@@ -42,13 +42,17 @@ def is_job_function(function: Function) -> bool:
 
 
 def _summary(job: BackgroundJob) -> dict[str, Any]:
-    return {
+    summary = {
         "job_id": job.job_id,
         "tool": job.tool_name,
         "status": job.status,
         "summary": job.result[:JOB_SUMMARY_MAX_CHARS] if job.result is not None else None,
         "summary_truncated": job.result is not None and len(job.result) > JOB_SUMMARY_MAX_CHARS,
     }
+    subagent_id = job.adapter.get("child", {}).get("subagent_id") if job.kind == "delegation" else None
+    if subagent_id:
+        summary["subagent_id"] = subagent_id
+    return summary
 
 
 class JobTools(Toolkit):
@@ -141,8 +145,8 @@ class JobTools(Toolkit):
         Args:
             action: Operation; wait retrieves the stored result.
             job_id: Exact job ID, required except for list.
-            limit: Maximum number of jobs to list, active jobs first.
-            offset: Number of accessible jobs to skip.
+            limit: Maximum number of jobs to list, from 1 to 100; active jobs first.
+            offset: Number of accessible jobs to skip, at least zero.
             wait_timeout: Seconds to wait; null waits until completion or human input, zero returns immediately.
 
         Returns:

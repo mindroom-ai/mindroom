@@ -128,10 +128,10 @@ from mindroom.team_exact_members import (
 from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.timing import emit_timing_event
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.agno_compat_functions import managed_team_session_state
 from mindroom.tool_jobs.completion import join_approval_jobs
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
-from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.events import (
     BackgroundWaitChunk,
@@ -2676,14 +2676,6 @@ def _approval_history_scope(
     return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
-# AGNO_COMPAT: Seed team run state only inside managed execution scopes.
-# Reason: Agno 3.0.9 omits TeamRunOutput.session_state unless arun receives a dict,
-# so managed result-consumption receipts would be absent from persisted team runs.
-# Upstream issue: No matching public team run-state persistence issue identified.
-# Upstream PR: None identified.
-# Remove when: Team runs persist tool-mutated session state without an explicit seed.
-# Coverage: tests/test_tool_job_turn_integration.py::test_team_session_state_is_seeded_only_for_managed_execution
-# Coverage: tests/test_tool_job_turn_integration.py::test_streaming_turn_consumes_completion_only_after_active_text_boundary
 async def _retrieve_team_job_results(
     previous: TeamRunOutput,
     prompt: str,
@@ -2707,7 +2699,7 @@ async def _retrieve_team_job_results(
             session_id=session_id,
             user_id=user_id,
             metadata=deepcopy(previous.metadata),
-            session_state={} if current_execution_resources() is not None else None,
+            session_state=managed_team_session_state(),
             stream=True,
             stream_events=True,
             yield_run_output=True,
@@ -3224,7 +3216,7 @@ async def team_response(  # noqa: C901, PLR0915
                     run_id=current_run_id,
                     user_id=user_id,
                     metadata=run_metadata,
-                    session_state={} if current_execution_resources() is not None else None,
+                    session_state=managed_team_session_state(),
                 )
 
         attempt_run_id = continuation_state.active_run_id
@@ -3504,7 +3496,7 @@ async def _team_response_stream_raw(
             run_id=run_id,
             user_id=user_id,
             metadata=metadata,
-            session_state={} if current_execution_resources() is not None else None,
+            session_state=managed_team_session_state(),
         )
     except Exception as e:
         logger.exception("team_streaming_failed", agents=team_members.display_names)

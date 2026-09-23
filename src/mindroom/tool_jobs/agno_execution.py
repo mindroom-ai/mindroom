@@ -231,7 +231,7 @@ async def _run_operation(
             tool_execution_identity(owner),
             authorized_tool_call(owner, owned_call.function, arguments=owned_call.arguments),
         ):
-            await job_checkpoint()
+            job_checkpoint()
             check_current_execution_authority()
             success, timer, _, result = await original(owned_call)
             value, events, replay = await _drain_result(result.result)
@@ -338,7 +338,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         if runtime is None or context is None or resources is None:
             return await original(call)
         if is_framework_function(call.function):
-            await job_checkpoint()
+            job_checkpoint()
             check_current_execution_authority()
             return await original(call)
         mode = call_wait_mode(call, depth=depth)
@@ -364,7 +364,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         actor = function_actor(call.function)
         if actor is not None and actor.id:
             owner = replace(owner, agent_name=actor.id)
-        await job_checkpoint()
+        job_checkpoint()
         with authorized_tool_call(owner, call.function, arguments=call.arguments), consuming_function_call(call):
             check_current_execution_authority()
             if (

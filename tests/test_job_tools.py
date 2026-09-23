@@ -134,7 +134,8 @@ async def test_only_native_job_wait_projects_external_approval(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path: Path) -> None:
+@pytest.mark.parametrize("native", [False, True])
+async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path: Path, *, native: bool) -> None:
     """A new turn rediscovers saved results while foreign requesters cannot list them."""
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
@@ -142,9 +143,12 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
     runtime = ToolJobRuntime(tmp_path)
 
     async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "saved")
+        return BackgroundOutcome("completed", "saved " * 1000)
 
-    await runtime.start(JobSpec("durable", "tool", 0), owner=owner, operation=operation)
+    spec = JobSpec("durable", "tool", 0)
+    if native:
+        spec = replace(spec, kind="delegation", adapter={"child": {"subagent_id": "reusable-child", "result": None}})
+    await runtime.start(spec, owner=owner, operation=operation)
     waited = await runtime.wait("durable", owner=owner, depth=0)
     await runtime.acknowledge_wait("durable", waited.token)
     await runtime.shutdown()
@@ -155,7 +159,11 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
     tools = JobTools(paths, owner)
     try:
         with tool_runtime_context(context):
-            assert json.loads(await tools.job("list"))[0]["job_id"] == "durable"
+            summary = json.loads(await tools.job("list"))[0]
+            assert summary["job_id"] == "durable"
+            assert summary["summary_truncated"]
+            assert summary.get("subagent_id") == ("reusable-child" if native else None)
+            assert json.loads(await tools.job("inspect", "durable")) == summary
         for foreign in (
             replace(context, requester_id="@foreign:example.org"),
             replace(context, agent_name="other"),
@@ -334,7 +342,12 @@ async def test_discovery_bounds_large_results_without_truncating_wait(
         )
 
     try:
-        await runtime.start(JobSpec("large", "large_tool", 0, kind=kind), owner=owner, operation=operation)
+        adapter = {"child": {"result": None}} if kind == "delegation" else {}
+        await runtime.start(
+            JobSpec("large", "large_tool", 0, kind=kind, adapter=adapter),
+            owner=owner,
+            operation=operation,
+        )
         waited = await runtime.wait("large", owner=owner, depth=0)
         await runtime.release_wait("large", waited.token)
         with tool_runtime_context(context):

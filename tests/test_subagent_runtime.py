@@ -403,7 +403,7 @@ async def test_replaced_response_runner_releases_wait_without_pausing_job(
     async def operation() -> BackgroundOutcome:
         await advance.wait()
         checkpoint_reached.set()
-        await job_checkpoint()
+        job_checkpoint()
         tool_executed.set()
         return BackgroundOutcome("completed", "Executed")
 

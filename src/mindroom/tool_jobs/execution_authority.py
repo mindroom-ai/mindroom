@@ -27,7 +27,7 @@ _CALL: ContextVar[tuple[ToolExecutionIdentity, Function, Mapping[str, Any]] | No
 
 def set_execution_authorizer(runtime_paths: RuntimePaths, authorize: _ExecutionAuthorizer | None) -> None:
     """Install or withdraw only this managed runtime's permission policy."""
-    key = runtime_paths.storage_root.resolve()
+    key = runtime_paths.storage_root
     if authorize is None:
         _AUTHORIZERS.pop(key, None)
     else:
@@ -55,7 +55,7 @@ def check_current_execution_authority(*, arguments: Mapping[str, Any] | None = N
     if call is None:
         return
     context = get_tool_runtime_context()
-    authorize = _AUTHORIZERS.get(context.runtime_paths.storage_root.resolve()) if context is not None else None
+    authorize = _AUTHORIZERS.get(context.runtime_paths.storage_root) if context is not None else None
     if authorize is not None:
         owner, function, accepted_arguments = call
         authorize(owner, function, accepted_arguments if arguments is None else arguments)

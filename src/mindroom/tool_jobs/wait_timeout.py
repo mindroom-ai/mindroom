@@ -50,18 +50,25 @@ def run_uses_managed_waits(metadata: dict[str, Any] | None, run_id: str | None) 
     return state.get("run_id") == run_id and "managed" in state.get("calls", {}).values()
 
 
-def read_wait_timeout(arguments: dict[str, Any] | None, *, owned_execution: bool = False) -> float | None:
-    """Validate a caller's wait budget before accepting execution side effects."""
-    value = (arguments or {}).get("wait_timeout")
+def validate_wait_timeout(value: object) -> float | None:
+    """Return a finite clock-representable wait budget, or an unbounded wait."""
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= sys.float_info.max:
         msg = "wait_timeout must be null or a finite nonnegative number of seconds"
         raise ValueError(msg)
+    return float(value)
+
+
+def read_wait_timeout(arguments: dict[str, Any] | None, *, owned_execution: bool = False) -> float | None:
+    """Validate a caller's wait budget before accepting execution side effects."""
+    value = validate_wait_timeout((arguments or {}).get("wait_timeout"))
+    if value is None:
+        return None
     if owned_execution:
         msg = "wait_timeout cannot detach nested execution from its outer job; omit it or pass null"
         raise ValueError(msg)
-    return float(value)
+    return value
 
 
 def application_arguments(arguments: dict[str, Any] | None) -> dict[str, Any] | None:

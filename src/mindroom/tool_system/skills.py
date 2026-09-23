@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import platform
@@ -172,7 +173,7 @@ class _MindroomSkills(Skills):
 
 def skill_access_origin(entrypoint: Callable[..., object] | None, skill_name: object) -> dict[str, object]:
     """Describe the configured or workspace source of a bound skill access call."""
-    skills = getattr(entrypoint, "__self__", None)
+    skills = entrypoint.__self__ if inspect.ismethod(entrypoint) else None
     if not isinstance(skills, _MindroomSkills):
         return {}
     return {

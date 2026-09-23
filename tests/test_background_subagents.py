@@ -275,7 +275,7 @@ async def test_human_followup_allows_subagent_next_tool(tmp_path: Path) -> None:
     async def operation() -> BackgroundOutcome:
         started.set()
         await proceed.wait()
-        await job_checkpoint()
+        job_checkpoint()
         next_tool.set()
         return BackgroundOutcome("completed", "finished")
 
@@ -358,7 +358,7 @@ async def test_approval_continuation_runs_after_human_followup(tmp_path: Path) -
         return BackgroundOutcome("awaiting_approval", approval_state={"toolkit_owners": [["call", "shell"]]})
 
     async def continuation() -> BackgroundOutcome:
-        await job_checkpoint()
+        job_checkpoint()
         executed.set()
         return BackgroundOutcome("completed", "approved")
 
@@ -394,7 +394,7 @@ async def test_existing_queued_human_releases_wait_without_blocking_first_tool(t
     entered, finish = asyncio.Event(), asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
-        await job_checkpoint()
+        job_checkpoint()
         entered.set()
         await finish.wait()
         return BackgroundOutcome("completed")
@@ -705,7 +705,7 @@ async def test_recovered_approval_continues_after_human_followup(tmp_path: Path,
     executed = asyncio.Event()
 
     async def continuation() -> BackgroundOutcome:
-        await job_checkpoint()
+        job_checkpoint()
         executed.set()
         return BackgroundOutcome("completed", "approved")
 
@@ -848,7 +848,7 @@ async def test_shutdown_rejects_new_cancel_while_draining_execution(tmp_path: Pa
     stopping = asyncio.create_task(runtime.shutdown())
     await draining.wait()
     try:
-        with pytest.raises(ValueError, match="closed"):
+        with pytest.raises(ValueError, match="shutting down"):
             await runtime.cancel(second.job_id, owner=_owner(), depth=0, await_completion=True)
     finally:
         release.set()

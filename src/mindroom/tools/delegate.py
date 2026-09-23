@@ -18,7 +18,7 @@ register_builtin_tool_metadata(
     ToolMetadata(
         name="delegate",
         display_name="Subagents",
-        description="Start allowed subagents and continue conversations",
+        description="Start allowed subagents, continue conversations, and return their results",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

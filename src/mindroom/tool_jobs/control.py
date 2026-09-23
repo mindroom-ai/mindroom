@@ -64,7 +64,7 @@ class JobControl:
         """Prevent tool entry even when the operation catches task cancellation."""
         self.cancelled = True
 
-    async def checkpoint(self) -> None:
+    def checkpoint(self) -> None:
         """Fail on cancellation without creating waiters on another event loop."""
         if self.cancelled:
             raise asyncio.CancelledError
@@ -99,11 +99,11 @@ def job_control_context(control: JobControl) -> Iterator[None]:
         _control.reset(token)
 
 
-async def job_checkpoint() -> None:
+def job_checkpoint() -> None:
     """Enforce the active job's cancellation immediately before tool execution."""
     control = _control.get()
     if control is not None:
-        await control.checkpoint()
+        control.checkpoint()
 
 
 def job_owns_execution() -> bool:

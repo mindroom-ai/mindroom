@@ -29,14 +29,14 @@ _PARKED: dict[Path, _ParkedWork] = {}
 
 def clear_parked_work(runtime_paths: RuntimePaths) -> None:
     """Release only the stopped process's passive index."""
-    _PARKED.pop(runtime_paths.storage_root.resolve(), None)
+    _PARKED.pop(runtime_paths.storage_root, None)
 
 
 def event_is_parked(config: Config, runtime_paths: RuntimePaths, entity_name: str, event: JournalEvent) -> bool:
     """Fence saved sources and every internal completion before any handoff."""
     if background_tool_jobs_enabled(config, runtime_paths):
         return False
-    parked = _PARKED.get(runtime_paths.storage_root.resolve())
+    parked = _PARKED.get(runtime_paths.storage_root)
     return event.kind is EventKind.TOOL_JOB_COMPLETION or (
         parked is not None and (entity_name, event.event_id) in parked.sources
     )
@@ -44,7 +44,7 @@ def event_is_parked(config: Config, runtime_paths: RuntimePaths, entity_name: st
 
 def approval_is_parked(runtime_paths: RuntimePaths, approval_id: str) -> bool:
     """Keep parked approval owners out of startup expiry and failure cleanup."""
-    parked = _PARKED.get(runtime_paths.storage_root.resolve())
+    parked = _PARKED.get(runtime_paths.storage_root)
     return parked is not None and approval_id in parked.approvals
 
 
@@ -85,4 +85,4 @@ async def index_parked_work(
                         (continuation.entity_name, event_id) for event_id in continuation.source_event_ids
                     )
             cursor = (owners[-1][1].entity_name, owners[-1][1].approval_id)
-    _PARKED[runtime_paths.storage_root.resolve()] = parked
+    _PARKED[runtime_paths.storage_root] = parked

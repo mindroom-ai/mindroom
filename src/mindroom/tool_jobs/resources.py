@@ -10,7 +10,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -153,13 +153,17 @@ def disconnect_execution_resource(resource: object) -> None:
     connection = _SYNC_CONNECTIONS[id(resource)]
 
     def close() -> None:
+        if (
+            len(connection.owners) == 1
+            and connection.owners[owner] == 1
+            and connection.thread_id != threading.get_ident()
+        ):
+            msg = "Synchronous toolkit cleanup requires its original connection thread"
+            raise RuntimeError(msg)
         connection.owners[owner] -= 1
         if connection.owners[owner] == 0:
             del connection.owners[owner]
         if not connection.owners:
-            if connection.thread_id != threading.get_ident():
-                msg = "Synchronous toolkit cleanup requires its original connection thread"
-                raise RuntimeError(msg)
             try:
                 connection.close()
             finally:
@@ -186,7 +190,7 @@ async def connect_async_execution_resource(
     connection = _ASYNC_CONNECTIONS.get(id(resource))
     while connection is not None and connection.closing.is_set():
         assert connection.task is not None
-        await run_coroutine_until_complete(_join_connection(connection.task))
+        await wait_for_future_until_complete(connection.task)
         connection = _ASYNC_CONNECTIONS.get(id(resource))
     if connection is None:
         connection = _AsyncConnection(resource)
@@ -225,14 +229,10 @@ async def disconnect_async_execution_resource(resource: object) -> None:
         if not connection.owners:
             connection.closing.set()
             if connection.task is not None:
-                await run_coroutine_until_complete(_join_connection(connection.task))
+                await wait_for_future_until_complete(connection.task)
 
     if not defer_execution_cleanup(close):
         await close()
-
-
-async def _join_connection(task: asyncio.Task[None]) -> None:
-    await asyncio.shield(task)
 
 
 async def _drain_cleanup(callbacks: list[Callable[[], Awaitable[None]]]) -> None:

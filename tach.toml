@@ -2352,7 +2352,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.teams"
 depends_on = [
-    "mindroom.tool_jobs.resources",
+    "mindroom.tool_jobs.agno_compat_functions",
     "mindroom.streaming",
     "mindroom.tool_jobs.completion",
     "mindroom.helper_usage",
@@ -6741,6 +6741,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.runtime"
 depends_on = [
+    "mindroom.tool_jobs.wait_timeout",
     "mindroom.ai_runtime",
     "mindroom.background_tasks",
     "mindroom.dispatch_source",
@@ -6882,7 +6883,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.ai",
-    "mindroom.teams",
+    "mindroom.tool_jobs.agno_compat_functions",
     "mindroom.history.session_context",
     "mindroom.tool_jobs.agno_compat_resources",
     "mindroom.tool_jobs.agno_execution",
@@ -7015,6 +7016,7 @@ visibility = [
 path = "mindroom.tool_jobs.wait_timeout"
 depends_on = []
 visibility = [
+    "mindroom.tool_jobs.runtime",
     "mindroom.response_turn",
     "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.tool_jobs.agno_execution",
@@ -7131,8 +7133,9 @@ visibility = ["mindroom.response_runner", "mindroom.orchestration.tool_job_runti
 
 [[modules]]
 path = "mindroom.tool_jobs.agno_compat_functions"
-depends_on = ["mindroom.tool_jobs.provenance"]
+depends_on = ["mindroom.tool_jobs.provenance", "mindroom.tool_jobs.resources"]
 visibility = [
+    "mindroom.teams",
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.tool_jobs.consumption",

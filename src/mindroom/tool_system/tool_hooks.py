@@ -681,7 +681,7 @@ async def _execute_bridge(  # noqa: PLR0915 - Ordered lifecycle and cleanup boun
     approval_gate: _ToolApprovalGate | None,
 ) -> _ToolHookResult:
     started_at = time.perf_counter()
-    await job_checkpoint()
+    job_checkpoint()
     timing = _ToolBridgeTiming(started_at=started_at)
     effective_dispatch_context = _explicit_bridge_dispatch_context(dispatch_context) or _ambient_tool_dispatch_context()
     bridge_context = _ToolHookBridgeContext(
@@ -752,7 +752,7 @@ async def _execute_bridge(  # noqa: PLR0915 - Ordered lifecycle and cleanup boun
     tool_body_started_at = time.perf_counter()
     entered_body = False
     try:
-        await job_checkpoint()
+        job_checkpoint()
         check_current_execution_authority(arguments=args)
         entered_body = True
         result = await _call_tool(

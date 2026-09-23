@@ -17,14 +17,14 @@ _STARTED: dict[Path, BackgroundToolJobsConfig] = {}
 def pin_background_tool_jobs(config: Config, runtime_paths: RuntimePaths) -> bool:
     """Freeze the setting before any responder or recovery owner starts."""
     return _STARTED.setdefault(
-        runtime_paths.storage_root.resolve(),
+        runtime_paths.storage_root,
         config.background_tool_jobs.model_copy(deep=True),
     ).enabled
 
 
 def release_background_tool_jobs(runtime_paths: RuntimePaths) -> None:
     """Release the stopped instance's setting so a new startup can choose again."""
-    _STARTED.pop(runtime_paths.storage_root.resolve(), None)
+    _STARTED.pop(runtime_paths.storage_root, None)
 
 
 def background_tool_jobs_enabled(config: Config, runtime_paths: RuntimePaths) -> bool:
@@ -38,9 +38,11 @@ def toolkit_is_background_excluded(name: str, config: Config, runtime_paths: Run
 
 
 def _effective_settings(config: Config, runtime_paths: RuntimePaths) -> BackgroundToolJobsConfig:
-    return _STARTED.get(runtime_paths.storage_root.resolve(), config.background_tool_jobs)
+    return _STARTED.get(runtime_paths.storage_root, config.background_tool_jobs)
 
 
 def pending_background_tool_jobs_restart(config: Config, runtime_paths: RuntimePaths) -> bool:
     """Report saved changes without changing any running execution envelope."""
-    return _effective_settings(config, runtime_paths) != config.background_tool_jobs
+    effective = _effective_settings(config, runtime_paths)
+    authored = config.background_tool_jobs
+    return effective.enabled != authored.enabled or set(effective.exclude_toolkits) != set(authored.exclude_toolkits)

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from agno.tools.function import FunctionCall
 
 from mindroom.tool_jobs.provenance import callable_origin
+from mindroom.tool_jobs.resources import current_execution_resources
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -75,3 +76,16 @@ def uses_sdk_async_dispatch(function: Function) -> bool:
         or inspect.iscoroutine(function.entrypoint)
         or any(inspect.iscoroutinefunction(hook) for hook in function.tool_hooks or [])
     )
+
+
+# AGNO_COMPAT: Seed team run state only inside managed execution scopes.
+# Reason: Agno 3.0.9 omits TeamRunOutput.session_state unless arun receives a dict,
+# so managed result-consumption receipts would be absent from persisted team runs.
+# Upstream issue: No matching public team run-state persistence issue identified.
+# Upstream PR: None identified.
+# Remove when: Team runs persist tool-mutated session state without an explicit seed.
+# Coverage: tests/test_tool_job_turn_integration.py::test_team_session_state_is_seeded_only_for_managed_execution
+# Coverage: tests/test_tool_job_turn_integration.py::test_streaming_turn_consumes_completion_only_after_active_text_boundary
+def managed_team_session_state() -> dict[str, object] | None:
+    """Ensure managed team runs save the session mutations containing result receipts."""
+    return {} if current_execution_resources() is not None else None

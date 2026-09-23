@@ -14,12 +14,15 @@ from agno.team import _init as team_init
 from agno.tools import Toolkit
 
 from mindroom.tool_jobs import agno_compat_resources
+from mindroom.tool_jobs import resources as resources_module
 from mindroom.tool_jobs.agno_compat_resources import install_execution_resource_bindings
 from mindroom.tool_jobs.resources import (
     ExecutionResources,
     bind_execution_resources,
     connect_async_execution_resource,
+    connect_execution_resource,
     disconnect_async_execution_resource,
+    disconnect_execution_resource,
     execution_resources,
 )
 
@@ -145,6 +148,21 @@ class _SharedTools(Toolkit):
         assert self.open
         self.closes += 1
         self.open = False
+
+
+@pytest.mark.asyncio
+async def test_wrong_thread_release_keeps_the_original_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rejected release must leave the connection able to close on its owning thread."""
+    monkeypatch.setattr(resources_module, "_SYNC_CONNECTIONS", {})
+    toolkit = _SharedTools()
+    with bind_execution_resources(ExecutionResources()):
+        connect_execution_resource(toolkit, toolkit.connect, toolkit.close)
+        with pytest.raises(RuntimeError, match="original connection thread"):
+            await asyncio.to_thread(disconnect_execution_resource, toolkit)
+        assert toolkit.open
+        disconnect_execution_resource(toolkit)
+    assert not toolkit.open
+    assert toolkit.connects == toolkit.closes == 1
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,17 @@ from tests.test_background_subagents import _owner
 
 
 @pytest.mark.asyncio
+async def test_wait_rejects_unrepresentable_timeout_before_lookup(tmp_path: Path) -> None:
+    """Both entry points reject budgets that cannot be represented on the event-loop clock."""
+    runtime = ToolJobRuntime(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="finite"):
+            await runtime.wait("unknown", owner=_owner(), depth=0, timeout=10**400)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_final_shutdown_waits_for_receipt_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A replacement owner must never recover before the old owner's last receipt lands."""
     runtime = ToolJobRuntime(tmp_path)
@@ -622,7 +633,7 @@ async def test_human_followup_releases_wait_without_pausing_next_tool(tmp_path: 
         calls += 1
         running.set()
         await proceed.wait()
-        await job_checkpoint()
+        job_checkpoint()
         finished.set()
         return BackgroundOutcome("completed", "done")
 

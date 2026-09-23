@@ -38,6 +38,7 @@ from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, get_background_runtime
 from mindroom.tool_jobs.settings import (
     background_tool_jobs_enabled,
+    pending_background_tool_jobs_restart,
     pin_background_tool_jobs,
     release_background_tool_jobs,
 )
@@ -265,6 +266,20 @@ def test_reload_reports_restart_and_keeps_effective_mode(tmp_path: Path, initial
         release_background_tool_jobs(paths)
     assert pin_background_tool_jobs(changed, paths) is not initial
     release_background_tool_jobs(paths)
+
+
+def test_exclusion_order_is_not_an_execution_policy_change(tmp_path: Path) -> None:
+    """Reordering toolkit exclusions does not claim a process restart is needed."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=True, exclude_toolkits=["shell", "plugin"]))
+    pin_background_tool_jobs(config, paths)
+    try:
+        config.background_tool_jobs.exclude_toolkits = ["plugin", "shell", "shell"]
+        assert not pending_background_tool_jobs_restart(config, paths)
+        config.background_tool_jobs.exclude_toolkits = ["plugin"]
+        assert pending_background_tool_jobs_restart(config, paths)
+    finally:
+        release_background_tool_jobs(paths)
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,7 @@ from mindroom.tool_jobs.control import (
     job_control_context,
 )
 from mindroom.tool_jobs.resources import execution_resources
+from mindroom.tool_jobs.wait_timeout import validate_wait_timeout
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -181,12 +182,12 @@ _runtimes: dict[Path, ToolJobRuntime] = {}
 
 def get_background_runtime(runtime_paths: RuntimePaths) -> ToolJobRuntime | None:
     """Find the managed Matrix runtime for one storage root, if present."""
-    return _runtimes.get(runtime_paths.storage_root.resolve())
+    return _runtimes.get(runtime_paths.storage_root)
 
 
 def register_background_runtime(runtime_paths: RuntimePaths, runtime: ToolJobRuntime | None) -> None:
     """Publish or withdraw the lifecycle-owned runtime at its storage boundary."""
-    key = runtime_paths.storage_root.resolve()
+    key = runtime_paths.storage_root
     if runtime is None:
         _runtimes.pop(key, None)
     else:
@@ -573,11 +574,7 @@ class ToolJobRuntime:
         reserved_token: str | None = None,
     ) -> _BackgroundWait:
         """Wait without cancelling execution; retain ready-result ownership until acknowledgement."""
-        if timeout is not None and (
-            isinstance(timeout, bool) or not isinstance(timeout, int | float) or not 0 <= timeout < float("inf")
-        ):
-            msg = "Tool job wait timeout must be finite and non-negative."
-            raise ValueError(msg)
+        timeout = validate_wait_timeout(timeout)
         token = reserved_token or uuid4().hex
         deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
         retained = False
