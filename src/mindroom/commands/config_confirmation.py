@@ -249,15 +249,72 @@ async def _remove_pending_change_from_matrix(
     )
 
 
+def _bot_authored_state_content(
+    client: nio.AsyncClient,
+    room_id: str,
+    state_event: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return pending-config state content only when this bot published it.
+
+    Any room member holding state-write power may publish this event type, so
+    its content describes an authoritative config change only when the bot
+    itself is the sender.
+    """
+    content = state_event.get("content")
+    if not isinstance(content, dict) or not content:
+        return None
+    sender = state_event.get("sender")
+    if client.user_id is None or sender != client.user_id:
+        logger.warning(
+            "Ignoring pending config change state event not authored by this bot",
+            room_id=room_id,
+            state_key=state_event.get("state_key"),
+            sender=sender,
+        )
+        return None
+    return content
+
+
+async def _bot_authored_pending_state(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+) -> dict[str, Any] | None:
+    """Return the bot-authored pending-config content stored under one preview."""
+    response = await client.room_get_state(room_id)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        msg = f"Failed to read room state for pending config change: {response}"
+        raise RuntimeError(msg)  # noqa: TRY004
+    for state_event in response.events:
+        if state_event.get("type") == _PENDING_CONFIG_EVENT_TYPE and state_event.get("state_key") == event_id:
+            return _bot_authored_state_content(client, room_id, state_event)
+    return None
+
+
+async def _is_bot_authored_event(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+) -> bool:
+    """Return whether this bot itself sent one referenced Matrix event."""
+    response = await client.room_get_event(room_id, event_id)
+    if isinstance(response, nio.RoomGetEventError) and response.status_code == "M_NOT_FOUND":
+        return False
+    if not isinstance(response, nio.RoomGetEventResponse):
+        msg = f"Failed to read config confirmation preview event {event_id}: {response}"
+        raise RuntimeError(msg)  # noqa: TRY004
+    return client.user_id is not None and response.event.sender == client.user_id
+
+
 async def _resolve_pending_change(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
 ) -> _PendingConfigChange | None:
-    """Resolve one pending change from memory or its authoritative Matrix state."""
+    """Resolve one pending change from memory or its bot-authored Matrix state."""
     pending_change = _get_pending_change(event_id)
     if pending_change is not None:
-        return pending_change
+        return pending_change if pending_change.room_id == room_id else None
 
     response = await client.room_get_state_event(
         room_id,
@@ -271,7 +328,13 @@ async def _resolve_pending_change(
         raise RuntimeError(msg)  # noqa: TRY004
     if not response.content:
         return None
-    return await _restore_pending_change(client, room_id, event_id, response.content)
+    # The probe above only tells us a record exists; it omits the sender, and
+    # any room member with state-write power can publish this event type. Take
+    # the content from the full room state instead, where provenance is visible.
+    content = await _bot_authored_pending_state(client, room_id, event_id)
+    if content is None:
+        return None
+    return await _restore_pending_change(client, room_id, event_id, content)
 
 
 async def resolve_reaction_pending_change(
@@ -342,10 +405,10 @@ async def restore_pending_changes(client: nio.AsyncClient, room_id: str) -> int:
                 continue
 
             state_key = event.get("state_key")
-            content = event.get("content", {})
+            content = _bot_authored_state_content(client, room_id, event)
 
-            # Skip empty content (deleted state events)
-            if not content:
+            # Skip deleted state events and records this bot did not author
+            if content is None:
                 continue
 
             try:
@@ -509,21 +572,30 @@ async def ensure_pending_change(
         )
 
 
+def _decision_refusal_text(
+    context: ConfigConfirmationContext,
+    resolved_sender: str,
+    decision_key: str,
+) -> str | None:
+    """Return the refusal for one decision under the authorization in force."""
+    if decision_key == "❌":
+        return "❌ Configuration change cancelled."
+    if not context.authorization.config_command_enabled:
+        return "❌ Config command disabled."
+    if not is_platform_administrator(resolved_sender, context.runtime.config, context.runtime_paths):
+        return "❌ Admin only."
+    return None
+
+
 async def _ensure_decision_checkpoint(
     context: ConfigConfirmationContext,
     event: nio.ReactionEvent,
     pending_change: _PendingConfigChange,
+    resolved_sender: str,
 ) -> _PendingConfigChange | None:
     """Freeze the winning reaction and its authorization before mutation."""
-    if pending_change.decision_event_id is not None:
-        return pending_change if pending_change.decision_event_id == event.event_id else None
-
-    authorization = context.authorization
-    resolved_sender = resolve_human_requester_alias(
-        event.sender,
-        context.runtime.config,
-        context.runtime_paths,
-    )
+    if event.sender == context.client.user_id or event.key not in {"✅", "❌"}:
+        return None
     if resolved_sender != pending_change.requester:
         logger.debug(
             "Ignoring config reaction from non-requester",
@@ -532,22 +604,14 @@ async def _ensure_decision_checkpoint(
             resolved_sender=resolved_sender,
         )
         return None
-    if event.sender == context.client.user_id or event.key not in {"✅", "❌"}:
-        return None
-
-    response_text = None
-    if event.key == "❌":
-        response_text = "❌ Configuration change cancelled."
-    elif not authorization.config_command_enabled:
-        response_text = "❌ Config command disabled."
-    elif not is_platform_administrator(resolved_sender, context.runtime.config, context.runtime_paths):
-        response_text = "❌ Admin only."
+    if pending_change.decision_event_id is not None:
+        return pending_change if pending_change.decision_event_id == event.event_id else None
 
     checkpoint = replace(
         pending_change,
         decision_event_id=event.event_id,
         decision_key=event.key,
-        decision_response_text=response_text,
+        decision_response_text=_decision_refusal_text(context, resolved_sender, event.key),
     )
     return await _commit_checkpoint(context.client, event.reacts_to, checkpoint)
 
@@ -556,6 +620,7 @@ async def _response_for_checkpointed_decision(
     context: ConfigConfirmationContext,
     preview_event_id: str,
     pending_change: _PendingConfigChange,
+    resolved_sender: str,
 ) -> tuple[_PendingConfigChange, str]:
     """Checkpoint one decision result without repeating an ambiguous config write."""
     if pending_change.decision_response_text is not None:
@@ -574,6 +639,17 @@ async def _response_for_checkpointed_decision(
             replace(pending_change, decision_response_text=response_text),
         )
         return checkpoint, response_text
+
+    # A decision frozen by an earlier run still has to be authorized by the
+    # configuration in force before it may write config.yaml.
+    refusal_text = _decision_refusal_text(context, resolved_sender, "✅")
+    if refusal_text is not None:
+        refused_checkpoint = await _commit_checkpoint(
+            context.client,
+            preview_event_id,
+            replace(pending_change, decision_response_text=refusal_text),
+        )
+        return refused_checkpoint, refusal_text
 
     started_checkpoint = await _commit_checkpoint(
         context.client,
@@ -620,19 +696,33 @@ async def handle_confirmation_reaction(
             return
         if pending_change.decision_event_id is not None and pending_change.decision_event_id != event.event_id:
             return
+        if not await _is_bot_authored_event(context.client, room.room_id, preview_event_id):
+            logger.warning(
+                "Ignoring config confirmation for a preview this bot did not send",
+                room_id=room.room_id,
+                preview_event_id=preview_event_id,
+                reaction_sender=event.sender,
+            )
+            return
 
         if await _has_visible_confirmation_response(context.client, room.room_id, event):
             await _remove_pending_change_from_matrix(context.client, pending_change.room_id, preview_event_id)
             _remove_pending_change(preview_event_id)
             return
 
-        pending_change = await _ensure_decision_checkpoint(context, event, pending_change)
+        resolved_sender = resolve_human_requester_alias(
+            event.sender,
+            context.runtime.config,
+            context.runtime_paths,
+        )
+        pending_change = await _ensure_decision_checkpoint(context, event, pending_change, resolved_sender)
         if pending_change is None:
             return
         pending_change, response_text = await _response_for_checkpointed_decision(
             context,
             preview_event_id,
             pending_change,
+            resolved_sender,
         )
 
         target = context.build_message_target(
