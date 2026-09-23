@@ -27,9 +27,10 @@ from mindroom.tool_jobs.agno_execution import _drain_result
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import decode_tool_result, encode_tool_result
-from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -48,7 +49,7 @@ async def test_application_wait_timeout_collision_fails_before_execution(tmp_pat
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model, depth=depth)
@@ -91,7 +92,7 @@ async def test_shared_schema_adds_optional_wait_without_changing_application_sch
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     model, backup = DelegationModel(id="primary"), DelegationModel(id="backup")
     install_tool_job_execution(model, FallbackConfig(on_error=[backup]))
@@ -136,7 +137,7 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
@@ -196,7 +197,7 @@ async def test_invalid_wait_budget_never_starts_application(tmp_path: Path, budg
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
@@ -257,7 +258,7 @@ async def test_batch_tools_keep_independent_wait_budgets(tmp_path: Path) -> None
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     model = DelegationModel(
         id="test",
@@ -304,7 +305,7 @@ async def test_rich_stream_reaches_sdk_with_media_metadata_and_events(tmp_path: 
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
@@ -345,7 +346,7 @@ async def test_owned_nested_application_cannot_create_detached_job(
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
@@ -402,7 +403,7 @@ async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     model = DelegationModel(
         id="test",

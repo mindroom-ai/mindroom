@@ -27,7 +27,7 @@ from mindroom.tool_jobs.authorization import (
 )
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec
+from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
@@ -114,13 +114,11 @@ async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
         async with execution_resources():
             with tool_runtime_context(replace(memory_context, config_provider=lambda: current)):
                 await coordinator.runtime.start(
-                    JobSpec(
-                        "accepted-memory",
-                        "add_memory",
-                        0,
-                        toolkit_name="memory",
-                        adapter={"origin": function_provenance(function), "authority": function_authority(function)},
-                    ),
+                    "accepted-memory",
+                    tool_name="add_memory",
+                    depth=0,
+                    toolkit_name="memory",
+                    adapter={"origin": function_provenance(function), "authority": function_authority(function)},
                     owner=owner,
                     operation=operation,
                 )

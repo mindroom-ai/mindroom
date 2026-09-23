@@ -37,7 +37,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
         locally_allowed,
     )
     from mindroom.tool_jobs.provenance import function_provenance
-    from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime
+    from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
     from mindroom.tool_system.construction import get_toolkit_construction
     from mindroom.tool_system.metadata import get_tool_by_name
     from mindroom.tool_system.plugins import load_plugins
@@ -108,9 +108,12 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
                 authority=job.adapter["authority"],
             )
 
+        async def no_cleanup(job):
+            return None
+
         statuses = {}
         if action == "create":
-            runtime = ToolJobRuntime(storage_root)
+            runtime = ToolJobRuntime(storage_root, authorize=lambda job: True, cancel=no_cleanup)
 
             async def completed():
                 return BackgroundOutcome("completed", "saved")
@@ -119,33 +122,29 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
                 await asyncio.Event().wait()
 
             await runtime.start(
-                JobSpec(
-                    "completed-job",
-                    "stable_echo",
-                    0,
-                    toolkit_name="stable_plugin",
-                    adapter=adapter,
-                ),
+                "completed-job",
+                tool_name="stable_echo",
+                depth=0,
+                toolkit_name="stable_plugin",
+                adapter=adapter,
                 owner=owner,
                 operation=completed,
             )
             waited = await runtime.wait("completed-job", owner=owner, depth=0)
             await runtime.release_wait("completed-job", waited.token)
             await runtime.start(
-                JobSpec(
-                    "interrupted-job",
-                    "stable_echo",
-                    0,
-                    toolkit_name="stable_plugin",
-                    adapter=adapter,
-                ),
+                "interrupted-job",
+                tool_name="stable_echo",
+                depth=0,
+                toolkit_name="stable_plugin",
+                adapter=adapter,
                 owner=owner,
                 operation=running,
             )
             await asyncio.sleep(0)
             await runtime.shutdown()
         elif action == "recover":
-            runtime = ToolJobRuntime(storage_root, authorize=authorized)
+            runtime = ToolJobRuntime(storage_root, authorize=authorized, cancel=no_cleanup)
             await runtime.recover()
             statuses = {
                 job.job_id: job.status

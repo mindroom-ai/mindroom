@@ -31,10 +31,11 @@ from mindroom.event_journal import (
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.completion import admit_job_completion, completion_envelope, completion_event
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
 from tests.response_runner_helpers import _target
+from tests.tool_job_helpers import tool_job_runtime
 
 
 async def _persist_waiting_continuation(
@@ -88,14 +89,14 @@ async def test_completion_requires_current_unconsumed_exact_claim(tmp_path: Path
         "$thread",
         target.session_id,
     )
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "answer")
 
     try:
-        await runtime.start(JobSpec("job", "tool", 0), owner=owner, operation=operation)
+        await runtime.start("job", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("job", owner=owner, depth=0)
         await runtime.release_wait("job", waited.token)
         envelope = completion_envelope(waited.job, sender_id="@mindroom_general:localhost")
@@ -135,14 +136,14 @@ async def test_consumed_completion_resumes_its_owned_approval_continuation(  # n
         "$thread",
         target.session_id,
     )
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     register_background_runtime(paths, runtime)
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("awaiting_approval")
 
     try:
-        await runtime.start(JobSpec("approval-job", "tool", 0), owner=owner, operation=operation)
+        await runtime.start("approval-job", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         initial_wait = await runtime.wait("approval-job", owner=owner, depth=0)
         await runtime.release_wait("approval-job", initial_wait.token)
         completion_wait = await runtime.wait("approval-job", owner=owner, depth=0)
@@ -261,7 +262,7 @@ async def test_completion_rechecks_after_real_lifecycle_lock(tmp_path: Path, con
         target.session_id,
         transport_agent_name="general",
     )
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     register_background_runtime(paths, runtime)
     first_started, release_first = asyncio.Event(), asyncio.Event()
     settled = []
@@ -283,7 +284,7 @@ async def test_completion_rechecks_after_real_lifecycle_lock(tmp_path: Path, con
         settled.append(True)
 
     try:
-        await runtime.start(JobSpec("queued-job", "tool", 0), owner=owner, operation=operation)
+        await runtime.start("queued-job", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("queued-job", owner=owner, depth=0)
         await runtime.release_wait("queued-job", waited.token)
         request = _plain_request(target)

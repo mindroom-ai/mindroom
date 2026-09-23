@@ -45,7 +45,7 @@ from mindroom.tool_jobs.completion import background_wait_notice
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
-from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.events import BackgroundWaitChunk, StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -55,6 +55,7 @@ from mindroom.tool_system.runtime_context import (
 from tests.conftest import make_turn_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -91,7 +92,7 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     started, release, waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
     signal = HumanMessageSignal()
@@ -324,7 +325,7 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     release, waiting = asyncio.Event(), asyncio.Event()
     notices: list[StreamingPresentation] = []
@@ -474,7 +475,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
     identities = entity_ids(config, paths)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     releases = [asyncio.Event(), asyncio.Event()]
     waiting = asyncio.Event()

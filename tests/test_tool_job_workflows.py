@@ -20,11 +20,12 @@ from mindroom.hooks import HookRegistry
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.resources import defer_execution_cleanup, execution_resources
-from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from tests.delegation_helpers import DelegationModel, _call
 from tests.test_dynamic_workflows import _make_context, _workflow_spec
+from tests.tool_job_helpers import tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -46,7 +47,7 @@ async def test_workflow_participant_runs_multiple_sync_tools(
     context.config.agents["general"].tools = [
         ToolConfigEntry(name="dynamic_workflow", overrides={"allowed_tools": ["calculator"]}),
     ]
-    runtime = ToolJobRuntime(context.runtime_paths.storage_root)
+    runtime = tool_job_runtime(context.runtime_paths.storage_root)
     if managed:
         register_background_runtime(context.runtime_paths, runtime)
     calls = [_call("add", "a", a=1, b=2), _call("multiply", "b", a=3, b=4)]
@@ -103,7 +104,7 @@ async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
     context = _make_context(tmp_path)
     context.config.background_tool_jobs.enabled = True
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(context.runtime_paths.storage_root)
+    runtime = tool_job_runtime(context.runtime_paths.storage_root)
     register_background_runtime(context.runtime_paths, runtime)
     loop = asyncio.get_running_loop()
     started = [asyncio.Event(), asyncio.Event()]
@@ -166,10 +167,9 @@ async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
             await asyncio.wait_for(started[0].wait(), 2)
             if parallel:
                 await asyncio.wait_for(started[1].wait(), 2)
-            cancelled = await runtime.cancel(job_id, owner=owner, depth=0)
-            assert cancelled.status == "cancel_requested"
+            waiter = asyncio.create_task(runtime.cancel(job_id, owner=owner, depth=0))
+            await wait_for_status(runtime, job_id, "cancel_requested")
             assert not cleaned.is_set()
-            waiter = asyncio.create_task(runtime.cancel(job_id, owner=owner, depth=0, await_completion=True))
             done, _ = await asyncio.wait({waiter}, timeout=0.05)
             assert not done
             assert completed == [0]

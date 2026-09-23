@@ -22,7 +22,7 @@ from mindroom.tool_jobs.authorization import (
 )
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, JobSpec
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
@@ -119,13 +119,11 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
         async with execution_resources():
             with tool_runtime_context(context):
                 job = await runtime.start(
-                    JobSpec(
-                        "outer-job",
-                        function_name,
-                        0,
-                        toolkit_name=toolkit_name,
-                        adapter={"origin": function_provenance(function), "authority": function_authority(function)},
-                    ),
+                    "outer-job",
+                    tool_name=function_name,
+                    depth=0,
+                    toolkit_name=toolkit_name,
+                    adapter={"origin": function_provenance(function), "authority": function_authority(function)},
                     owner=owner,
                     operation=operation,
                     initial_wait_token=wait_claim,

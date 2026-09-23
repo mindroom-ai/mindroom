@@ -40,7 +40,7 @@ from mindroom.tool_jobs.authorization import (
     bind_toolkit_authority,
     function_authority,
 )
-from mindroom.tool_jobs.control import job_checkpoint
+from mindroom.tool_jobs.control import human_message_signal_context, job_checkpoint
 from mindroom.tool_jobs.execution_authority import (
     authorized_tool_call,
     check_current_execution_authority,
@@ -51,7 +51,6 @@ from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
     JobAccessError,
-    JobSpec,
     ToolJobRuntime,
     get_background_runtime,
     register_background_runtime,
@@ -65,6 +64,7 @@ from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.test_mcp_toolkit import _oauth_server_config
 from tests.test_queued_message_notify import _envelope
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -163,13 +163,13 @@ async def test_runtime_startup_io_keeps_loop_live_and_retains_cancelled_lease(
             await startup
         monkeypatch.setattr(ToolJobRuntime, "__init__", original_init)
         with pytest.raises(BlockingIOError):
-            ToolJobRuntime(paths.storage_root)
+            tool_job_runtime(paths.storage_root)
     finally:
         release.set()
         ready_waiter.cancel()
         await asyncio.gather(startup, ready_waiter, return_exceptions=True)
         await coordinator.stop()
-    replacement = ToolJobRuntime(paths.storage_root)
+    replacement = tool_job_runtime(paths.storage_root)
     await replacement.shutdown()
 
 
@@ -290,7 +290,11 @@ async def test_completion_scan_shares_membership_read_for_multiple_jobs(tmp_path
     try:
         for name in ("one", "two"):
             await coordinator.runtime.start(
-                JobSpec(name, fixture.tool_name, 0, kind=fixture.kind, adapter=fixture.adapter),
+                name,
+                tool_name=fixture.tool_name,
+                depth=0,
+                kind=fixture.kind,
+                adapter=fixture.adapter,
                 owner=fixture.owner,
                 operation=completed,
             )
@@ -337,7 +341,7 @@ async def test_failed_coordinator_stop_releases_pinned_state_before_restart(
         raise OSError(msg)
 
     with monkeypatch.context() as patch:
-        patch.setattr(coordinator.runtime, "_persist", failed_save)
+        patch.setattr(coordinator.runtime, "_publish", failed_save)
         with pytest.raises(ExceptionGroup):
             await coordinator.stop()
     config.background_tool_jobs.enabled = False
@@ -461,13 +465,8 @@ async def test_replaced_response_runner_releases_wait_without_pausing_job(
         return BackgroundOutcome("completed", "Executed")
 
     fixture = _job()
-    job = await start_delegation(
-        runtime,
-        delegation_child(fixture),
-        owner=fixture.owner,
-        operation=operation,
-        human_signal=signal,
-    )
+    with human_message_signal_context(signal):
+        job = await start_delegation(runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
     waiting = asyncio.create_task(runtime.wait(job.job_id, owner=fixture.owner, depth=0))
     await asyncio.sleep(0)
     replacement = ResponseRunner(deps)

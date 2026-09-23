@@ -14,12 +14,14 @@ from mindroom.config.main import Config
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.resources import current_execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobRecoveryBlockedError
 from tests.bot_helpers import _runtime_bound_config
 from tests.conftest import runtime_paths_for
 from tests.test_background_subagents import _owner
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
 
@@ -33,7 +35,7 @@ async def test_shutdown_save_failure_does_not_abandon_orchestrator_cleanup(
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
     orchestrator.config = config
     orchestrator._shared_journal_store()
-    runtime = ToolJobRuntime(orchestrator.storage_path)
+    runtime = tool_job_runtime(orchestrator.storage_path)
     orchestrator._tool_job_runtime._runtime = runtime
     started = asyncio.Event()
 
@@ -48,7 +50,7 @@ async def test_shutdown_save_failure_does_not_abandon_orchestrator_cleanup(
         raise OSError(msg)
 
     try:
-        await runtime.start(JobSpec("shutdown", "tool", 0), owner=_owner(), operation=operation)
+        await runtime.start("shutdown", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
         await asyncio.wait_for(started.wait(), 10)
         with monkeypatch.context() as patch, capture_logs() as logs:
             patch.setattr(runtime_module, "write_json_file_durable", fail_save)
@@ -66,7 +68,7 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A failed snapshot write cannot replace a completed side effect's output with the storage error."""
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     release = asyncio.Event()
     writer = runtime_module.write_json_file_durable
 
@@ -82,7 +84,7 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
         writer(path, payload, strict_atomic_replace=strict_atomic_replace)
 
     try:
-        await runtime.start(JobSpec("write-failure", "tool", 0), owner=_owner(), operation=operation)
+        await runtime.start("write-failure", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
         with monkeypatch.context() as patch:
             patch.setattr(runtime_module, "write_json_file_durable", fail_outcome)
             release.set()
@@ -93,7 +95,7 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
             assert (tmp_path / "effect.txt").read_text() == "once"
         await runtime.acknowledge_wait("write-failure", waited.token)
         await runtime.shutdown()
-        restored = ToolJobRuntime(tmp_path)
+        restored = tool_job_runtime(tmp_path)
         try:
             await restored.recover()
             saved = await restored.lookup("write-failure", owner=_owner(), depth=0)
@@ -112,7 +114,7 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
 @pytest.mark.parametrize("shutdown", [False, True])
 async def test_returned_result_survives_stop_during_resource_cleanup(tmp_path: Path, shutdown: bool) -> None:
     """A completed side effect retains its output, but only after its resource cleanup drains."""
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     cleaning, release, cleaned = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def cleanup() -> None:
@@ -131,12 +133,10 @@ async def test_returned_result_survives_stop_during_resource_cleanup(tmp_path: P
 
     stopping = None
     try:
-        await runtime.start(JobSpec("returned", "tool", 0), owner=_owner(), operation=operation)
+        await runtime.start("returned", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
         await asyncio.wait_for(cleaning.wait(), 2)
         stopping = asyncio.create_task(
-            runtime.shutdown()
-            if shutdown
-            else runtime.cancel("returned", owner=_owner(), depth=0, await_completion=True),
+            runtime.shutdown() if shutdown else runtime.cancel("returned", owner=_owner(), depth=0),
         )
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(asyncio.shield(stopping), 0.02)
@@ -161,9 +161,9 @@ async def test_returned_result_survives_stop_during_resource_cleanup(tmp_path: P
 @pytest.mark.asyncio
 async def test_returned_result_survives_cancel_admission_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Cancellation cannot overwrite output returned while its durable admission owns the lock."""
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     finish, returned, saving, release = (asyncio.Event() for _ in range(4))
-    persist = runtime._persist
+    publish = runtime._publish
 
     async def operation() -> BackgroundOutcome:
         await finish.wait()
@@ -171,17 +171,17 @@ async def test_returned_result_survives_cancel_admission_lock(tmp_path: Path, mo
         returned.set()
         return BackgroundOutcome("completed", "exact result")
 
-    async def delayed_persist(entry: runtime_module._Entry, *, update_timestamp: bool = True) -> None:
-        if entry.job.status == "cancel_requested":
+    async def delayed_publish(entry: runtime_module._Entry, job: runtime_module.BackgroundJob) -> None:
+        if job.status == "cancel_requested":
             saving.set()
             await release.wait()
-        await persist(entry, update_timestamp=update_timestamp)
+        await publish(entry, job)
 
     stopping = None
     try:
-        await runtime.start(JobSpec("returned", "tool", 0), owner=_owner(), operation=operation)
-        monkeypatch.setattr(runtime, "_persist", delayed_persist)
-        stopping = asyncio.create_task(runtime.cancel("returned", owner=_owner(), depth=0, await_completion=True))
+        await runtime.start("returned", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
+        monkeypatch.setattr(runtime, "_publish", delayed_publish)
+        stopping = asyncio.create_task(runtime.cancel("returned", owner=_owner(), depth=0))
         await asyncio.wait_for(saving.wait(), 2)
         finish.set()
         await asyncio.wait_for(returned.wait(), 2)
@@ -208,7 +208,7 @@ async def test_shutdown_save_failure_still_drains_every_job_and_releases_lease(
     first_completed: bool,
 ) -> None:
     """A failed snapshot write remains visible without abandoning other work or blocking restart."""
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     started, stopped = asyncio.Event(), asyncio.Event()
     cleaned: list[str] = []
 
@@ -227,7 +227,10 @@ async def test_shutdown_save_failure_still_drains_every_job_and_releases_lease(
         cleaned.append(job.job_id)
 
     await runtime.start(
-        JobSpec("first", "tool", 0),
+        "first",
+        tool_name="tool",
+        depth=0,
+        adapter={},
         owner=_owner(),
         operation=completed if first_completed else running,
         cancel=cleanup,
@@ -235,7 +238,15 @@ async def test_shutdown_save_failure_still_drains_every_job_and_releases_lease(
     if first_completed:
         waited = await runtime.wait("first", owner=_owner(), depth=0)
         await runtime.release_wait("first", waited.token)
-    await runtime.start(JobSpec("second", "tool", 0), owner=_owner(), operation=running, cancel=cleanup)
+    await runtime.start(
+        "second",
+        tool_name="tool",
+        depth=0,
+        adapter={},
+        owner=_owner(),
+        operation=running,
+        cancel=cleanup,
+    )
     await started.wait()
     writer = runtime_module.write_json_file_durable
 
@@ -255,7 +266,7 @@ async def test_shutdown_save_failure_still_drains_every_job_and_releases_lease(
         assert cleaned == (["second"] if first_completed else ["first", "second"])
         snapshot = json.loads((tmp_path / "tool_jobs" / "second.json").read_text())
         assert snapshot["status"] == "interrupted"
-        restored = ToolJobRuntime(tmp_path)
+        restored = tool_job_runtime(tmp_path)
         try:
             await restored.recover()
             assert (await restored.lookup("second", owner=_owner(), depth=0)).status == "interrupted"
@@ -266,3 +277,39 @@ async def test_shutdown_save_failure_still_drains_every_job_and_releases_lease(
             assert isinstance(failure.value.exceptions[0], OSError)
     finally:
         await asyncio.gather(runtime.shutdown(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_blocked_shutdown_cleanup_still_settles_other_jobs(tmp_path: Path) -> None:
+    """A child still owned elsewhere stays unsettled without stranding later jobs, and shutdown reports it."""
+    started: set[str] = set()
+    both_started = asyncio.Event()
+
+    async def cleanup(job: runtime_module.BackgroundJob) -> None:
+        if job.job_id == "blocked":
+            msg = "Native child is still executing; recovery cannot settle it."
+            raise JobRecoveryBlockedError(msg)
+
+    runtime = tool_job_runtime(tmp_path, cancel=cleanup)
+
+    def running(name: str) -> Callable[[], Awaitable[BackgroundOutcome]]:
+        async def operation() -> BackgroundOutcome:
+            started.add(name)
+            if started == {"blocked", "later"}:
+                both_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError
+
+        return operation
+
+    for name in ("blocked", "later"):
+        await runtime.start(name, tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=running(name))
+    await both_started.wait()
+    with pytest.raises(ExceptionGroup, match="shutdown") as failure:
+        await runtime.shutdown()
+    assert [type(error) for error in failure.value.exceptions] == [JobRecoveryBlockedError]
+    saved = {
+        name: runtime_module.read_job_snapshot(tmp_path / "tool_jobs" / f"{name}.json").status
+        for name in ("blocked", "later")
+    }
+    assert saved == {"blocked": "running", "later": "interrupted"}

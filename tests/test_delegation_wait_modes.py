@@ -23,12 +23,13 @@ from mindroom.delegation.state import DelegationState
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_jobs.settings import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -64,7 +65,7 @@ async def test_delegate_policy_approval_keeps_wait_owner_after_restart(  # noqa:
         users=["@alice:example.org"],
     )
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     pin_background_tool_jobs(config, paths)
     storage = create_session_storage("leader", config, paths, owner)
@@ -146,7 +147,7 @@ async def test_delegate_policy_approval_keeps_wait_owner_after_restart(  # noqa:
                 release_background_tool_jobs(paths)
                 config.background_tool_jobs.exclude_toolkits = [] if initially_excluded else ["delegate"]
                 pin_background_tool_jobs(config, paths)
-                runtime = ToolJobRuntime(tmp_path)
+                runtime = tool_job_runtime(tmp_path)
                 await runtime.recover()
                 register_background_runtime(paths, runtime)
                 call_id = state.pending_tools[0]["tool_call_id"]

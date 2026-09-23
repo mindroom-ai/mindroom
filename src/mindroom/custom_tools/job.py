@@ -173,7 +173,7 @@ class JobTools(Toolkit):
                     return await consume_tool_job(runtime, waited.job, waited.token)
                 return json.dumps(_summary(waited.job))
             if action == "cancel":
-                job = await runtime.cancel(job_id, owner=owner, depth=self._depth, await_completion=True)
+                job = await runtime.cancel(job_id, owner=owner, depth=self._depth)
                 waited = await runtime.wait(job_id, owner=owner, depth=self._depth, timeout=0)
                 if waited.token is not None:
                     await record_tool_job_receipt(runtime, waited.job, waited.token)

@@ -44,15 +44,6 @@ class HumanMessageSignal:
         """Consume queued input so later waits can remain attached."""
         self._pending = False
 
-    async def wait(self) -> None:
-        """Wait for pending or new human input, releasing the subscription on exit."""
-        notified = asyncio.Event()
-        self.subscribe(notified.set)
-        try:
-            await notified.wait()
-        finally:
-            self.unsubscribe(notified.set)
-
 
 @dataclass
 class JobControl:

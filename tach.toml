@@ -7952,7 +7952,6 @@ depends_on = [
     "mindroom.tool_job_completion",
     "mindroom.tool_jobs.control",
     "mindroom.tool_system.runtime_context",
-    "mindroom.background_tasks",
 ]
 
 visibility = [

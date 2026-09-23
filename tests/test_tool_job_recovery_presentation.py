@@ -19,7 +19,7 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.response_runner import _EarlyPlaceholderState
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingPresentation, send_streaming_response
 from mindroom.tool_jobs.completion import _ReadyJobContinuation
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.events import (
     BackgroundWaitChunk,
     ToolTraceEntry,
@@ -33,6 +33,7 @@ from tests.delegation_helpers import DelegationModel, _call
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_stale_stream_cleanup import _aiter, _make_message_event, _room_get_event_response
 from tests.test_subagent_runtime import _job
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -100,7 +101,7 @@ async def test_recovered_job_source_preserves_latest_visible_edit(
         requester_id=request.response_envelope.requester_id,
         session_id=request.response_envelope.target.session_id,
     )
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(bot.runtime_paths, runtime)
     old_trace = ToolTraceEntry("tool_call_completed", "original_tool", result_preview="saved result")
     narrative = ("Long analysis already visible. " * 100).rstrip()
@@ -128,7 +129,10 @@ async def test_recovered_job_source_preserves_latest_visible_edit(
 
     try:
         await runtime.start(
-            JobSpec("retained", "tool", 0, adapter={"source_event_id": "$event"}),
+            "retained",
+            tool_name="tool",
+            depth=0,
+            adapter={"source_event_id": "$event"},
             owner=owner,
             operation=operation,
         )

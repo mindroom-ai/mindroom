@@ -24,13 +24,15 @@ from mindroom.message_target import MessageTarget
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.control import human_message_signal_context
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -68,7 +70,7 @@ async def test_completed_wait_releases_signal_and_idle_conversation(
     terminal: Literal["completed", "failed", "cancelled"],
 ) -> None:
     """An active wait retains its conversation; every terminal outcome releases it."""
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     owner = ToolExecutionIdentity(
         channel="matrix",
         agent_name="parent",
@@ -90,7 +92,8 @@ async def test_completed_wait_releases_signal_and_idle_conversation(
 
     waiter = None
     try:
-        await runtime.start(JobSpec("work", "tool", 0), owner=owner, operation=operation, human_signal=signal)
+        with human_message_signal_context(signal):
+            await runtime.start("work", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         subscribe = signal.subscribe
 
         def record_subscription(callback: Callable[[], None]) -> None:

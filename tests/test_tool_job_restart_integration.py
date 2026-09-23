@@ -46,7 +46,7 @@ from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.disabled import approval_is_parked, event_is_parked
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
-from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.events import format_tool_started_event
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -56,6 +56,7 @@ from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_c
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx
 from tests.test_tool_job_turn_integration import _provider_tool_content, _wait_until_ready
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -102,7 +103,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     register_background_runtime(paths, runtime)
     signal = HumanMessageSignal()
     storage_file = str(tmp_path / "restart.db")
@@ -224,7 +225,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         await runtime.shutdown()
         register_background_runtime(paths, None)
 
-        restored = ToolJobRuntime(paths.storage_root)
+        restored = tool_job_runtime(paths.storage_root)
         await restored.recover()
         register_background_runtime(paths, restored)
         recovered = await restored.lookup(job_id, owner=owner, depth=0)
@@ -316,7 +317,7 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
         transport_agent_name="general",
         membership_turn_id="$approval-source",
     )
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     register_background_runtime(paths, runtime)
     side_effects: list[str] = []
 

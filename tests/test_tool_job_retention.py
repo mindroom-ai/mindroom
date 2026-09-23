@@ -21,10 +21,11 @@ from mindroom.event_journal import (
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseSources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime
+from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.turn_record import TurnRecord
 from tests.response_runner_helpers import _bot
 from tests.test_subagent_runtime import _job
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,7 +44,7 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     bot = _bot(tmp_path)
     bot.config.background_tool_jobs.enabled = True
     paths = bot.runtime_paths
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
     coordinator = ToolJobRuntimeCoordinator(paths, lambda: bot.config, lambda _: bot, AgentReplyMembershipIndex())
     coordinator._runtime = runtime
@@ -53,13 +54,17 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
         return BackgroundOutcome("completed", "saved result", result_payload={"value": "saved result"})
 
     await runtime.start(
-        JobSpec("old", "tool", 0, adapter={"source_event_id": "$original"}),
+        "old",
+        tool_name="tool",
+        depth=0,
+        adapter={"source_event_id": "$original"},
         owner=owner,
         operation=operation,
     )
     waited = await runtime.wait("old", owner=owner, depth=0)
     await runtime.acknowledge_wait("old", waited.token)
-    runtime._entries["old"].job.updated_at = (datetime.now(UTC) - timedelta(days=31)).isoformat()
+    entry = runtime._entries["old"]
+    entry.job = replace(entry.job, updated_at=(datetime.now(UTC) - timedelta(days=31)).isoformat())
     record = TurnRecord.create(("$original",), anchor_event_id="$original", completed=source_completed)
     principal = bot.journal_principal()
     await principal.admit(

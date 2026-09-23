@@ -42,7 +42,7 @@ from mindroom.tool_jobs.control import (
     human_message_signal_context,
 )
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -58,6 +58,7 @@ from tests.test_delegation_execution import (
     test_child_approval_survives_parent_reconstruction as _native_approval_scenario,
 )
 from tests.test_subagent_runtime import _job
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -102,7 +103,7 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
     if excluded:
         config.background_tool_jobs.exclude_toolkits.append("delegate")
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     delegate = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
     bind_toolkit_construction(delegate, ToolConstruction("delegate", None))
@@ -202,7 +203,7 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
         users=["@alice:example.org"],
     )
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
@@ -318,7 +319,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
         None,
         "parent",
     )
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
@@ -431,7 +432,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
         call = _saved_approval_calls(state)[0]
         if exclude_after_acceptance and not cancel_approval:
             await runtime.shutdown()
-            runtime = ToolJobRuntime(tmp_path)
+            runtime = tool_job_runtime(tmp_path)
             await runtime.recover()
             register_background_runtime(paths, runtime)
         assert (call.toolkit_name, call.invoking_agent, call.tool_call_id) == (
@@ -640,7 +641,7 @@ async def test_managed_team_approvals_keep_member_and_nested_ownership(
 ) -> None:
     """Managed team jobs project the actual member and nested tool owner on reconstruction."""
     paths = _runtime_paths(tmp_path)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     try:
         await _native_approval_scenario(
@@ -652,7 +653,7 @@ async def test_managed_team_approvals_keep_member_and_nested_ownership(
             retry=False,
             team_parent=True,
         )
-        jobs = await runtime.recover()
+        jobs = [entry.job for entry in runtime._entries.values()]
         assert len(jobs) == 1
         assert jobs[0].status == ("completed" if outcome in {"approve", "cancel_completed"} else "cancelled")
         if outcome != "approve":
@@ -683,7 +684,7 @@ async def test_native_wait_unavailable_job_returns_tool_error(tmp_path: Path) ->
         None,
         "parent",
     )
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
@@ -914,7 +915,7 @@ async def test_native_job_source_survives_approval_continuation_and_restart(
         membership_turn_id=source_event_id,
     )
     child = prepare_child_turn("leader", "code", "task", owner=owner, config=config, runtime_paths=paths, depth=0)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
 
     async def approval() -> BackgroundOutcome:
         child.status = "paused"
@@ -947,7 +948,7 @@ async def test_native_job_source_survives_approval_continuation_and_restart(
         await runtime.release_wait(job.job_id, waited.token)
     finally:
         await runtime.shutdown()
-    restored = ToolJobRuntime(tmp_path)
+    restored = tool_job_runtime(tmp_path)
     try:
         await restored.recover()
         saved = await restored.lookup(child.delegation_id, owner=owner, depth=0)

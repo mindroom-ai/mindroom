@@ -12,7 +12,6 @@ from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
     JobRecoveryBlockedError,
-    JobSpec,
     ToolJobRuntime,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -22,7 +21,6 @@ if TYPE_CHECKING:
     from weakref import ReferenceType
 
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_jobs.control import HumanMessageSignal
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -107,7 +105,6 @@ async def start_delegation(
     *,
     owner: ToolExecutionIdentity,
     operation: Callable[[], Awaitable[BackgroundOutcome]],
-    human_signal: HumanMessageSignal | None = None,
     initial_wait_token: str | None = None,
     cancel: Callable[[DelegationChild], Awaitable[None]] | None = None,
     output_path: str | None = None,
@@ -138,10 +135,13 @@ async def start_delegation(
 
     try:
         return await runtime.start(
-            JobSpec(child.delegation_id, "delegate", child.depth - 1, kind="delegation", adapter=adapter),
+            child.delegation_id,
+            tool_name="delegate",
+            depth=child.depth - 1,
+            kind="delegation",
+            adapter=adapter,
             owner=owner,
             operation=run,
-            human_signal=human_signal,
             initial_wait_token=initial_wait_token,
             cancel=cleanup,
         )

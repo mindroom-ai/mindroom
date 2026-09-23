@@ -41,8 +41,6 @@ from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
-    JobSpec,
-    ToolJobRuntime,
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import (
@@ -58,6 +56,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
 from tests.test_config_lifecycle import _make_lifecycle
 from tests.test_subagent_runtime import _job
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -384,7 +383,7 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
     bot = _bot(tmp_path)
     paths = bot.runtime_paths
     owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
 
     executions = 0
 
@@ -394,13 +393,11 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
         return BackgroundOutcome("completed", "kept result")
 
     await runtime.start(
-        JobSpec(
-            "saved",
-            "tool",
-            0,
-            kind=kind,
-            adapter={**(_job().adapter if kind == "delegation" else {}), "source_event_id": "$saved"},
-        ),
+        "saved",
+        tool_name="tool",
+        depth=0,
+        kind=kind,
+        adapter={**(_job().adapter if kind == "delegation" else {}), "source_event_id": "$saved"},
         owner=owner,
         operation=operation,
     )
@@ -452,8 +449,7 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
     try:
         await restarted.initialize(bot._journal_store)
         await restarted.sync()
-        recovered = (await restarted.runtime.recover())[0]
-        assert recovered is not None
+        recovered = restarted.runtime._entries["saved"].job
         assert recovered.result == "kept result"
         assert not recovered.wait_acknowledged
         assert executions == 1

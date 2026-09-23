@@ -24,11 +24,12 @@ from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import _call, _delegate_runtime_context, _runtime_paths
 from tests.test_tool_job_exclusions import _SchemaRecordingModel
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -68,7 +69,14 @@ class _OutputAgent:
             return BackgroundOutcome("completed", _LARGE_RESULT)
 
         job_id = "a" * 64
-        await self.runtime.start(JobSpec(job_id, "saved_output", 0), owner=self.owner, operation=operation)
+        await self.runtime.start(
+            job_id,
+            tool_name="saved_output",
+            depth=0,
+            adapter={},
+            owner=self.owner,
+            operation=operation,
+        )
         ready = await self.runtime.wait(job_id, owner=self.owner, depth=0)
         await self.runtime.release_wait(job_id, ready.token)
         return job_id
@@ -95,7 +103,7 @@ async def output_agent(tmp_path: Path, managed: bool) -> AsyncIterator[_OutputAg
     bind_runtime_paths(config, runtime_paths=paths)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     if managed:
         register_background_runtime(paths, runtime)
     agent = create_agent(

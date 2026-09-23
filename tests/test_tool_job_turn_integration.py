@@ -42,6 +42,7 @@ from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_response_turn import _AdapterLog, _continuation, _ctx, _streaming_adapter
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -175,7 +176,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     register_background_runtime(paths, runtime)
     signal = HumanMessageSignal()
     storage_file = str(tmp_path / "turns.db")
@@ -283,7 +284,7 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     register_background_runtime(paths, runtime)
     storage_file = str(tmp_path / "stream.db")
 

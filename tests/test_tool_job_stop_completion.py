@@ -14,7 +14,7 @@ from mindroom.event_journal import ApprovalCall, ApprovalContinuation, ApprovalD
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.completion import completion_envelope, completion_event
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.turn_record import TurnRecord
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from tests.conftest import unwrap_extracted_collaborator
@@ -24,6 +24,7 @@ from tests.test_tool_job_completion import _persist_waiting_continuation
 from tests.test_tool_job_stop import _bind_reply
 from tests.test_tool_jobs import _owner
 from tests.test_user_stop_convergence import _CountingGateway
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -64,7 +65,7 @@ async def test_stop_reaches_active_completion_and_its_descendant(tmp_path: Path,
             completed=False,
         ),
     )
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     register_background_runtime(paths, runtime)
     started, release = asyncio.Event(), asyncio.Event()
     sent_after_stop = []
@@ -80,7 +81,10 @@ async def test_stop_reaches_active_completion_and_its_descendant(tmp_path: Path,
 
     try:
         await runtime.start(
-            JobSpec("prior-job", "tool", 0, adapter={"source_event_id": "$first"}),
+            "prior-job",
+            tool_name="tool",
+            depth=0,
+            adapter={"source_event_id": "$first"},
             owner=owner,
             operation=finished,
         )
@@ -99,7 +103,10 @@ async def test_stop_reaches_active_completion_and_its_descendant(tmp_path: Path,
                 consumed_wait = await runtime.wait("prior-job", owner=owner, depth=0)
                 await runtime.acknowledge_wait("prior-job", consumed_wait.token)
             await runtime.start(
-                JobSpec("completion-child", "tool", 0, adapter={"source_event_id": event.event_id}),
+                "completion-child",
+                tool_name="tool",
+                depth=0,
+                adapter={"source_event_id": event.event_id},
                 owner=owner,
                 operation=child_operation,
             )
@@ -170,7 +177,7 @@ async def test_stop_after_placeholder_deletion_still_cancels_jobs(tmp_path: Path
             completed=False,
         ),
     )
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     register_background_runtime(paths, runtime)
 
     class RetiredGateway(_CountingGateway):
@@ -188,7 +195,10 @@ async def test_stop_after_placeholder_deletion_still_cancels_jobs(tmp_path: Path
 
     try:
         await runtime.start(
-            JobSpec("active", "tool", 0, adapter={"source_event_id": "$source"}),
+            "active",
+            tool_name="tool",
+            depth=0,
+            adapter={"source_event_id": "$source"},
             owner=owner,
             operation=active,
         )
@@ -238,7 +248,7 @@ async def test_stop_blocks_older_job_approval_owned_by_human_source(tmp_path: Pa
             completed=False,
         ),
     )
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     register_background_runtime(paths, runtime)
 
     async def awaiting() -> BackgroundOutcome:
@@ -246,7 +256,10 @@ async def test_stop_blocks_older_job_approval_owned_by_human_source(tmp_path: Pa
 
     try:
         await runtime.start(
-            JobSpec("older-approval-job", "delegate", 0, adapter={"source_event_id": "$first"}),
+            "older-approval-job",
+            tool_name="delegate",
+            depth=0,
+            adapter={"source_event_id": "$first"},
             owner=owner,
             operation=awaiting,
         )

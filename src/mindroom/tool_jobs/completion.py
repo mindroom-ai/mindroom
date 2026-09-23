@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_STREAMING,
@@ -238,7 +237,7 @@ async def _wait_for_job(runtime: ToolJobRuntime, job: BackgroundJob) -> None:
         waited = await runtime.wait(job.job_id, owner=job.owner, depth=job.depth)
     finally:
         if waited is not None:
-            await run_coroutine_until_complete(runtime.release_wait(job.job_id, waited.token))
+            await runtime.release_wait(job.job_id, waited.token)
 
 
 async def _wait_for_ready_jobs(runtime: ToolJobRuntime, jobs: Sequence[BackgroundJob], human: asyncio.Event) -> None:

@@ -27,8 +27,6 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobAccessError,
-    JobSpec,
-    ToolJobRuntime,
     register_background_runtime,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -39,6 +37,7 @@ from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_c
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
 from tests.test_subagent_runtime import _config, _delivery_coordinator, _job
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -133,7 +132,7 @@ async def test_idle_ad_hoc_completion_reconstructs_member_for_exact_result(  # n
     persist_entity_accounts(config, paths)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     owner = replace(_job().owner, agent_name="worker", transport_agent_name="general")
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     register_background_runtime(paths, runtime)
     release = asyncio.Event()
     results = []
@@ -201,7 +200,7 @@ async def test_idle_ad_hoc_completion_reconstructs_member_for_exact_result(  # n
     monkeypatch.setattr(runner, "generate_response", respond)
     monkeypatch.setattr(runner, "generate_team_response_helper", respond)
     try:
-        await runtime.start(JobSpec("late-member", "report", 0), owner=owner, operation=operation)
+        await runtime.start("late-member", tool_name="report", depth=0, adapter={}, owner=owner, operation=operation)
         # The launching response is gone before its accepted operation completes.
         release.set()
         waited = await runtime.wait("late-member", owner=owner, depth=0)
@@ -225,7 +224,7 @@ async def test_single_agent_turn_leaves_other_member_jobs_for_their_completion_o
     config = _config(tmp_path)
     paths = _delivery_coordinator(tmp_path, config).runtime_paths
     owner = replace(_job().owner, agent_name="worker", transport_agent_name="lead")
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     register_background_runtime(paths, runtime)
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=owner),
@@ -237,7 +236,7 @@ async def test_single_agent_turn_leaves_other_member_jobs_for_their_completion_o
         return BackgroundOutcome("completed", "Member result")
 
     try:
-        await runtime.start(JobSpec("member", "report", 0), owner=owner, operation=operation)
+        await runtime.start("member", tool_name="report", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("member", owner=owner, depth=0)
         await runtime.release_wait("member", waited.token)
         with tool_runtime_context(context):

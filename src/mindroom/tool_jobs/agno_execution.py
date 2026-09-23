@@ -46,7 +46,6 @@ from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.results import decode_tool_result, encode_tool_result
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
-    JobSpec,
     format_job_handle,
     get_background_runtime,
 )
@@ -390,7 +389,6 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
             "origin": function_provenance(call.function, call.arguments),
             "authority": function_authority(call.function),
         }
-        spec = JobSpec(job_id, call.function.name, depth, toolkit_name=call.function.owning_toolkit, adapter=adapter)
         owned_call = isolated_function_call(call)
         owned_call.arguments = application_arguments(owned_call.arguments)
         baseline = deepcopy(run_context.session_state or {})
@@ -400,7 +398,11 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         retained = False
         try:
             await runtime.start(
-                spec,
+                job_id,
+                tool_name=call.function.name,
+                depth=depth,
+                toolkit_name=call.function.owning_toolkit,
+                adapter=adapter,
                 owner=owner,
                 operation=lambda: _run_operation(original, owned_call, owner, baseline, reference),
                 initial_wait_token=token,

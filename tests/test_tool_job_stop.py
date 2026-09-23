@@ -13,7 +13,7 @@ from mindroom.event_journal import DeliveryStage
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseAttempt, ResponseSources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_jobs.user_stop import stop_conversation_jobs
 from mindroom.turn_record import TurnRecord
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
@@ -22,6 +22,7 @@ from tests.response_runner_helpers import _bot
 from tests.test_event_journal_store import ROOM, admit
 from tests.test_tool_jobs import _owner
 from tests.test_user_stop_convergence import _CountingGateway
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -95,7 +96,7 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
         "other-room": (replace(owner, room_id="!elsewhere:example.org"), "$first"),
         "other-thread": (replace(owner, resolved_thread_id="$other", session_id="other"), "$first"),
     }
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
 
     async def operation() -> BackgroundOutcome:
         await asyncio.Event().wait()
@@ -104,7 +105,10 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
     try:
         for job_id, (job_owner, source) in jobs.items():
             await runtime.start(
-                JobSpec(job_id, "tool", 0, adapter={"source_event_id": source}),
+                job_id,
+                tool_name="tool",
+                depth=0,
+                adapter={"source_event_id": source},
                 owner=job_owner,
                 operation=operation,
             )
@@ -116,7 +120,7 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
             job = await runtime.lookup(job_id, owner=job_owner, depth=0)
             if job_id in {"earlier", "current", "member"}:
                 assert job.user_stop_receipt_order == 100
-                await runtime.cancel(job_id, owner=job_owner, depth=0, await_completion=True)
+                await runtime.cancel(job_id, owner=job_owner, depth=0)
             else:
                 assert job.user_stop_receipt_order is None
                 assert job.status == "running"
@@ -127,7 +131,7 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
 @pytest.mark.asyncio
 async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tmp_path: Path) -> None:
     """Stop returns after cancellation admission while uncooperative cleanup still owns the job."""
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
@@ -144,7 +148,10 @@ async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tm
 
     try:
         await runtime.start(
-            JobSpec("active", "slow", 0),
+            "active",
+            tool_name="slow",
+            depth=0,
+            adapter={},
             owner=_owner(),
             operation=operation,
             initial_wait_token="parent-wait",  # noqa: S106
@@ -167,7 +174,7 @@ async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tm
         release.set()
         await runtime.shutdown()
 
-    restored = ToolJobRuntime(tmp_path)
+    restored = tool_job_runtime(tmp_path)
     try:
         await restored.recover()
         saved = await restored.lookup("active", owner=_owner(), depth=0)
@@ -211,7 +218,7 @@ async def test_replayed_stop_preserves_newer_edit_but_cancels_older_edit_work(
         latest_edit_receipt_order=new.receipt_order,
         user_stop_receipt_order=old.receipt_order,
     )
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
 
     async def operation() -> BackgroundOutcome:
         await asyncio.Event().wait()
@@ -220,7 +227,10 @@ async def test_replayed_stop_preserves_newer_edit_but_cancels_older_edit_work(
     try:
         for job_id, source in (("older-edit", "$old-edit"), ("newer-edit", "$new-edit")):
             await runtime.start(
-                JobSpec(job_id, "tool", 0, adapter={"source_event_id": source}),
+                job_id,
+                tool_name="tool",
+                depth=0,
+                adapter={"source_event_id": source},
                 owner=owner,
                 operation=operation,
             )
@@ -270,7 +280,7 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
             completed=False,
         ),
     )
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     register_background_runtime(paths, runtime)
     coordinator = None
 
@@ -279,7 +289,10 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
 
     try:
         await runtime.start(
-            JobSpec("ready", "tool", 0, adapter={"source_event_id": "$source"}),
+            "ready",
+            tool_name="tool",
+            depth=0,
+            adapter={"source_event_id": "$source"},
             owner=owner,
             operation=operation,
         )

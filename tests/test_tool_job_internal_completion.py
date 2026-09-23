@@ -30,7 +30,7 @@ from mindroom.tool_jobs.completion import (
     report_background_wait,
 )
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
 from tests.delegation_helpers import _delegate_runtime_context
@@ -50,6 +50,7 @@ from mindroom.event_journal import EventKind
 from mindroom.tool_jobs.completion import completion_envelope, completion_event
 from tests.response_runner_helpers import _bot
 from tests.test_subagent_runtime import _job
+from tests.tool_job_helpers import tool_job_runtime
 
 
 @pytest.mark.asyncio
@@ -72,7 +73,7 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
 ) -> None:
     """Quiet continuations retain substantive findings while treating NO_REPLY as control data."""
     paths, owner = test_runtime_paths(tmp_path), _job().owner
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     context = replace(
         _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
@@ -95,7 +96,10 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
 
     try:
         await runtime.start(
-            JobSpec("quiet", "tool", 0, adapter={"source_kind": SILENT_SCHEDULE_SOURCE_KIND}),
+            "quiet",
+            tool_name="tool",
+            depth=0,
+            adapter={"source_kind": SILENT_SCHEDULE_SOURCE_KIND},
             owner=owner,
             operation=operation,
         )
@@ -169,14 +173,14 @@ async def test_internal_completion_dispatch_does_not_parse_matrix_event(tmp_path
 @pytest.mark.asyncio
 async def test_pending_outcomes_require_saved_consumption(tmp_path: Path) -> None:
     """Transient ready-result claims cannot hide an unsaved outcome after release."""
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     owner = _job().owner
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("failed", "tool failed")
 
     try:
-        await runtime.start(JobSpec("quiet", "tool", 0), owner=owner, operation=operation)
+        await runtime.start("quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("quiet", owner=owner, depth=0)
         assert not await runtime.pending_outcomes()
         await runtime.release_wait("quiet", waited.token)
@@ -205,7 +209,7 @@ async def test_completion_waits_for_active_and_newer_turns(tmp_path: Path, consu
         transport_agent_name=None,
         requester_id=request.user_id or "@user:localhost",
     )
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(bot.runtime_paths, runtime)
     order = []
     started, release = asyncio.Event(), asyncio.Event()
@@ -226,7 +230,7 @@ async def test_completion_waits_for_active_and_newer_turns(tmp_path: Path, consu
         await runner.deps.approval_store.settle(event.event_id)
 
     try:
-        await runtime.start(JobSpec("quiet", "tool", 0), owner=owner, operation=operation)
+        await runtime.start("quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("quiet", owner=owner, depth=0)
         if consumed:
             await runtime.acknowledge_wait("quiet", waited.token)
@@ -273,7 +277,7 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
     """Turn-end waiting is visible, interruptible, and does not cancel the operation."""
     paths = test_runtime_paths(tmp_path)
     owner = _job().owner
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     context = replace(
         _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
@@ -288,7 +292,8 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
         return BackgroundOutcome("completed", "done")
 
     try:
-        await runtime.start(JobSpec("quiet", "tool", 0), owner=owner, operation=operation, human_signal=signal)
+        with human_message_signal_context(signal):
+            await runtime.start("quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         with tool_runtime_context(context), human_message_signal_context(signal):
             stream = join_conversation_jobs(attempted)
             assert "Waiting" in (await anext(stream)).content
@@ -317,7 +322,7 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
 ) -> None:
     """Both shared drivers continue once at the safe boundary even if the model ignores retrieval."""
     paths, owner = test_runtime_paths(tmp_path), _job().owner
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     context = replace(
         _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
@@ -337,7 +342,7 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
         yield AttemptResolved(await attempt(run, state))
 
     try:
-        await runtime.start(JobSpec("quiet", "tool", 0), owner=owner, operation=operation)
+        await runtime.start("quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("quiet", owner=owner, depth=0)
         await runtime.release_wait("quiet", waited.token)
         with tool_runtime_context(context):
@@ -431,7 +436,11 @@ async def test_failed_completion_admission_retries_and_new_generation_is_admitte
 
     try:
         await coordinator.runtime.start(
-            JobSpec(fixture.job_id, fixture.tool_name, 0, kind=fixture.kind, adapter=fixture.adapter),
+            fixture.job_id,
+            tool_name=fixture.tool_name,
+            depth=0,
+            kind=fixture.kind,
+            adapter=fixture.adapter,
             owner=fixture.owner,
             operation=approval,
         )
@@ -471,18 +480,18 @@ async def test_internal_source_envelope_is_stable_after_runtime_recovery(tmp_pat
     bot = _bot(tmp_path)
     bot.config.background_tool_jobs.enabled = True
     owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "retained")
 
-    await runtime.start(JobSpec("recover", "tool", 0), owner=owner, operation=operation)
+    await runtime.start("recover", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
     waited = await runtime.wait("recover", owner=owner, depth=0)
     await runtime.release_wait("recover", waited.token)
     event = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
     await bot._journal_store.principal(bot._journal_principal_id).admit(event)
     await runtime.shutdown()
-    restored = ToolJobRuntime(tmp_path)
+    restored = tool_job_runtime(tmp_path)
     try:
         await restored.recover()
         job = await restored.outcome("recover", 0)
@@ -517,7 +526,7 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
         session_id=request.response_envelope.target.session_id,
     )
     allowed = True
-    runtime = ToolJobRuntime(tmp_path, authorize=lambda _job: allowed)
+    runtime = tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
     register_background_runtime(bot.runtime_paths, runtime)
 
     async def operation() -> BackgroundOutcome:
@@ -525,14 +534,12 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
 
     try:
         await runtime.start(
-            JobSpec(
-                "retained",
-                "tool",
-                0,
-                adapter={
-                    "source_event_id": request.response_envelope.source_event_id if matching_source else "$unrelated",
-                },
-            ),
+            "retained",
+            tool_name="tool",
+            depth=0,
+            adapter={
+                "source_event_id": request.response_envelope.source_event_id if matching_source else "$unrelated",
+            },
             owner=owner,
             operation=operation,
         )
@@ -625,7 +632,7 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
         session_id=request.response_envelope.target.session_id,
         resolved_thread_id=request.thread_id,
     )
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(bot.runtime_paths, runtime)
 
     async def operation() -> BackgroundOutcome:
@@ -635,7 +642,10 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
 
     try:
         await runtime.start(
-            JobSpec("recovered", "tool", 0, adapter={"source_event_id": "$event"}),
+            "recovered",
+            tool_name="tool",
+            depth=0,
+            adapter={"source_event_id": "$event"},
             owner=owner,
             operation=operation,
         )
@@ -673,7 +683,7 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
 async def test_ready_approval_is_retrieved_before_waiting_on_other_running_jobs(tmp_path: Path) -> None:
     """A pending approval reaches the existing native wait path without a join deadlock."""
     paths, owner = test_runtime_paths(tmp_path), _job().owner
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     context = replace(
         _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
@@ -690,8 +700,8 @@ async def test_ready_approval_is_retrieved_before_waiting_on_other_running_jobs(
         return BackgroundOutcome("awaiting_approval", "Approval required")
 
     try:
-        await runtime.start(JobSpec("running", "tool", 0), owner=owner, operation=running)
-        await runtime.start(JobSpec("approval", "delegation", 0), owner=owner, operation=approval)
+        await runtime.start("running", tool_name="tool", depth=0, adapter={}, owner=owner, operation=running)
+        await runtime.start("approval", tool_name="delegation", depth=0, adapter={}, owner=owner, operation=approval)
         waited = await runtime.wait("approval", owner=owner, depth=0)
         await runtime.release_wait("approval", waited.token)
         with tool_runtime_context(context):
@@ -713,7 +723,7 @@ async def test_ready_approval_is_retrieved_before_waiting_on_other_running_jobs(
 async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failure_boundary: str) -> None:  # noqa: PLR0915
     """Joining or retrieving retained work cannot publish top-level completion early."""
     paths, owner = test_runtime_paths(tmp_path), _job().owner
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     context = replace(
         _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
@@ -752,7 +762,7 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
 
     task = None
     try:
-        await runtime.start(JobSpec("retained", "tool", 0), owner=owner, operation=operation)
+        await runtime.start("retained", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         with tool_runtime_context(context), background_wait_notice(progress):
             task = asyncio.create_task(
                 run_blocking_response_turn(

@@ -25,7 +25,7 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
-from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.delegation_helpers import (
@@ -36,6 +36,7 @@ from tests.delegation_helpers import (
     _saved_approval_calls,
 )
 from tests.identity_helpers import entity_ids
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -83,7 +84,7 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
         None,
         "parent",
     )
-    runtime = ToolJobRuntime(tmp_path) if execution != "inline" else None
+    runtime = tool_job_runtime(tmp_path) if execution != "inline" else None
     register_background_runtime(paths, runtime)
     release = asyncio.Event()
     signal = HumanMessageSignal()
@@ -173,7 +174,7 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
                     (workspace / "report.txt").mkdir()
                 if mode.startswith("resumed"):
                     await runtime.shutdown()
-                    runtime = ToolJobRuntime(tmp_path)
+                    runtime = tool_job_runtime(tmp_path)
                     register_background_runtime(paths, runtime)
                     await runtime.recover()
                 wait_model = DelegationModel(

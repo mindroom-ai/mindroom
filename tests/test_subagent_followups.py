@@ -26,7 +26,7 @@ from mindroom.delegation import sessions
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.state import DelegationState
-from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import (
     DelegationModel,
@@ -37,6 +37,7 @@ from tests.delegation_helpers import (
 )
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -130,7 +131,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
             "runtime_paths": paths,
             "execution_identity": identity,
         }
-        runtime = ToolJobRuntime(tmp_path) if execution == "excluded" else None
+        runtime = tool_job_runtime(tmp_path) if execution == "excluded" else None
         register_background_runtime(paths, runtime)
         try:
             response = await parent.arun("Work", session_id=identity.session_id, user_id=identity.requester_id)

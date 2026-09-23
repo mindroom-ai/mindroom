@@ -30,11 +30,12 @@ from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_jobs.wait_timeout import record_tool_wait_mode, saved_tool_wait_mode
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -64,7 +65,7 @@ async def test_sdk_preparation_preserves_wait_modes_with_either_call_style(
     """Supported SDK positional calls carry the same saved ownership as keyword calls."""
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
@@ -139,7 +140,7 @@ async def test_saved_approval_retains_timeout_semantics_after_exclusion_change( 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     observed: list[int] = []
     storage = SqliteDb(db_file=str(tmp_path / "approvals.db"))
@@ -302,7 +303,7 @@ async def test_earlier_managed_call_keeps_native_approval_owned(tmp_path: Path, 
         agents={"leader": AgentConfig(display_name="Leader")},
     )
     context = _delegate_runtime_context(config, paths)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     model = DelegationModel(
         id="test",
@@ -353,7 +354,7 @@ async def test_nested_native_owner_keeps_slow_child_tool_after_human_signal(tmp_
     )
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     model = DelegationModel(
         id="test",

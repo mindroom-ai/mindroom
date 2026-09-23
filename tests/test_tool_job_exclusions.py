@@ -37,6 +37,7 @@ from mindroom.tools.shell import _process_registry
 from tests.conftest import test_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_config_lifecycle import _make_lifecycle
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -77,7 +78,7 @@ async def shell_runtime(tmp_path: Path, request: pytest.FixtureRequest) -> Async
     )
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     toolkit = get_tool_by_name(
         "shell",
@@ -306,7 +307,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
     paths = test_runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     pin_background_tool_jobs(config, paths)
     excluded = excluded_name == "native_plugin"

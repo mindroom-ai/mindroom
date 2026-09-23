@@ -18,10 +18,11 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.event_journal import ApprovalCall
 from mindroom.hooks import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL, HookRegistry, hook
-from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import persist_entity_accounts
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,7 +71,7 @@ async def test_reserved_controls_obey_approval_and_plugin_hooks(
     )
     context = replace(_delegate_runtime_context(config, paths), hook_registry=registry)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(paths.storage_root)
+    runtime = tool_job_runtime(paths.storage_root)
     register_background_runtime(paths, runtime)
     model = DelegationModel(
         id="test",

@@ -23,10 +23,11 @@ from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.results import encode_tool_result
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,7 +43,7 @@ async def test_job_wait_waits_and_restores_rich_result(tmp_path: Path) -> None:
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     gate = asyncio.Event()
 
@@ -56,7 +57,7 @@ async def test_job_wait_waits_and_restores_rich_result(tmp_path: Path) -> None:
 
     tools = JobTools(paths, owner)
     try:
-        await runtime.start(JobSpec("ordinary", "slow", 0), owner=owner, operation=operation)
+        await runtime.start("ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         with tool_runtime_context(context):
             pending = asyncio.create_task(tools.job("wait", "ordinary"))
             await asyncio.sleep(0)
@@ -88,7 +89,7 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
     bind_runtime_paths(config, runtime_paths=paths)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     try:
         agent = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
@@ -106,14 +107,22 @@ async def test_only_native_job_wait_projects_external_approval(tmp_path: Path) -
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("awaiting_approval")
 
     try:
-        await runtime.start(JobSpec("native", "delegate", 0, kind="delegation"), owner=owner, operation=operation)
+        await runtime.start(
+            "native",
+            tool_name="delegate",
+            depth=0,
+            kind="delegation",
+            adapter={},
+            owner=owner,
+            operation=operation,
+        )
         waited = await runtime.wait("native", owner=owner, depth=0)
         await runtime.release_wait("native", waited.token)
         model = DelegationModel(
@@ -139,20 +148,25 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "saved " * 1000)
 
-    spec = JobSpec("durable", "tool", 0)
-    if native:
-        spec = replace(spec, kind="delegation", adapter={"child": {"subagent_id": "reusable-child", "result": None}})
-    await runtime.start(spec, owner=owner, operation=operation)
+    await runtime.start(
+        "durable",
+        tool_name="tool",
+        depth=0,
+        kind="delegation" if native else "tool",
+        adapter={"child": {"subagent_id": "reusable-child", "result": None}} if native else {},
+        owner=owner,
+        operation=operation,
+    )
     waited = await runtime.wait("durable", owner=owner, depth=0)
     await runtime.acknowledge_wait("durable", waited.token)
     await runtime.shutdown()
     allowed = True
-    runtime = ToolJobRuntime(tmp_path, authorize=lambda _: allowed)
+    runtime = tool_job_runtime(tmp_path, authorize=lambda _: allowed)
     await runtime.recover()
     register_background_runtime(paths, runtime)
     tools = JobTools(paths, owner)
@@ -186,7 +200,7 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = replace(_delegate_runtime_context(config, paths), agent_name="squad", transport_agent_name="squad")
     owner = replace(build_execution_identity_from_runtime_context(context), agent_name="leader")
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
 
     def storage_factory() -> BaseDb:
@@ -197,7 +211,7 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
 
     storage = storage_factory()
     try:
-        await runtime.start(JobSpec("member-job", "slow", 0), owner=owner, operation=operation)
+        await runtime.start("member-job", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("member-job", owner=owner, depth=0)
         await runtime.release_wait("member-job", waited.token)
         member_model = DelegationModel(
@@ -265,7 +279,7 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
 
     def storage_factory() -> BaseDb:
@@ -288,7 +302,7 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
 
     storage = storage_factory()
     try:
-        await runtime.start(JobSpec("ordinary", "slow", 0), owner=owner, operation=operation)
+        await runtime.start("ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("ordinary", owner=owner, depth=0)
         await runtime.release_wait("ordinary", waited.token)
         model = DelegationModel(
@@ -329,7 +343,7 @@ async def test_discovery_bounds_large_results_without_truncating_wait(
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     result = "large result " * 100_000
 
@@ -343,7 +357,11 @@ async def test_discovery_bounds_large_results_without_truncating_wait(
     try:
         adapter = {"child": {"result": None}} if kind == "delegation" else {}
         await runtime.start(
-            JobSpec("large", "large_tool", 0, kind=kind, adapter=adapter),
+            "large",
+            tool_name="large_tool",
+            depth=0,
+            kind=kind,
+            adapter=adapter,
             owner=owner,
             operation=operation,
         )
@@ -369,7 +387,7 @@ async def test_job_wait_can_return_immediately_without_cancelling(tmp_path: Path
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
     gate = asyncio.Event()
 
@@ -379,7 +397,7 @@ async def test_job_wait_can_return_immediately_without_cancelling(tmp_path: Path
 
     tools = JobTools(paths, owner)
     try:
-        await runtime.start(JobSpec("ordinary", "slow", 0), owner=owner, operation=operation)
+        await runtime.start("ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         with tool_runtime_context(context):
             result = await tools.job("wait", "ordinary", wait_timeout=0)
             assert json.loads(result)["status"] == "running"
@@ -403,7 +421,7 @@ async def test_cancel_acknowledges_only_saved_management_result(
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = ToolJobRuntime(tmp_path)
+    runtime = tool_job_runtime(tmp_path)
     register_background_runtime(paths, runtime)
 
     def storage_factory() -> BaseDb:
@@ -422,7 +440,7 @@ async def test_cancel_acknowledges_only_saved_management_result(
 
         monkeypatch.setattr(type(storage), "upsert_run", fail_save)
     try:
-        await runtime.start(JobSpec("cancelled", "slow", 0), owner=owner, operation=operation)
+        await runtime.start("cancelled", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         model = DelegationModel(
             id="test",
             responses=[

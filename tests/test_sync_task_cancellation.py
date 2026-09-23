@@ -81,7 +81,6 @@ from mindroom.runtime_shutdown import (
     ShutdownBudget,
     shutdown_intent_for_entity,
 )
-from mindroom.tool_jobs.runtime import ToolJobRuntime
 from tests.bot_helpers import make_test_agent_bot
 
 if TYPE_CHECKING:
@@ -97,6 +96,7 @@ from tests.conftest import (
     test_runtime_paths,
     write_config_yaml,
 )
+from tests.tool_job_helpers import tool_job_runtime
 
 
 async def _complete_frame(bot: AgentBot, index: int = 0) -> None:
@@ -4210,14 +4210,14 @@ async def test_orchestrator_deferred_stop_keeps_journal_open_for_resistant_owner
         journal.close.assert_not_awaited()
         assert orchestrator._tool_job_runtime.runtime is jobs
         with pytest.raises(BlockingIOError):
-            ToolJobRuntime(orchestrator.storage_path)
+            tool_job_runtime(orchestrator.storage_path)
 
         release_owner.set()
         await stopping
 
     journal.close.assert_awaited_once()
     assert orchestrator._open_journal is None
-    restarted = ToolJobRuntime(orchestrator.storage_path)
+    restarted = tool_job_runtime(orchestrator.storage_path)
     await restarted.shutdown()
 
 
@@ -4328,13 +4328,13 @@ async def test_orchestrator_retains_shared_journal_for_generic_failure_until_res
         assert orchestrator._open_journal is journal
         assert orchestrator._tool_job_runtime.runtime is jobs
         with pytest.raises(BlockingIOError):
-            ToolJobRuntime(orchestrator.storage_path)
+            tool_job_runtime(orchestrator.storage_path)
 
         await orchestrator.stop()
 
     journal.close.assert_awaited_once()
     assert orchestrator._open_journal is None
-    restarted = ToolJobRuntime(orchestrator.storage_path)
+    restarted = tool_job_runtime(orchestrator.storage_path)
     await restarted.shutdown()
 
 
