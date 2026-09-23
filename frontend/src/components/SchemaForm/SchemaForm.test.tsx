@@ -6,11 +6,15 @@ import type { JsonSchema } from "@/lib/configSchema";
 import type { ConfigDiagnostic } from "@/lib/configValidation";
 import { useConfigStore } from "@/store/configStore";
 
+import { useConfigSchema } from "@/hooks/useConfigSchema";
+
 import { SchemaFields } from "./SchemaField";
+import { SchemaSection } from "./SchemaSection";
 
 vi.mock("@/store/configStore", () => ({
   useConfigStore: vi.fn(),
 }));
+vi.mock("@/hooks/useConfigSchema", () => ({ useConfigSchema: vi.fn() }));
 
 // Shapes mirror Pydantic's model_json_schema() output for the real config models.
 const ROOT: JsonSchema = {
@@ -400,6 +404,74 @@ describe("SchemaFields", () => {
     ]);
     expect(
       screen.getByText("Input should be 'sidecar' or 'split'"),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("SchemaSection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(useConfigStore).mockReturnValue({
+      config: { models: {}, agents: {} },
+      diagnostics: [],
+    } as never);
+    vi.mocked(useConfigSchema).mockReturnValue({ schema: ROOT, error: null });
+  });
+
+  const renderSection = (exclude: readonly string[]) =>
+    render(
+      <SchemaSection
+        title="More settings"
+        definition="ParticipationConfig"
+        value={{}}
+        path={["participation"]}
+        exclude={exclude}
+        onFieldChange={vi.fn()}
+      />,
+    );
+
+  it("summarizes the remaining fields while collapsed", () => {
+    renderSection(["judgment"]);
+    const toggle = screen.getByRole("button", { name: /More settings/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveTextContent("Debounce seconds, Instructions");
+
+    fireEvent.click(toggle);
+    expect(
+      screen.getByRole("spinbutton", { name: "Debounce seconds" }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders nothing when the editor owns every field", () => {
+    const { container } = renderSection([
+      "debounce_seconds",
+      "instructions",
+      "judgment",
+    ]);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("renders nothing for a definition the backend does not define", () => {
+    const { container } = render(
+      <SchemaSection
+        title="More settings"
+        definition="FutureConfig"
+        value={{}}
+        path={[]}
+        onFieldChange={vi.fn()}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("explains when the schema cannot be loaded", () => {
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: null,
+      error: "API call failed: 500",
+    });
+    renderSection([]);
+    expect(
+      screen.getByText("More settings are unavailable: API call failed: 500"),
     ).toBeInTheDocument();
   });
 });

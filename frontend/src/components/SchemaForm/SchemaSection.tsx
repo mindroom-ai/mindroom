@@ -39,7 +39,8 @@ export function SchemaSection({
       </p>
     );
   }
-  if (root == null) {
+  // A backend without this definition has no fields to add here.
+  if (root?.$defs?.[definition] == null) {
     return null;
   }
 

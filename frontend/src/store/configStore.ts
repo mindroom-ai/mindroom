@@ -51,7 +51,7 @@ export function readConfigRoot(config: Config, root: string): unknown {
 }
 
 function withConfigRoot(config: Config, root: string, value: unknown): Config {
-  return setObjectKey(config, root, value) as unknown as Config;
+  return setObjectKey(config, root, value);
 }
 
 function validationDiagnostics(

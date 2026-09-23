@@ -382,6 +382,16 @@ export function matchUnionVariant(
 }
 
 /** Copy an object with one key set, or removed when next is undefined. */
+export function setObjectKey<T extends object>(
+  value: T | null | undefined,
+  key: string,
+  next: unknown,
+): T;
+export function setObjectKey(
+  value: unknown,
+  key: string,
+  next: unknown,
+): Record<string, unknown>;
 export function setObjectKey(
   value: unknown,
   key: string,

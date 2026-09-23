@@ -131,6 +131,13 @@ function presenceMode(node: SchemaNode, required: boolean): Presence {
   return "tri";
 }
 
+/** Lowercase a label for use mid-sentence, keeping leading acronyms. */
+function inlineLabel(label: string): string {
+  return /^[A-Z]{2}/.test(label)
+    ? label
+    : label.charAt(0).toLowerCase() + label.slice(1);
+}
+
 function displayScalar(value: unknown): string {
   if (typeof value === "boolean") {
     return value ? "on" : "off";
@@ -416,7 +423,7 @@ export function SchemaField({
           }
         />
         <Label htmlFor={id} className="cursor-pointer text-sm">
-          Configure {label.toLowerCase()}
+          Configure {inlineLabel(label)}
         </Label>
       </div>
     ) : (
@@ -985,7 +992,7 @@ function ListEditor({
         }
       >
         <Plus className="mr-2 h-4 w-4" />
-        Add {label.toLowerCase()}
+        Add {inlineLabel(label)}
       </Button>
     </div>
   );
@@ -1080,7 +1087,7 @@ function StringListEditor({
       )}
       <div className="flex items-center gap-2">
         <Input
-          aria-label={`New ${label.toLowerCase()} entry`}
+          aria-label={`New ${inlineLabel(label)} entry`}
           value={draft}
           list={available ? listId : undefined}
           onChange={(event) => setDraft(event.target.value)}
@@ -1096,7 +1103,7 @@ function StringListEditor({
           type="button"
           variant="outline"
           size="sm"
-          aria-label={`Add ${label.toLowerCase()} entry`}
+          aria-label={`Add ${inlineLabel(label)} entry`}
           disabled={draft.trim() === ""}
           onClick={add}
         >
@@ -1199,7 +1206,7 @@ function MapEditor({
       ))}
       <div className="flex items-center gap-2">
         <Input
-          aria-label={`New ${label.toLowerCase()} key`}
+          aria-label={`New ${inlineLabel(label)} key`}
           placeholder="Key"
           value={draftKey}
           list={keySuggestions ? keyListId : undefined}
@@ -1218,7 +1225,7 @@ function MapEditor({
           type="button"
           variant="outline"
           size="sm"
-          aria-label={`Add ${label.toLowerCase()} key`}
+          aria-label={`Add ${inlineLabel(label)} key`}
           disabled={draftKey.trim() === "" || draftKey.trim() in value}
           onClick={add}
         >

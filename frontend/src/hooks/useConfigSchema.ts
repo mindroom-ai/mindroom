@@ -1,17 +1,24 @@
 import { useEffect, useState } from "react";
 
 import { API_ENDPOINTS, fetchJSON } from "@/lib/api";
-import type { JsonSchema } from "@/lib/configSchema";
+import { isPlainObject, type JsonSchema } from "@/lib/configSchema";
 
 // The schema only changes with the backend build, so one fetch serves the session.
 let cachedSchema: JsonSchema | null = null;
 let pendingSchema: Promise<JsonSchema> | null = null;
 
 function loadConfigSchema(): Promise<JsonSchema> {
-  pendingSchema ??= fetchJSON<JsonSchema>(API_ENDPOINTS.config.schema)
+  pendingSchema ??= fetchJSON<unknown>(API_ENDPOINTS.config.schema)
     .then((schema) => {
-      cachedSchema = schema;
-      return schema;
+      if (
+        !isPlainObject(schema) ||
+        !isPlainObject(schema.properties) ||
+        !isPlainObject(schema.$defs)
+      ) {
+        throw new Error("Unexpected configuration schema response.");
+      }
+      cachedSchema = schema as JsonSchema;
+      return cachedSchema;
     })
     .finally(() => {
       pendingSchema = null;
