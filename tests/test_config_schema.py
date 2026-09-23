@@ -115,10 +115,10 @@ def test_secret_fields_are_annotated() -> None:
 
 
 def test_compaction_override_fields_clear_inherited_values() -> None:
-    """An authored null in an agent or team override drops the defaults.compaction value, so forms offer None."""
+    """An authored null in an agent or team override drops the defaults.compaction value, so forms offer it."""
     properties = Config.model_json_schema()["$defs"]["CompactionOverrideConfig"]["properties"]
     clearing = {name for name, field in properties.items() if field.get(HINT_KEY, {}).get("clears_inherited")}
-    # An authored null enabled falls back to the defaults, like leaving it unset.
+    # An authored null enabled turns compaction off instead of clearing back to the inherited value.
     assert clearing == set(properties) - {"enabled"}
 
 

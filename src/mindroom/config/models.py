@@ -250,7 +250,10 @@ def _validate_compaction_threshold_choice(
 
 
 class CompactionOverrideConfig(BaseModel):
-    """Optional per-scope overrides for destructive compaction; an authored null clears the inherited value."""
+    """Optional per-scope overrides for destructive compaction.
+
+    An authored null clears the value inherited from defaults, except for ``enabled``, where it turns compaction off.
+    """
 
     enabled: bool | None = Field(
         default=None,

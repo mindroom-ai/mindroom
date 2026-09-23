@@ -947,7 +947,7 @@
       "type": "object"
     },
     "CompactionOverrideConfig": {
-      "description": "Optional per-scope overrides for destructive compaction; an authored null clears the inherited value.",
+      "description": "Optional per-scope overrides for destructive compaction.\n\nAn authored null clears the value inherited from defaults, except for ``enabled``, where it turns compaction off.",
       "properties": {
         "enabled": {
           "anyOf": [

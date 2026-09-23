@@ -606,11 +606,15 @@ describe("SchemaFields", () => {
     );
   });
 
-  it("offers None where an authored null clears an inherited value", () => {
+  it("offers the built-in default where an authored null clears an inherited value", () => {
     const { lastValue } = renderFixture();
-    fireEvent.change(screen.getByRole("combobox", { name: "Fallback model" }), {
-      target: { value: "__none__" },
-    });
+    const select = screen.getByRole("combobox", { name: "Fallback model" });
+    expect(
+      within(select)
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["Inherited", "Built-in default", "default", "sonnet"]);
+    fireEvent.change(select, { target: { value: "__none__" } });
     expect(lastValue()).toEqual({ fallback_model: null });
   });
 

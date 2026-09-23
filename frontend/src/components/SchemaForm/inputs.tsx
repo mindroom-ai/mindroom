@@ -58,6 +58,16 @@ export function presenceMode(
   return "tri";
 }
 
+// Where an authored null clears an inherited value, leaving the field unset
+// inherits it and null restores the built-in default rather than meaning none.
+export function unsetLabel(node: SchemaNode, label: string): string {
+  return node.hint.clears_inherited === true ? "Inherited" : label;
+}
+
+export function noneLabel(node: SchemaNode): string {
+  return node.hint.clears_inherited === true ? "Built-in default" : "None";
+}
+
 /** Lowercase a label for use mid-sentence, keeping leading acronyms. */
 export function inlineLabel(label: string): string {
   return /^[A-Z]{2}/.test(label)
@@ -316,10 +326,15 @@ export function ScalarInput({
         : [
             {
               value: DEFAULT_OPTION,
-              label: summary ? `Default (${summary})` : "Not set",
+              label: unsetLabel(
+                node,
+                summary ? `Default (${summary})` : "Not set",
+              ),
             },
           ]),
-      ...(presence === "tri" ? [{ value: NONE_OPTION, label: "None" }] : []),
+      ...(presence === "tri"
+        ? [{ value: NONE_OPTION, label: noneLabel(node) }]
+        : []),
       ...values.map((option) => ({ value: option, label: option })),
     ];
     return (
@@ -388,7 +403,9 @@ export function ScalarInput({
           onCheckedChange={(next) => onChange(next === true ? null : undefined)}
         />
         <Label htmlFor={`${id}-none`} className="cursor-pointer text-xs">
-          Set to none
+          {node.hint.clears_inherited === true
+            ? "Use built-in default"
+            : "Set to none"}
         </Label>
       </div>
     </div>

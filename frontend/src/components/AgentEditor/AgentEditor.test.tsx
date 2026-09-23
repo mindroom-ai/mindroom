@@ -2083,6 +2083,7 @@ describe("AgentEditor", () => {
                   { type: "null" },
                 ],
                 default: null,
+                "x-mindroom": { clears_inherited: true },
               },
             },
           },
@@ -2106,12 +2107,19 @@ describe("AgentEditor", () => {
       compaction: { timeout_seconds: 30 },
     });
 
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Use built-in default" }),
+    );
+    expect(mockStore.updateAgent).toHaveBeenLastCalledWith("test_agent", {
+      compaction: { timeout_seconds: null },
+    });
+
     // An explicit null opts this agent out of an inherited fallback model.
     fireEvent.change(screen.getByRole("combobox", { name: "Fallback model" }), {
       target: { value: "__none__" },
     });
     expect(mockStore.updateAgent).toHaveBeenLastCalledWith("test_agent", {
-      compaction: { timeout_seconds: 30, fallback_model: null },
+      compaction: { timeout_seconds: null, fallback_model: null },
     });
   });
 
