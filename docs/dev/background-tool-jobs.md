@@ -54,6 +54,9 @@ uses `mindroom_output_path`, and ordinary automatic output saving bounds large m
 payloads. The durable codec has a separate 64 MiB per-value envelope backstop; it is
 not a display limit.
 
+Managed generator events retain their SDK family, serialized fields, and captured result text.
+Custom events replay as fixed SDK subclasses; plugin class identity and methods are not restored from saved data.
+
 Unread terminal payloads cool to disk. Consumed results remain for 30 days after
 the last acknowledged read, longer while response or approval ownership requires
 them. Expiry keeps an execution receipt but drops full results, tool arguments and
