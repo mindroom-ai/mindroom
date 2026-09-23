@@ -50,6 +50,7 @@ class SpeechServiceConfig(BaseModel):
     extra_kwargs: dict[str, Any] = Field(
         default_factory=dict,
         description="Provider-specific options passed to the speech adapter",
+        json_schema_extra=dashboard_hint(secret=True),
     )
 
     @field_validator("api_key", "host", mode="before")

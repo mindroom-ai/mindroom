@@ -166,7 +166,7 @@ class ToolConfigEntry(BaseModel):
     name: str = Field(description="Registered tool name")
     overrides: dict[str, object] = Field(
         default_factory=dict,
-        description="Per-agent values for the tool's override fields",
+        description="Values for the tool's override fields; defaults.tools entries apply them to every agent",
     )
     defer: bool = Field(
         default=False,
@@ -618,7 +618,8 @@ class ModelConfig(BaseModel):
     )
     extra_kwargs: dict[str, Any] | None = Field(
         default=None,
-        description="Additional provider-specific parameters passed directly to the model",
+        description="Additional provider-specific parameters passed directly to the model; may include api_key",
+        json_schema_extra=dashboard_hint(secret=True),
     )
     context_window: int | None = Field(
         default=None,

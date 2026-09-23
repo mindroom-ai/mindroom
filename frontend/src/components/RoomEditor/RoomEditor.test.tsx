@@ -291,15 +291,33 @@ describe("RoomEditor", () => {
     ).toBeInTheDocument();
   });
 
-  it("edits per-room Matrix settings through More settings", () => {
+  const roomSchema = {
+    type: "object",
+    properties: {},
+    $defs: {
+      RoomConfig: {
+        type: "object",
+        properties: {
+          description: { type: "string" },
+          encrypted: {
+            anyOf: [{ type: "boolean" }, { type: "null" }],
+            default: null,
+          },
+        },
+      },
+    },
+  };
+
+  const renderRoomWithSchema = (
+    rooms: Record<string, Record<string, unknown>>,
+    loadedRooms: Record<string, Record<string, unknown>>,
+  ) => {
     const mockUpdateConfigValue = vi.fn();
     (useConfigStore as any).mockReturnValue({
       rooms: [mockRoom],
       agents: mockAgents,
-      config: {
-        ...mockConfig,
-        rooms: { lobby: { description: "Main discussion room" }, dev: {} },
-      },
+      config: { ...mockConfig, rooms },
+      loadedConfig: { ...mockConfig, rooms: loadedRooms },
       diagnostics: [],
       selectedRoomId: "lobby",
       updateRoom: mockUpdateRoom,
@@ -309,35 +327,40 @@ describe("RoomEditor", () => {
       isDirty: false,
     });
     vi.mocked(useConfigSchema).mockReturnValue({
-      schema: {
-        type: "object",
-        properties: {},
-        $defs: {
-          RoomConfig: {
-            type: "object",
-            properties: {
-              description: { type: "string" },
-              encrypted: {
-                anyOf: [{ type: "boolean" }, { type: "null" }],
-                default: null,
-              },
-            },
-          },
-        },
-      },
+      schema: roomSchema,
       error: null,
       retry: vi.fn(),
     });
-
     render(<RoomEditor />);
     fireEvent.click(screen.getByRole("button", { name: /More settings/ }));
+    return mockUpdateConfigValue;
+  };
+
+  it("edits per-room Matrix settings through More settings", () => {
+    const authored = { lobby: { description: "Main discussion room" } };
+    const updateConfigValue = renderRoomWithSchema(authored, authored);
     fireEvent.change(screen.getByRole("combobox", { name: "Encrypted" }), {
       target: { value: "true" },
     });
 
-    expect(mockUpdateConfigValue).toHaveBeenCalledWith(
-      ["rooms", "lobby", "encrypted"],
-      true,
+    expect(updateConfigValue).toHaveBeenCalledWith(["rooms", "lobby"], {
+      description: "Main discussion room",
+      encrypted: true,
+    });
+  });
+
+  it("leaves a room unauthored when its only override is reset", () => {
+    const updateConfigValue = renderRoomWithSchema(
+      { lobby: { encrypted: true } },
+      {},
+    );
+    fireEvent.change(screen.getByRole("combobox", { name: "Encrypted" }), {
+      target: { value: "__default__" },
+    });
+
+    expect(updateConfigValue).toHaveBeenCalledWith(
+      ["rooms", "lobby"],
+      undefined,
     );
   });
 });

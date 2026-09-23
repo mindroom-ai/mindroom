@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mindroom.config.models import EmbedderConfig
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.path_globs import validate_safe_relative_pattern
 
 MemoryBackend = Literal["mem0", "file", "none"]
@@ -73,7 +74,11 @@ class _MemoryLLMConfig(BaseModel):
     """Memory LLM configuration."""
 
     provider: str = Field(default="ollama", description="LLM provider (ollama, openai, anthropic)")
-    config: dict[str, Any] = Field(default_factory=dict, description="Provider-specific LLM config")
+    config: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Provider-specific LLM config; may include credentials",
+        json_schema_extra=dashboard_hint(secret=True),
+    )
 
 
 class _MemoryFileConfig(BaseModel):

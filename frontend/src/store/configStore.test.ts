@@ -6220,6 +6220,16 @@ describe("configStore", () => {
       expect(state.diagnostics).toEqual([siblingIssue]);
     });
 
+    it("drops a root once its last key is reset", async () => {
+      await loadBaseConfig();
+      useConfigStore
+        .getState()
+        .updateConfigValue(["router", "model"], undefined);
+
+      expect(useConfigStore.getState().config).not.toHaveProperty("router");
+      expect(await savedPayload()).not.toHaveProperty("router");
+    });
+
     it("removes a root when given undefined", async () => {
       await loadBaseConfig();
 

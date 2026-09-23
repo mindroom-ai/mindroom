@@ -3,6 +3,7 @@ import { Save, SlidersHorizontal } from "lucide-react";
 
 import { showSaveFailureToastIfNeeded } from "@/components/shared";
 import {
+  NativeSelect,
   ReferenceOptionsProvider,
   SchemaField,
   SchemaFields,
@@ -190,20 +191,18 @@ export function Settings() {
               ))}
             </ul>
           </nav>
-          <select
-            aria-label="Settings section"
-            className="glass-control h-10 px-3 text-sm md:hidden"
+          <NativeSelect
+            label="Settings section"
+            className="md:hidden"
             value={active.id}
-            onChange={(event) => setSelectedId(event.target.value)}
-          >
-            {sections.map((section) => (
-              <option key={section.id} value={section.id}>
-                {sectionsWithIssues.has(section.id)
-                  ? `${section.title} (needs attention)`
-                  : section.title}
-              </option>
-            ))}
-          </select>
+            options={sections.map((section) => ({
+              value: section.id,
+              label: sectionsWithIssues.has(section.id)
+                ? `${section.title} (needs attention)`
+                : section.title,
+            }))}
+            onChange={setSelectedId}
+          />
           <Card className="min-h-0 overflow-y-auto">
             <CardHeader>
               <CardTitle>{active.title}</CardTitle>

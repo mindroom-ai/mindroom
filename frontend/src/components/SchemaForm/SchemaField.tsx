@@ -448,7 +448,14 @@ function ValueEditor({
         />
       );
     case "freeform":
-      return <YamlEditor label={label} value={value} onChange={onChange} />;
+      return (
+        <YamlEditor
+          label={label}
+          value={value}
+          secret={node.hint.secret === true}
+          onChange={onChange}
+        />
+      );
     default:
       return (
         <SchemaField

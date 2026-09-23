@@ -43,7 +43,10 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { ProviderLogo } from "./ProviderLogos";
 import { getProviderInfo, getProviderList } from "@/lib/providers";
-import type { ProviderType } from "@/types/config";
+import type {
+  ModelConfig as ModelConfigType,
+  ProviderType,
+} from "@/types/config";
 
 interface RowDraft {
   modelName: string;
@@ -339,8 +342,14 @@ const MODEL_EDITOR_FIELDS = [
 ] as const;
 
 export function ModelConfig() {
-  const { config, updateModel, deleteModel, saveConfig, isLoading } =
-    useConfigStore();
+  const {
+    config,
+    updateModel,
+    updateConfigValue,
+    deleteModel,
+    saveConfig,
+    isLoading,
+  } = useConfigStore();
 
   const [providerKeys, setProviderKeys] = useState<Record<string, KeyStatus>>(
     {},
@@ -353,6 +362,12 @@ export function ModelConfig() {
 
   const [editingRowId, setEditingRowId] = useState<string | null>(null);
   const [rowDraft, setRowDraft] = useState<RowDraft | null>(null);
+  // The model as it was when row editing began, so Cancel can also undo
+  // More settings edits and Save only writes a Base URL the row changed.
+  const [editingStart, setEditingStart] = useState<{
+    config: ModelConfigType;
+    baseUrl: string;
+  } | null>(null);
   const [isSavingRow, setIsSavingRow] = useState(false);
 
   const [isAddingRow, setIsAddingRow] = useState(false);
@@ -524,6 +539,10 @@ export function ModelConfig() {
 
   const startEditingRow = (row: ModelRowData) => {
     setEditingRowId(row.modelName);
+    setEditingStart({
+      config: models[row.modelName],
+      baseUrl: row.openAIBaseUrl || "",
+    });
     setRowDraft({
       modelName: row.modelName,
       provider: row.provider,
@@ -538,9 +557,22 @@ export function ModelConfig() {
     });
   };
 
-  const cancelEditingRow = () => {
+  const finishEditingRow = () => {
     setEditingRowId(null);
     setRowDraft(null);
+    setEditingStart(null);
+  };
+
+  const cancelEditingRow = () => {
+    if (
+      editingRowId != null &&
+      editingStart != null &&
+      JSON.stringify(models[editingRowId]) !==
+        JSON.stringify(editingStart.config)
+    ) {
+      updateConfigValue(["models", editingRowId], editingStart.config);
+    }
+    finishEditingRow();
   };
 
   const startAddingRow = () => {
@@ -716,10 +748,14 @@ export function ModelConfig() {
 
     const nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
     if (rowDraft.provider === "openai") {
-      if (normalizedBaseUrl) {
-        nextExtraKwargs.base_url = normalizedBaseUrl;
-      } else {
-        delete nextExtraKwargs.base_url;
+      // More settings may have edited extra_kwargs; keep its base_url unless
+      // the row's own Base URL input changed.
+      if (rowDraft.baseUrl !== editingStart?.baseUrl) {
+        if (normalizedBaseUrl) {
+          nextExtraKwargs.base_url = normalizedBaseUrl;
+        } else {
+          delete nextExtraKwargs.base_url;
+        }
       }
     } else {
       delete nextExtraKwargs.base_url;
@@ -749,7 +785,7 @@ export function ModelConfig() {
 
     await fetchAllKeyStatuses();
     setIsSavingRow(false);
-    cancelEditingRow();
+    finishEditingRow();
 
     toast({
       title: "Model Updated",

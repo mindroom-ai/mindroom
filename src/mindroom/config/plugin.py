@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import non_empty_stripped
 
 
@@ -24,7 +25,8 @@ class PluginEntryConfig(BaseModel):
     enabled: bool = Field(default=True, description="Load the plugin; false disables it without removing the entry")
     settings: dict[str, Any] = Field(
         default_factory=dict,
-        description="Free-form settings passed to the plugin at load time",
+        description="Free-form settings passed to the plugin at load time; may include credentials",
+        json_schema_extra=dashboard_hint(secret=True),
     )
     hooks: dict[str, HookOverrideConfig] = Field(
         default_factory=dict,

@@ -78,22 +78,15 @@ export interface SchemaNode {
 
 const ACRONYMS: Record<string, string> = {
   api: "API",
-  http: "HTTP",
   id: "ID",
-  ids: "IDs",
-  jev: "JEV",
   livekit: "LiveKit",
   llm: "LLM",
   mcp: "MCP",
-  mxc: "MXC",
   oauth: "OAuth",
   pkce: "PKCE",
-  rtc: "RTC",
-  sse: "SSE",
   stt: "STT",
   tts: "TTS",
   url: "URL",
-  urls: "URLs",
 };
 
 export function isPlainObject(
@@ -122,7 +115,7 @@ function definitionName(ref: string): string {
   return ref.slice(prefix.length);
 }
 
-export function definitionSchema(root: JsonSchema, name: string): JsonSchema {
+function definitionSchema(root: JsonSchema, name: string): JsonSchema {
   const definition = root.$defs?.[name];
   if (definition == null) {
     throw new Error(`Unknown schema definition: ${name}`);

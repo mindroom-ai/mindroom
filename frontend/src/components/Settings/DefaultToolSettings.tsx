@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { NativeSelect } from "@/components/SchemaForm";
 import { ToolConfigPanel } from "@/components/ToolConfig/ToolConfigPanel";
 import type { ToolInfo } from "@/hooks/useTools";
 import { useConfigStore } from "@/store/configStore";
@@ -24,18 +25,15 @@ export function DefaultToolSettings({ tools }: { tools: ToolInfo[] }) {
           Override tool options for every agent that includes the default tools.
         </p>
       </div>
-      <select
-        aria-label="Default tool"
-        className="glass-control h-10 w-full px-3 text-sm"
+      <NativeSelect
+        label="Default tool"
         value={toolName}
-        onChange={(event) => setSelected(event.target.value)}
-      >
-        {names.map((name) => (
-          <option key={name} value={name}>
-            {tools.find((tool) => tool.name === name)?.display_name ?? name}
-          </option>
-        ))}
-      </select>
+        options={names.map((name) => ({
+          value: name,
+          label: tools.find((tool) => tool.name === name)?.display_name ?? name,
+        }))}
+        onChange={setSelected}
+      />
       <ToolConfigPanel
         target={{ kind: "defaults" }}
         toolName={toolName}

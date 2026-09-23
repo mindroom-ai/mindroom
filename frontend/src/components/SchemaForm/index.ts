@@ -1,3 +1,4 @@
+export { NativeSelect } from "./inputs";
 export { SchemaField, SchemaFields } from "./SchemaField";
 export { SchemaSection } from "./SchemaSection";
 export { SchemaUnavailable } from "./SchemaUnavailable";

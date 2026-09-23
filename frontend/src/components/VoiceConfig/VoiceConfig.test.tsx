@@ -345,7 +345,6 @@ describe("VoiceConfig", () => {
               },
             },
           },
-          VoiceConfig: { type: "object", properties: {} },
           VoiceSTTConfig: { type: "object", properties: {} },
         },
       },
@@ -374,7 +373,6 @@ describe("VoiceConfig", () => {
         type: "object",
         properties: {},
         $defs: {
-          VoiceConfig: { type: "object", properties: {} },
           VoiceSTTConfig: {
             type: "object",
             properties: {

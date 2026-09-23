@@ -2365,7 +2365,7 @@ visibility = [
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
 path = "mindroom.config.memory"
-depends_on = ["mindroom.config.models", "mindroom.path_globs"]
+depends_on = ["mindroom.config.models", "mindroom.config.schema_hints", "mindroom.path_globs"]
 
 [[modules]]
 path = "mindroom.config.models"
@@ -5972,7 +5972,7 @@ depends_on = ["mindroom.cli.config", "mindroom.config.main", "mindroom.config_bu
 
 [[modules]]
 path = "mindroom.api.config_schema"
-depends_on = ["mindroom.config.main", "mindroom.config.schema_hints"]
+depends_on = ["mindroom.config.main"]
 
 [[modules]]
 path = "mindroom.config.schema_hints"

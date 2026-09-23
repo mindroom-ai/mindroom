@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import type { ReferenceOptions, SchemaNode } from "@/lib/configSchema";
+import { cn } from "@/lib/utils";
 
 export type SchemaPath = Array<string | number>;
 
@@ -108,18 +109,20 @@ export function NativeSelect({
   value,
   options,
   onChange,
+  className,
 }: {
   id?: string;
   label: string;
   value: string;
   options: Array<{ value: string; label: string }>;
   onChange: (value: string) => void;
+  className?: string;
 }) {
   return (
     <select
       id={id}
       aria-label={label}
-      className={SELECT_CLASS}
+      className={cn(SELECT_CLASS, className)}
       value={value}
       onChange={(event) => onChange(event.target.value)}
     >
@@ -648,19 +651,41 @@ function dumpYaml(value: unknown): string {
 export function YamlEditor({
   label,
   value,
+  secret,
   onChange,
 }: {
   label: string;
   value: unknown;
+  /** Hide the content until revealed, for mappings that can hold credentials. */
+  secret: boolean;
   onChange: (next: unknown) => void;
 }) {
   const serialized = useMemo(() => dumpYaml(value), [value]);
   const [draft, setDraft] = useState(serialized);
   const [parseError, setParseError] = useState<string | null>(null);
+  const [revealed, setRevealed] = useState(false);
   useEffect(() => {
     setDraft(serialized);
     setParseError(null);
   }, [serialized]);
+
+  if (secret && !revealed && serialized !== "") {
+    return (
+      <div className="flex items-center justify-between gap-2 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
+        <span>Hidden because it may contain credentials.</span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          aria-label={`Show ${inlineLabel(label)}`}
+          onClick={() => setRevealed(true)}
+        >
+          <Eye className="mr-1 h-3 w-3" />
+          Show
+        </Button>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-1">

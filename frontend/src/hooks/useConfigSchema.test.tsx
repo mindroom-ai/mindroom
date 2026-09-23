@@ -38,6 +38,21 @@ describe("useConfigSchema", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("updates every consumer when one of them retries", async () => {
+    const useConfigSchema = await loadHook();
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ has_key: false }));
+    const first = renderHook(() => useConfigSchema());
+    const second = renderHook(() => useConfigSchema());
+    await waitFor(() => expect(second.result.current.error).not.toBeNull());
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(SCHEMA));
+    act(() => first.result.current.retry());
+    await waitFor(() => expect(second.result.current.schema).toEqual(SCHEMA));
+    expect(second.result.current.error).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("serves later callers from the cache", async () => {
     const useConfigSchema = await loadHook();
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(SCHEMA));

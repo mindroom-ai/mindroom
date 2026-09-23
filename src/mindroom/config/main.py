@@ -70,7 +70,7 @@ from mindroom.config.runtime_overlays import (
     apply_runtime_approved_egress_overlay,
     strip_runtime_approved_egress_overlay_from_dump,
 )
-from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.voice import VoiceConfig
 from mindroom.config.yaml_includes import (
@@ -2000,6 +2000,11 @@ class Config(BaseModel):
             resolved_context_window = self.get_model_context_window(resolved_model_name)
 
         return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
+
+
+def dashboard_config_schema() -> dict[str, Any]:
+    """Return the Config JSON schema with dashboard hints and default-factory values."""
+    return Config.model_json_schema(schema_generator=DashboardJsonSchema)
 
 
 def failed_config_source_fingerprint(exc: BaseException) -> str | None:

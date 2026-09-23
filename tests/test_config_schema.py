@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import inspect
+import json
 import typing
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from pydantic import BaseModel
 
-from mindroom.config.main import Config
-from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint
+from mindroom.config.main import Config, dashboard_config_schema
+from mindroom.config.schema_hints import dashboard_hint
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -103,7 +105,9 @@ def test_reference_fields_are_annotated() -> None:
 def test_secret_fields_are_annotated() -> None:
     """Credential-bearing strings render as password inputs."""
     defs = Config.model_json_schema()["$defs"]
-    assert defs["ModelConfig"]["properties"]["api_key"][HINT_KEY] == {"secret": True}
+    assert defs["ModelConfig"]["properties"]["extra_kwargs"][HINT_KEY] == {"secret": True}
+    assert defs["_MemoryLLMConfig"]["properties"]["config"][HINT_KEY] == {"secret": True}
+    assert defs["PluginEntryConfig"]["properties"]["settings"][HINT_KEY] == {"secret": True}
     assert defs["EventJournalConfig"]["properties"]["database_url"][HINT_KEY] == {"secret": True}
     assert defs["MCPServerConfig"]["properties"]["headers"][HINT_KEY] == {"secret": True}
     assert defs["KnowledgeGitConfig"]["properties"]["repo_url"][HINT_KEY] == {"secret": True}
@@ -111,10 +115,19 @@ def test_secret_fields_are_annotated() -> None:
 
 def test_dashboard_schema_reports_default_factory_values() -> None:
     """Forms show effective defaults for collections and nested blocks."""
-    schema = Config.model_json_schema(schema_generator=DashboardJsonSchema)
+    schema = dashboard_config_schema()
     defaults = schema["$defs"]["DefaultsConfig"]["properties"]
     assert defaults["tools"]["default"] == ["scheduler"]
     assert defaults["compaction"]["default"]["enabled"] is True
     assert schema["properties"]["router"]["default"]["model"] == "default"
     # Factories that read other field values have no single default to report.
     assert "default" not in schema["$defs"]["VoiceSTTConfig"]["properties"]["credentials_service"]
+
+
+def test_dashboard_schema_snapshot_is_current() -> None:
+    """Frontend tests render the checked-in snapshot, so it must match the models."""
+    snapshot_path = (
+        Path(__file__).resolve().parents[1] / "frontend" / "src" / "test" / "fixtures" / "config-schema.json"
+    )
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert snapshot == dashboard_config_schema(), "Run .venv/bin/python .github/scripts/generate_config_schema.py"

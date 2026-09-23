@@ -19,7 +19,6 @@ export interface SchemaSectionProps {
   path: SchemaPath;
   /** Keys the surrounding hand-built editor already renders. */
   exclude?: readonly string[];
-  defaultOpen?: boolean;
 }
 
 /** Collapsible form for every key of one schema object that a hand-built editor does not render. */
@@ -30,7 +29,6 @@ export function SchemaSection({
   onFieldChange,
   path,
   exclude,
-  defaultOpen = false,
 }: SchemaSectionProps) {
   const { schema: root, error, retry } = useConfigSchema();
   const { diagnostics } = useConfigStore();
@@ -42,7 +40,7 @@ export function SchemaSection({
   const hasErrors = keys.some(
     (key) => findConfigValidationIssue(diagnostics, [...path, key]) != null,
   );
-  const [open, setOpen] = useOpenOnError(defaultOpen, hasErrors);
+  const [open, setOpen] = useOpenOnError(false, hasErrors);
 
   if (error != null) {
     return <SchemaUnavailable subject={title} error={error} onRetry={retry} />;

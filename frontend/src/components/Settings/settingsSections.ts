@@ -31,7 +31,8 @@ const PAGE_OWNED_ROOTS: Record<string, "*" | readonly string[]> = {
   models: "*",
   memory: "*",
   knowledge_bases: "*",
-  voice: "*",
+  // New voice keys land in Other; the Voice page renders these by hand.
+  voice: ["enabled", "visible_router_echo", "stt", "intelligence"],
   calls: "*",
   room_defaults: ["admins"],
 };

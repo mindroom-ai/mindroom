@@ -23,8 +23,12 @@ The frontend uses Vitest as the test runner with React Testing Library for compo
 - `src/components/VoiceConfig/VoiceConfig.test.tsx` - Tests for the VoiceConfig component
 - `src/components/Integrations/Integrations.test.tsx` - Tests for the Integrations component
 - `src/lib/configSchema.test.ts` - Tests for configuration JSON schema classification
+- `src/components/SchemaForm/realSchema.test.tsx` - Renders every schema-driven form from `src/test/fixtures/config-schema.json`, a snapshot of the backend configuration schema
 
 The frontend test count changes frequently; use `rg --files frontend/src | rg '\.test\.tsx?$'` for the current inventory.
+
+The `generate-config-schema` pre-commit hook regenerates the schema snapshot whenever backend Python changes, and `tests/test_config_schema.py` fails if it is stale.
+Run `.venv/bin/python .github/scripts/generate_config_schema.py` to regenerate it by hand.
 
 ### Running Frontend Tests
 

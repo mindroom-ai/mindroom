@@ -30,14 +30,6 @@ import {
 import { useConfigSchema } from "@/hooks/useConfigSchema";
 import { VoiceConfig as VoiceConfigType } from "@/types/config";
 
-/** VoiceConfig keys this page renders by hand; More settings shows the rest. */
-const VOICE_EDITOR_FIELDS = [
-  "enabled",
-  "visible_router_echo",
-  "stt",
-  "intelligence",
-] as const;
-
 const STT_EDITOR_FIELDS = ["provider", "model", "api_key", "host"] as const;
 
 const OPENAI_TRANSCRIPTION_ENDPOINT =
@@ -443,17 +435,6 @@ export function VoiceConfig() {
             exclude={STT_EDITOR_FIELDS}
             onFieldChange={(key, next) =>
               updateConfigValue(["voice", "stt", key], next)
-            }
-          />
-
-          <SchemaSection
-            title="More settings"
-            definition="VoiceConfig"
-            value={config?.voice}
-            path={["voice"]}
-            exclude={VOICE_EDITOR_FIELDS}
-            onFieldChange={(key, next) =>
-              updateConfigValue(["voice", key], next)
             }
           />
 

@@ -58,6 +58,13 @@ repos:
         pass_filenames: false
         files: ^(docs/.*\.md|zensical\.toml|\.github/scripts/generate_skill_references\.py)$
 
+      - id: generate-config-schema
+        name: Regenerate the dashboard config schema snapshot
+        entry: .venv/bin/python .github/scripts/generate_config_schema.py
+        language: system
+        pass_filenames: false
+        files: ^(src/mindroom/.*\.py|\.github/scripts/generate_config_schema\.py)$
+
       - id: check-tool-extras-sync
         name: Check tool extras stay in sync with pyproject.toml
         entry: .venv/bin/python .github/scripts/check_tool_extras_sync.py
@@ -89,7 +96,7 @@ repos:
     hooks:
       - id: prettier
         files: ^frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
-        exclude: ^(frontend/package-lock\.json|frontend/tsconfig.*\.json|.*\.min\.(js|css))$
+        exclude: ^(frontend/package-lock\.json|frontend/tsconfig.*\.json|frontend/src/test/fixtures/config-schema\.json|.*\.min\.(js|css))$
         args: ["--cache", "--cache-location", ".cache/prettier-precommit.json"]
         require_serial: true
 
@@ -134,4 +141,4 @@ repos:
       - id: pretty-format-json
         args: ['--autofix', '--indent=2']
         files: ^frontend/.*\.json$
-        exclude: ^(frontend/package(-lock)?\.json|frontend/tsconfig.*\.json|frontend/\.eslintrc\.json)$
+        exclude: ^(frontend/package(-lock)?\.json|frontend/tsconfig.*\.json|frontend/\.eslintrc\.json|frontend/src/test/fixtures/config-schema\.json)$

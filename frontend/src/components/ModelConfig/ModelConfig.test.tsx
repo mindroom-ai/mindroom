@@ -82,6 +82,11 @@ describe("ModelConfig", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: null,
+      error: null,
+      retry: vi.fn(),
+    });
 
     const mockedUseConfigStore = useConfigStore as unknown as {
       mockReturnValue: (value: unknown) => void;
@@ -710,6 +715,70 @@ describe("ModelConfig", () => {
 
     expect(mockStore.updateModel).toHaveBeenLastCalledWith("default", {
       host: "http://ollama:11434",
+    });
+  });
+
+  describe("while More settings edit the model being edited", () => {
+    const withEditedExtraKwargs = () => ({
+      ...mockStore,
+      config: {
+        ...mockStore.config,
+        models: {
+          ...mockStore.config.models,
+          openai_local: {
+            ...mockStore.config.models.openai_local,
+            extra_kwargs: {
+              base_url: "http://proxy:8080/v1",
+              temperature: 0.2,
+            },
+          },
+        },
+      },
+    });
+
+    it("keeps the More settings base URL when the row's Base URL is untouched", async () => {
+      const { rerender } = render(<ModelConfig />);
+      fireEvent.click(screen.getByText("openai_local"));
+      vi.mocked(useConfigStore).mockReturnValue(
+        withEditedExtraKwargs() as never,
+      );
+      rerender(<ModelConfig />);
+
+      const row = screen.getByDisplayValue("openai_local").closest("tr");
+      if (!row) throw new Error("row not found");
+      fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+      await waitFor(() => {
+        expect(mockStore.updateModel).toHaveBeenCalledWith(
+          "openai_local",
+          expect.objectContaining({
+            extra_kwargs: {
+              base_url: "http://proxy:8080/v1",
+              temperature: 0.2,
+            },
+          }),
+        );
+      });
+    });
+
+    it("reverts More settings edits when the row edit is cancelled", () => {
+      const updateConfigValue = vi.fn();
+      const { rerender } = render(<ModelConfig />);
+      fireEvent.click(screen.getByText("openai_local"));
+      vi.mocked(useConfigStore).mockReturnValue({
+        ...withEditedExtraKwargs(),
+        updateConfigValue,
+      } as never);
+      rerender(<ModelConfig />);
+
+      const row = screen.getByDisplayValue("openai_local").closest("tr");
+      if (!row) throw new Error("row not found");
+      fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+
+      expect(updateConfigValue).toHaveBeenCalledWith(
+        ["models", "openai_local"],
+        mockStore.config.models.openai_local,
+      );
     });
   });
 });

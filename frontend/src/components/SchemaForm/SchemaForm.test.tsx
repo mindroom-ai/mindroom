@@ -147,6 +147,11 @@ const ROOT: JsonSchema = {
           items: { $ref: "#/$defs/RuleConfig" },
         },
         settings: { type: "object", additionalProperties: true },
+        extra_kwargs: {
+          type: "object",
+          additionalProperties: true,
+          "x-mindroom": { secret: true },
+        },
         welcome: {
           type: "string",
           default: "Welcome!",
@@ -504,6 +509,16 @@ describe("SchemaFields", () => {
     expect(lastValue()).toEqual({
       participation: { judgment: { provider: "typesafe", timeout_seconds: 9 } },
     });
+  });
+
+  it("hides secret freeform YAML until revealed", () => {
+    renderFixture({ extra_kwargs: { api_key: "sk-secret" } });
+    expect(screen.queryByText(/sk-secret/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show extra kwargs" }));
+    expect(
+      screen.getByRole("textbox", { name: "Extra kwargs YAML" }),
+    ).toHaveValue("api_key: sk-secret\n");
   });
 
   it("does not mark freeform YAML dirty when it only loses focus", () => {

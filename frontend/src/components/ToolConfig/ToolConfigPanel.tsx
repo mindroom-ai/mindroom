@@ -428,10 +428,13 @@ export function ToolConfigPanel({
       <div className="mb-4 flex items-center justify-between gap-3">
         <div>
           <div className="text-sm font-semibold">
-            {title} — {lazyLoading ? "Per-Agent Settings" : "Default Settings"}
+            {title} —{" "}
+            {target.kind === "agent"
+              ? "Per-Agent Settings"
+              : "Default Settings"}
           </div>
           <div className="text-xs text-muted-foreground">
-            {lazyLoading
+            {target.kind === "agent"
               ? "Toggle fields to override the tool default for this agent."
               : "Toggle fields to override the tool default for every agent that includes default tools."}
           </div>

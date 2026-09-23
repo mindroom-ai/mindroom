@@ -12,7 +12,7 @@ import {
   normalizeAgentUpdates,
   normalizeTeamUpdates,
 } from "@/types/config";
-import { setPathValue } from "@/lib/configSchema";
+import { isPlainObject, setPathValue } from "@/lib/configSchema";
 import * as configService from "@/services/configService";
 import {
   isConfigConflictDiagnostic,
@@ -2155,7 +2155,19 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateConfigValue: (path, value) => {
     set((state) => {
       if (!state.config) return state;
-      const nextConfig = setPathValue(state.config, path, value);
+      const [root] = path;
+      let nextConfig = setPathValue(state.config, path, value);
+      // A root emptied by removing its last key falls back to its defaults
+      // instead of persisting as an empty mapping.
+      const nextRoot = readConfigRoot(nextConfig, root);
+      if (
+        value === undefined &&
+        path.length > 1 &&
+        isPlainObject(nextRoot) &&
+        Object.keys(nextRoot).length === 0
+      ) {
+        nextConfig = setPathValue(nextConfig, [root], undefined);
+      }
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
