@@ -38,12 +38,17 @@ from mindroom.tool_jobs.agno_compat_functions import (
     uses_sdk_async_dispatch,
 )
 from mindroom.tool_jobs.authorization import function_authority
-from mindroom.tool_jobs.consumption import consume_tool_job, consuming_function_call, session_state_delta
+from mindroom.tool_jobs.consumption import (
+    consume_tool_job,
+    consuming_function_call,
+    restore_control,
+    session_state_delta,
+)
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_current_execution_authority
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import current_execution_resources
-from mindroom.tool_jobs.results import decode_tool_result, encode_tool_result
+from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, encode_tool_result, read_result_payload
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     format_job_handle,
@@ -69,6 +74,7 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
 
     from mindroom.tool_jobs.resources import ExecutionResourceReference
+    from mindroom.tool_jobs.results import ReplayItem
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -123,10 +129,13 @@ def call_wait_mode(call: FunctionCall, *, depth: int) -> ToolWaitMode:
 @dataclass
 class _CollectedResult:
     chunks: list[str] = field(default_factory=list)
-    events: list[dict[str, Any]] = field(default_factory=list)
-    replay: list[dict[str, Any]] = field(default_factory=list)
+    replay: list[ReplayItem] = field(default_factory=list)
     rich: ToolResult = field(default_factory=lambda: ToolResult(content=""))
     has_rich: bool = False
+
+    def _append(self, text: str, event: dict[str, Any] | None = None) -> None:
+        self.chunks.append(text)
+        self.replay.append((len(text), event))
 
     def collect(self, item: object) -> None:
         if isinstance(item, BaseRunOutputEvent):
@@ -134,30 +143,30 @@ class _CollectedResult:
             if event["event"] not in _EVENT_TYPES:
                 msg = f"Unsupported durable tool event: {event['event']}"
                 raise TypeError(msg)
+            text = ""
             if isinstance(item, (RunContentEvent, TeamRunContentEvent)):
                 # Agno concatenates content during replay; model dictionaries must remain JSON text.
                 content = item.content.model_dump_json() if isinstance(item.content, BaseModel) else item.content
-                event["content"] = content
-                self.chunks.append(str(content or ""))
-            self.events.append(event)
-            self.replay.append({"event": event})
+                text = str(content or "")
+                if text:
+                    # The saved value holds this text; replay restores it into the event.
+                    del event["content"]
+            self._append(text, event)
         elif isinstance(item, ToolResult):
             self.has_rich = True
-            self.chunks.append(item.content)
-            self.replay.append({"result": item})
+            self._append(item.content)
             self.rich.images = (self.rich.images or []) + (item.images or [])
             self.rich.audios = (self.rich.audios or []) + (item.audios or [])
             self.rich.videos = (self.rich.videos or []) + (item.videos or [])
             self.rich.files = (self.rich.files or []) + (item.files or [])
             self.rich.metadata = {**(self.rich.metadata or {}), **(item.metadata or {})}
         else:
-            self.chunks.append(str(item))
-            self.replay.append({"text": str(item)})
+            self._append(str(item))
 
 
-async def _drain_result(value: object) -> tuple[object, list[dict[str, Any]], list[dict[str, Any]]]:
+async def _drain_result(value: object) -> tuple[object, tuple[ReplayItem, ...]]:
     if not isinstance(value, (Iterator, AsyncIterator)):
-        return value, [], []
+        return value, ()
     collected = _CollectedResult()
 
     if isinstance(value, AsyncIterator):
@@ -176,27 +185,37 @@ async def _drain_result(value: object) -> tuple[object, list[dict[str, Any]], li
 
         await run_blocking_until_complete(consume)
     text = "".join(collected.chunks)
+    replay = tuple(collected.replay)
     if collected.has_rich:
         collected.rich.content = text
-        return collected.rich, collected.events, collected.replay
-    return text, collected.events, collected.replay
+        return collected.rich, replay
+    return text, replay
+
+
+def _replayed(value: str | ToolResult, replay: tuple[ReplayItem, ...]) -> Iterator[object]:
+    """Re-chunk the saved text around its SDK events; a consumption notice follows as a final chunk."""
+    text = value.content if isinstance(value, ToolResult) else value
+    offset = 0
+    for length, saved in replay:
+        chunk = text[offset : offset + length]
+        offset += length
+        if saved is None:
+            yield chunk
+            continue
+        event = dict(saved, content=chunk) if length else dict(saved)
+        yield _EVENT_TYPES[event["event"]].from_dict(event)
+    if offset < len(text):
+        yield text[offset:]
 
 
 def _control_payload(error: AgentRunException) -> dict[str, Any]:
-    return encode_tool_result(
-        {
-            "message": str(error),
-            "user_message": error.user_message,
-            "agent_message": error.agent_message,
-            "messages": error.messages,
-            "stop_execution": error.stop_execution,
-        },
-    )
-
-
-def _restore_control(payload: dict[str, Any]) -> AgentRunException:
-    values = decode_tool_result(payload)
-    return AgentRunException(values.pop("message"), **values)
+    return {
+        "message": str(error),
+        "user_message": error.user_message,
+        "agent_message": error.agent_message,
+        "messages": error.messages,
+        "stop_execution": error.stop_execution,
+    }
 
 
 async def execute_owned_tool_call(original: _Execute, call: FunctionCall) -> ToolCallResult:
@@ -234,23 +253,23 @@ async def _run_operation(
             job_checkpoint()
             check_current_execution_authority()
             success, timer, _, result = await original(owned_call)
-            value, events, replay = await _drain_result(result.result)
+            value, replay = await _drain_result(result.result)
 
             def encode_outcome() -> BackgroundOutcome:
                 isolated = function_run_context(owned_call.function)
                 delta = session_state_delta(baseline, isolated.session_state or {}) if isolated is not None else {}
+                payload = ToolResultPayload(
+                    value=value,
+                    state_delta=delta,
+                    error=owned_call.error or result.error,
+                    elapsed=timer.elapsed,
+                    replay=replay,
+                    control=_control_payload(success) if isinstance(success, AgentRunException) else None,
+                )
                 return BackgroundOutcome(
                     "completed" if success is True else "failed",
                     result=value.content if isinstance(value, ToolResult) else str(value),
-                    result_payload={
-                        "value": encode_tool_result(value),
-                        "state_delta": encode_tool_result(delta),
-                        "error": owned_call.error or result.error,
-                        "elapsed": timer.elapsed,
-                        "events": encode_tool_result(events),
-                        "replay": encode_tool_result(replay),
-                        "control": _control_payload(success) if isinstance(success, AgentRunException) else None,
-                    },
+                    result_payload=encode_result_payload(payload),
                 )
 
             encoding = asyncio.create_task(asyncio.to_thread(encode_outcome))
@@ -277,29 +296,18 @@ async def _consume_result(
     call: FunctionCall,
     timer: Timer,
 ) -> ToolCallResult:
-    payload = job.result_payload or {}
-    timer.elapsed_time = payload.get("elapsed", timer.elapsed)
+    payload = read_result_payload(job)
+    timer.elapsed_time = payload.elapsed
     try:
-        value = await consume_tool_job(runtime, job, token, function_call=call)
+        value = await consume_tool_job(runtime, job, payload, token, function_call=call)
     except AgentRunException:
-        value = decode_tool_result(payload["value"])
+        value = payload.value
     call.result = value
-    call.error = payload.get("error") or (job.result if job.status == "failed" else None)
-    success = _restore_control(payload["control"]) if payload.get("control") else job.status == "completed"
+    call.error = payload.error or (job.result if job.status == "failed" else None)
+    success = restore_control(payload.control) if payload.control is not None else job.status == "completed"
     result = FunctionExecutionResult(status="success" if success is True else "failure", result=value, error=call.error)
-    replay = decode_tool_result(payload["replay"]) if payload.get("replay") else []
-    if replay:
-        # Consumption can append a state-conflict notice to the saved text.
-        if isinstance(value, ToolResult) and value.content != job.result:
-            replay.append({"text": value.content.removeprefix(job.result or "")})
-        call.result = iter(
-            _EVENT_TYPES[item["event"]["event"]].from_dict(item["event"])
-            if "event" in item
-            else item["result"].content
-            if "result" in item
-            else item["text"]
-            for item in replay
-        )
+    if payload.replay:
+        call.result = _replayed(value, payload.replay)
         if isinstance(value, ToolResult):
             result.images, result.audios, result.videos, result.files = (
                 value.images,

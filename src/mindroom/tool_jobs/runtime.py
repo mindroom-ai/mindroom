@@ -52,8 +52,8 @@ type _OutcomeStatus = Literal["awaiting_approval", "completed", "failed", "cance
 _TERMINAL = frozenset({"completed", "failed", "cancelled", "denied", "interrupted"})
 _READY = _TERMINAL | {"awaiting_approval"}
 _UNAVAILABLE = "Tool job is not available in this conversation."
-JOB_SUMMARY_MAX_CHARS = 500
-_SNAPSHOT_SCHEMA_VERSION = 2
+_JOB_SUMMARY_MAX_CHARS = 500
+_SNAPSHOT_SCHEMA_VERSION = 3
 logger = get_logger(__name__)
 
 
@@ -75,12 +75,16 @@ class JobContinuationError(ValueError):
 
 @dataclass
 class BackgroundOutcome:
-    """Serializable operation outcome; approval semantics remain owned by its adapter."""
+    """Serializable operation outcome; approval semantics remain owned by its adapter.
+
+    `result` is the outcome's text, which the job keeps only as a bounded summary.
+    `result_payload` is the adapter's encoded full result, which the runtime stores without reading it.
+    """
 
     status: _OutcomeStatus
     result: str | None = None
     approval_state: dict[str, Any] = field(default_factory=dict)
-    result_payload: Any = None
+    result_payload: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -97,8 +101,10 @@ class BackgroundJob:
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     status: _BackgroundStatus = "running"
+    # At most _JOB_SUMMARY_MAX_CHARS of the outcome text; an adapter's payload keeps its full result.
     result: str | None = None
-    result_payload: Any = None
+    summary_truncated: bool = False
+    result_payload: dict[str, Any] | None = None
     approval_state: dict[str, Any] = field(default_factory=dict)
     generation: int = 0
     wait_acknowledged: bool = False
@@ -109,6 +115,19 @@ class BackgroundJob:
 def _updated(job: BackgroundJob, **changes: object) -> BackgroundJob:
     """Return the next state of a job, stamped with its transition time."""
     return replace(job, **changes, updated_at=datetime.now(UTC).isoformat())
+
+
+def _with_outcome(job: BackgroundJob, outcome: BackgroundOutcome) -> BackgroundJob:
+    """Publish an outcome's payload and approval state with only a bounded summary of its text."""
+    text = outcome.result
+    return _updated(
+        job,
+        status=outcome.status,
+        result=text[:_JOB_SUMMARY_MAX_CHARS] if text is not None else None,
+        summary_truncated=text is not None and len(text) > _JOB_SUMMARY_MAX_CHARS,
+        approval_state=outcome.approval_state,
+        result_payload=outcome.result_payload,
+    )
 
 
 def read_job_snapshot(path: Path) -> BackgroundJob:
@@ -451,16 +470,7 @@ class ToolJobRuntime:
                     entry.stopped_outcome = outcome
                 elif entry.job.status not in _TERMINAL:
                     try:
-                        await self._publish_outcome(
-                            entry,
-                            _updated(
-                                entry.job,
-                                status=outcome.status,
-                                result=outcome.result,
-                                approval_state=outcome.approval_state,
-                                result_payload=outcome.result_payload,
-                            ),
-                        )
+                        await self._publish_outcome(entry, _with_outcome(entry.job, outcome))
                     except Exception:
                         logger.exception(
                             "Tool job outcome save failed; retaining it in memory",
@@ -497,12 +507,7 @@ class ToolJobRuntime:
     def _cool(self, entry: _Entry) -> None:
         """Keep only discovery metadata in memory after durable terminal publication."""
         if entry.saved and entry.job.status in _TERMINAL:
-            entry.job = replace(
-                entry.job,
-                result=entry.job.result[: JOB_SUMMARY_MAX_CHARS + 1] if entry.job.result is not None else None,
-                result_payload=None,
-                approval_state={},
-            )
+            entry.job = replace(entry.job, result_payload=None, approval_state={})
             entry.cold = not entry.job.result_expired
             self._release_control(entry)
             entry.human_signal = None
@@ -781,14 +786,9 @@ class ToolJobRuntime:
         ):
             outcome = entry.stopped_outcome
         entry.stopped_outcome = None
-        if outcome is not None and outcome.status in _TERMINAL:
-            return _updated(
-                entry.job,
-                status=outcome.status,
-                result=outcome.result,
-                result_payload=outcome.result_payload,
-            )
-        return _updated(entry.job, status=status, result=reason)
+        if outcome is None or outcome.status not in _TERMINAL:
+            outcome = BackgroundOutcome(status, reason)
+        return _with_outcome(entry.job, outcome)
 
     async def continue_job(
         self,
@@ -943,6 +943,7 @@ class ToolJobRuntime:
                         entry.job,
                         adapter=self._compact_adapter(entry.job.adapter),
                         result="Tool result expired after 30 days; its execution receipt prevents replay.",
+                        summary_truncated=False,
                         result_payload=None,
                         approval_state={},
                         result_expired=True,

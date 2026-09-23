@@ -51,8 +51,8 @@ a replacement process acquire the job store.
 Discovery summaries contain at most 500 characters and retain native subagent IDs.
 `wait` reads the complete supported saved value. Workspace-backed result redirection
 uses `mindroom_output_path`, and ordinary automatic output saving bounds large model
-payloads. The durable codec has a separate 64 MiB per-value envelope backstop; it is
-not a display limit.
+payloads. Each job stores its full result once, in one typed payload whose durable
+envelope has a separate 64 MiB backstop; it is not a display limit.
 
 Unread terminal payloads cool to disk. Consumed results remain for 30 days after
 the last acknowledged read, longer while response or approval ownership requires

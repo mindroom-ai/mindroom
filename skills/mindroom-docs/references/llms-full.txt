@@ -13063,10 +13063,10 @@ An expired result reports its expiry, and its retained receipt prevents the orig
 Receipts retain invocation identity and authorization metadata, so their storage still grows with execution history.
 Retained plugin jobs require the same plugin installation path and current grants; moving the plugin directory invalidates that recorded callable provenance.
 
-Each durable result envelope has a 64 MiB encoded JSON limit, including base64 expansion, its artifacts, and structural overhead.
-A job record can contain several envelopes for its result, state updates, events, and replay data, so this is not a limit on total job storage.
+A job stores its full result once, together with its session-state updates and stream replay, in one durable envelope with a 64 MiB encoded JSON limit, including base64 expansion and artifacts.
+Job metadata keeps only a summary of at most 500 characters, and tool arguments are stored separately, so this is not a limit on total job storage.
 A result that exceeds this limit becomes a failed job with a size-limit error.
-Artifact files are read within the remaining budget; the configured large-output policy can save eligible text to a file before result encoding.
+An artifact file that cannot fit is rejected before it is fully read; the configured large-output policy can save eligible text to a file before result encoding.
 
 Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.
 `run.json` and `events.jsonl` are updated with every event, while `transcript.md` is rendered when the delegation finishes.
@@ -21712,7 +21712,7 @@ Generic ownership lives in `src/mindroom/tool_jobs/`; native child execution and
 | `tool_jobs/agno_execution.py` / `tool_jobs/consumption.py` | Original SDK result capture and exact durable consumption |
 | `tool_jobs/execution_scope.py` / `tool_jobs/resources.py` | Response execution envelopes and shared connection/cleanup lifetime across foreground handoff |
 | `tool_jobs/authorization.py` / `tool_jobs/execution_authority.py` / `tool_jobs/provenance.py` | Current local grants, checks at application entry, and exact callable provenance |
-| `tool_jobs/results.py` | Non-executable serialization of durable tool values, media, and SDK artifacts |
+| `tool_jobs/results.py` | Typed job result payload and non-executable serialization of durable tool values, media, and SDK artifacts |
 | `custom_tools/job.py` | One reserved management schema and exact native wait projection |
 | `tool_jobs/completion.py` | Internal completion sources, admission and automatic joining at response boundaries |
 | `tool_job_completion.py` | Immutable exact job/generation reference carried by response ownership |

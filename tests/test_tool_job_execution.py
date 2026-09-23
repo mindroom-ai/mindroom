@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import threading
 from collections.abc import AsyncIterator  # noqa: TC003 - Agno resolves tool return annotations at runtime.
@@ -29,7 +30,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.hooks import HookRegistry
-from mindroom.tool_jobs import agno_execution
+from mindroom.tool_jobs import agno_execution, results
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import (
     ConsumptionOwner,
@@ -46,7 +47,12 @@ from mindroom.tool_jobs.resources import (
     disconnect_async_execution_resource,
     execution_resources,
 )
-from mindroom.tool_jobs.results import decode_tool_result, encode_tool_result
+from mindroom.tool_jobs.results import (
+    ToolResultPayload,
+    encode_result_payload,
+    encode_tool_result,
+    read_result_payload,
+)
 from mindroom.tool_jobs.runtime import read_job_snapshot, register_background_runtime
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -69,15 +75,14 @@ async def test_large_outcome_encoding_leaves_event_loop_free(
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
 ) -> None:
-    """State, events, replay, and control data use the same worker as the tool value."""
+    """State, stream replay, and control data are encoded with the tool value off the event loop."""
     text = "payload" * 16_384
     loop_thread = threading.get_ident()
     encoding_threads: list[int] = []
 
-    def encode(value: object) -> object:
-        if text in str(value):
-            encoding_threads.append(threading.get_ident())
-        return encode_tool_result(value)
+    def encode(payload: ToolResultPayload) -> dict[str, object]:
+        encoding_threads.append(threading.get_ident())
+        return encode_result_payload(payload)
 
     async def tool(run_context: RunContext) -> str:
         run_context.session_state["large"] = text
@@ -99,22 +104,28 @@ async def test_large_outcome_encoding_leaves_event_loop_free(
     function = Function.from_callable(streamed if kind == "stream" else tool)
     function._agent = Agent(id="leader")
     function._run_context = RunContext(run_id="payload-run", session_id=context.session_id, session_state={})
-    monkeypatch.setattr(agno_execution, "encode_tool_result", encode)
+    monkeypatch.setattr(agno_execution, "encode_result_payload", encode)
     try:
         async with execution_resources():
             with tool_runtime_context(context):
                 result = await model.arun_function_call(FunctionCall(function=function, call_id="payload-call"))
-        assert encoding_threads
-        assert all(thread != loop_thread for thread in encoding_threads)
+        assert len(encoding_threads) == 1
+        assert encoding_threads[0] != loop_thread
         owner = build_execution_identity_from_runtime_context(context)
         listed = (await runtime.list_jobs(owner=owner, depth=0))[0]
-        job = await runtime.lookup(listed.job_id, owner=owner, depth=0)
+        payload = read_result_payload(await runtime.lookup(listed.job_id, owner=owner, depth=0))
         if kind == "stream":
-            assert decode_tool_result(job.result_payload["events"])[0]["content"] == text
-            assert decode_tool_result(job.result_payload["replay"])[-1]["text"] == text
+            assert payload.value == text * 2
         else:
-            assert decode_tool_result(job.result_payload["state_delta"])["large"]["value"] == text
+            assert payload.state_delta["large"]["value"] == text
         if kind == "control":
+            assert payload.control == {
+                "message": "stop requested",
+                "user_message": None,
+                "agent_message": text,
+                "messages": None,
+                "stop_execution": True,
+            }
             assert isinstance(result[0], AgentRunException)
             assert result[0].agent_message == text
         else:
@@ -126,7 +137,7 @@ async def test_large_outcome_encoding_leaves_event_loop_free(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("shutdown", [False, True])
-async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_value(  # noqa: PLR0915 - SDK, resources, cancellation, and durable output.
+async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_value(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     shutdown: bool,
@@ -151,18 +162,17 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
         run_context.session_state["changed"] = "encoded state"
         return "completed before cancellation"
 
-    def encode(value: object) -> object:
-        if isinstance(value, dict) and "changed" in value:
-            started.set()
-            assert release.wait(5)
-        return encode_tool_result(value)
+    def encode(payload: ToolResultPayload) -> dict[str, object]:
+        started.set()
+        assert release.wait(5)
+        return encode_result_payload(payload)
 
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
     function = Function.from_callable(tool)
     function._agent = Agent(id="leader")
     function._run_context = RunContext(run_id="encoding", session_id=context.session_id, session_state={})
-    monkeypatch.setattr(agno_execution, "encode_tool_result", encode)
+    monkeypatch.setattr(agno_execution, "encode_result_payload", encode)
     try:
         async with execution_resources():
             with tool_runtime_context(context):
@@ -184,7 +194,7 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
                 saved = read_job_snapshot(tmp_path / "tool_jobs" / f"{job_id}.json")
                 assert saved.status == "completed"
                 assert saved.result == "completed before cancellation"
-                assert decode_tool_result(saved.result_payload["state_delta"])["changed"]["value"] == "encoded state"
+                assert read_result_payload(saved).state_delta["changed"]["value"] == "encoded state"
     finally:
         release.set()
         await runtime.shutdown()
@@ -314,17 +324,78 @@ async def test_human_followup_releases_original_sdk_call_once(tmp_path: Path) ->
         await runtime.shutdown()
 
 
-def test_rich_result_codec_preserves_binary_media() -> None:
-    """Durable output retains typed binary artifacts and structured metadata."""
-    expected = ToolResult(
-        content="picture",
-        images=[Image(content=b"\x00\xff")],
-        metadata={"structured_content": {"a": 1}},
-    )
-    payload = json.loads(json.dumps(encode_tool_result(expected)))
-    actual = decode_tool_result(payload)
-    assert isinstance(actual, ToolResult)
-    assert actual == expected
+@pytest.mark.asyncio
+async def test_streamed_result_saves_its_text_and_media_once(tmp_path: Path) -> None:
+    """The saved job keeps full text and media only in its payload value; metadata keeps a bounded summary."""
+    text = "".join(f"chunk {index:04d} " for index in range(200))
+
+    async def streamed() -> AsyncIterator[RunContentEvent | ToolResult | str]:
+        yield RunContentEvent(content=text[:1000])
+        yield ToolResult(content=text[1000:1500], images=[Image(content=b"image")])
+        yield text[1500:]
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    register_background_runtime(paths, runtime)
+    model = DelegationModel(id="test")
+    install_tool_job_execution(model)
+    function = Function.from_callable(streamed)
+    function._agent = Agent(id="leader")
+    function._run_context = RunContext(run_id="once-run", session_id=context.session_id, session_state={})
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                _, _, call, result = await model.arun_function_call(FunctionCall(function=function, call_id="once"))
+        replayed = list(call.result)
+        assert isinstance(replayed[0], RunContentEvent)
+        assert replayed[0].content == text[:1000]
+        assert replayed[1:] == [text[1000:1500], text[1500:]]
+        assert result.result.content == text
+        assert result.images[0].content == b"image"
+        job = (await runtime.list_jobs(owner=owner, depth=0))[0]
+        assert job.result == text[:500]
+        assert job.summary_truncated
+        saved = (tmp_path / "tool_jobs" / f"{job.job_id}.json").read_text()
+        for marker in ("chunk 0060 ", "chunk 0100 ", "chunk 0180 "):
+            assert saved.count(marker) == 1
+        assert saved.count(base64.b64encode(b"image").decode()) == 1
+    finally:
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_oversized_result_becomes_a_failed_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A result beyond the encoded limit fails its job with the size-limit error instead of being saved."""
+
+    async def large() -> str:
+        return "x" * 200
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    register_background_runtime(paths, runtime)
+    model = DelegationModel(id="test")
+    install_tool_job_execution(model)
+    function = Function.from_callable(large)
+    function._agent = Agent(id="leader")
+    function._run_context = RunContext(run_id="large-run", session_id=context.session_id, session_state={})
+    monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 150)
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                success, _, call, _ = await model.arun_function_call(FunctionCall(function=function, call_id="large"))
+        assert success is False
+        assert "encoded JSON limit" in call.error
+        job = (await runtime.list_jobs(owner=owner, depth=0))[0]
+        assert job.status == "failed"
+        assert job.result_payload is None
+    finally:
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -481,11 +552,12 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
             assert closed.is_set()
             assert result.job.status == ("failed" if fails else "completed")
             if not fails:
-                value = decode_tool_result(result.job.result_payload["value"])
-                assert isinstance(value, ToolResult)
-                assert value.content == "event textpicture"
-                assert value.images[0].content == b"image"
-                assert decode_tool_result(result.job.result_payload["events"])[0]["content"] == "event text"
+                payload = read_result_payload(result.job)
+                assert isinstance(payload.value, ToolResult)
+                assert payload.value.content == "event textpicture"
+                assert payload.value.images[0].content == b"image"
+                assert payload.value.metadata == {"detail": "retained"}
+                assert [length for length, _event in payload.replay] == [len("event text"), len("picture")]
     finally:
         release.set()
         await runtime.shutdown()
@@ -607,7 +679,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
             assert response.tools[0].result == "actual result"
         jobs = await runtime.list_jobs(owner=owner, depth=0)
         assert len(jobs) == 1
-        assert decode_tool_result(jobs[0].adapter["arguments"]) == {"wait_timeout": None}
+        assert jobs[0].adapter["arguments"] == encode_tool_result({"wait_timeout": None})
         assert jobs[0].adapter["source_event_id"] == "$original-request"
         assert jobs[0].owner == owner
         assert jobs[0].wait_acknowledged is not save_fails
@@ -621,24 +693,13 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
             assert saved.owner == owner
             assert saved.wait_acknowledged is not save_fails
             assert len(await restored.pending_outcomes()) == int(save_fails)
-            assert decode_tool_result(saved.adapter["arguments"]) == {"wait_timeout": None}
+            assert saved.adapter["arguments"] == encode_tool_result({"wait_timeout": None})
         finally:
             await restored.shutdown()
     finally:
         storage.close()
         await runtime.shutdown()
         register_background_runtime(paths, None)
-
-
-def test_rich_result_captures_local_artifact_before_cleanup(tmp_path: Path) -> None:
-    """Durable media bytes survive deletion of a toolkit-owned file."""
-    path = tmp_path / "image.png"
-    path.write_bytes(b"artifact bytes")
-    payload = encode_tool_result(ToolResult(content="image", images=[Image(filepath=path)]))
-    path.unlink()
-    result = decode_tool_result(payload)
-    assert result.images[0].content == b"artifact bytes"
-    assert result.images[0].filepath is None
 
 
 @pytest.mark.asyncio
@@ -1037,7 +1098,13 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
                 state.update({"conflict": "newer", "unrelated": "newer"})
                 claims = ConsumptionOwner()
                 with consumption_context(claims):
-                    value = await consume_tool_job(runtime, waited.job, waited.token, function_call=call)
+                    value = await consume_tool_job(
+                        runtime,
+                        waited.job,
+                        read_result_payload(waited.job),
+                        waited.token,
+                        function_call=call,
+                    )
                     await claims.finalize()
                 assert state["changed"] == 1
                 assert state["conflict"] == state["unrelated"] == "newer"
@@ -1167,7 +1234,13 @@ async def test_saved_control_exception_keeps_stop_semantics(tmp_path: Path) -> N
                 claims = ConsumptionOwner()
                 with consumption_context(claims):
                     with pytest.raises(AgentRunException, match="stop requested") as stopped:
-                        await consume_tool_job(runtime, waited.job, waited.token, function_call=call)
+                        await consume_tool_job(
+                            runtime,
+                            waited.job,
+                            read_result_payload(waited.job),
+                            waited.token,
+                            function_call=call,
+                        )
                     assert stopped.value.stop_execution
                     await claims.finalize()
     finally:

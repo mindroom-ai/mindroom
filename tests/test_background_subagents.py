@@ -20,6 +20,8 @@ from mindroom.delegation.background import (
     cancel_retained_delegation,
     continue_delegation,
     delegation_child,
+    delegation_outcome,
+    delegation_result,
     reconcile_delegation,
     retained_child,
     start_delegation,
@@ -89,7 +91,7 @@ async def test_consumed_native_result_releases_live_child_and_discovery_payload(
         async def operation() -> BackgroundOutcome:
             child.status = "completed"
             child.result = raw
-            return BackgroundOutcome("completed", delivered)
+            return delegation_outcome("completed", delivered)
 
         await start_delegation(runtime, child, owner=_owner(), operation=operation)
         return weakref.ref(child)
@@ -98,14 +100,14 @@ async def test_consumed_native_result_releases_live_child_and_discovery_payload(
         child_ref = await start()
         job_id = _child().delegation_id
         waited = await runtime.wait(job_id, owner=_owner(), depth=0)
-        assert waited.job.result == delivered
+        assert delegation_result(waited.job) == delivered
         await runtime.acknowledge_wait(job_id, waited.token)
         gc.collect()
         assert child_ref() is None
         discovered = await runtime.list_jobs(owner=_owner(), depth=0)
         assert len(json.dumps([asdict(job) for job in discovered])) < 8192
         reread = await runtime.wait(job_id, owner=_owner(), depth=0)
-        assert reread.job.result == delivered
+        assert delegation_result(reread.job) == delivered
         await runtime.acknowledge_wait(job_id, reread.token)
     finally:
         await runtime.shutdown()
@@ -122,7 +124,7 @@ async def test_native_result_expires_to_a_compact_receipt_after_restart(tmp_path
     async def operation() -> BackgroundOutcome:
         child.status = "completed"
         child.result = raw
-        return BackgroundOutcome("completed", delivered)
+        return delegation_outcome("completed", delivered)
 
     await start_delegation(runtime, child, owner=_owner(), operation=operation)
     waited = await runtime.wait(child.delegation_id, owner=_owner(), depth=0)
@@ -136,7 +138,7 @@ async def test_native_result_expires_to_a_compact_receipt_after_restart(tmp_path
 
     try:
         await restored.recover()
-        assert (await restored.lookup(child.delegation_id, owner=_owner(), depth=0)).result == delivered
+        assert delegation_result(await restored.lookup(child.delegation_id, owner=_owner(), depth=0)) == delivered
         discovered = await restored.list_jobs(owner=_owner(), depth=0)
         assert len(json.dumps([asdict(job) for job in discovered])) < 8192
         await restored.expire_consumed(

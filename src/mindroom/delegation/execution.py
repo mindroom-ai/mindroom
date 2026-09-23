@@ -29,7 +29,14 @@ from mindroom.approval_tools import (
     toolkit_owners_for_agents,
     validate_approval_tool_owners,
 )
-from mindroom.delegation.background import continue_delegation, owns_delegation, retained_child, start_delegation
+from mindroom.delegation.background import (
+    continue_delegation,
+    delegation_outcome,
+    delegation_result,
+    owns_delegation,
+    retained_child,
+    start_delegation,
+)
 from mindroom.delegation.hooks import after_delegation, before_delegation
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -744,9 +751,9 @@ async def _background_child_outcome(
                 error=str(cleanup_error),
                 exc_info=True,
             )
-            return BackgroundOutcome(
-                status="failed",
-                result=_finalize_delegation_output(
+            return delegation_outcome(
+                "failed",
+                _finalize_delegation_output(
                     f"{error}\n\nDelegation cleanup did not complete; recovery may still be required: {cleanup_error}",
                     output_request,
                 ),
@@ -762,9 +769,9 @@ async def _background_child_outcome(
             error=str(settlement_error),
             exc_info=True,
         )
-        return BackgroundOutcome(
-            status="failed",
-            result=_finalize_delegation_output(
+        return delegation_outcome(
+            "failed",
+            _finalize_delegation_output(
                 f"{primary_error}\n\n"
                 f"Delegation settlement did not complete; recovery may still be required: {settlement_error}",
                 output_request,
@@ -773,9 +780,9 @@ async def _background_child_outcome(
     status = child.status
     assert status != "running"
     assert status != "paused"
-    return BackgroundOutcome(
-        status=status,
-        result=_finalize_delegation_output(_child_result_text(child, receipt), output_request),
+    return delegation_outcome(
+        status,
+        _finalize_delegation_output(_child_result_text(child, receipt), output_request),
     )
 
 
@@ -1227,7 +1234,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             await background.acknowledge_wait(child.delegation_id, waited.token)
                         return True
                     result = (
-                        background_job.result if waited.token is not None and not waited.delivery_queued else None
+                        delegation_result(background_job) if waited.token is not None and not waited.delivery_queued else None
                     ) or format_job_handle(
                         background_job,
                         subagent_id=child.subagent_id,

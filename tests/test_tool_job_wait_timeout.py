@@ -26,7 +26,7 @@ from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.agno_execution import _drain_result
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.results import decode_tool_result, encode_tool_result
+from mindroom.tool_jobs.results import encode_tool_result
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
@@ -167,7 +167,7 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
                 assert hooked == [{}]
                 assert call.arguments == arguments
                 jobs = await runtime.list_jobs(owner=owner, depth=0)
-                assert decode_tool_result(jobs[0].adapter["arguments"]) == arguments
+                assert jobs[0].adapter["arguments"] == encode_tool_result(arguments)
     finally:
         gate.set()
         register_background_runtime(paths, None)
@@ -222,21 +222,15 @@ async def test_invalid_wait_budget_never_starts_application(tmp_path: Path, budg
         await runtime.shutdown()
 
 
-def test_tuple_codec_preserves_nested_sequence_types() -> None:
-    """Durable results cannot change tuples into application-visible lists."""
-    expected = {"items": [(1, "two"), ([], (3,))]}
-    assert decode_tool_result(json.loads(json.dumps(encode_tool_result(expected)))) == expected
-
-
 @pytest.mark.asyncio
-async def test_stream_replay_retains_individual_rich_metadata() -> None:
-    """Replay must retain each rich chunk rather than flattening it into text."""
-    first = ToolResult(content="first", metadata={"artifact": "one"})
+async def test_stream_replay_keeps_rich_chunks_only_as_text_positions() -> None:
+    """Rich chunks merge their artifacts into the value; replay keeps only where each chunk's text lies."""
+    first = ToolResult(content="first", images=[Image(content=b"one")], metadata={"artifact": "one"})
     second = ToolResult(content="second", metadata={"artifact": "two"})
-    value, _, replay = await _drain_result(iter([first, second]))
-    restored = decode_tool_result(json.loads(json.dumps(encode_tool_result(replay))))
-    assert restored == [{"result": first}, {"result": second}]
+    value, replay = await _drain_result(iter([first, second]))
+    assert replay == ((5, None), (6, None))
     assert value.content == "firstsecond"
+    assert value.images == first.images
     assert value.metadata == {"artifact": "two"}
 
 

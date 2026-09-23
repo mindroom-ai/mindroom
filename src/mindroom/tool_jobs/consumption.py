@@ -17,13 +17,13 @@ from mindroom.agent_storage import run_session_storage_operation
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.agno_compat_functions import function_actor, function_agent, function_run_context
-from mindroom.tool_jobs.results import decode_tool_result
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from agno.db.base import BaseDb
 
+    from mindroom.tool_jobs.results import ToolResultPayload
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
 
 _RECEIPTS = "mindroom_tool_job_receipts"
@@ -184,13 +184,14 @@ def session_state_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[s
     }
 
 
-def _merge_session_state(value: Any, job: BackgroundJob, call: FunctionCall) -> Any:  # noqa: ANN401
-    if job.wait_acknowledged or job.status != "completed" or not job.result_payload:
+def _merge_session_state(value: Any, job: BackgroundJob, payload: ToolResultPayload, call: FunctionCall) -> Any:  # noqa: ANN401
+    """Apply unconflicted state changes, reporting conflicts in a new value that leaves the payload intact."""
+    if job.wait_acknowledged or job.status != "completed":
         return value
     context = function_run_context(call.function)
     state = context.session_state if context is not None else None
     conflicts = []
-    for key, change in decode_tool_result(job.result_payload["state_delta"]).items():
+    for key, change in payload.state_delta.items():
         if state is None or (key in state) != change["before_present"] or state.get(key) != change["before"]:
             conflicts.append(key)
         elif change["present"]:
@@ -199,12 +200,19 @@ def _merge_session_state(value: Any, job: BackgroundJob, call: FunctionCall) -> 
             state.pop(key, None)
     if conflicts:
         warning = "Session state conflicts: " + ", ".join(sorted(conflicts))
+        metadata = {"session_state_conflicts": conflicts}
         if isinstance(value, ToolResult):
-            value.content += "\n" + warning
-            value.metadata = {**(value.metadata or {}), "session_state_conflicts": conflicts}
-        else:
-            value = ToolResult(content=f"{value}\n{warning}", metadata={"session_state_conflicts": conflicts})
+            return value.model_copy(
+                update={"content": f"{value.content}\n{warning}", "metadata": {**(value.metadata or {}), **metadata}},
+            )
+        return ToolResult(content=f"{value}\n{warning}", metadata=metadata)
     return value
+
+
+def restore_control(control: dict[str, Any]) -> AgentRunException:
+    """Rebuild the SDK control exception a job's tool raised."""
+    values = dict(control)
+    return AgentRunException(values.pop("message"), **values)
 
 
 async def record_tool_job_receipt(
@@ -230,15 +238,16 @@ async def record_tool_job_receipt(
 async def consume_tool_job(
     runtime: ToolJobRuntime,
     job: BackgroundJob,
+    payload: ToolResultPayload,
     token: str | None,
     *,
     function_call: FunctionCall | None = None,
 ) -> Any:  # noqa: ANN401 - SDK tool values are intentionally heterogeneous.
-    """Decode one ready outcome and retain its claim until exact parent readback."""
+    """Return one ready outcome's value and retain its claim until exact parent readback."""
     from mindroom.custom_tools.job import is_job_function  # noqa: PLC0415 - Controls also use consumption receipts.
 
     call = function_call or _CALL.get()
-    value = decode_tool_result(job.result_payload["value"]) if job.result_payload else job.result
+    value = payload.value
     owner = _OWNER.get()
     if token is None:
         return value
@@ -246,21 +255,13 @@ async def consume_tool_job(
         await runtime.release_wait(job.job_id, token)
         return value
     try:
-        value = _merge_session_state(value, job, call)
+        value = _merge_session_state(value, job, payload, call)
         await record_tool_job_receipt(runtime, job, token, function_call=call)
     except BaseException:
         await runtime.release_wait(job.job_id, token)
         raise
-    if job.result_payload and job.result_payload.get("control"):
-        control = decode_tool_result(job.result_payload["control"])
-        raise AgentRunException(control.pop("message"), **control)
+    if payload.control is not None:
+        raise restore_control(payload.control)
     if is_job_function(call.function) and job.status == "failed":
-        error = job.result_payload.get("error") if isinstance(job.result_payload, dict) else None
-        raise RuntimeError(str(error or job.result or "Background tool job failed."))
-    if is_job_function(call.function) and job.result_payload and job.result_payload.get("events"):
-        events = decode_tool_result(job.result_payload["events"])
-        if events:
-            if not isinstance(value, ToolResult):
-                value = ToolResult(content=str(value))
-            value.metadata = {**(value.metadata or {}), "tool_job_events": events}
+        raise RuntimeError(str(payload.error or value or "Background tool job failed."))
     return value

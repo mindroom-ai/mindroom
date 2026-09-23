@@ -1,155 +1,86 @@
-"""Versioned, non-executable durable tool values and rich Agno artifacts."""
+"""The typed job result payload and its versioned, non-executable encoding of tool values and rich Agno artifacts."""
 
 from __future__ import annotations
 
 import base64
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agno.media import Audio, File, Image, Video
 from agno.models.message import Message
 from agno.tools.function import ToolResult
 
+if TYPE_CHECKING:
+    from mindroom.tool_jobs.runtime import BackgroundJob
+
 _MODELS = {model.__name__: model for model in (ToolResult, Image, Audio, Video, File, Message)}
 _MAX_ENCODED_RESULT_BYTES = 64 * 1024 * 1024
-
-
-@dataclass
-class _EncodingBudget:
-    """Track exact default-JSON UTF-8 bytes without materializing the document."""
-
-    limit: int
-    used: int = 0
-
-    @property
-    def remaining(self) -> int:
-        return self.limit - self.used
-
-    def charge(self, size: int) -> None:
-        if size > self.remaining:
-            msg = f"Durable tool result exceeds the {self.limit}-byte encoded JSON limit."
-            raise ValueError(msg)
-        self.used += size
+# One drained stream item: the length of its text within the value's text, and its SDK event without that text.
+type ReplayItem = tuple[int, dict[str, Any] | None]
 
 
 @dataclass(frozen=True)
-class _FileBytes:
-    """Defer one local artifact read until its enclosing JSON overhead is charged."""
+class ToolResultPayload:
+    """Everything a consumer reads back from one finished job, stored once."""
 
-    path: Path
-
-
-def _json_string_size(value: str) -> int:
-    """Return json.dumps' default ensure-ascii byte size without a second string copy."""
-    size = 2
-    short_escapes = {'"', "\\", "\b", "\f", "\n", "\r", "\t"}
-    for character in value:
-        codepoint = ord(character)
-        if character in short_escapes:
-            size += 2
-        elif codepoint <= 0x1F:
-            size += 6
-        elif codepoint < 0x7F:
-            size += 1
-        elif codepoint <= 0xFFFF:
-            size += 6
-        else:
-            size += 12
-    return size
+    value: Any
+    state_delta: dict[str, Any] = field(default_factory=dict)
+    error: str | None = None
+    elapsed: float = 0.0
+    replay: tuple[ReplayItem, ...] = ()
+    control: dict[str, Any] | None = None
 
 
-def _charge_object(keys: tuple[str, ...], budget: _EncodingBudget) -> None:
-    budget.charge(2 + max(0, len(keys) - 1) * 2 + len(keys) * 2)
-    for key in keys:
-        budget.charge(_json_string_size(key))
+def _size_error() -> ValueError:
+    return ValueError(f"Durable tool result exceeds the {_MAX_ENCODED_RESULT_BYTES}-byte encoded JSON limit.")
 
 
-def _charge_array(length: int, budget: _EncodingBudget) -> None:
-    budget.charge(2 + max(0, length - 1) * 2)
+def _file_bytes(path: Path) -> bytes:
+    """Read a local artifact whose base64 form can still fit, even if the file grows meanwhile."""
+    limit = 3 * (_MAX_ENCODED_RESULT_BYTES // 4)
+    if path.stat().st_size > limit:
+        raise _size_error()
+    with path.open("rb") as source:
+        raw = source.read(limit + 1)
+    if len(raw) > limit:
+        raise _size_error()
+    return raw
 
 
-def _charge_tag(kind: str, budget: _EncodingBudget) -> None:
-    _charge_object(("type", "value"), budget)
-    budget.charge(_json_string_size(kind))
-
-
-def _encoded_base64_json_size(raw_size: int) -> int:
-    return 2 + 4 * ((raw_size + 2) // 3)
-
-
-def _encode_bytes(value: bytes, budget: _EncodingBudget) -> dict[str, str]:
-    _charge_tag("bytes", budget)
-    budget.charge(_encoded_base64_json_size(len(value)))
-    return {"type": "bytes", "value": base64.b64encode(value).decode("ascii")}
-
-
-def _encode_file_bytes(value: _FileBytes, budget: _EncodingBudget) -> dict[str, str]:
-    _charge_tag("bytes", budget)
-    max_raw_bytes = 3 * (max(0, budget.remaining - 2) // 4)
-    with value.path.open("rb") as source:
-        raw = source.read(max_raw_bytes + 1)
-    if len(raw) > max_raw_bytes:
-        msg = f"Durable tool result exceeds the {budget.limit}-byte encoded JSON limit."
-        raise ValueError(msg)
-    budget.charge(_encoded_base64_json_size(len(raw)))
-    return {"type": "bytes", "value": base64.b64encode(raw).decode("ascii")}
-
-
-def _encode(value: Any, budget: _EncodingBudget) -> Any:  # noqa: ANN401, C901, PLR0911, PLR0912
+def _encode(value: Any) -> Any:  # noqa: ANN401, C901, PLR0911 - One explicit branch per supported wire tag.
     if isinstance(value, ToolResult):
-        _charge_tag("ToolResult", budget)
-        return {
-            "type": "ToolResult",
-            "value": _encode(
-                {
-                    "content": value.content,
-                    "metadata": value.metadata,
-                    "images": value.images,
-                    "audios": value.audios,
-                    "videos": value.videos,
-                    "files": value.files,
-                },
-                budget,
-            ),
+        fields = {
+            "content": value.content,
+            "metadata": value.metadata,
+            "images": value.images,
+            "audios": value.audios,
+            "videos": value.videos,
+            "files": value.files,
         }
+        return {"type": "ToolResult", "value": _encode(fields)}
     if isinstance(value, (Image, Audio, Video, File)):
-        _charge_tag(type(value).__name__, budget)
         fields = value.model_dump(mode="python")
         if value.filepath is not None:
             fields["filepath"] = None
-            fields.pop("content", None)
-            fields["content"] = _FileBytes(Path(value.filepath))
-        return {"type": type(value).__name__, "value": _encode(fields, budget)}
-    if isinstance(value, tuple(_MODELS.values())):
-        _charge_tag(type(value).__name__, budget)
-        return {"type": type(value).__name__, "value": _encode(value.model_dump(mode="python"), budget)}
-    if isinstance(value, _FileBytes):
-        return _encode_file_bytes(value, budget)
+            fields["content"] = _file_bytes(Path(value.filepath))
+        return {"type": type(value).__name__, "value": _encode(fields)}
+    if isinstance(value, Message):
+        return {"type": "Message", "value": _encode(value.model_dump(mode="python"))}
     if isinstance(value, bytes):
-        return _encode_bytes(value, budget)
+        return {"type": "bytes", "value": base64.b64encode(value).decode("ascii")}
     if isinstance(value, Path):
-        _charge_tag("path", budget)
-        budget.charge(_json_string_size(str(value)))
         return {"type": "path", "value": str(value)}
     if isinstance(value, dict):
         if not all(isinstance(key, str) for key in value):
             msg = "Tool result dictionaries require string keys"
             raise TypeError(msg)
-        _charge_tag("dict", budget)
-        _charge_object(tuple(value), budget)
-        return {"type": "dict", "value": {key: _encode(item, budget) for key, item in value.items()}}
+        return {"type": "dict", "value": {key: _encode(item) for key, item in value.items()}}
     if isinstance(value, (list, tuple)):
         kind = "tuple" if isinstance(value, tuple) else "list"
-        _charge_tag(kind, budget)
-        _charge_array(len(value), budget)
-        return {"type": kind, "value": [_encode(item, budget) for item in value]}
+        return {"type": kind, "value": [_encode(item) for item in value]}
     if value is None or isinstance(value, (str, int, float, bool)):
-        if isinstance(value, str):
-            budget.charge(_json_string_size(value))
-        else:
-            budget.charge(len(json.dumps(value, allow_nan=False)))
         return value
     msg = f"Unsupported durable tool result type: {type(value).__name__}"
     raise TypeError(msg)
@@ -176,16 +107,28 @@ def _decode(value: Any) -> Any:  # noqa: ANN401, PLR0911 - One explicit branch p
 
 
 def encode_tool_result(value: Any) -> dict[str, Any]:  # noqa: ANN401 - Public SDK value boundary.
-    """Encode supported values within one 64 MiB encoded-JSON budget."""
-    budget = _EncodingBudget(_MAX_ENCODED_RESULT_BYTES)
-    _charge_object(("version", "value"), budget)
-    budget.charge(1)
-    return {"version": 1, "value": _encode(value, budget)}
+    """Encode one supported value in a versioned envelope within the 64 MiB encoded-JSON limit."""
+    envelope = {"version": 1, "value": _encode(value)}
+    # Default JSON escapes every non-ASCII character, so its length is the saved byte count.
+    if len(json.dumps(envelope, allow_nan=False)) > _MAX_ENCODED_RESULT_BYTES:
+        raise _size_error()
+    return envelope
 
 
-def decode_tool_result(payload: dict[str, Any]) -> Any:  # noqa: ANN401 - Public SDK value boundary.
-    """Restore an exact supported value from a persisted result envelope."""
-    if payload["version"] != 1:
+def encode_result_payload(payload: ToolResultPayload) -> dict[str, Any]:
+    """Encode a whole job result in one envelope, so one limit covers every field."""
+    return encode_tool_result(vars(payload))
+
+
+def _decode_result_payload(envelope: dict[str, Any]) -> ToolResultPayload:
+    if envelope["version"] != 1:
         msg = "Unsupported durable tool result version"
         raise ValueError(msg)
-    return _decode(payload["value"])
+    return ToolResultPayload(**_decode(envelope["value"]))
+
+
+def read_result_payload(job: BackgroundJob) -> ToolResultPayload:
+    """Read the full result of a snapshot that includes it; an outcome the runtime authored itself has only its summary."""
+    if job.result_payload is None:
+        return ToolResultPayload(value=job.result)
+    return _decode_result_payload(job.result_payload)

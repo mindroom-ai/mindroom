@@ -18,12 +18,13 @@ from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.delegation.background import start_delegation
+from mindroom.delegation.background import delegation_outcome, start_delegation
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.resources import execution_resources
+from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths
@@ -66,7 +67,8 @@ class _OutputAgent:
 
     async def save_job(self) -> str:
         async def operation() -> BackgroundOutcome:
-            return BackgroundOutcome("completed", _LARGE_RESULT)
+            payload = encode_result_payload(ToolResultPayload(_LARGE_RESULT))
+            return BackgroundOutcome("completed", _LARGE_RESULT, result_payload=payload)
 
         job_id = "a" * 64
         await self.runtime.start(
@@ -165,7 +167,7 @@ async def test_job_retrieval_applies_workspace_output_policy(
         assert receipt["path"] == "results/job.txt"
     else:
         assert receipt["auto_saved"] is True
-    assert (await case.runtime.lookup(job_id, owner=case.owner, depth=0)).result == _LARGE_RESULT
+    assert read_result_payload(await case.runtime.lookup(job_id, owner=case.owner, depth=0)).value == _LARGE_RESULT
 
 
 async def test_job_output_path_is_validated_before_claiming_result(output_agent: _OutputAgent) -> None:
@@ -236,7 +238,7 @@ async def test_native_delegation_job_wait_redirects_saved_result(output_agent: _
     )
 
     async def completed() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", _LARGE_RESULT)
+        return delegation_outcome("completed", _LARGE_RESULT)
 
     async def never_run(_child: DelegationChild, **_kwargs: object) -> str:
         msg = "Retrieval must not execute the child again"

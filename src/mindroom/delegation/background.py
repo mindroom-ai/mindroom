@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from weakref import WeakKeyDictionary, ref
 
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
 from mindroom.delegation.state import DelegationChild
+from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
 from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
@@ -64,13 +65,23 @@ def retained_child(runtime: ToolJobRuntime, job: BackgroundJob) -> DelegationChi
     return _retained_delegation(runtime, job)[0]
 
 
+def delegation_outcome(status: Literal["completed", "failed", "cancelled", "denied"], text: str) -> BackgroundOutcome:
+    """Keep a child's full text in the job payload; job metadata keeps only its summary."""
+    return BackgroundOutcome(status, text, result_payload=encode_result_payload(ToolResultPayload(value=text)))
+
+
+def delegation_result(job: BackgroundJob) -> str | None:
+    """Read a child's full saved text."""
+    return read_result_payload(job).value
+
+
 def _terminal(child: DelegationChild) -> BackgroundOutcome | None:
     # Metadata-only reconstruction still needs the durable native outcome.
     if child.result is None:
         return None
     match child.status:
         case "completed" | "failed" | "cancelled" | "denied" as status:
-            return BackgroundOutcome(status, child.result)
+            return delegation_outcome(status, child.result)
         case _:
             return None
 
@@ -218,7 +229,7 @@ async def cancel_retained_delegation(runtime: ToolJobRuntime, child: DelegationC
         return False
     retained = delegation_child(job)
     child.status = retained.status
-    child.result = job.result
+    child.result = delegation_result(job)
     child.run_id = retained.run_id
     child.model_name = retained.model_name
     return True

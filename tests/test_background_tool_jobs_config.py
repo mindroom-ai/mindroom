@@ -470,9 +470,9 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
 @pytest.mark.parametrize(
     "unreadable",
     [
-        '{"schema_version": 1, "job_id": "retired"}',
-        '{"schema_version": 2, "job_id": "trunc',
-        '{"schema_version": 2, "job_id": "another"}',
+        '{"schema_version": 2, "job_id": "retired"}',
+        '{"schema_version": 3, "job_id": "trunc',
+        '{"schema_version": 3, "job_id": "another"}',
     ],
 )
 async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unreadable: str) -> None:
@@ -483,7 +483,7 @@ async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unre
     (directory / "retired.json").write_text(unreadable)
     owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
     saved = BackgroundJob(job_id="saved", owner=owner, tool_name="tool", depth=0, adapter={"source_event_id": "$saved"})
-    (directory / "saved.json").write_text(json.dumps({"schema_version": 2, **asdict(saved)}))
+    (directory / "saved.json").write_text(json.dumps({"schema_version": 3, **asdict(saved)}))
     event = JournalEvent("$saved", "!room:localhost", None, EventKind.MESSAGE, "@user:localhost", 1, {}, 1)
     try:
         await index_parked_work(paths)

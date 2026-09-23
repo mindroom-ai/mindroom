@@ -145,7 +145,6 @@ async def test_consumed_payload_is_loaded_on_demand_without_startup_rewrites(
     try:
         assert runtime._entries["consumed"].job.result_payload is None
         assert runtime._entries["consumed"].drain is None
-        assert len(runtime._entries["consumed"].job.result) < 1000
         assert (await runtime.lookup("consumed", owner=_owner(), depth=0)).result_payload == {"value": value}
         assert bool(await runtime.pending_outcomes()) is not acknowledged
     finally:
@@ -166,7 +165,10 @@ async def test_consumed_payload_is_loaded_on_demand_without_startup_rewrites(
             reattach=True,
         )
         reread = await restored.wait("consumed", owner=_owner(), depth=0)
-        assert reread.job.result == value
+        assert (reread.job.result, reread.job.summary_truncated) == (
+            value[: runtime_module._JOB_SUMMARY_MAX_CHARS],
+            True,
+        )
         assert reread.job.result_payload == {"value": value}
         assert calls == 1
         await restored.acknowledge_wait("consumed", reread.token)
@@ -183,7 +185,7 @@ async def test_cancelling_consumed_job_does_not_retain_the_returned_payload(tmp_
     value = "large result" * 10_000
 
     async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", value)
+        return BackgroundOutcome("completed", value, result_payload={"value": value})
 
     await runtime.start("consumed", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
     waited = await runtime.wait("consumed", owner=_owner(), depth=0)
@@ -195,13 +197,14 @@ async def test_cancelling_consumed_job_does_not_retain_the_returned_payload(tmp_
             else await runtime.cancel("consumed", owner=_owner(), depth=0)
         )
         assert result is not None
-        assert result.result == value
+        assert result.result_payload == {"value": value}
         reference = weakref.ref(result)
         del result
         await asyncio.sleep(0)
         gc.collect()
         assert reference() is None, "runtime retained the full cancelled-history snapshot"
-        assert (await runtime.lookup("consumed", owner=_owner(), depth=0)).result == value
+        assert runtime._entries["consumed"].job.result_payload is None
+        assert (await runtime.lookup("consumed", owner=_owner(), depth=0)).result_payload == {"value": value}
     finally:
         await runtime.shutdown()
 

@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from agno.tools import Toolkit
 
 from mindroom.tool_jobs.consumption import consume_tool_job, record_tool_job_receipt
-from mindroom.tool_jobs.runtime import JOB_SUMMARY_MAX_CHARS, JobAccessError, get_background_runtime
+from mindroom.tool_jobs.results import read_result_payload
+from mindroom.tool_jobs.runtime import JobAccessError, get_background_runtime
 from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.output_files import wrap_toolkit_for_output_files
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -46,8 +47,8 @@ def _summary(job: BackgroundJob) -> dict[str, Any]:
         "job_id": job.job_id,
         "tool": job.tool_name,
         "status": job.status,
-        "summary": job.result[:JOB_SUMMARY_MAX_CHARS] if job.result is not None else None,
-        "summary_truncated": job.result is not None and len(job.result) > JOB_SUMMARY_MAX_CHARS,
+        "summary": job.result,
+        "summary_truncated": job.summary_truncated,
     }
     subagent_id = job.adapter.get("child", {}).get("subagent_id") if job.kind == "delegation" else None
     if subagent_id:
@@ -170,7 +171,7 @@ class JobTools(Toolkit):
             if action == "wait":
                 waited = await runtime.wait(job_id, owner=owner, depth=self._depth, timeout=wait_timeout)
                 if waited.token is not None:
-                    return await consume_tool_job(runtime, waited.job, waited.token)
+                    return await consume_tool_job(runtime, waited.job, read_result_payload(waited.job), waited.token)
                 return json.dumps(_summary(waited.job))
             if action == "cancel":
                 job = await runtime.cancel(job_id, owner=owner, depth=self._depth)

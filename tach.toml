@@ -7575,6 +7575,7 @@ path = "mindroom.delegation.background"
 depends_on = [
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
+    "mindroom.tool_jobs.results",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.runtime_context",
 ]
@@ -7690,7 +7691,6 @@ visibility = [
 path = "mindroom.tool_jobs.consumption"
 depends_on = [
     "mindroom.agent_storage",
-    "mindroom.tool_jobs.results",
     "mindroom.custom_tools.job",
     "mindroom.tool_jobs.agno_compat_functions",
 ]
@@ -7746,8 +7746,9 @@ path = "mindroom.tool_jobs.results"
 depends_on = [
 ]
 visibility = [
+    "mindroom.custom_tools.job",
+    "mindroom.delegation.background",
     "mindroom.tool_jobs.agno_execution",
-    "mindroom.tool_jobs.consumption",
 ]
 
 [[modules]]
@@ -7906,7 +7907,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.custom_tools.job"
-depends_on = ["mindroom.tool_jobs.consumption", "mindroom.tool_system.runtime_context", "mindroom.tool_jobs.runtime", "mindroom.tool_system.declarations", "mindroom.tool_system.output_files"]
+depends_on = ["mindroom.tool_jobs.consumption", "mindroom.tool_jobs.results", "mindroom.tool_system.runtime_context", "mindroom.tool_jobs.runtime", "mindroom.tool_system.declarations", "mindroom.tool_system.output_files"]
 
 visibility = [
     "mindroom.agents",

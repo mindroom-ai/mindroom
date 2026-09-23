@@ -19,10 +19,11 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
+from mindroom.delegation.background import delegation_outcome
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
-from mindroom.tool_jobs.results import encode_tool_result
+from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths
@@ -52,7 +53,9 @@ async def test_job_wait_waits_and_restores_rich_result(tmp_path: Path) -> None:
         return BackgroundOutcome(
             "completed",
             "answer",
-            result_payload={"value": encode_tool_result(ToolResult(content="answer", metadata={"proof": 1}))},
+            result_payload=encode_result_payload(
+                ToolResultPayload(value=ToolResult(content="answer", metadata={"proof": 1})),
+            ),
         )
 
     tools = JobTools(paths, owner)
@@ -289,15 +292,7 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
         return BackgroundOutcome(
             status,
             "None",
-            result_payload={
-                "value": encode_tool_result(None),
-                "state_delta": encode_tool_result({}),
-                "error": stored_error,
-                "elapsed": 0.1,
-                "events": encode_tool_result([]),
-                "replay": encode_tool_result([]),
-                "control": None,
-            },
+            result_payload=encode_result_payload(ToolResultPayload(value=None, error=stored_error, elapsed=0.1)),
         )
 
     storage = storage_factory()
@@ -348,11 +343,9 @@ async def test_discovery_bounds_large_results_without_truncating_wait(
     result = "large result " * 100_000
 
     async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome(
-            "completed",
-            result,
-            result_payload={"value": encode_tool_result(result)} if kind == "tool" else None,
-        )
+        if kind == "delegation":
+            return delegation_outcome("completed", result)
+        return BackgroundOutcome("completed", result, result_payload=encode_result_payload(ToolResultPayload(result)))
 
     try:
         adapter = {"child": {"result": None}} if kind == "delegation" else {}
