@@ -71,7 +71,24 @@ class JobTools(Toolkit):
         self.async_functions["job"].owning_toolkit = "job"
 
     @staticmethod
-    def install(
+    def available(
+        runtime_paths: RuntimePaths,
+        owner: ToolExecutionIdentity | None,
+        *,
+        depth: int,
+        enabled: bool,
+    ) -> bool:
+        """Require the same live conversation capability at construction and approval recovery."""
+        return (
+            enabled
+            and depth == 0
+            and owner is not None
+            and owner.channel == "matrix"
+            and get_background_runtime(runtime_paths) is not None
+        )
+
+    @staticmethod
+    def build(
         tools: list[Toolkit],
         runtime_paths: RuntimePaths,
         owner: ToolExecutionIdentity | None,
@@ -79,15 +96,14 @@ class JobTools(Toolkit):
         depth: int,
         enabled: bool,
         output_file_policy: ToolOutputFilePolicy | None = None,
-    ) -> None:
-        """Install the reserved function once after rejecting authored collisions."""
-        if owner is None or owner.channel != "matrix" or get_background_runtime(runtime_paths) is None:
-            return
+    ) -> Toolkit | None:
+        """Build the reserved toolkit for the caller's ordinary policy/hook pipeline."""
+        if owner is None or not JobTools.available(runtime_paths, owner, depth=depth, enabled=enabled):
+            return None
         if any("job" in toolkit.get_async_functions() for toolkit in tools):
             msg = "Tool function name job is reserved for managed job controls"
             raise ValueError(msg)
-        if enabled:
-            tools.append(wrap_toolkit_for_output_files(JobTools(runtime_paths, owner, depth=depth), output_file_policy))
+        return wrap_toolkit_for_output_files(JobTools(runtime_paths, owner, depth=depth), output_file_policy)
 
     def caller_identity(self) -> ToolExecutionIdentity:
         """Keep the original execution owner with the current conversation session."""

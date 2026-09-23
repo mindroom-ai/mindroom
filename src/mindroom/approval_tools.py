@@ -11,9 +11,11 @@ from agno.tools.toolkit import Toolkit
 
 from mindroom.agno_compat_approval import append_denied_tool_result, before_tool_lookup
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.custom_tools.job import JobTools
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
 from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
@@ -174,6 +176,14 @@ async def required_approval_tool_names(
     if any(call.invoking_agent != agent_name or not call.toolkit_name for call in calls):
         msg = "Saved approval has unknown toolkit ownership; retry the request"
         raise RuntimeError(msg)
+    if any(call.toolkit_name == call.tool_name == "job" for call in calls) and not JobTools.available(
+        runtime_paths,
+        execution_identity,
+        depth=0,
+        enabled=background_tool_jobs_enabled(config, runtime_paths),
+    ):
+        msg = "Saved job controls are no longer available; retry the request"
+        raise RuntimeError(msg)
     await asyncio.to_thread(ensure_tool_registry_loaded, runtime_paths, config)
     surface = visible_tool_surface(
         agent_name=agent_name,
@@ -182,7 +192,13 @@ async def required_approval_tool_names(
         include_matrix_room_runtime_tools=execution_identity.room_id is not None,
     )
     permitted = {entry.authored_name or entry.name: entry for entry in surface.runtime_tool_configs}
-    required = sorted({call.toolkit_name for call in calls if call.toolkit_name is not None})
+    required = sorted(
+        {
+            call.toolkit_name
+            for call in calls
+            if call.toolkit_name is not None and not call.toolkit_name == call.tool_name == "job"
+        },
+    )
     for name in required:
         entry = permitted.get(name)
         if entry is None:

@@ -19,7 +19,7 @@ from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.authorization import AUTHORITY_METADATA_KEY, authority_snapshot, bind_toolkit_authority
+from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
 from mindroom.tool_jobs.completion import completion_event, join_conversation_jobs
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
@@ -60,12 +60,14 @@ def _calculator_agent(config: Config, paths: RuntimePaths) -> Agent:
         responses=[ModelResponse(tool_calls=[_call("add", "addition", a=2, b=3)]), ModelResponse(content="done")],
     )
     install_tool_job_execution(model)
-    return Agent(
-        id="worker",
-        name="Worker",
-        model=model,
-        tools=[toolkit],
-        metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "worker")},
+    return bind_actor_authority(
+        Agent(
+            id="worker",
+            name="Worker",
+            model=model,
+            tools=[toolkit],
+        ),
+        authority_snapshot(config, "worker"),
     )
 
 

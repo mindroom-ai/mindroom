@@ -30,11 +30,18 @@ from mindroom.background_tasks import (
 )
 from mindroom.custom_tools.job import is_job_function
 from mindroom.logging_config import get_logger
+from mindroom.tool_jobs.agno_compat_functions import (
+    function_actor,
+    function_run_context,
+    is_framework_function,
+    isolated_function_call,
+    uses_sdk_async_dispatch,
+)
 from mindroom.tool_jobs.authorization import function_authority
 from mindroom.tool_jobs.consumption import consume_tool_job, consuming_function_call, session_state_delta
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_current_execution_authority
-from mindroom.tool_jobs.provenance import callable_origin, function_provenance
+from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.results import decode_tool_result, encode_tool_result
 from mindroom.tool_jobs.runtime import (
@@ -87,18 +94,6 @@ def is_background_job_excluded(function: Function) -> bool:
     )
 
 
-def is_framework_function(function: Function) -> bool:
-    """Recognize SDK-owned calls without an independent application execution owner."""
-    if function._agent is None and function._team is None:
-        return True
-    origin = callable_origin(function)
-    return (
-        origin["module"] == "agno.team._default_tools"
-        and origin["qualname"] is not None
-        and ("get_delegate_task" in origin["qualname"] or "get_forward_task" in origin["qualname"])
-    )
-
-
 def _validate_wait_timeout_parameter(function: Function) -> None:
     """Reject application parameters that would be consumed as framework metadata."""
     if not is_job_function(function) and "wait_timeout" in function.parameters.get("properties", {}):
@@ -111,7 +106,7 @@ def _validate_wait_timeout_parameter(function: Function) -> None:
 
 def call_wait_mode(call: FunctionCall, *, depth: int) -> ToolWaitMode:
     """Freeze a call's argument/owner policy before the SDK can pause for approval."""
-    run = call.function._run_context
+    run = function_run_context(call.function)
     if run is not None and call.call_id and (saved := saved_tool_wait_mode(run.metadata, run.run_id, call.call_id)):
         return saved
     mode: ToolWaitMode = "managed"
@@ -124,20 +119,6 @@ def call_wait_mode(call: FunctionCall, *, depth: int) -> ToolWaitMode:
     if run is not None and run.metadata is not None and call.call_id:
         record_tool_wait_mode(run.metadata, run.run_id, call.call_id, mode)
     return mode
-
-
-def _copy_call(call: FunctionCall) -> FunctionCall:
-    function = call.function.model_copy()
-    context = function._run_context
-    if context is not None:
-        function._run_context = replace(
-            context,
-            session_state=deepcopy(context.session_state),
-            metadata=deepcopy(context.metadata),
-            messages=deepcopy(context.messages),
-            dependencies=dict(context.dependencies) if context.dependencies is not None else None,
-        )
-    return FunctionCall(function=function, arguments=deepcopy(call.arguments), call_id=call.call_id)
 
 
 @dataclass
@@ -223,12 +204,7 @@ async def execute_owned_tool_call(original: _Execute, call: FunctionCall) -> Too
     if not job_owns_execution():
         return await original(call)
     tracker = SyncToolCompletionTracker()
-    asynchronous = (
-        inspect.iscoroutinefunction(call.function.entrypoint)
-        or inspect.isasyncgenfunction(call.function.entrypoint)
-        or inspect.iscoroutine(call.function.entrypoint)
-        or any(inspect.iscoroutinefunction(hook) for hook in call.function.tool_hooks or [])
-    )
+    asynchronous = uses_sdk_async_dispatch(call.function)
     try:
         with track_sync_tool_completion(tracker if asynchronous else None):
             invocation = original(call)
@@ -261,7 +237,7 @@ async def _run_operation(
             value, events, replay = await _drain_result(result.result)
 
             def encode_outcome() -> BackgroundOutcome:
-                isolated = owned_call.function._run_context
+                isolated = function_run_context(owned_call.function)
                 delta = session_state_delta(baseline, isolated.session_state or {}) if isolated is not None else {}
                 return BackgroundOutcome(
                     "completed" if success is True else "failed",
@@ -385,7 +361,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
                 ValueError("wait_timeout is not supported for tools that stop the current model step"),
             )
         owner = get_tool_execution_identity() or build_execution_identity_from_runtime_context(context)
-        actor = call.function._agent or call.function._team
+        actor = function_actor(call.function)
         if actor is not None and actor.id:
             owner = replace(owner, agent_name=actor.id)
         await job_checkpoint()
@@ -398,7 +374,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
                 or call.function.stop_after_tool_call
             ):
                 return await _execute_inline(original, call, mode=mode)
-        run_context = call.function._run_context
+        run_context = function_run_context(call.function)
         if run_context is None or not run_context.run_id or not call.call_id:
             msg = "Managed tool execution requires an exact run and tool-call identity"
             raise ValueError(msg)
@@ -414,7 +390,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
             "authority": function_authority(call.function),
         }
         spec = JobSpec(job_id, call.function.name, depth, toolkit_name=call.function.owning_toolkit, adapter=adapter)
-        owned_call = _copy_call(call)
+        owned_call = isolated_function_call(call)
         owned_call.arguments = application_arguments(owned_call.arguments)
         baseline = deepcopy(run_context.session_state or {})
         reference = resources.acquire()

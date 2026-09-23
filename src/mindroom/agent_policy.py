@@ -10,11 +10,18 @@ from mindroom.config.agent import AgentConfig
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from mindroom.config.models import DefaultsConfig
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _PrivateWorkerScope = Literal["user", "user_agent"]
 _AgentPolicySource = Literal["private.per", "agent.worker_scope", "defaults.worker_scope", "unscoped"]
 _DEFAULT_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
+
+
+def is_learning_enabled(agent: AgentConfig, defaults: DefaultsConfig) -> bool:
+    """Resolve the configured learning switch consistently for construction and grants."""
+    learning = agent.learning if agent.learning is not None else defaults.learning
+    return learning is not False
 
 
 @dataclass(frozen=True)
@@ -382,6 +389,7 @@ __all__ = [
     "dashboard_credentials_supported_for_scope",
     "get_agent_delegation_closure",
     "get_unsupported_team_agents",
+    "is_learning_enabled",
     "resolve_agent_policy_from_data",
     "resolve_agent_policy_index",
     "resolve_private_knowledge_base_agent",

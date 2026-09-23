@@ -11,7 +11,7 @@ from agno.agent import Agent
 from agno.models.response import ModelResponse
 
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.authorization import AUTHORITY_METADATA_KEY, authority_snapshot
+from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -77,11 +77,13 @@ async def test_skill_access_through_managed_sdk_calls(
     ]
     model = DelegationModel(id="test", responses=[ModelResponse(tool_calls=calls), ModelResponse(content="done")])
     install_tool_job_execution(model)
-    agent = Agent(
-        id="lead",
-        model=model,
-        skills=skills,
-        metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")},
+    agent = bind_actor_authority(
+        Agent(
+            id="lead",
+            model=model,
+            skills=skills,
+        ),
+        authority_snapshot(config, "lead"),
     )
     owner = replace(_job().owner, transport_agent_name="lead")
     context = replace(

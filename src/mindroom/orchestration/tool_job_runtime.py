@@ -279,6 +279,7 @@ class ToolJobRuntimeCoordinator:
 
     async def deliver_pending(self) -> None:
         """Retry pending outcomes until the durable journal owns each generation."""
+        await self.runtime.cancel_revoked()
         memberships: dict[AsyncClient, list[str] | None] = {}
         pending = await self.runtime.pending_outcomes()
         self._admitted.intersection_update((job.job_id, job.generation) for job in pending)

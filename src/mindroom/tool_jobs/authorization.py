@@ -6,21 +6,29 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools import Toolkit
 
-from mindroom.agent_policy import resolve_agent_policy_from_data
+from mindroom.agent_policy import is_learning_enabled, resolve_agent_policy_from_data
+from mindroom.knowledge.utils import agent_knowledge_authority_signature
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
+from mindroom.tool_jobs.agno_compat_functions import function_actor
 from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.filters import tool_name_allowed
 from mindroom.tool_system.registry_state import TOOL_METADATA, tool_registry_origins
 
 if TYPE_CHECKING:
+    from agno.agent import Agent
+    from agno.team import Team
     from agno.tools.function import Function
 
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-AUTHORITY_METADATA_KEY = "mindroom_tool_authority"
+
+def bind_actor_authority[Actor: Agent | Team](actor: Actor, snapshot: dict[str, Any]) -> Actor:
+    """Bind current construction evidence outside SDK-persisted session metadata."""
+    vars(actor)["mindroom_tool_authority"] = snapshot
+    return actor
 
 
 def bind_toolkit_authority(toolkit: Toolkit, *, authored_name: str) -> None:
@@ -37,17 +45,20 @@ def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:
         config.agents[agent_name],
         default_worker_scope=config.defaults.worker_scope,
     )
-    return {"scope": policy.effective_execution_scope}
+    return {
+        "scope": policy.effective_execution_scope,
+        "knowledge": agent_knowledge_authority_signature(agent_name, config),
+    }
 
 
 def function_authority(function: Function) -> dict[str, Any]:
     """Read the construction snapshot retained by the actual executing actor."""
-    actor = function._agent or function._team
-    snapshot = (actor.metadata or {}).get(AUTHORITY_METADATA_KEY, {}) if actor is not None else {}
+    actor = function_actor(function)
+    snapshot = vars(actor).get("mindroom_tool_authority", {}) if actor is not None else {}
     toolkit = function.source_toolkit
     construction = get_toolkit_construction(toolkit) if isinstance(toolkit, Toolkit) else None
     return {
-        "scope": snapshot.get("scope"),
+        **snapshot,
         "construction": (
             {
                 "name": construction.name,
@@ -62,7 +73,13 @@ def function_authority(function: Function) -> dict[str, Any]:
     }
 
 
-def _framework_tool_allowed(config: Config, agent_name: str, tool_name: str, origin: dict[str, Any]) -> bool:
+def _framework_tool_allowed(
+    config: Config,
+    agent_name: str,
+    tool_name: str,
+    origin: dict[str, Any],
+    authority: dict[str, Any],
+) -> bool:
     agent = config.agents[agent_name]
     module = str(origin.get("module", ""))
     qualname = str(origin.get("qualname", ""))
@@ -78,12 +95,8 @@ def _framework_tool_allowed(config: Config, agent_name: str, tool_name: str, ori
         and tool_name == "search_knowledge_base"
         and "create_knowledge_search_tool." in qualname
     ):
-        return bool(
-            agent.knowledge_bases
-            or (agent.private is not None and agent.private.knowledge is not None)
-            or config.resolve_entity(agent_name).memory_backend == "file",
-        )
-    learning = agent.learning if agent.learning is not None else config.defaults.learning
+        current = agent_knowledge_authority_signature(agent_name, config)
+        return current is not None and authority.get("knowledge") == current
     mode = agent.learning_mode or config.defaults.learning_mode
     expected = {
         "agno.learn.stores.user_profile": {"update_profile"},
@@ -95,7 +108,9 @@ def _framework_tool_allowed(config: Config, agent_name: str, tool_name: str, ori
             "clear_all_memories",
         },
     }
-    return learning and mode == "agentic" and tool_name in expected.get(module, set())
+    return (
+        is_learning_enabled(agent, config.defaults) and mode == "agentic" and tool_name in expected.get(module, set())
+    )
 
 
 def locally_allowed(
@@ -111,17 +126,16 @@ def locally_allowed(
     """Check current authored ownership and filters without remote availability probes."""
     if owner.agent_name not in config.agents:
         return False
-    if authority:
-        policy = resolve_agent_policy_from_data(
-            owner.agent_name,
-            config.agents[owner.agent_name],
-            default_worker_scope=config.defaults.worker_scope,
-        )
-        if authority.get("scope") != policy.effective_execution_scope:
-            return False
+    policy = resolve_agent_policy_from_data(
+        owner.agent_name,
+        config.agents[owner.agent_name],
+        default_worker_scope=config.defaults.worker_scope,
+    )
+    if "scope" not in authority or authority["scope"] != policy.effective_execution_scope:
+        return False
     if toolkit_name is None:
         # Framework-owned knowledge, memory, and skill functions have no authored toolkit.
-        return _framework_tool_allowed(config, owner.agent_name, tool_name, origin)
+        return _framework_tool_allowed(config, owner.agent_name, tool_name, origin, authority)
     construction = authority.get("construction")
     if not isinstance(construction, dict):
         return False
@@ -170,14 +184,13 @@ def _configured_tool_allowed(
             exclude=authored_filter.get("exclude_tools"),
         )
     filters: list[dict[str, Any]] = [authored_filter]
-    if server_id is not None:
-        server = config.mcp_servers.get(server_id)
-        if server is None or not server.enabled or origin.get("mcp_server_id") != server_id:
-            return False
-        filtered_name = origin.get("mcp_tool_name")
-        if filtered_name is None:
-            return True  # OAuth status/list operations do not invoke a remote tool.
-        filters.append({"include_tools": server.include_tools, "exclude_tools": server.exclude_tools})
+    server = config.mcp_servers.get(server_id)
+    if server is None or not server.enabled or origin.get("mcp_server_id") != server_id:
+        return False
+    filtered_name = origin.get("mcp_tool_name")
+    if filtered_name is None:
+        return True  # OAuth status/list operations do not invoke a remote tool.
+    filters.append({"include_tools": server.include_tools, "exclude_tools": server.exclude_tools})
     return all(
         tool_name_allowed(
             filtered_name,

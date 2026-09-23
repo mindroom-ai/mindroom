@@ -15,8 +15,8 @@ from agno.run.base import RunStatus
 from mindroom.config.models import ToolConfigEntry
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import (
-    AUTHORITY_METADATA_KEY,
     authority_snapshot,
+    bind_actor_authority,
     bind_toolkit_authority,
     function_authority,
 )
@@ -90,11 +90,13 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
         ],
     )
     install_tool_job_execution(model)
-    actor = Agent(
-        id="lead",
-        model=model,
-        tools=[toolkit],
-        metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")},
+    actor = bind_actor_authority(
+        Agent(
+            id="lead",
+            model=model,
+            tools=[toolkit],
+        ),
+        authority_snapshot(config, "lead"),
     )
     function._agent = actor
     started, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()

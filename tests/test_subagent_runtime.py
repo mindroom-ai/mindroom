@@ -34,8 +34,8 @@ from mindroom.message_target import MessageTarget
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_runner import ResponseRunner, ResponseRunnerDeps
 from mindroom.tool_jobs.authorization import (
-    AUTHORITY_METADATA_KEY,
     authority_snapshot,
+    bind_actor_authority,
     bind_toolkit_authority,
     function_authority,
 )
@@ -185,6 +185,47 @@ async def _finish_job(coordinator: ToolJobRuntimeCoordinator) -> BackgroundJob:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("approval", [False, True])
+async def test_revocation_cancels_hidden_work_without_delivering_its_result(tmp_path: Path, approval: bool) -> None:
+    """Current permission loss also stops accepted work through its internal owner."""
+    config = _config(tmp_path)
+    coordinator = _delivery_coordinator(tmp_path, config)
+    fixture = _job()
+    child = delegation_child(fixture)
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        started.set()
+        if approval:
+            return BackgroundOutcome("awaiting_approval")
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def cleanup(retained: DelegationChild) -> None:
+        retained.status = "cancelled"
+        retained.result = "Cancelled after revocation"
+        cancelled.set()
+
+    try:
+        await start_delegation(coordinator.runtime, child, owner=fixture.owner, operation=operation, cancel=cleanup)
+        await started.wait()
+        if approval:
+            waited = await coordinator.runtime.wait(child.delegation_id, owner=fixture.owner, depth=0)
+            await coordinator.runtime.release_wait(child.delegation_id, waited.token)
+        config.agents["lead"].delegate_to.clear()
+        await coordinator.deliver_pending()
+        assert await coordinator.runtime.list_jobs(owner=fixture.owner, depth=0) == []
+        await asyncio.wait_for(cancelled.wait(), 10)
+        config.agents["lead"].delegate_to.append("worker")
+        waited = await coordinator.runtime.wait(child.delegation_id, owner=fixture.owner, depth=0)
+        assert waited.job.status == "cancelled"
+        await coordinator.runtime.release_wait(child.delegation_id, waited.token)
+        coordinator.bot_provider("team").wake_tool_job_completion.assert_not_awaited()
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
 async def test_completion_scan_shares_membership_read_for_multiple_jobs(tmp_path: Path) -> None:
     """One bot's ready burst and inaccessible outcomes cost one remote membership read per scan."""
     coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
@@ -227,7 +268,16 @@ async def test_failed_coordinator_stop_releases_pinned_state_before_restart(
     config = _config(tmp_path)
     coordinator = _delivery_coordinator(tmp_path, config)
     await coordinator.initialize()
-    await _finish_job(coordinator)
+    started = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    fixture = _job()
+    await start_delegation(coordinator.runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
+    await asyncio.wait_for(started.wait(), 10)
 
     async def failed_save(*_args: object, **_kwargs: object) -> None:
         msg = "snapshot unavailable"
@@ -537,7 +587,7 @@ async def test_retained_child_leaf_checks_current_grant_and_native_ancestry(tmp_
     toolkit.functions["add"] = function
     bind_toolkit_construction(toolkit, ToolConstruction.from_factory("calculator", TOOL_REGISTRY["calculator"]))
     bind_toolkit_authority(toolkit, authored_name="calculator")
-    function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "worker")})
+    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "worker"))
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     try:
         with tool_runtime_context(
@@ -577,7 +627,7 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
     function = next(item for name, item in toolkit.async_functions.items() if name.endswith("_call_tool"))
     bind_toolkit_construction(toolkit, ToolConstruction.from_factory("mcp_demo", TOOL_REGISTRY["mcp_demo"]))
     bind_toolkit_authority(toolkit, authored_name="mcp_demo")
-    function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")})
+    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     set_execution_authorizer(coordinator.runtime_paths, coordinator._authorize_execution)
     try:
@@ -712,7 +762,7 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
     )
     bind_toolkit_authority(toolkit, authored_name="calculator")
     function = toolkit.get_async_functions()["add"].model_copy(deep=True)
-    function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")})
+    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
     stored = replace(
         _job(),
         kind="tool",

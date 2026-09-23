@@ -18,6 +18,7 @@ from mindroom import agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
 from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
+from mindroom.agent_policy import is_learning_enabled
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools.job import JobTools
@@ -36,7 +37,7 @@ from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.authorization import AUTHORITY_METADATA_KEY, authority_snapshot, bind_toolkit_authority
+from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
@@ -983,12 +984,6 @@ def _registry_tool_routes_through_worker(
     )
 
 
-def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) -> bool:
-    """Check if learning is enabled for an agent, falling back to defaults."""
-    learning = agent_config.learning if agent_config.learning is not None else defaults.learning
-    return learning is not False
-
-
 def _context_hidden_toolkits(execution_identity: ToolExecutionIdentity | None) -> frozenset[str]:
     if execution_identity is None or execution_identity.room_id is not None:
         return frozenset()
@@ -1014,7 +1009,7 @@ def _resolve_agent_learning(
     learning_storage: BaseDb | None = None,
 ) -> bool | LearningMachine:
     """Resolve Agent.learning setting from MindRoom agent configuration."""
-    if not _is_learning_enabled(agent_config, defaults):
+    if not is_learning_enabled(agent_config, defaults):
         return False
 
     learning_mode = agent_config.learning_mode or defaults.learning_mode
@@ -1217,11 +1212,16 @@ def _build_agent_tool_hook_bridge(
     )
 
 
-def _prune_toolkit_functions(
-    toolkit: Toolkit,
+def _prepare_toolkit_functions(
+    toolkit: Toolkit | None,
     tool_function_filter: Callable[[Function], bool] | None,
+    *,
+    tool_name: str,
 ) -> Toolkit | None:
-    """Apply the final function policy and discard toolkits with no callable surface."""
+    """Reject reserved collisions, apply channel policy, and drop empty toolkits."""
+    if toolkit is None:
+        return None
+    _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
     if tool_function_filter is not None:
         toolkit.functions = {
             name: function for name, function in toolkit.functions.items() if tool_function_filter(function)
@@ -1509,9 +1509,7 @@ def _assemble_agent_toolkits(
                     refresh_scheduler=refresh_scheduler,
                     dynamic_tool_continuation=dynamic_tool_continuation,
                 )
-            if toolkit:
-                _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
-                toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
+            toolkit = _prepare_toolkit_functions(toolkit, tool_function_filter, tool_name=tool_name)
             toolkit = apply_tool_approval_capability(
                 toolkit,
                 config,
@@ -1554,7 +1552,7 @@ def _assemble_agent_toolkits(
                 agent=agent_name,
                 error=str(exc),
             )
-    JobTools.install(
+    controls = JobTools.build(
         tools,
         runtime_paths,
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
@@ -1566,6 +1564,14 @@ def _assemble_agent_toolkits(
             config.defaults.tool_output_auto_save_threshold_bytes,
         ),
     )
+    controls = apply_tool_approval_capability(
+        controls,
+        config,
+        supports_native_tool_approval=supports_native_tool_approval,
+        registered_tool_name="job",
+    )
+    if controls is not None:
+        tools.append(prepend_tool_hook_bridge(controls, tool_hook_bridge))
     return _AgentToolAssembly(
         tools=tools,
         loaded_tools=loaded_tools,
@@ -1875,7 +1881,7 @@ def create_agent(
             subdir="learning",
             session_table=f"{agent_name}_learning_sessions",
         )
-        if persist_runtime_state and _is_learning_enabled(agent_config, defaults)
+        if persist_runtime_state and is_learning_enabled(agent_config, defaults)
         else None
     )
 
@@ -1963,11 +1969,6 @@ def create_agent(
     agent = _initialize_agent_instance(
         name=agent_config.display_name,
         id=agent_name,
-        metadata=(
-            {AUTHORITY_METADATA_KEY: authority_snapshot(config, agent_name)}
-            if background_tool_jobs_enabled(config, runtime_paths)
-            else None
-        ),
         role=role_context.role,
         model=model,
         tools=tool_assembly.tools,
@@ -2004,6 +2005,7 @@ def create_agent(
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
     if background_tool_jobs_enabled(config, runtime_paths):
+        bind_actor_authority(agent, authority_snapshot(config, agent_name))
         install_tool_job_execution(model, agent.fallback_config, depth=delegation_depth)
 
     logger.info(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import pytest
@@ -34,17 +35,21 @@ async def test_shutdown_save_failure_does_not_abandon_orchestrator_cleanup(
     orchestrator._shared_journal_store()
     runtime = ToolJobRuntime(orchestrator.storage_path)
     orchestrator._tool_job_runtime._runtime = runtime
+    started = asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "retained result")
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
 
-    def fail_save(_path: Path, _payload: dict[str, object]) -> None:
+    def fail_save(_path: Path, _payload: dict[str, object], *, strict_atomic_replace: bool = False) -> None:
+        assert strict_atomic_replace
         msg = "job storage unavailable"
         raise OSError(msg)
 
     try:
         await runtime.start(JobSpec("shutdown", "tool", 0), owner=_owner(), operation=operation)
-        await runtime.wait("shutdown", owner=_owner(), depth=0)
+        await asyncio.wait_for(started.wait(), 10)
         with monkeypatch.context() as patch, capture_logs() as logs:
             patch.setattr(runtime_module, "write_json_file_durable", fail_save)
             await orchestrator.stop()
@@ -70,11 +75,11 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
         (tmp_path / "effect.txt").write_text("once")
         return BackgroundOutcome("completed", "retained output", result_payload={"artifact": [1, 2]})
 
-    def fail_outcome(path: Path, payload: dict[str, object]) -> None:
+    def fail_outcome(path: Path, payload: dict[str, object], *, strict_atomic_replace: bool = False) -> None:
         if payload["status"] == "completed":
             msg = "outcome storage unavailable"
             raise OSError(msg)
-        writer(path, payload)
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
 
     try:
         await runtime.start(JobSpec("write-failure", "tool", 0), owner=_owner(), operation=operation)
@@ -234,16 +239,17 @@ async def test_shutdown_save_failure_still_drains_every_job_and_releases_lease(
     await started.wait()
     writer = runtime_module.write_json_file_durable
 
-    def fail_first_save(path: Path, payload: object) -> None:
+    def fail_first_save(path: Path, payload: object, *, strict_atomic_replace: bool = False) -> None:
         if path.stem == "first":
             msg = "injected shutdown save failure"
             raise OSError(msg)
-        writer(path, payload)
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
 
     try:
         with monkeypatch.context() as patch:
             patch.setattr(runtime_module, "write_json_file_durable", fail_first_save)
-            with pytest.raises((OSError, ExceptionGroup), match="shutdown") as failure:
+            expectation = nullcontext() if first_completed else pytest.raises(ExceptionGroup, match="shutdown")
+            with expectation as failure:
                 await runtime.shutdown()
         assert stopped.is_set()
         assert cleaned == (["second"] if first_completed else ["first", "second"])
@@ -255,8 +261,8 @@ async def test_shutdown_save_failure_still_drains_every_job_and_releases_lease(
             assert (await restored.lookup("second", owner=_owner(), depth=0)).status == "interrupted"
         finally:
             await restored.shutdown()
-        errors = failure.value.exceptions if isinstance(failure.value, ExceptionGroup) else (failure.value,)
-        assert len(errors) == 1
-        assert isinstance(errors[0], OSError)
+        if failure is not None:
+            assert len(failure.value.exceptions) == 1
+            assert isinstance(failure.value.exceptions[0], OSError)
     finally:
         await asyncio.gather(runtime.shutdown(), return_exceptions=True)

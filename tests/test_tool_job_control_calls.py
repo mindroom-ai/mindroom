@@ -19,7 +19,7 @@ from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.authorization import AUTHORITY_METADATA_KEY, authority_snapshot, bind_toolkit_authority
+from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
@@ -77,12 +77,13 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
         responses=[ModelResponse(tool_calls=[_call("switch_thread_model", "switch", **arguments)])],
     )
     install_tool_job_execution(model)
-    metadata = {AUTHORITY_METADATA_KEY: authority_snapshot(config, "leader")}
+    snapshot = authority_snapshot(config, "leader")
     actor = (
-        Team(id="leader", model=model, members=[], tools=[toolkit], metadata=metadata, telemetry=False)
+        Team(id="leader", model=model, members=[], tools=[toolkit], telemetry=False)
         if team
-        else Agent(id="leader", model=model, tools=[toolkit], metadata=metadata, telemetry=False)
+        else Agent(id="leader", model=model, tools=[toolkit], telemetry=False)
     )
+    bind_actor_authority(actor, snapshot)
     pending = None
     try:
         async with execution_resources():

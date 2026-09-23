@@ -16,6 +16,7 @@ from agno.tools.function import FunctionCall, ToolResult
 from mindroom.agent_storage import run_session_storage_operation
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
+from mindroom.tool_jobs.agno_compat_functions import function_actor, function_agent, function_run_context
 from mindroom.tool_jobs.results import decode_tool_result
 
 if TYPE_CHECKING:
@@ -84,14 +85,15 @@ class ConsumptionOwner:
 
     def register(self, runtime: ToolJobRuntime, job: BackgroundJob, token: str, call: FunctionCall) -> None:
         """Bind a unique generation receipt to the exact SDK run and tool result."""
-        context = call.function._run_context
+        context = function_run_context(call.function)
         if context is None or context.session_state is None or not call.call_id:
             msg = "Tool result consumption requires exact run and tool-call identity"
             raise ValueError(msg)
-        actor = call.function._agent or call.function._team
+        actor = function_actor(call.function)
         if actor is None:
             msg = "Tool result consumption requires a concrete agent or team"
             raise ValueError(msg)
+        agent = function_agent(call.function)
         receipt = {"job_id": job.job_id, "generation": job.generation, "token": token, "run_id": context.run_id}
         context.session_state.setdefault(_RECEIPTS, {})[f"{context.run_id}:{call.call_id}"] = receipt
         self._claims.append(
@@ -103,8 +105,8 @@ class ConsumptionOwner:
                 context.session_id,
                 context.user_id,
                 actor.id,
-                call.function._agent is None,
-                call.function._agent.team_id if call.function._agent is not None else None,
+                agent is None,
+                agent.team_id if agent is not None else None,
                 call.call_id,
                 call.function.name,
                 deepcopy(call.arguments),
@@ -185,7 +187,7 @@ def session_state_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[s
 def _merge_session_state(value: Any, job: BackgroundJob, call: FunctionCall) -> Any:  # noqa: ANN401
     if job.wait_acknowledged or job.status != "completed" or not job.result_payload:
         return value
-    context = call.function._run_context
+    context = function_run_context(call.function)
     state = context.session_state if context is not None else None
     conflicts = []
     for key, change in decode_tool_result(job.result_payload["state_delta"]).items():

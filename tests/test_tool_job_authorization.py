@@ -20,9 +20,9 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import resolved_mcp_tool_state
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.tool_jobs.authorization import (
-    AUTHORITY_METADATA_KEY,
     _configured_tool_allowed,
     authority_snapshot,
+    bind_actor_authority,
     bind_toolkit_authority,
     function_authority,
     locally_allowed,
@@ -39,6 +39,57 @@ if TYPE_CHECKING:
 
 
 _OWNER = ToolExecutionIdentity("matrix", "lead", "@human:localhost", "!room:localhost", None, None, "session")
+
+
+@pytest.mark.parametrize("change", ["files_only", "remove_one", "private_disabled", "keyword_memory", "missing_scope"])
+def test_retained_knowledge_requires_the_exact_current_source_policy(change: str) -> None:
+    """A surviving search capability cannot retain a removed source or an uncaptured scope."""
+    agent: dict[str, object] = {"display_name": "Lead", "knowledge_bases": ["first", "second"]}
+    if change == "private_disabled":
+        agent = {
+            "display_name": "Lead",
+            "private": {"per": "user_agent", "knowledge": {"enabled": True, "path": "knowledge"}},
+        }
+    elif change == "keyword_memory":
+        agent = {"display_name": "Lead", "memory_backend": "file", "memory_search": {"mode": "semantic"}}
+    config = Config.model_validate(
+        {
+            "agents": {"lead": agent},
+            "knowledge_bases": {"first": {"path": "first"}, "second": {"path": "second"}},
+        },
+    )
+    captured = authority_snapshot(config, "lead")
+
+    def allowed() -> bool:
+        return locally_allowed(
+            config,
+            _OWNER,
+            tool_name="search_knowledge_base",
+            toolkit_name=None,
+            depth=0,
+            origin={
+                "module": "agno.agent._default_tools",
+                "qualname": "create_knowledge_search_tool.search_knowledge_base",
+            },
+            authority=captured,
+        )
+
+    assert allowed()
+    if change == "files_only":
+        for base in config.knowledge_bases.values():
+            base.mode = "files"
+    elif change == "remove_one":
+        config.agents["lead"].knowledge_bases.pop()
+    elif change == "private_disabled":
+        private = config.agents["lead"].private
+        assert private is not None
+        assert private.knowledge is not None
+        private.knowledge.enabled = False
+    elif change == "keyword_memory":
+        config.agents["lead"].memory_search.mode = "keyword"
+    else:
+        captured.clear()
+    assert not allowed()
 
 
 def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> None:
@@ -60,7 +111,7 @@ def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> 
     assert toolkit is not None
     bind_toolkit_authority(toolkit, authored_name=entry.name)
     function = toolkit.get_async_functions()["list_workflows"]
-    function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")})
+    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
     authority = function_authority(function)
 
     def allowed() -> bool:
@@ -85,7 +136,7 @@ def _calculator_authority(config: Config) -> dict[str, object]:
     toolkit.functions["add"] = function
     bind_toolkit_construction(toolkit, ToolConstruction.from_factory("calculator", TOOL_REGISTRY["calculator"]))
     bind_toolkit_authority(toolkit, authored_name="calculator")
-    function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")})
+    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
     return function_authority(function)
 
 
@@ -369,7 +420,7 @@ def test_deferred_job_policy_survives_unloading_but_rejects_new_filters_and_orig
     toolkit.functions["add"] = function
     bind_toolkit_construction(toolkit, ToolConstruction.from_factory("calculator", TOOL_REGISTRY["calculator"]))
     bind_toolkit_authority(toolkit, authored_name="calculator")
-    function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")})
+    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
     snapshot = function_authority(function)
 
     def allowed() -> bool:
@@ -414,7 +465,7 @@ def test_sdk_learning_job_requires_current_enabled_learning() -> None:
             toolkit_name=None,
             origin=origin,
             depth=0,
-            authority={},
+            authority=authority_snapshot(config, "lead"),
         )
 
     assert allowed("update_user_memory")

@@ -32,7 +32,7 @@ from mindroom.agents import (
     _AdditionalContextChunk,
     _apply_preload_cap,
     _load_context_files,
-    _prune_toolkit_functions,
+    _prepare_toolkit_functions,
     _render_tool_execution_environment,
     _trim_chunk_tails,
     agent_build_can_overlap_file_memory,
@@ -3577,7 +3577,7 @@ def test_tool_function_filter_prunes_resolved_functions() -> None:
     unsafe = Function(name="unsafe", entrypoint=lambda: "unsafe")
     toolkit = Toolkit(name="mixed", tools=[safe, unsafe])
 
-    filtered = _prune_toolkit_functions(toolkit, lambda function: function.name == "safe")
+    filtered = _prepare_toolkit_functions(toolkit, lambda function: function.name == "safe", tool_name="mixed")
 
     assert filtered is toolkit
     assert set(toolkit.functions) == {"safe"}

@@ -32,7 +32,6 @@ from mindroom.event_journal import (
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseSources
-from mindroom.tool_jobs.authorization import AUTHORITY_METADATA_KEY
 from mindroom.tool_jobs.disabled import approval_is_parked, event_is_parked
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.resources import current_execution_resources
@@ -76,7 +75,7 @@ def test_background_job_yaml_rejects_invalid_settings(settings: object) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
-async def test_saved_authority_metadata_uses_startup_feature_setting(
+async def test_authority_stays_out_of_saved_metadata_with_startup_feature_setting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     enabled: bool,
@@ -108,9 +107,8 @@ async def test_saved_authority_metadata_uses_startup_feature_setting(
         )
         response = await agent.arun("hello", session_id=owner.session_id, user_id=owner.requester_id)
         saved = storage.get_run(response.run_id)
-        assert (AUTHORITY_METADATA_KEY in (saved.metadata or {})) is enabled
-        if enabled:
-            assert saved.metadata[AUTHORITY_METADATA_KEY] == {"scope": None}
+        assert "mindroom_tool_authority" not in (saved.metadata or {})
+        assert ("mindroom_tool_authority" in vars(agent)) is enabled
     finally:
         storage.close()
         release_background_tool_jobs(paths)

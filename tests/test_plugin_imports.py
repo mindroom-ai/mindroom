@@ -30,7 +30,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
     from mindroom.config.main import Config
     from mindroom.constants import resolve_runtime_paths
     from mindroom.tool_jobs.authorization import (
-        AUTHORITY_METADATA_KEY,
+        bind_actor_authority,
         authority_snapshot,
         bind_toolkit_authority,
         function_authority,
@@ -76,10 +76,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
         )
         bind_toolkit_authority(toolkit, authored_name="stable_plugin")
         function = toolkit.get_async_functions()["stable_echo"]
-        function._agent = Agent(
-            id="lead",
-            metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")},
-        )
+        function._agent = bind_actor_authority(Agent(id="lead"), authority_snapshot(config, "lead"))
         construction = get_toolkit_construction(toolkit)
         identity = {
             "factory": tool_registry_origins()["stable_plugin"],

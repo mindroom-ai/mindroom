@@ -17,12 +17,12 @@ from agno.team import _tools as team_tools
 from agno.tools.function import Function
 
 from mindroom.custom_tools.job import is_job_function, project_native_job_wait
+from mindroom.tool_jobs.agno_compat_functions import is_framework_function
 from mindroom.tool_jobs.agno_compat_resources import install_execution_resource_bindings
 from mindroom.tool_jobs.agno_execution import (
     call_wait_mode,
     execute_owned_tool_call,
     is_background_job_excluded,
-    is_framework_function,
     wrap_tool_execution,
 )
 from mindroom.tool_jobs.control import job_owns_execution

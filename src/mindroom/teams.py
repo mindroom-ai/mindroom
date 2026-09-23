@@ -58,7 +58,6 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     is_silent_schedule_no_report_response,
 )
-from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.execution import drive_delegation_stream, drive_delegations, has_delegation_state
 from mindroom.delegation.state import DelegationState
 from mindroom.entity_resolution import entity_identity_registry
@@ -2361,17 +2360,8 @@ def _create_team_instance(
     if background_tool_jobs_enabled(config, runtime_paths):
         install_tool_job_execution(model)
     team_members: list[Agent | Team] = [*agents]
-    job_tools = []
-    JobTools.install(
-        job_tools,
-        runtime_paths,
-        execution_identity,
-        depth=0,
-        enabled=background_tool_jobs_enabled(config, runtime_paths),
-    )
     team = Team(
         members=team_members,
-        tools=job_tools,
         id=team_id,
         name=team_display_name,
         model=model,

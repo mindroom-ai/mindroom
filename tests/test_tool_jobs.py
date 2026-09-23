@@ -831,9 +831,11 @@ async def test_failed_atomic_receipt_replacement_preserves_previous_generation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("prior_claim", ["acknowledged", "retained"])
+@pytest.mark.parametrize("published", [False, True])
 async def test_failed_approval_cancellation_admission_preserves_generation_transition(
     tmp_path: Path,
     prior_claim: str,
+    published: bool,
 ) -> None:
     """Retry retains approval identity and invalidates every prior-generation result claim."""
     runtime = ToolJobRuntime(tmp_path)
@@ -854,6 +856,8 @@ async def test_failed_approval_cancellation_admission_preserves_generation_trans
         nonlocal writes
         writes += 1
         if writes == 1:
+            if published:
+                await original_persist(entry)
             msg = "approval cancellation admission failed"
             raise OSError(msg)
         await original_persist(entry)
@@ -863,11 +867,20 @@ async def test_failed_approval_cancellation_admission_preserves_generation_trans
         with pytest.raises(OSError, match="approval cancellation admission failed"):
             await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
         after_failure = await runtime.lookup(job.job_id, owner=_owner(), depth=0)
-        assert after_failure.status == "awaiting_approval"
-        assert after_failure.generation == 0
-        assert after_failure.wait_acknowledged is (prior_claim == "acknowledged")
-        expected_token = None if prior_claim == "acknowledged" else claimed.token
+        assert after_failure.status == ("cancel_requested" if published else "awaiting_approval")
+        assert after_failure.generation == int(published)
+        assert after_failure.wait_acknowledged is (prior_claim == "acknowledged" and not published)
+        expected_token = None if published or prior_claim == "acknowledged" else claimed.token
         assert runtime._entries[job.job_id].wait_token == expected_token
+        if published:
+            with pytest.raises(ValueError, match="Approval no longer applies"):
+                await runtime.continue_job(
+                    job.job_id,
+                    owner=_owner(),
+                    depth=0,
+                    operation=approval,
+                    expected_generation=0,
+                )
 
         settled = await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
         assert settled.status == "cancelled"

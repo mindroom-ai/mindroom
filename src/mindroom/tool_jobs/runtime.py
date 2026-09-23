@@ -725,6 +725,18 @@ class ToolJobRuntime:
             task = self._cancellation_task(entry)
         return await wait_for_future_until_complete(task)
 
+    async def cancel_revoked(self) -> None:
+        """Withdraw execution when current grants disappear, retaining owned cleanup."""
+        async with self._lock:
+            self._ensure_open()
+            cancellations = [
+                (entry, self._cancellation_task(entry))
+                for entry in self._entries.values()
+                if entry.job.status not in _TERMINAL and not self._allowed(entry.job)
+            ]
+        for entry, task in cancellations:
+            await self._cancel_admitted(entry, task)
+
     def _cancellation_task(self, entry: _Entry) -> asyncio.Task[BackgroundJob]:
         """Accept exactly one cleanup while the caller holds the runtime admission lock."""
         task = entry.cancel_task
@@ -754,9 +766,11 @@ class ToolJobRuntime:
             try:
                 await self._persist(entry)
             except BaseException:
-                entry.job = previous
-                entry.wait_token = previous_token
-                self._index_consumption(entry)
+                saved = await asyncio.to_thread(read_job_snapshot, self._path(entry.job.job_id))
+                if (saved.status, saved.generation) == (previous.status, previous.generation):
+                    entry.job = previous
+                    entry.wait_token = previous_token
+                    self._index_consumption(entry)
                 raise
             entry.cancel_ready.set()
             entry.control.cancel()
