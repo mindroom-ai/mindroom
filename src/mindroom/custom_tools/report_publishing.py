@@ -39,8 +39,10 @@ _STATIC_SITE_SOURCE_KEYS = frozenset({"path", "title"})
 
 _TOOL_DESCRIPTIONS = {
     "publish_report": (
-        "Publish an authorized report source through a revocable public or origin-room link. "
-        "Public links require confirm_public=true. Supports source_type dynamic_workflow_run and static_site."
+        "Publish an authorized report source through a revocable link. "
+        "access_policy origin_room limits viewing to people currently joined to this Matrix room; "
+        "public creates a bearer link anyone holding it can open and requires confirm_public=true. "
+        "Omit access_policy to use the configured default. Supports source_type dynamic_workflow_run and static_site."
     ),
     "revoke_report": "Revoke a previously published report link under either access policy.",
 }
@@ -58,7 +60,7 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
                 "enum": [*get_args(ReportAccessPolicy), None],
             },
         },
-        "required": ["source_type", "source", "confirm_public"],
+        "required": ["source_type", "source"],
     },
     "revoke_report": {
         "type": "object",
@@ -105,7 +107,7 @@ class ReportPublishingTools(Toolkit):
         self,
         source_type: str,
         source: dict[str, Any],
-        confirm_public: bool,
+        confirm_public: bool = False,
         access_policy: str | None = None,
     ) -> str:
         """Publish an authorized report artifact through a revocable link."""
@@ -167,7 +169,7 @@ class ReportPublishingTools(Toolkit):
         self,
         source_type: str,
         source: dict[str, Any],
-        confirm_public: bool,
+        confirm_public: bool = False,
         access_policy: str | None = None,
     ) -> str:
         """Publish an authorized report artifact through a revocable link."""

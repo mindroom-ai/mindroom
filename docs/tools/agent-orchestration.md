@@ -566,20 +566,20 @@ publish_report(
     source_type="static_site",
     source={"path": "room-report", "title": "Room Report"},
     access_policy="origin_room",
-    confirm_public=False,
 )
 revoke_report("pub_...")
 ```
 
 ### Notes
 
-- `confirm_public=True` remains required for `public`, while `origin_room` does not require public confirmation.
+- `confirm_public=True` is required for `public` so accidental bearer links fail closed, while `origin_room` needs no confirmation.
 - Dynamic Workflow source references default to `scope="agent"` and may include an explicit `scope`.
 - Static site publishing requires an agent workspace and publishes an immutable copy, so later workspace edits need a new `publish_report()` call.
 - An agent has a workspace when it uses `memory_backend: file` or a `private:` workspace configuration, and the source path resolves against that canonical workspace root.
 - Only the run requester or the user who published the link may revoke it.
 - Additional registered report sources can be added without changing Dynamic Workflow storage.
 - Route both `/reports/public/*` and `/reports/room/*` to the MindRoom backend.
+- Deployments whose reverse proxy routes `/reports/public/*` to the backend by path must add the same rule for `/reports/room/*`, or origin-room links fall through to whatever serves the rest of the host.
 - Public routes must remain outside dashboard-login middleware, while protected routes depend only on trusted browser identity rather than dashboard authorization.
 - Set `MINDROOM_PUBLIC_URL` to the externally reachable MindRoom origin so publish payloads include clickable absolute URLs.
 - See the [origin-room report threat model](../dev/2026-07-23-origin-room-report-threat-model.md) for prevented, bounded, and out-of-scope risks.

@@ -724,7 +724,6 @@ def test_report_publishing_tool_publishes_origin_room_from_trusted_context(tmp_p
             report_tool.publish_report(
                 source_type="static_site",
                 source={"path": "report.html", "title": "Protected"},
-                confirm_public=False,
                 access_policy="origin_room",
             ),
         )
