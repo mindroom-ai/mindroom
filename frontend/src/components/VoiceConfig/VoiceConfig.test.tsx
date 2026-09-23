@@ -2,11 +2,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { VoiceConfig } from "./VoiceConfig";
 import { useConfigStore } from "@/store/configStore";
+import { useConfigSchema } from "@/hooks/useConfigSchema";
 import type { ConfigDiagnostic } from "@/lib/configValidation";
 import { Config } from "@/types/config";
 import type { SaveConfigResult } from "@/store/configStore";
 
 vi.mock("@/store/configStore");
+vi.mock("@/hooks/useConfigSchema", () => ({
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
+}));
 
 const { mockToast, mockToaster } = vi.hoisted(() => ({
   mockToast: vi.fn(),
@@ -318,5 +322,37 @@ describe("VoiceConfig", () => {
     expect(
       screen.getByRole("button", { name: "Save Voice Configuration" }),
     ).toBeDisabled();
+  });
+
+  it("enables voice calls from the Voice Calls card", () => {
+    mockStoreState.diagnostics = [];
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: {
+        type: "object",
+        properties: {},
+        $defs: {
+          CallsConfig: {
+            type: "object",
+            properties: {
+              enabled: {
+                type: "boolean",
+                default: false,
+                description: "Enable agents joining Element Call voice calls",
+              },
+            },
+          },
+          VoiceConfig: { type: "object", properties: {} },
+          VoiceSTTConfig: { type: "object", properties: {} },
+        },
+      },
+      error: null,
+    });
+
+    render(<VoiceConfig />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Enabled" }));
+
+    expect(mockUpdateConfigRoot).toHaveBeenCalledWith("calls", {
+      enabled: true,
+    });
   });
 });

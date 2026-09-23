@@ -15,6 +15,7 @@ import {
   SHARED_CONTEXT_FILE_PLACEHOLDER,
 } from "@/types/config";
 import { useTools } from "@/hooks/useTools";
+import { useConfigSchema } from "@/hooks/useConfigSchema";
 
 // Mock the store
 vi.mock("@/store/configStore", () => ({
@@ -23,6 +24,10 @@ vi.mock("@/store/configStore", () => ({
 
 vi.mock("@/components/ui/toaster", () => ({
   toast: vi.fn(),
+}));
+
+vi.mock("@/hooks/useConfigSchema", () => ({
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
 }));
 
 // Mock useTools hook
@@ -2002,5 +2007,56 @@ describe("AgentEditor", () => {
 
     // Should be exactly 10 updates, not hundreds or thousands
     expect(updateCount).toBe(10);
+  });
+
+  it("edits fields the editor does not render through More settings", () => {
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: {
+        type: "object",
+        properties: {},
+        $defs: {
+          AgentConfig: {
+            type: "object",
+            properties: {
+              display_name: { type: "string" },
+              worker_scope: {
+                anyOf: [
+                  { enum: ["shared", "user", "user_agent"], type: "string" },
+                  { type: "null" },
+                ],
+                default: null,
+              },
+              participation: {
+                anyOf: [
+                  { $ref: "#/$defs/ParticipationConfig" },
+                  { type: "null" },
+                ],
+                default: null,
+                description: "Opt-in adaptive participation",
+              },
+            },
+          },
+          ParticipationConfig: {
+            type: "object",
+            properties: {
+              debounce_seconds: { type: "number", default: 3 },
+            },
+          },
+        },
+      },
+      error: null,
+    });
+
+    render(<AgentEditor />);
+    const section = screen.getByRole("button", { name: /More settings/ });
+    expect(section).toHaveTextContent("Worker scope, Participation");
+    fireEvent.click(section);
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Configure participation" }),
+    );
+
+    expect(mockStore.updateAgent).toHaveBeenCalledWith("test_agent", {
+      participation: {},
+    });
   });
 });

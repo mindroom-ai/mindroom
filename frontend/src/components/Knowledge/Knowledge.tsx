@@ -16,6 +16,8 @@ import {
 import { apiErrorMessageFromPayload, API_ENDPOINTS } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useConfigStore } from "@/store/configStore";
+import { SchemaSection } from "@/components/SchemaForm";
+import { setObjectKey } from "@/lib/configSchema";
 import type { KnowledgeBaseConfig, KnowledgeGitConfig } from "@/types/config";
 import { useToast } from "@/components/ui/use-toast";
 import { Badge } from "@/components/ui/badge";
@@ -257,10 +259,22 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+/** KnowledgeBaseConfig keys this editor renders by hand; More settings shows the rest. */
+export const KNOWLEDGE_BASE_EDITOR_FIELDS = [
+  "mode",
+  "description",
+  "path",
+  "watch",
+  "chunk_size",
+  "chunk_overlap",
+  "git",
+] as const;
+
 export function Knowledge() {
   const {
     config,
     updateKnowledgeBase,
+    updateConfigRoot,
     deleteKnowledgeBase,
     saveConfig,
     isDirty,
@@ -1749,6 +1763,26 @@ export function Knowledge() {
                     </p>
                   </div>
                 ) : null}
+
+                {selectedBaseConfig && (
+                  <SchemaSection
+                    title="More settings"
+                    definition="KnowledgeBaseConfig"
+                    value={selectedBaseConfig}
+                    path={["knowledge_bases", selectedBase]}
+                    exclude={KNOWLEDGE_BASE_EDITOR_FIELDS}
+                    onFieldChange={(key, next) =>
+                      updateConfigRoot(
+                        "knowledge_bases",
+                        setObjectKey(
+                          knowledgeBases,
+                          selectedBase,
+                          setObjectKey(selectedBaseConfig, key, next),
+                        ),
+                      )
+                    }
+                  />
+                )}
 
                 <div className="flex justify-end">
                   <Button

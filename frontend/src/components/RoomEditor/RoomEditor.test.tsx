@@ -2,10 +2,14 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { RoomEditor } from "./RoomEditor";
 import { useConfigStore } from "@/store/configStore";
+import { useConfigSchema } from "@/hooks/useConfigSchema";
 import { Room, Agent, Config } from "@/types/config";
 
 // Mock the store
 vi.mock("@/store/configStore");
+vi.mock("@/hooks/useConfigSchema", () => ({
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
+}));
 
 describe("RoomEditor", () => {
   const mockRoom: Room = {
@@ -285,5 +289,54 @@ describe("RoomEditor", () => {
     expect(
       screen.getByText(/Select agents that should have access to this room/),
     ).toBeInTheDocument();
+  });
+
+  it("edits per-room Matrix settings through More settings", () => {
+    const mockUpdateConfigRoot = vi.fn();
+    (useConfigStore as any).mockReturnValue({
+      rooms: [mockRoom],
+      agents: mockAgents,
+      config: {
+        ...mockConfig,
+        rooms: { lobby: { description: "Main discussion room" }, dev: {} },
+      },
+      diagnostics: [],
+      selectedRoomId: "lobby",
+      updateRoom: mockUpdateRoom,
+      updateConfigRoot: mockUpdateConfigRoot,
+      deleteRoom: mockDeleteRoom,
+      saveConfig: mockSaveConfig,
+      isDirty: false,
+    });
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: {
+        type: "object",
+        properties: {},
+        $defs: {
+          RoomConfig: {
+            type: "object",
+            properties: {
+              description: { type: "string" },
+              encrypted: {
+                anyOf: [{ type: "boolean" }, { type: "null" }],
+                default: null,
+              },
+            },
+          },
+        },
+      },
+      error: null,
+    });
+
+    render(<RoomEditor />);
+    fireEvent.click(screen.getByRole("button", { name: /More settings/ }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Encrypted" }), {
+      target: { value: "true" },
+    });
+
+    expect(mockUpdateConfigRoot).toHaveBeenCalledWith("rooms", {
+      lobby: { description: "Main discussion room", encrypted: true },
+      dev: {},
+    });
   });
 });

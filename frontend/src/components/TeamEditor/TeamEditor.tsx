@@ -21,9 +21,24 @@ import {
 import { useForm, Controller } from "react-hook-form";
 import { Team } from "@/types/config";
 import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
+import { SchemaSection } from "@/components/SchemaForm";
 
 const AGENT_POLICY_UNAVAILABLE_REASON =
   "Agent policy preview is unavailable. Save or refresh to validate team eligibility.";
+
+/** TeamConfig keys this editor renders by hand; More settings shows the rest. */
+export const TEAM_EDITOR_FIELDS = [
+  "display_name",
+  "role",
+  "agents",
+  "rooms",
+  "model",
+  "mode",
+  "compaction",
+  "num_history_runs",
+  "num_history_messages",
+  "max_tool_calls_from_history",
+] as const;
 
 export function TeamEditor() {
   const {
@@ -431,6 +446,17 @@ export function TeamEditor() {
           )}
         />
       </FieldGroup>
+
+      <SchemaSection
+        title="More settings"
+        definition="TeamConfig"
+        value={selectedTeam}
+        path={["teams", selectedTeam.id]}
+        exclude={TEAM_EDITOR_FIELDS}
+        onFieldChange={(key, next) =>
+          updateTeam(selectedTeam.id, { [key]: next } as Partial<Team>)
+        }
+      />
     </EditorPanel>
   );
 }

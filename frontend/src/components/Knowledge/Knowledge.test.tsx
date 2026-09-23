@@ -3,11 +3,15 @@ import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { Knowledge } from "./Knowledge";
 import { API_ENDPOINTS } from "@/lib/api";
 import { useConfigStore } from "@/store/configStore";
+import { useConfigSchema } from "@/hooks/useConfigSchema";
 import type { SaveConfigResult } from "@/store/configStore";
 import type { Config, KnowledgeBaseConfig } from "@/types/config";
 
 vi.mock("@/store/configStore", () => ({
   useConfigStore: vi.fn(),
+}));
+vi.mock("@/hooks/useConfigSchema", () => ({
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
 }));
 
 const mockToast = vi.fn();
@@ -16,6 +20,7 @@ vi.mock("@/components/ui/use-toast", () => ({
 }));
 
 const mockUpdateKnowledgeBase = vi.fn();
+const mockUpdateConfigRoot = vi.fn();
 const mockDeleteKnowledgeBase = vi.fn();
 const mockSaveConfig = vi
   .fn<() => Promise<SaveConfigResult>>()
@@ -139,7 +144,9 @@ function mockStore(
     config: {
       knowledge_bases: knowledgeBases,
     } as unknown as Config,
+    diagnostics: [],
     updateKnowledgeBase: mockUpdateKnowledgeBase,
+    updateConfigRoot: mockUpdateConfigRoot,
     deleteKnowledgeBase: mockDeleteKnowledgeBase,
     saveConfig: mockSaveConfig,
     isDirty: options.isDirty ?? false,
@@ -149,6 +156,49 @@ function mockStore(
 describe("Knowledge", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("edits knowledge base filters through More settings", async () => {
+    mockStore({ docs: { path: "./knowledge_docs/docs", watch: true } });
+    setKnowledgeApiMock({});
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: {
+        type: "object",
+        properties: {},
+        $defs: {
+          KnowledgeBaseConfig: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              exclude_extensions: {
+                type: "array",
+                items: { type: "string" },
+                description: "Extensions to skip",
+              },
+            },
+          },
+        },
+      },
+      error: null,
+    });
+
+    render(<Knowledge />);
+    fireEvent.click(await screen.findByRole("button", { name: /More settings/ }));
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "New exclude extensions entry" }),
+      { target: { value: ".log" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Add exclude extensions entry" }),
+    );
+
+    expect(mockUpdateConfigRoot).toHaveBeenCalledWith("knowledge_bases", {
+      docs: {
+        path: "./knowledge_docs/docs",
+        watch: true,
+        exclude_extensions: [".log"],
+      },
+    });
   });
 
   it("does not auto-select the first base when multiple bases are configured", async () => {

@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { useConfigStore } from "@/store/configStore";
+import { SchemaSection } from "@/components/SchemaForm";
+import { setObjectKey } from "@/lib/configSchema";
 import { useSwipeBack } from "@/hooks/useSwipeBack";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -18,6 +20,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+/** RoomConfig keys this editor renders by hand; More settings shows the rest. */
+export const ROOM_EDITOR_FIELDS = ["display_name", "description"] as const;
+
 export function RoomEditor() {
   const {
     rooms,
@@ -30,6 +35,7 @@ export function RoomEditor() {
     isDirty,
     isLoading,
     selectRoom,
+    updateConfigRoot,
   } = useConfigStore();
 
   const selectedRoom = rooms.find((r) => r.id === selectedRoomId);
@@ -184,6 +190,29 @@ export function RoomEditor() {
           )}
         </div>
       </FieldGroup>
+
+      <SchemaSection
+        title="More settings"
+        definition="RoomConfig"
+        value={config?.rooms?.[selectedRoom.id]}
+        path={["rooms", selectedRoom.id]}
+        exclude={ROOM_EDITOR_FIELDS}
+        onFieldChange={(key, next) => {
+          const roomConfig = setObjectKey(
+            config?.rooms?.[selectedRoom.id],
+            key,
+            next,
+          );
+          updateConfigRoot(
+            "rooms",
+            setObjectKey(
+              config?.rooms,
+              selectedRoom.id,
+              Object.keys(roomConfig).length === 0 ? undefined : roomConfig,
+            ),
+          );
+        }}
+      />
     </EditorPanel>
   );
 }

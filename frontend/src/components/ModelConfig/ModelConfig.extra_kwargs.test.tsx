@@ -6,6 +6,9 @@ import { useConfigStore } from "@/store/configStore";
 vi.mock("@/store/configStore", () => ({
   useConfigStore: vi.fn(),
 }));
+vi.mock("@/hooks/useConfigSchema", () => ({
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
+}));
 
 vi.mock("@/components/ui/toaster", () => ({
   toast: vi.fn(),

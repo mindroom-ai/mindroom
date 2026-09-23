@@ -16,6 +16,7 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import { useConfigStore } from "@/store/configStore";
+import { SchemaSection } from "@/components/SchemaForm";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -323,6 +324,19 @@ function renderTableValue<TContext>(
   }
   return renderer;
 }
+
+/** ModelConfig keys this page renders by hand; More settings shows the rest. */
+export const MODEL_EDITOR_FIELDS = [
+  "provider",
+  "id",
+  "display_name",
+  "icon",
+  "api",
+  "host",
+  "api_key",
+  "extra_kwargs",
+  "context_window",
+] as const;
 
 export function ModelConfig() {
   const { config, updateModel, deleteModel, saveConfig, isLoading } =
@@ -1691,6 +1705,19 @@ export function ModelConfig() {
             </table>
           </div>
         </div>
+
+        {editingRowId != null && models[editingRowId] != null && (
+          <SchemaSection
+            title={`More settings for ${editingRowId}`}
+            definition="ModelConfig"
+            value={models[editingRowId]}
+            path={["models", editingRowId]}
+            exclude={MODEL_EDITOR_FIELDS}
+            onFieldChange={(key, next) =>
+              updateModel(editingRowId, { [key]: next })
+            }
+          />
+        )}
 
         <Button
           onClick={() => void handleSaveAllChanges()}

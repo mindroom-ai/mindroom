@@ -13,6 +13,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useConfigStore } from "@/store/configStore";
+import { SchemaSection } from "@/components/SchemaForm";
+import { setObjectKey } from "@/lib/configSchema";
 
 const EMBEDDER_PROVIDERS = [
   { value: "openai", label: "OpenAI" },
@@ -45,6 +47,18 @@ const MODEL_PLACEHOLDERS: Record<string, string> = {
 };
 
 type MemorySettings = MindRoomConfig["memory"];
+
+/** MemoryConfig keys this page renders by hand; More settings shows the rest. */
+export const MEMORY_EDITOR_FIELDS = [
+  "backend",
+  "team_reads_member_memory",
+  "embedder",
+  "file",
+  "search",
+  "auto_flush",
+] as const;
+
+const EMBEDDER_EDITOR_FIELDS = ["model", "credentials_service", "host"] as const;
 
 const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   backend: "mem0",
@@ -531,6 +545,23 @@ export function MemoryConfig() {
             </FieldGroup>
           )}
 
+          <SchemaSection
+            title="More embedder settings"
+            definition="EmbedderConfig"
+            value={localConfig.embedder.config}
+            path={["memory", "embedder", "config"]}
+            exclude={EMBEDDER_EDITOR_FIELDS}
+            onFieldChange={(key, next) =>
+              applyMemoryConfig({
+                ...localConfig,
+                embedder: {
+                  ...localConfig.embedder,
+                  config: setObjectKey(localConfig.embedder.config, key, next),
+                },
+              })
+            }
+          />
+
           {localConfig.backend === "file" && (
             <>
               <FieldGroup
@@ -984,6 +1015,17 @@ export function MemoryConfig() {
               </FieldGroup>
             </>
           )}
+
+          <SchemaSection
+            title="More settings"
+            definition="MemoryConfig"
+            value={localConfig}
+            path={["memory"]}
+            exclude={MEMORY_EDITOR_FIELDS}
+            onFieldChange={(key, next) =>
+              applyMemoryConfig(setObjectKey(localConfig, key, next))
+            }
+          />
         </div>
 
         <div className="p-4 bg-muted/50 rounded-lg shadow-sm border border-border">

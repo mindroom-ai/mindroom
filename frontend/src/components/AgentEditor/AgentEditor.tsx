@@ -38,6 +38,47 @@ import { useSkills } from "@/hooks/useSkills";
 import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
 import { ToolConfigPanel } from "./ToolConfigPanel";
 import { ToolSelectionRow } from "./ToolSelectionRow";
+import { SchemaSection } from "@/components/SchemaForm";
+import { setObjectKey } from "@/lib/configSchema";
+
+/** AgentConfig keys this editor renders by hand; More settings shows the rest. */
+export const AGENT_EDITOR_FIELDS = [
+  "display_name",
+  "role",
+  "tools",
+  "include_default_tools",
+  "skills",
+  "instructions",
+  "rooms",
+  "markdown",
+  "learning",
+  "learning_mode",
+  "model",
+  "memory_backend",
+  "compaction",
+  "private",
+  "knowledge_bases",
+  "context_files",
+  "thread_mode",
+  "num_history_runs",
+  "num_history_messages",
+  "compress_tool_results",
+  "max_tool_calls_from_history",
+  "show_tool_calls",
+  "worker_tools",
+  "allow_self_config",
+  "delegate_to",
+] as const;
+
+// Private agents derive their execution scope from private.per.
+const PRIVATE_AGENT_EDITOR_FIELDS = [...AGENT_EDITOR_FIELDS, "worker_scope"];
+
+const PRIVATE_KNOWLEDGE_EDITOR_FIELDS = [
+  "enabled",
+  "description",
+  "path",
+  "watch",
+] as const;
 
 const TOOL_VALIDATION_UNAVAILABLE_MESSAGE =
   "Tool availability preview is unavailable while agent policy preview is unavailable. Save or refresh to validate tool assignments.";
@@ -1012,6 +1053,19 @@ export function AgentEditor() {
                     </label>
                   </div>
                 </FieldGroup>
+
+                <SchemaSection
+                  title="More private knowledge settings"
+                  definition="AgentPrivateKnowledgeConfig"
+                  value={privateKnowledge}
+                  path={["agents", selectedAgent.id, "private", "knowledge"]}
+                  exclude={PRIVATE_KNOWLEDGE_EDITOR_FIELDS}
+                  onFieldChange={(key, next) =>
+                    mutatePrivateKnowledge((current) =>
+                      setObjectKey(current, key, next),
+                    )
+                  }
+                />
               </>
             )}
           </>
@@ -1752,6 +1806,21 @@ export function AgentEditor() {
           onChange: (value) =>
             handleFieldChange("compress_tool_results", value),
         }}
+      />
+
+      <SchemaSection
+        title="More settings"
+        definition="AgentConfig"
+        value={selectedAgent}
+        path={["agents", selectedAgent.id]}
+        exclude={
+          selectedAgent.private != null
+            ? PRIVATE_AGENT_EDITOR_FIELDS
+            : AGENT_EDITOR_FIELDS
+        }
+        onFieldChange={(key, next) =>
+          updateAgent(selectedAgent.id, { [key]: next } as Partial<Agent>)
+        }
       />
     </EditorPanel>
   );

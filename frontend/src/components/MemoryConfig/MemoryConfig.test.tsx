@@ -2,10 +2,14 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryConfig } from "./MemoryConfig";
 import { useConfigStore } from "@/store/configStore";
+import { useConfigSchema } from "@/hooks/useConfigSchema";
 import { Config } from "@/types/config";
 
 // Mock the store
 vi.mock("@/store/configStore");
+vi.mock("@/hooks/useConfigSchema", () => ({
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
+}));
 
 describe("MemoryConfig", () => {
   const mockConfig: Partial<Config> = {
@@ -516,5 +520,53 @@ describe("MemoryConfig", () => {
     expect(providerSelect).toHaveTextContent("OpenAI");
     const modelInput = document.getElementById("model") as HTMLInputElement;
     expect(modelInput).toHaveValue("text-embedding-3-small");
+  });
+
+  it("edits memory settings the page does not render through More settings", () => {
+    (useConfigStore as any).mockReturnValue({
+      config: mockConfig,
+      diagnostics: [],
+      updateMemoryConfig: mockUpdateMemoryConfig,
+      saveConfig: mockSaveConfig,
+      isDirty: false,
+    });
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: {
+        type: "object",
+        properties: {},
+        $defs: {
+          MemoryConfig: {
+            type: "object",
+            properties: {
+              backend: { type: "string" },
+              llm: {
+                anyOf: [{ $ref: "#/$defs/_MemoryLLMConfig" }, { type: "null" }],
+                default: null,
+                description: "LLM used by Mem0 for memory extraction",
+              },
+            },
+          },
+          _MemoryLLMConfig: {
+            type: "object",
+            properties: {
+              provider: { type: "string", default: "ollama" },
+            },
+          },
+          EmbedderConfig: {
+            type: "object",
+            properties: { model: { type: "string" } },
+          },
+        },
+      },
+      error: null,
+    });
+
+    render(<MemoryConfig />);
+    fireEvent.click(screen.getByRole("button", { name: /^More settings/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Configure LLM" }));
+
+    expect(mockUpdateMemoryConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({ llm: {} }),
+    );
   });
 });

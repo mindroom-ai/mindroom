@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Mic, Settings, Volume2, Info } from "lucide-react";
+import { Mic, Settings, Volume2, Info, PhoneCall } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -21,8 +21,21 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/use-toast";
 import { showSaveFailureToastIfNeeded } from "@/components/shared";
-import { useConfigStore } from "@/store/configStore";
+import { readConfigRoot, useConfigStore } from "@/store/configStore";
+import { SchemaFields, SchemaSection } from "@/components/SchemaForm";
+import { useConfigSchema } from "@/hooks/useConfigSchema";
+import { definitionSchema, setObjectKey } from "@/lib/configSchema";
 import { VoiceConfig as VoiceConfigType } from "@/types/config";
+
+/** VoiceConfig keys this page renders by hand; More settings shows the rest. */
+export const VOICE_EDITOR_FIELDS = [
+  "enabled",
+  "visible_router_echo",
+  "stt",
+  "intelligence",
+] as const;
+
+const STT_EDITOR_FIELDS = ["provider", "model", "api_key", "host"] as const;
 
 const OPENAI_TRANSCRIPTION_ENDPOINT =
   "https://api.openai.com/v1/audio/transcriptions";
@@ -82,6 +95,8 @@ function normalizeSTTConfig(
 
 export function VoiceConfig() {
   const { config, isLoading, saveConfig, updateConfigRoot } = useConfigStore();
+  const { schema: schemaRoot, error: schemaError } = useConfigSchema();
+  const callsConfig = config == null ? undefined : readConfigRoot(config, "calls");
   const { toast } = useToast();
 
   // Initialize local state with default values if voice config doesn't exist
@@ -395,10 +410,66 @@ export function VoiceConfig() {
             </div>
           </div>
 
+          <SchemaSection
+            title="More speech-to-text settings"
+            definition="VoiceSTTConfig"
+            value={voiceConfig.stt}
+            path={["voice", "stt"]}
+            exclude={STT_EDITOR_FIELDS}
+            onFieldChange={(key, next) => handleSTTChange({ [key]: next })}
+          />
+
+          <SchemaSection
+            title="More settings"
+            definition="VoiceConfig"
+            value={voiceConfig}
+            path={["voice"]}
+            exclude={VOICE_EDITOR_FIELDS}
+            onFieldChange={(key, next) =>
+              handleVoiceConfigChange({ [key]: next })
+            }
+          />
+
           {/* Save Button */}
           <div className="flex justify-end">
             <Button onClick={handleSave} disabled={isLoading}>
               Save Voice Configuration
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <PhoneCall className="h-5 w-5 text-primary" />
+            Voice Calls
+          </CardTitle>
+          <CardDescription>
+            Let agents join Element Call (MatrixRTC) voice calls with named call
+            profiles.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          {schemaError != null && (
+            <p className="text-sm text-muted-foreground">
+              Call settings are unavailable: {schemaError}
+            </p>
+          )}
+          {schemaRoot?.$defs?.CallsConfig != null && (
+            <SchemaFields
+              schema={definitionSchema(schemaRoot, "CallsConfig")}
+              root={schemaRoot}
+              value={callsConfig}
+              path={["calls"]}
+              onFieldChange={(key, next) =>
+                updateConfigRoot("calls", setObjectKey(callsConfig, key, next))
+              }
+            />
+          )}
+          <div className="flex justify-end">
+            <Button onClick={handleSave} disabled={isLoading}>
+              Save Call Settings
             </Button>
           </div>
         </CardContent>
