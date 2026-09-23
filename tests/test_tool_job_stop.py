@@ -544,7 +544,10 @@ async def test_stop_reaches_an_approval_continued_while_it_was_judged(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_approval_stopped_during_shutdown_is_cancelled_on_restart(tmp_path: Path) -> None:
-    """Shutdown leaves a Stopped approval paused, and it can never continue, so recovery cancels it with its cleanup."""
+    """Shutdown leaves a Stopped approval paused, so recovery cancels it with its cleanup as live cancellation would.
+
+    Like live cancellation of an approval, the cancelled outcome takes a fresh generation that stale claims cannot own.
+    """
     cleaned: list[str] = []
 
     async def awaiting() -> BackgroundOutcome:
@@ -570,7 +573,20 @@ async def test_approval_stopped_during_shutdown_is_cancelled_on_restart(tmp_path
         assert await restored.stoppable_jobs() == []
     finally:
         await restored.shutdown()
-    assert (job.status, job.user_stop_receipt_order, cleaned) == ("cancelled", 100, ["paused"])
+    assert (job.status, job.generation, job.user_stop_receipt_order, cleaned) == ("cancelled", 1, 100, ["paused"])
+
+
+@pytest.mark.asyncio
+async def test_stop_on_a_closed_runtime_raises_without_saving_a_mark(tmp_path: Path) -> None:
+    """A closed runtime refuses a Stop, so its unsettled reaction replays after restart instead of being lost."""
+    runtime = tool_job_runtime(tmp_path)
+    try:
+        await start_job(runtime, "done", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=_completed)
+    finally:
+        await runtime.shutdown()
+    with pytest.raises(runtime_module.JobAccessError, match="closed"):
+        await runtime.stop_jobs(receipt_order=100, matches=_every_job)
+    assert runtime_module.read_job_snapshot(tmp_path / "tool_jobs" / "done.json").user_stop_receipt_order is None
 
 
 def _conversation_owner(target: MessageTarget) -> ToolExecutionIdentity:
