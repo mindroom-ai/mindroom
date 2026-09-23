@@ -125,6 +125,184 @@ def test_initialize_only_preserves_authored_edits_and_changed_source(tmp_path: P
     assert not (tmp_path / "active.previous").exists()
 
 
+def test_declared_revision_preserves_hot_install_and_rollback(tmp_path: Path) -> None:
+    """A restart at the same revision retains hot updates and guarded rollback."""
+    source = _bundle(tmp_path / "source")
+    target = tmp_path / "active"
+    first = install_config_bundle(source, target, initialize_only=True, revision="deploy-1", process_env={})
+    assert first.status == "installed"
+    assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "deploy-1"
+    (source / "prompts/helper.md").write_text("Invalid on repeat")
+    (source / "config.yaml").write_text("bad: [")
+    assert install_config_bundle(source, target, initialize_only=True, revision="deploy-1", process_env={}).status == (
+        "initialized"
+    )
+    hot = _bundle(tmp_path / "hot", "Hot prompt")
+    install_config_bundle(hot, target, process_env={})
+    assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "deploy-1"
+    assert install_config_bundle(source, target, initialize_only=True, revision="deploy-1", process_env={}).status == (
+        "initialized"
+    )
+    install_config_bundle(tmp_path / "active.previous", target, expected_digest=first.digest, process_env={})
+    assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "deploy-1"
+    assert install_config_bundle(source, target, initialize_only=True, revision="deploy-1", process_env={}).status == (
+        "initialized"
+    )
+
+
+def test_new_revision_validates_and_updates_identical_tree_without_rotation(tmp_path: Path) -> None:
+    """A metadata-only revision change leaves authored files and backups untouched."""
+    source = _bundle(tmp_path / "source")
+    target = tmp_path / "active"
+    install_config_bundle(source, target, revision="one", process_env={})
+    config_stat = (target / "config.yaml").stat()
+    assert install_config_bundle(source, target, initialize_only=True, revision="two", process_env={}).status == (
+        "unchanged"
+    )
+    assert (target / "config.yaml").stat() == config_stat
+    assert not (tmp_path / "active.previous").exists()
+    assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "two"
+
+
+def test_new_revision_replaces_changed_managed_tree(tmp_path: Path) -> None:
+    """A changed revision installs changed managed content and rotates the backup."""
+    source = _bundle(tmp_path / "source")
+    target = tmp_path / "active"
+    install_config_bundle(source, target, initialize_only=True, revision="one", process_env={})
+    (source / "prompts/helper.md").write_text("Second prompt")
+    assert install_config_bundle(source, target, initialize_only=True, revision="two", process_env={}).status == (
+        "installed"
+    )
+    assert (target / "prompts/helper.md").read_text() == "Second prompt"
+    assert (tmp_path / "active.previous/prompts/helper.md").read_text() == "First prompt"
+    assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "two"
+
+
+def test_revision_ignores_incoming_metadata_and_reads_old_metadata(tmp_path: Path) -> None:
+    """Incoming metadata cannot set active revision; digest-only records upgrade."""
+    source = _bundle(tmp_path / "source")
+    (source / ".mindroom-bundle.json").write_text('{"revision": "incoming"}')
+    target = tmp_path / "active"
+    install_config_bundle(source, target, process_env={})
+    assert "revision" not in json.loads((target / ".mindroom-bundle.json").read_text())
+    assert install_config_bundle(source, target, initialize_only=True, revision="one", process_env={}).status == (
+        "unchanged"
+    )
+    assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "one"
+
+
+def test_identical_unmanaged_tree_requires_force_for_revision_adoption(tmp_path: Path) -> None:
+    """A matching candidate cannot establish ownership of an unmanaged target implicitly."""
+    source = _bundle(tmp_path / "source")
+    target = _bundle(tmp_path / "active")
+    before = _snapshot(target)
+    with pytest.raises(ValueError, match="--force"):
+        install_config_bundle(source, target, initialize_only=True, revision="one", process_env={})
+    assert _snapshot(target) == before
+    assert install_config_bundle(source, target, process_env={}).status == "unchanged"
+    assert _snapshot(target) == before
+    (source / "prompts/helper.md").write_text("Changed prompt")
+    with pytest.raises(ValueError, match="--force"):
+        install_config_bundle(source, target, initialize_only=True, revision="two", process_env={})
+    (source / "prompts/helper.md").write_text("First prompt")
+    assert install_config_bundle(source, target, revision="one", force=True, process_env={}).status == "unchanged"
+    assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "one"
+    (source / "prompts/helper.md").write_text("Next prompt")
+    assert install_config_bundle(source, target, process_env={}).status == "installed"
+
+
+def test_identical_authored_drift_cannot_be_rebaselined_by_revision(tmp_path: Path) -> None:
+    """A candidate matching authored edits cannot reset the managed baseline without force."""
+    source = _bundle(tmp_path / "source")
+    target = tmp_path / "active"
+    install_config_bundle(source, target, revision="one", process_env={})
+    original_metadata = (target / ".mindroom-bundle.json").read_bytes()
+    (target / "prompts/helper.md").write_text("Authored prompt")
+    (source / "prompts/helper.md").write_text("Authored prompt")
+    with pytest.raises(ValueError, match="--force"):
+        install_config_bundle(source, target, initialize_only=True, revision="two", process_env={})
+    assert (target / ".mindroom-bundle.json").read_bytes() == original_metadata
+    (source / "prompts/helper.md").write_text("Next prompt")
+    with pytest.raises(ValueError, match="--force"):
+        install_config_bundle(source, target, process_env={})
+    (source / "prompts/helper.md").write_text("Authored prompt")
+    assert install_config_bundle(source, target, revision="two", force=True, process_env={}).status == "unchanged"
+    assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "two"
+    (source / "prompts/helper.md").write_text("Next prompt")
+    assert install_config_bundle(source, target, process_env={}).status == "installed"
+
+
+def test_new_revision_rejects_drift_and_unmanaged_target(tmp_path: Path) -> None:
+    """Revision changes do not bypass authored drift or unmanaged target protection."""
+    source = _bundle(tmp_path / "source")
+    target = tmp_path / "active"
+    install_config_bundle(source, target, revision="one", process_env={})
+    (target / ".env").write_text("AUTHORED=keep\n")
+    (source / "prompts/helper.md").write_text("New prompt")
+    with pytest.raises(ValueError, match="--force"):
+        install_config_bundle(source, target, initialize_only=True, revision="two", process_env={})
+    assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "one"
+    unmanaged = _bundle(tmp_path / "unmanaged")
+    with pytest.raises(ValueError, match="--force"):
+        install_config_bundle(source, unmanaged, initialize_only=True, revision="two", process_env={})
+
+
+def test_revision_metadata_failure_preserves_old_value_and_allows_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed metadata replacement preserves the prior revision for retry."""
+    source = _bundle(tmp_path / "source")
+    target = tmp_path / "active"
+    install_config_bundle(source, target, revision="one", process_env={})
+    original = (target / ".mindroom-bundle.json").read_bytes()
+    replace = Path.replace
+
+    def fail_replace(path: Path, destination: Path) -> Path:
+        if destination == target / ".mindroom-bundle.json":
+            msg = "metadata publication failed"
+            raise OSError(msg)
+        return replace(path, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", fail_replace)
+        with pytest.raises(OSError, match="metadata publication failed"):
+            install_config_bundle(source, target, revision="two", process_env={})
+    assert (target / ".mindroom-bundle.json").read_bytes() == original
+    assert install_config_bundle(source, target, revision="two", process_env={}).status == "unchanged"
+
+
+def test_partial_revision_metadata_write_keeps_old_value(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Partial metadata output cannot replace the last complete record."""
+    source = _bundle(tmp_path / "source")
+    target = tmp_path / "active"
+    install_config_bundle(source, target, revision="one", process_env={})
+    original = (target / ".mindroom-bundle.json").read_bytes()
+    dump = json.dump
+
+    def fail_dump(value: object, stream: TextIO) -> None:
+        if isinstance(value, dict) and value.get("revision") == "two":
+            stream.write('{"digest":')
+            msg = "metadata write failed"
+            raise OSError(msg)
+        dump(value, stream)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(json, "dump", fail_dump)
+        with pytest.raises(OSError, match="metadata write failed"):
+            install_config_bundle(source, target, revision="two", process_env={})
+    assert (target / ".mindroom-bundle.json").read_bytes() == original
+    assert not list(tmp_path.glob(".active.metadata-*"))
+
+
+@pytest.mark.parametrize("revision", ["", " ", "line\nbreak", "x" * 129, "\ud800", 123])
+def test_invalid_revision_is_rejected(tmp_path: Path, revision: object) -> None:
+    """The native boundary rejects blank, control, oversized, and nonstring values."""
+    source = _bundle(tmp_path / "source")
+    with pytest.raises(ValueError, match="revision"):
+        install_config_bundle(source, tmp_path / "active", revision=revision, process_env={})  # type: ignore[arg-type]
+
+
 def test_changed_bundle_requires_force_after_authored_edits(tmp_path: Path) -> None:
     """Authored files must survive a new revision unless replacement is explicit."""
     source = _bundle(tmp_path / "source")

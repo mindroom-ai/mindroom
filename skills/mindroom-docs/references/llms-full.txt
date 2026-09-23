@@ -651,6 +651,8 @@ Configure AI agents:
 - **Rooms** - Where the agent operates
 - **Learning** - Enable or disable Agno Learning per agent (enabled by default)
 - **Learning mode** - Choose `always` (automatic extraction) or `agentic` (tool-driven)
+- **Lazy tool loading** - Open a checked tool's settings and enable **Load lazily** (`defer`) or **Load at session start** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` cannot be deferred, so they do not offer it
+- **More settings** - Every other agent field, such as `participation`, `mid_turn`, `accept_invites`, `access`, `memory_search`, `thread_exports`, and `room_thread_modes`
 
 ### Teams
 
@@ -670,6 +672,7 @@ Manage Matrix room configuration:
 - **Display name** and **Description**
 - **Room model** - Optional model override
 - **Agents in room** - Select which agents have access
+- **More settings** - Per-room `join_policy`, `listed`, `encrypted`, `invite_users`, and `admins` overrides
 
 ### External Rooms
 
@@ -685,6 +688,8 @@ Configure AI model providers:
 
 - **Add/edit models** with provider, model ID, host URL, and advanced settings
 - **Provider API keys** section for configuring credentials
+
+While a model row is being edited, its **More settings** section appears below the table, and cancelling the row edit also reverts the More settings changes made since the last save.
 
 **Runtime-supported providers:** Anthropic, Bedrock Claude, Azure OpenAI, OpenAI, Codex CLI ChatGPT authentication, Kimi Code, Google Gemini, Vertex AI Claude, Ollama, llama.cpp, Groq, OpenRouter, Cerebras, DeepSeek, Z.ai, and the internal synthetic provider.
 The dashboard preserves provider IDs already present in the configuration; not every runtime provider has a dedicated icon or preset in the add-model dropdown.
@@ -761,6 +766,7 @@ Configure voice message handling:
 - **Enable/disable** voice message support
 - **Speech-to-Text** - OpenAI transcription or a self-hosted OpenAI-compatible service
 - **Transcript intelligence** - Model selection for mention normalization and light ASR cleanup
+- **Voice Calls** - MatrixRTC call settings, named call profiles, and per-agent profile assignments
 
 ### Integrations
 
@@ -770,7 +776,30 @@ Connect external services to enable agent capabilities:
 - **Search and filter** by status (Available, Unconfigured, Configured)
 - **OAuth flows** for Google (6 endpoints), Spotify (4 endpoints), Home Assistant (7 endpoints), and more
 
+### Settings
+
+The **Settings** tab edits every top-level configuration root that has no dedicated tab.
+Sections group related roots: response defaults, history and context, tools and workers, router, personal rooms, room defaults, tool approval, prompts, MCP servers, plugins, access and identity, Matrix and runtime, and diagnostics.
+A root or field that no tab or section claims appears under **Other**, so new options are never hidden.
+The **Tools and workers** section also edits per-tool overrides for the default tools every agent inherits.
+Sections with validation errors from the last save are marked **Needs attention**.
+Changes join the same draft as every other tab and are saved with **Save**.
+
 ## Features
+
+### More Settings
+
+Tabs with hand-built editors also show a collapsible **More settings** section listing the fields they do not render themselves.
+The Agents, Teams, Rooms, Memory, Knowledge, Voice, and Models tabs use it.
+
+### Schema-Driven Forms
+
+Settings and More settings forms are generated from the configuration schema that the running backend serves at `/api/config/schema`.
+Each field shows its description and default, entity references such as model or agent names become pickers, and credential-bearing fields are masked.
+Resetting a field removes it from `config.yaml` so the default applies again, and optional blocks are added or removed with their **Configure** checkbox.
+Lists keep their order and can repeat values, such as MCP server arguments.
+Validation errors from a save appear beside the affected field, and collapsed sections that contain one open automatically.
+If the schema cannot be loaded, these forms show the error with a **Retry** button.
 
 ### Save Status
 
@@ -803,6 +832,7 @@ The dashboard communicates with the backend API at `/api/`:
 | PUT | `/api/config/save` | Save full configuration |
 | GET | `/api/config/raw` | Fetch the raw `config.yaml` source for recovery editing |
 | PUT | `/api/config/raw` | Replace the entire raw `config.yaml` source during recovery |
+| GET | `/api/config/schema` | Fetch the configuration JSON schema used by Settings and More settings |
 | GET | `/api/config/agents` | List all agents |
 | POST | `/api/config/agents` | Create new agent |
 | PUT | `/api/config/agents/{id}` | Update agent |
@@ -2177,6 +2207,7 @@ personal_rooms:
   welcome_dispatch: false
   confirmation: ""
   backfill: false
+  auto_join_requester: false
   requester_admin: false
   # avatar: avatars/personal.png
   avatar_from_requester: false
@@ -2197,6 +2228,7 @@ When enabled, its fields are:
 | `welcome_dispatch` | boolean | `false` | Dispatch the welcome to the selected agent after the human joins; otherwise send a notice. |
 | `confirmation` | string | `""` | Optional once-only notice template in the original onboarding room, up to 10,000 characters. |
 | `backfill` | boolean | `false` | Also reconcile current eligible onboarding-room members on startup and config reload. |
+| `auto_join_requester` | boolean | `false` | Use the homeserver admin API to join the requester during initial creation of a new personal room. |
 | `requester_admin` | boolean | `false` | Grant the human Matrix room administration. |
 | `avatar` | string or `null` | `null` | Room avatar file, relative to the configuration; fills only an empty avatar. |
 | `avatar_from_requester` | boolean | `false` | Copy the human's profile avatar into an empty room avatar when no avatar file is configured. |
@@ -2206,6 +2238,13 @@ Trigger rooms must already be configured.
 Commands are optional, exact messages in those rooms, and onboard only their authenticated human sender.
 Existing agent access rules still apply; agent and service accounts are excluded.
 `backfill: true` also reconciles current eligible members at startup and configuration reload.
+`auto_join_requester: true` requires a source Matrix account authorized to use the homeserver's Synapse-compatible admin join API.
+It enrolls only the requester of a newly created room.
+A failed initial join can retry after restart, but a requester who has already joined, left, or been banned is never force joined again.
+Existing and imported rooms do not gain automatic joining when this setting is enabled later.
+Restart reconciliation and backfill preserve a requester who left or was banned from a personal room.
+A fresh leave-to-join event in the onboarding room may re-invite a departed requester to a newly created personal room; it never overrides a ban or re-invites someone to an imported room.
+If room creation succeeds but its local room-ID receipt is lost, alias recovery conservatively skips automatic joining because it cannot prove the room was newly created by that attempt.
 
 Templates support `{user}` (full Matrix user ID), `{room}` (room alias), and `{agent}` (display name).
 Aliases combine the prefix, the first 20 lowercase SHA256 hex characters of the full user ID, and the installation namespace.
@@ -2235,19 +2274,21 @@ Use `personal_room_record_path(runtime_paths, agent_name, user_id)` and `write_p
 The storage location is `agents/<agent>/personal_rooms/<full-sha256-user-id>.json` under the runtime storage root.
 These files are trusted operator state, never user-submitted input.
 
-A minimal seed looks like this:
+For a private room with shared history and one already permitted guest, a seed looks like this:
 
 ```json
 {
-  "user_id": "@alice:example.org",
-  "alias": "#personal-alice:example.org",
-  "source_room_id": "!lobby:example.org",
-  "room_id": "!existing:example.org",
+  "user_id": "@alice:example.test",
+  "alias": "#personal-alice:example.test",
+  "source_room_id": "!lobby:example.test",
+  "room_id": "!existing:example.test",
   "welcome_completed": true,
   "adoption": {
-    "creator_user_id": "@router:example.org",
-    "agent_user_id": "@helper:example.org",
-    "router_user_id": "@router:example.org"
+    "creator_user_id": "@router:example.test",
+    "agent_user_id": "@helper:example.test",
+    "router_user_id": "@router:example.test",
+    "expected_history_visibility": "shared",
+    "additional_user_ids": ["@guest:example.test"]
   }
 }
 ```
@@ -2256,10 +2297,16 @@ The filename must bind the exact full requester ID, and adoption requires an exa
 `creator_user_id` must match the immutable create-event sender, and `agent_user_id` must match the selected agent's authenticated Matrix identity.
 An optional `router_user_id` permits only this installation's persisted router account to remain in the room.
 Before import, arrange an agent-authored `org.mindroom.personal_room` state event with empty state key and exactly `{"user_id": "<requester>", "agent_user_id": "<agent>"}` as content.
-The target agent must already be joined with room admin power, the directory visibility must be private, the join rule must be invite-only, and history visibility must be `invited`.
-No other joined, invited, or knocking member is permitted beyond the requester, agent, and explicitly seeded router.
+The target agent must already be joined with room admin power, the directory visibility must be private, and the join rule must be invite-only.
+`expected_history_visibility` must exactly match the room's current `invited`, `joined`, or `shared` history policy; `world_readable` is never accepted.
+If omitted, it defaults to `invited`.
+`additional_user_ids` lists concrete Matrix IDs for existing participants who may be joined, invited, or knocking; it defaults to an empty list.
+No other joined, invited, or knocking member is permitted beyond the requester, agent, explicitly seeded router, and these additional users.
+The list is a permission attestation only: it does not invite or rejoin anyone, grant room admin power, or retain a router during cleanup.
+Only `router_user_id` grants the separate router retention contract.
 Normal authorization and current onboarding-room membership still apply when reconciling the seed.
-The service verifies these conditions before inviting or sending; it does not rewrite existing room identity, name, topic, or history.
+The service verifies these conditions before inviting or sending; changed history or membership fails reconciliation.
+It does not rewrite existing room identity, name, topic, or history.
 Explicitly seeded router membership is retained during ordinary cleanup, including after onboarding is disabled.
 
 Set `welcome_completed: true` only when onboarding history is already complete; no historical event ID needs to be invented.
@@ -20302,6 +20349,9 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Retrying a stream can reuse partial assistant or tool state. | Establish retry ownership and test that partial output cannot be duplicated. | `agno_compat_openai_responses.py`. |
 | Native Responses error events are ignored and unread streams can remain open after parsing fails. | Preserve terminal error codes and explicitly close SDK streams on failure or consumer closure; retain incomplete-stream retry protections. | `agno_compat_openai_responses.py`. |
 | Unsuccessful Responses streams discard received usage, and successful retries replace earlier attempt counters. | Preserve reported terminal usage through failure cleanup and across retries without counting clean completions twice; tracked locally in [issue #1952](https://github.com/mindroom-ai/mindroom/issues/1952), with no matching upstream issue or PR identified. | `agno_compat_openai_responses.py`; real SDK, Agent, durable-usage, and export regressions in `tests/test_openai_responses_stream.py`. Combined retry counters stay aggregate-only in request exports. |
+| Terminal error and cancellation cleanup keep stale checkpoint or continuation messages. | Refresh the saved message list from current in-flight messages while retaining cancellation cleanup; no matching upstream tracking identified. | `agno_compat_run_messages.py`; Agent/Team snapshots and resumed-run export coverage in `tests/test_agno_compat_run_messages.py`. |
+| Interrupted model streams accumulate usage before retaining the assistant message. | Preserve the metered message before terminal persistence; [issue #9489](https://github.com/agno-agi/agno/issues/9489) identifies the same lost-message boundary, but does not separately track request-detail preservation. | `agno_compat_run_messages.py`; real SDK stream failures and task cancellation in `tests/test_openai_responses_stream.py`. |
+| Stopping an async run between chunks abandons its suspended model stream until garbage collection, after the run is persisted without the usage that stream already received. | Close in-flight model streams innermost first before terminal cancellation or error persistence; [issue #9489](https://github.com/agno-agi/agno/issues/9489) covers related abandoned-generation bookkeeping, not usage settlement. | `agno_compat_run_messages.py` settles the abandoned request once from received stream data; consumer closure and failure, cancellation-request, and retried-attempt regressions in `tests/test_openai_responses_stream.py`. |
 | OpenAI usage parsing omits cache-write input tokens. | Preserve the SDK counter for Responses and Chat Completions, including older payloads where the field is absent. | `agno_compat_openai_responses.py`, `agno_compat_openai_chat.py`. |
 | Responses guesses inline-file MIME from opaque storage paths before original filenames. | Infer missing MIME from the original filename without mutating attachment metadata; retain binary MIME for compressed attachments stored under opaque paths. No matching upstream issue or PR identified. | `agno_compat_openai_responses.py`; synthetic attachment-to-request regression coverage in `tests/test_openai_models.py`. |
 | Run saves commit internally, with no caller-owned transaction or persistence hook. | Tracking gap: an in-transaction hook is needed to persist application-owned usage atomically; no matching upstream issue or PR identified. | `agno_compat_sqlite.py` copies the Agno 3.0.9 run UPSERT; `usage_storage.py` owns the content-free schema and projection. |
@@ -20339,6 +20389,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store and exact-run cancellation drainage. | `agent_storage.py` and storage lifecycle callers; `ai.py` retains canonical history ownership. |
 | `agno_compat_sqlite.py` | Private pragma listener removal, monotonic run insertion with atomic usage snapshots, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy. |
 | `agno_compat_session_metrics.py` | Version-guarded Agent/Team accumulator repair, scoped to owned storage. | Loaded run metrics seed transient accounting snapshots; repeated saves add only changed contributions while preserving existing cumulative history. |
+| `agno_compat_run_messages.py` | Version-guarded Agent/Team terminal snapshots, retention of metered messages from interrupted model streams, and one-time settlement of abandoned async model streams. | `agent_storage.py` installs the patch; provider adapters own reported counters, and `usage_storage.py` retains content-free projection and retry exclusions. Aggregate accounting remains with Agno and the session-metrics repair. |
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
@@ -23611,30 +23662,37 @@ Start MindRoom with your configuration.
  - Starts the bundled dashboard/API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --log-level                -l              TEXT     Set the logging level (DEBUG,      │
-│                                                     INFO, WARNING, ERROR)              │
-│                                                     [env var: LOG_LEVEL]               │
-│                                                     [default: INFO]                    │
-│ --config                   -c              PATH     Use this config file path.         │
-│                                                     Defaults the storage location to   │
-│                                                     the selected config directory      │
-│                                                     unless --storage-path is set.      │
-│ --storage-path             -s              PATH     Base directory for persistent      │
-│                                                     MindRoom data (state, sessions,    │
-│                                                     tracking)                          │
-│ --bootstrap-config-bundle                  PATH     Initialize the selected config     │
-│                                                     directory from this bundle only    │
-│                                                     when the directory is absent.      │
-│ --api                          --no-api             Start the bundled dashboard/API    │
-│                                                     server alongside the bot           │
-│                                                     [default: api]                     │
-│ --api-port                                 INTEGER  Port for the bundled dashboard/API │
-│                                                     server                             │
-│                                                     [default: 8765]                    │
-│ --api-host                                 TEXT     Host for the bundled dashboard/API │
-│                                                     server                             │
-│                                                     [default: 0.0.0.0]                 │
-│ --help                     -h                       Show this message and exit.        │
+│ --log-level                     -l              TEXT     Set the logging level (DEBUG, │
+│                                                          INFO, WARNING, ERROR)         │
+│                                                          [env var: LOG_LEVEL]          │
+│                                                          [default: INFO]               │
+│ --config                        -c              PATH     Use this config file path.    │
+│                                                          Defaults the storage location │
+│                                                          to the selected config        │
+│                                                          directory unless              │
+│                                                          --storage-path is set.        │
+│ --storage-path                  -s              PATH     Base directory for persistent │
+│                                                          MindRoom data (state,         │
+│                                                          sessions, tracking)           │
+│ --bootstrap-config-bundle                       PATH     Initialize the selected       │
+│                                                          config directory from this    │
+│                                                          bundle only when the          │
+│                                                          directory is absent.          │
+│ --bootstrap-config-bundle-rev…                  TEXT     Install a changed bootstrap   │
+│                                                          revision through native       │
+│                                                          validation; preserve a        │
+│                                                          matching active revision.     │
+│ --api                               --no-api             Start the bundled             │
+│                                                          dashboard/API server          │
+│                                                          alongside the bot             │
+│                                                          [default: api]                │
+│ --api-port                                      INTEGER  Port for the bundled          │
+│                                                          dashboard/API server          │
+│                                                          [default: 8765]               │
+│ --api-host                                      TEXT     Host for the bundled          │
+│                                                          dashboard/API server          │
+│                                                          [default: 0.0.0.0]            │
+│ --help                          -h                       Show this message and exit.   │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -24643,6 +24701,7 @@ Install a complete configuration directory, including nested YAML includes, prom
 ```bash
 mindroom config install-bundle ./candidate --target ./active --json
 mindroom config install-bundle ./candidate --target ./active --initialize-only
+mindroom config install-bundle ./candidate --target ./active --revision deploy-2
 mindroom config check-applied --path ./active/config.yaml --fingerprint <receipt-fingerprint> --wait 300
 # Keep each installation receipt; pin rollback to the previous revision's digest:
 mindroom config install-bundle ./active.previous --target ./active --expected-digest <previous-receipt-digest> --json
@@ -24655,8 +24714,16 @@ Run the installer with the runtime's environment and filesystem access; external
 Relative paths resolve within the staged candidate during validation.
 Automatic config migrations affect the staged copy only.
 
-`--initialize-only` preserves any existing target directory, even when the supplied revision changes or the existing files have been edited.
+`--initialize-only` without `--revision` preserves any existing target directory.
 It does not validate that existing tree and returns `initialized` with no fingerprint.
+With `--revision`, a matching revision stored in `.mindroom-bundle.json` preserves the active tree after recovery, including any later hot installs.
+A different or missing stored revision validates the candidate.
+When `--revision` is supplied and the stored revision is missing or differs, an existing active tree must be owned and unedited, even when the candidate has identical content.
+Use ordinary installation with explicit `--force` to adopt an unmanaged tree or reset authored drift.
+The revision is an opaque, nonblank string of at most 128 UTF-8 bytes with no control characters.
+It changes only after successful validation and publication.
+If candidate content is identical, only metadata changes atomically; authored files and previous trees stay untouched.
+Ordinary installs without `--revision` carry the active revision forward and ignore revision metadata in the incoming bundle.
 Without this flag, unchanged trees return `unchanged`.
 Changed managed trees replace the active tree only if its file names, modes, and contents still match the last installation.
 This covers `.env` and files outside the YAML include graph too.
@@ -24679,10 +24746,12 @@ If the active revision has since been authored, rollback also requires explicit 
 A failed or missing runtime receipt does not automatically roll back filesystem state.
 
 For startup, `mindroom run --bootstrap-config-bundle SOURCE --config TARGET/config.yaml` runs initialize-only installation before loading the runtime environment.
+Add `--bootstrap-config-bundle-revision REVISION` to install a changed declared revision before startup; this option requires a bootstrap source.
 The target directory is derived from the selected config path, and the source must contain the same config filename at its root.
 Validation reads the staged `.env`, with exported process values and explicit `--storage-path` taking precedence.
 Startup then resolves paths and `.env` again from the installed tree.
-Existing target directories are preserved, so changed source revisions never overwrite authored edits on restart.
+Without a declared revision, existing target directories are preserved on restart.
+With a matching declared revision, restarts preserve hot updates and guarded rollbacks; a new revision uses native validation and drift protection.
 Keep storage outside this dedicated config directory.
 
 **Filesystem limits:** directory replacement uses two renames on the target filesystem.

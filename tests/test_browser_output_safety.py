@@ -85,7 +85,7 @@ async def test_browser_outputs_reject_directory_swap(
                     save_as=save_as,
                     path=download_path,
                 ),
-            )
+            ),
         )
     with pytest.raises((OSError, ValueError)):
         await operation

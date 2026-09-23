@@ -27,6 +27,8 @@ It should send, edit, redact, and finalize already-generated responses.
 `AgentApprovalExecution` restores saved execution, validates exact approved calls, and supplies the resumed attempt to that shared driver.
 The driver distinguishes a completed model attempt from a completed response and reports typed execution status independently of display metadata.
 Approval pauses retain the response's continuation count and active model in `ApprovalContinuation`, so resuming does not reset the remaining budget.
+For a streaming requester, the resumed run edits the paused reply with throttled progress that starts from its saved presentation.
+That progress closes before the approval lifecycle delivers the durable final edit, publishes a further pause, or settles a failure or stop, and closing waits until no progress edit is in flight, even when a stop arrives meanwhile.
 `FinalDeliveryOutcome` exposes terminal run identity from the frozen delivery payload through its typed contract, keeping live and recovered history linkage consistent.
 
 `ResponseSources` captures immutable pending events, logical sources, discovery aliases, and the selected edit receipt for one request.

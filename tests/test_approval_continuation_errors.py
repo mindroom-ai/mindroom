@@ -32,8 +32,14 @@ if TYPE_CHECKING:
 
 async def _collect(events: AsyncIterator[object], *, team: bool) -> RunOutput | TeamRunOutput:
     if team:
-        return await _collect_team_continuation(events, _TeamStreamPresentation.new([], [], show_tool_calls=True))
-    return (await _collect_agent_continuation(events, CollectedStreamPresentation(show_tool_calls=True))).response
+        return await _collect_team_continuation(
+            events,
+            _TeamStreamPresentation.new([], [], show_tool_calls=True),
+            progress=None,
+        )
+    return (
+        await _collect_agent_continuation(events, CollectedStreamPresentation(show_tool_calls=True), progress=None)
+    ).response
 
 
 @pytest.mark.parametrize("team", [False, True])

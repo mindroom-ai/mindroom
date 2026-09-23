@@ -43,9 +43,12 @@ from mindroom.streaming import (
     StreamingLifecycleSuspensionError,
     StreamingResponse,
     send_streaming_response,
+    stream_progress_edits,
 )
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
+from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
+from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import (
     bind_runtime_paths,
     make_matrix_client_mock,
@@ -56,8 +59,10 @@ from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
+    from contextlib import AbstractAsyncContextManager
 
     from mindroom.final_delivery import StreamTransportOutcome
+    from mindroom.streaming import ProgressPublisher
 
 
 @dataclass(frozen=True)
@@ -67,6 +72,7 @@ class _GatewayOp:
     kind: Literal["send", "edit"]
     content: dict[str, Any]
     display_text: str
+    event_id: str | None = None
 
 
 class _FakeGateway:
@@ -95,13 +101,13 @@ class _FakeGateway:
         self,
         _client: object,
         _room_id: str,
-        _event_id: str,
+        event_id: str,
         new_content: dict[str, Any],
         new_text: str,
         *,
         retry_sync_recovery: bool = False,  # noqa: ARG002
     ) -> DeliveredMatrixEvent:
-        self._record(_GatewayOp(kind="edit", content=dict(new_content), display_text=new_text))
+        self._record(_GatewayOp(kind="edit", content=dict(new_content), display_text=new_text, event_id=event_id))
         return DeliveredMatrixEvent(event_id=f"$edit_{len(self.ops)}", content_sent=dict(new_content))
 
     async def wait_for_ops(self, count: int) -> None:
@@ -781,3 +787,220 @@ async def test_cancellation_mid_stream_appends_cancelled_note(config: Config) ->
     assert transport_outcome.terminal_status == "cancelled"
     assert transport_outcome.failure_reason == "cancelled_by_user"
     assert transport_outcome.visible_event_id == "$stream_1"
+
+
+def _progress_edits(config: Config) -> AbstractAsyncContextManager[ProgressPublisher]:
+    return stream_progress_edits(
+        make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
+        MessageTarget.resolve("!test:localhost", "$thread", "$original_123"),
+        config,
+        runtime_paths_for(config),
+        event_id="$waiting",
+        show_tool_calls=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_progress_edits_update_the_existing_reply_and_leave_its_terminal_to_the_owner(config: Config) -> None:
+    """Resumed work edits the reply it continues from its restored body, never sending a terminal update."""
+    gateway = _FakeGateway()
+    pending = "Before approval.\n\n🔧 `inspect` [1] ⏳"
+    completed = "Before approval.\n\n🔧 `inspect` [1]"
+    started_trace = [ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")]
+    completed_trace = [
+        ToolTraceEntry(type="tool_call_completed", tool_name="inspect", result_preview="ok", tool_call_id="call-1"),
+    ]
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+    ):
+        async with _progress_edits(config) as publish:
+            await publish(StructuredStreamChunk(content=pending, tool_trace=started_trace))
+            await gateway.wait_for_ops(1)
+            await publish(StructuredStreamChunk(content=completed, tool_trace=completed_trace))
+            await gateway.wait_for_ops(2)
+            await publish(StructuredStreamChunk(content=f"{completed}\n\nAfter approval."))
+            await gateway.wait_for_ops(3)
+
+    assert [(op.kind, op.event_id) for op in gateway.ops] == [("edit", "$waiting")] * 3
+    assert [op.display_text for op in gateway.ops] == [pending, completed, f"{completed}\n\nAfter approval."]
+    assert {op.content[STREAM_STATUS_KEY] for op in gateway.ops} == {STREAM_STATUS_STREAMING}
+    assert {op.content["msgtype"] for op in gateway.ops} == {"m.notice"}
+    assert [event["type"] for event in gateway.ops[0].content[_TOOL_TRACE_KEY]["events"]] == ["tool_call_started"]
+    assert [event["type"] for event in gateway.ops[2].content[_TOOL_TRACE_KEY]["events"]] == ["tool_call_completed"]
+
+
+@pytest.mark.asyncio
+async def test_first_progress_publication_replaces_the_prior_reply_state_at_once(config: Config) -> None:
+    """An empty restored body still leaves the previous state immediately instead of waiting on a throttle."""
+    gateway = _FakeGateway()
+
+    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
+        async with _progress_edits(config) as publish:
+            await publish(StructuredStreamChunk(content=""))
+
+    assert [op.display_text for op in gateway.ops] == [_PROGRESS_PLACEHOLDER]
+    assert gateway.ops[0].content[STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_failed_progress_edit_stops_progress_without_failing_its_owner(config: Config) -> None:
+    """Progress is transport only, so a rejected edit ends progress while the owner keeps running."""
+    attempts: list[str] = []
+    attempted = asyncio.Event()
+
+    async def rejected_edit(*_args: object, **_kwargs: object) -> None:
+        attempts.append("edit")
+        attempted.set()
+
+    with patch("mindroom.streaming.edit_message_result", new=rejected_edit):
+        async with _progress_edits(config) as publish:
+            await publish(StructuredStreamChunk(content="Before."))
+            async with asyncio.timeout(5):
+                await attempted.wait()
+            await publish(StructuredStreamChunk(content="Before. After."))
+
+    assert attempts == ["edit"]
+
+
+@pytest.mark.asyncio
+async def test_progress_tool_boundaries_are_delivered_without_waiting_for_a_later_event(config: Config) -> None:
+    """With the real clock, tool starts and completions reach the reply at once like ordinary streamed tools."""
+    gateway = _FakeGateway()
+    started = "Seed. Running the build.\n\n🔧 `build` [1] ⏳"
+    completed = "Seed. Running the build.\n\n🔧 `build` [1]"
+
+    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
+        async with _progress_edits(config) as publish:
+            await publish(StructuredStreamChunk(content="Seed."))
+            await gateway.wait_for_ops(1)
+            await publish(StructuredStreamChunk(content="Seed. Running the build."))
+            await publish(
+                StructuredStreamChunk(
+                    content=started,
+                    tool_trace=[ToolTraceEntry(type="tool_call_started", tool_name="build", tool_call_id="call-1")],
+                ),
+            )
+            async with asyncio.timeout(1):
+                await gateway.wait_for_ops(2)
+            await publish(
+                StructuredStreamChunk(
+                    content=completed,
+                    tool_trace=[ToolTraceEntry(type="tool_call_completed", tool_name="build", tool_call_id="call-1")],
+                ),
+            )
+            async with asyncio.timeout(1):
+                await gateway.wait_for_ops(3)
+
+    assert [op.display_text for op in gateway.ops] == ["Seed.", started, completed]
+
+
+class _BlockingEdit:
+    """Hold each progress edit in flight and record whether it finished before its owner."""
+
+    def __init__(self, *, ignore_first_cancel: bool = False) -> None:
+        self.started = asyncio.Event()
+        self.cancel_seen = asyncio.Event()
+        self.release = asyncio.Event()
+        self.finished = asyncio.Event()
+        self.landed: list[str] = []
+        self._ignore_first_cancel = ignore_first_cancel
+
+    async def edit(self, *_args: object, **_kwargs: object) -> DeliveredMatrixEvent | None:
+        self.started.set()
+        try:
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancel_seen.set()
+                if not self._ignore_first_cancel:
+                    raise
+                await self.release.wait()
+            self.landed.append("progress")
+            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
+        finally:
+            self.finished.set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_progress_shutdown_waits_for_the_in_flight_edit_to_end(config: Config) -> None:
+    """A stop that arrives while progress drains cannot leave an edit in flight past its owner."""
+    blocking = _BlockingEdit()
+    exiting = asyncio.Event()
+
+    async def owner() -> None:
+        async with _progress_edits(config) as publish:
+            await publish(StructuredStreamChunk(content="Before."))
+            await blocking.started.wait()
+            exiting.set()
+
+    with patch("mindroom.streaming.edit_message_result", new=blocking.edit):
+        task = asyncio.create_task(owner())
+        await exiting.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert blocking.finished.is_set()
+        blocking.release.set()
+
+    assert blocking.landed == []
+
+
+@pytest.mark.asyncio
+async def test_progress_shutdown_outlasts_a_delivery_that_ignores_its_drain_deadline(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A progress edit that survives the drain deadline and its cancellation still ends before the owner resumes."""
+    monkeypatch.setattr(streaming_mod, "_STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS", 0.01)
+    blocking = _BlockingEdit(ignore_first_cancel=True)
+
+    async def owner() -> None:
+        async with _progress_edits(config) as publish:
+            await publish(StructuredStreamChunk(content="Before."))
+            await blocking.started.wait()
+
+    with patch("mindroom.streaming.edit_message_result", new=blocking.edit):
+        task = asyncio.create_task(owner())
+        async with asyncio.timeout(5):
+            await blocking.cancel_seen.wait()
+        assert not task.done()
+        blocking.release.set()
+        await task
+
+    assert blocking.finished.is_set()
+    assert blocking.landed == ["progress"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_progress_edits_show_worker_warmup_of_the_resumed_tool(config: Config) -> None:
+    """A sandbox worker warming up for resumed work reports its progress in the reply like ordinary streaming."""
+    gateway = _FakeGateway()
+
+    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
+        async with _progress_edits(config) as publish:
+            await publish(StructuredStreamChunk(content="Before."))
+            await gateway.wait_for_ops(1)
+            pump = get_worker_progress_pump()
+            assert pump is not None
+            pump.queue.put_nowait(
+                WorkerProgressEvent(
+                    tool_name="shell",
+                    function_name="run",
+                    progress=WorkerReadyProgress(
+                        phase="cold_start",
+                        worker_key="worker-a",
+                        backend_name="kubernetes",
+                        elapsed_seconds=2.0,
+                    ),
+                ),
+            )
+            await gateway.wait_for_ops(2)
+
+    assert get_worker_progress_pump() is None
+    assert gateway.ops[1].display_text.startswith("Before.\n\n")
+    assert "shell" in gateway.ops[1].display_text

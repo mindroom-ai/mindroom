@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serial
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.judgment import TypeSafeJudgmentConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_defaults_fields
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
@@ -85,8 +86,14 @@ class CoalescingConfig(BaseModel):
 class DebugConfig(BaseModel):
     """Debug and diagnostic settings."""
 
-    log_llm_requests: bool = False
-    llm_request_log_dir: str | None = None
+    log_llm_requests: bool = Field(
+        default=False,
+        description="Write best-effort JSONL records of provider requests for troubleshooting",
+    )
+    llm_request_log_dir: str | None = Field(
+        default=None,
+        description="Directory for LLM request logs; defaults to mindroom_data/logs/llm_requests",
+    )
 
 
 def _normalize_tool_entry_overrides(
@@ -156,10 +163,19 @@ class ToolConfigEntry(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    name: str
-    overrides: dict[str, object] = Field(default_factory=dict)
-    defer: bool = False
-    initial: bool = False
+    name: str = Field(description="Registered tool name")
+    overrides: dict[str, object] = Field(
+        default_factory=dict,
+        description="Values for the tool's override fields; defaults.tools entries apply them to every agent",
+    )
+    defer: bool = Field(
+        default=False,
+        description="Hide the tool schema until the agent loads the tool for the current session",
+    )
+    initial: bool = Field(
+        default=False,
+        description="Load a deferred tool at session start and keep it loaded; requires defer",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -234,7 +250,10 @@ def _validate_compaction_threshold_choice(
 
 
 class CompactionOverrideConfig(BaseModel):
-    """Optional per-scope overrides for destructive compaction."""
+    """Optional per-scope overrides for destructive compaction.
+
+    An authored null clears the value inherited from defaults, except for ``enabled``, where it turns compaction off.
+    """
 
     enabled: bool | None = Field(
         default=None,
@@ -267,6 +286,7 @@ class CompactionOverrideConfig(BaseModel):
     model: str | None = Field(
         default=None,
         description="Optional model config name to use for summary generation",
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     fallback_model: str | None = Field(
         default=None,
@@ -274,6 +294,7 @@ class CompactionOverrideConfig(BaseModel):
             "Optional model config name retried once when the summary model refuses for safeguards; summary input "
             "is rebuilt under the fallback model's context budget when needed"
         ),
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     timeout_seconds: float | None = Field(
         default=None,
@@ -328,6 +349,7 @@ class CompactionConfig(BaseModel):
     model: str | None = Field(
         default=None,
         description="Optional model config name to use for summary generation",
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     fallback_model: str | None = Field(
         default=None,
@@ -335,6 +357,7 @@ class CompactionConfig(BaseModel):
             "Optional model config name retried once when the summary model refuses for safeguards; summary input "
             "is rebuilt under the fallback model's context budget when needed"
         ),
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     timeout_seconds: float = Field(
         default=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
@@ -360,6 +383,7 @@ class DefaultsConfig(BaseModel):
     tools: list[ToolConfigEntry] = Field(
         default_factory=lambda: [ToolConfigEntry(name=name) for name in _DEFAULT_DEFAULT_TOOLS],
         description="Tool entries automatically added to every agent, with optional inline overrides",
+        json_schema_extra=dashboard_hint(reference="tool"),
     )
     markdown: bool = Field(default=True, description="Default markdown setting")
     enable_streaming: bool = Field(
@@ -425,6 +449,7 @@ class DefaultsConfig(BaseModel):
     worker_tools: list[str] | None = Field(
         default=None,
         description="Tool names to route through scoped workers by default (None = use the built-in default routing policy)",
+        json_schema_extra=dashboard_hint(reference="tool"),
     )
     worker_scope: WorkerScope | None = Field(
         default=None,
@@ -471,6 +496,7 @@ class DefaultsConfig(BaseModel):
     thread_summary_model: str | None = Field(
         default=None,
         description="Model config name for generating thread summaries (e.g., 'haiku'). Uses 'default' if not set.",
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     thread_summary_temperature: float | None = Field(
         default=0.2,
@@ -566,6 +592,7 @@ class EmbedderConfig(BaseModel):
             "Explicit embedder API key. Highest priority, above credentials_service and the legacy "
             "dedicated embedder-to-openai fallback"
         ),
+        json_schema_extra=dashboard_hint(secret=True),
     )
     host: str | None = Field(default=None, description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)")
     dimensions: int | None = Field(
@@ -595,10 +622,15 @@ class ModelConfig(BaseModel):
         description="OpenAI API transport; unset keeps automatic model/endpoint selection",
     )
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
-    api_key: str | None = Field(default=None, description="Optional API key (usually from env vars)")
+    api_key: str | None = Field(
+        default=None,
+        description="Optional API key (usually from env vars)",
+        json_schema_extra=dashboard_hint(secret=True),
+    )
     extra_kwargs: dict[str, Any] | None = Field(
         default=None,
-        description="Additional provider-specific parameters passed directly to the model",
+        description="Additional provider-specific parameters passed directly to the model; may include api_key",
+        json_schema_extra=dashboard_hint(secret=True),
     )
     context_window: int | None = Field(
         default=None,
@@ -676,14 +708,21 @@ class ModelConfig(BaseModel):
 class RouterConfig(BaseModel):
     """Configuration for the router system."""
 
-    model: str = Field(default="default", description="Model to use for routing decisions")
+    model: str = Field(
+        default="default",
+        description="Model to use for routing decisions",
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
     judgment: TypeSafeJudgmentConfig | None = Field(
         default=None,
         description="Optional JEV responder selection before the LLM router",
     )
     accept_invites: InviteAcceptancePolicy = Field(
         default=True,
-        description="Whether the router accepts all, no, or matching inviter room invites",
+        description=(
+            "true accepts every room invite to the router, false accepts none, and a list accepts only "
+            "invites from matching inviter Matrix IDs or glob patterns"
+        ),
     )
     access: ResponderAccessConfig | None = Field(
         default=None,

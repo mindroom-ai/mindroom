@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Mic, Settings, Volume2, Info } from "lucide-react";
+import { Mic, Settings, Volume2, Info, PhoneCall } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -21,8 +21,16 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/use-toast";
 import { showSaveFailureToastIfNeeded } from "@/components/shared";
-import { useConfigStore } from "@/store/configStore";
+import { readConfigRoot, useConfigStore } from "@/store/configStore";
+import {
+  SchemaFields,
+  SchemaSection,
+  SchemaUnavailable,
+} from "@/components/SchemaForm";
+import { useConfigSchema } from "@/hooks/useConfigSchema";
 import { VoiceConfig as VoiceConfigType } from "@/types/config";
+
+const STT_EDITOR_FIELDS = ["provider", "model", "api_key", "host"] as const;
 
 const OPENAI_TRANSCRIPTION_ENDPOINT =
   "https://api.openai.com/v1/audio/transcriptions";
@@ -81,7 +89,14 @@ function normalizeSTTConfig(
 }
 
 export function VoiceConfig() {
-  const { config, isLoading, saveConfig, updateVoiceConfig } = useConfigStore();
+  const { config, isLoading, saveConfig, updateConfigValue } = useConfigStore();
+  const {
+    schema: schemaRoot,
+    error: schemaError,
+    retry: retrySchema,
+  } = useConfigSchema();
+  const callsConfig =
+    config == null ? undefined : readConfigRoot(config, "calls");
   const { toast } = useToast();
 
   // Initialize local state with default values if voice config doesn't exist
@@ -98,7 +113,7 @@ export function VoiceConfig() {
     const newConfig = { ...voiceConfig, ...updates };
     setVoiceConfig(newConfig);
 
-    updateVoiceConfig(newConfig);
+    updateConfigValue(["voice"], newConfig);
   };
 
   const handleSTTChange = (updates: Partial<VoiceConfigType["stt"]>) => {
@@ -136,7 +151,7 @@ export function VoiceConfig() {
   const providerLabel = isCompatibleProvider ? "OpenAI-compatible" : "OpenAI";
 
   const handleSave = async () => {
-    updateVoiceConfig({
+    updateConfigValue(["voice"], {
       ...voiceConfig,
       stt: normalizeSTTConfig(voiceConfig.stt),
     });
@@ -152,6 +167,23 @@ export function VoiceConfig() {
     toast({
       title: "Voice Configuration Saved",
       description: "Your voice settings have been updated successfully.",
+    });
+  };
+
+  // Saves the draft as is; unlike handleSave it must not write voice defaults.
+  const handleSaveCalls = async () => {
+    const result = await saveConfig();
+    if (
+      showSaveFailureToastIfNeeded(result, {
+        staleMessage: "Save was superseded by newer call configuration edits.",
+        fallbackMessage: "Failed to save call configuration.",
+      })
+    ) {
+      return;
+    }
+    toast({
+      title: "Call Settings Saved",
+      description: "Your voice call settings have been updated successfully.",
     });
   };
 
@@ -395,12 +427,69 @@ export function VoiceConfig() {
             </div>
           </div>
 
+          <SchemaSection
+            title="More speech-to-text settings"
+            definition="VoiceSTTConfig"
+            value={config?.voice?.stt}
+            path={["voice", "stt"]}
+            exclude={STT_EDITOR_FIELDS}
+            onFieldChange={(key, next) =>
+              updateConfigValue(["voice", "stt", key], next)
+            }
+          />
+
           {/* Save Button */}
           <div className="flex justify-end">
             <Button onClick={handleSave} disabled={isLoading}>
               Save Voice Configuration
             </Button>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <PhoneCall className="h-5 w-5 text-primary" />
+            Voice Calls
+          </CardTitle>
+          <CardDescription>
+            Let agents join Element Call (MatrixRTC) voice calls with named call
+            profiles.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          {schemaError != null && (
+            <SchemaUnavailable
+              subject="Call settings"
+              error={schemaError}
+              onRetry={retrySchema}
+            />
+          )}
+          {schemaRoot == null && schemaError == null && (
+            <p className="text-sm text-muted-foreground">
+              Loading call settings...
+            </p>
+          )}
+          {schemaRoot?.properties?.calls != null && (
+            <>
+              <SchemaFields
+                schema={schemaRoot.properties.calls}
+                root={schemaRoot}
+                value={callsConfig}
+                path={["calls"]}
+                showOwnError
+                onFieldChange={(key, next) =>
+                  updateConfigValue(["calls", key], next)
+                }
+              />
+              <div className="flex justify-end">
+                <Button onClick={handleSaveCalls} disabled={isLoading}>
+                  Save Call Settings
+                </Button>
+              </div>
+            </>
+          )}
         </CardContent>
       </Card>
 

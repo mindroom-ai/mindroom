@@ -112,6 +112,8 @@ from tests.identity_helpers import entity_ids, fixture_entity_matrix_id, persist
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from mindroom.tool_system.events import StructuredStreamChunk
+
 
 _TEST_MODEL = "openai:gpt-6-astra"
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
@@ -258,10 +260,45 @@ async def test_team_continuation_appends_terminal_only_consensus() -> None:
     async def events() -> AsyncIterator[object]:
         yield terminal
 
-    response = await _collect_team_continuation(events(), presentation)
+    response = await _collect_team_continuation(events(), presentation, progress=None)
 
     assert response is terminal
     assert "Before approval. After approval." in presentation.render_body()
+
+
+@pytest.mark.asyncio
+async def test_team_continuation_publishes_progress_from_its_restored_document() -> None:
+    """Team progress resumes the saved document, then follows each applied member event."""
+    prior = _TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=True)
+    prior.append_member("general", "Before approval.")
+    prior.start_member_tool("general", ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}))
+    presentation = _TeamStreamPresentation.restore(
+        config_names=["general"],
+        show_tool_calls=True,
+        state=prior.to_state(),
+        tool_trace=prior.tool_trace,
+        prior_response_text=prior.render_body(),
+    )
+    published: list[str] = []
+
+    async def progress(chunk: StructuredStreamChunk) -> None:
+        published.append(chunk.content)
+
+    async def events() -> AsyncIterator[object]:
+        yield AgentToolCallCompletedEvent(
+            agent_id="general",
+            agent_name="GeneralAgent",
+            tool=ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done"),
+        )
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="After approval.")
+        yield TeamRunOutput(run_id="run-1", session_id="session-1", status=RunStatus.completed)
+
+    await _collect_team_continuation(events(), presentation, progress=progress)
+
+    assert published[0] == prior.render_body()
+    assert "🔧 `inspect` [1] ⏳" in published[0]
+    assert all("🔧 `inspect` [1] ⏳" not in body for body in published[1:])
+    assert "🔧 `inspect` [1]\n\nAfter approval." in published[-1]
 
 
 @pytest.mark.asyncio
@@ -290,7 +327,7 @@ async def test_hidden_team_continuation_separates_text_across_the_tool_boundary(
     async def events() -> AsyncIterator[object]:
         yield terminal
 
-    await _collect_team_continuation(events(), presentation)
+    await _collect_team_continuation(events(), presentation, progress=None)
 
     assert "Before approval.\n\nAfter approval." in presentation.render_body()
 
@@ -316,7 +353,7 @@ async def test_hidden_team_continuation_separates_text_across_a_new_tool_boundar
         yield TeamToolCallCompletedEvent(tool=tool)
         yield terminal
 
-    await _collect_team_continuation(events(), presentation)
+    await _collect_team_continuation(events(), presentation, progress=None)
 
     assert "Before tool.\n\nAfter tool." in presentation.render_body()
 
@@ -382,7 +419,7 @@ async def test_team_continuation_reuses_an_existing_visible_tool_separator() -> 
     async def events() -> AsyncIterator[object]:
         yield terminal
 
-    await _collect_team_continuation(events(), presentation)
+    await _collect_team_continuation(events(), presentation, progress=None)
 
     assert "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval." in presentation.render_body()
 
@@ -402,7 +439,7 @@ async def test_team_continuation_falls_back_per_unstreamed_slot() -> None:
         yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member delta.")
         yield terminal
 
-    await _collect_team_continuation(events(), presentation)
+    await _collect_team_continuation(events(), presentation, progress=None)
 
     body = presentation.render_body()
     assert "**GeneralAgent**: Member delta." in body
@@ -433,7 +470,7 @@ async def test_team_continuation_completes_terminal_only_member_tool_in_its_slot
     async def events() -> AsyncIterator[object]:
         yield terminal
 
-    await _collect_team_continuation(events(), presentation)
+    await _collect_team_continuation(events(), presentation, progress=None)
 
     assert presentation.tool_trace[0].type == "tool_call_completed"
     assert presentation.tool_trace[0].scope_key == "agent:general"
@@ -838,6 +875,7 @@ async def test_paused_team_scope_open_failure_does_not_materialize_members() -> 
             decisions={"call-1": True},
             denial_reasons={"call-1": None},
             refresh_scheduler=None,
+            progress=None,
         )
 
     materialize.assert_not_called()
@@ -1018,6 +1056,7 @@ async def test_team_continuation_executes_real_agno_confirmation(  # noqa: PLR09
             prior_presentation_state=prior.to_state(),
             show_tool_calls=True,
             tool_trace_collector=collected_trace,
+            progress=None,
         )
 
     if approved:
@@ -1140,6 +1179,7 @@ async def test_team_continuation_rejects_non_exact_persisted_call_ids(
             decisions=decisions,
             denial_reasons=denial_reasons,
             refresh_scheduler=None,
+            progress=None,
         )
 
     team.acontinue_run.assert_not_awaited()

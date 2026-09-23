@@ -32,7 +32,7 @@ from mindroom.api import sandbox_runner as sandbox_runner_api
 from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
-from mindroom.config.main import Config
+from mindroom.config.main import Config, dashboard_config_schema
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.embedder_health import capture_embedder_health_recorder
 from mindroom.matrix.decrypt_failure import e2ee_stats
@@ -1485,6 +1485,12 @@ def test_get_tools(test_client: TestClient) -> None:
     assert "description" in first_tool
     assert "category" in first_tool
     assert "icon_color" in first_tool  # New field we added
+
+    # Presets and control-plane tools reject defer/initial, so the dashboard hides lazy loading for them.
+    lazy_loading = {tool["name"]: tool["lazy_loading_supported"] for tool in data["tools"]}
+    assert lazy_loading["calculator"] is True
+    assert lazy_loading["dynamic_tools"] is False
+    assert lazy_loading["openclaw_compat"] is False
 
     shell_tool = next(tool for tool in data["tools"] if tool["name"] == "shell")
     assert shell_tool["agent_override_fields"] == [
@@ -3026,6 +3032,14 @@ def test_get_raw_config_source_returns_current_invalid_file(
 
     assert response.status_code == 200
     assert response.json() == {"source": invalid_source, "uses_includes": False}
+
+
+def test_get_config_schema_returns_annotated_config_schema(test_client: TestClient) -> None:
+    """Dashboard editors render forms from the configuration JSON schema."""
+    response = test_client.get("/api/config/schema")
+
+    assert response.status_code == 200
+    assert response.json() == dashboard_config_schema()
 
 
 def test_get_raw_config_source_returns_replacement_text_for_non_utf8_invalid_file(

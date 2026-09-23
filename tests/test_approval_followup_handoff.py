@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from mindroom.approval_response import _ApprovalPausePlan
     from mindroom.message_target import MessageTarget
     from mindroom.response_runner import ResponseRequest, ResponseRunner
+    from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
 
 
@@ -218,8 +219,9 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(
         request: ResponseRequest,
         target: MessageTarget,
         tool_trace_collector: list[ToolTraceEntry],
+        progress: ProgressPublisher | None,
     ) -> CompletedApprovalRun | PausedAttempt:
-        del request, tool_trace_collector
+        del request, tool_trace_collector, progress
         generations.append(continuation.generation)
         assert continuation.continuation_count == 2
         if checkpoint == "chained" and len(generations) == 1:
@@ -301,8 +303,9 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
         request: ResponseRequest,
         target: MessageTarget,
         tool_trace_collector: list[ToolTraceEntry],
+        progress: ProgressPublisher | None,
     ) -> PausedAttempt:
-        del continuation, request, target, tool_trace_collector
+        del continuation, request, target, tool_trace_collector, progress
         order.append("first batch")
         batch_started.set()
         await release_batch.wait()

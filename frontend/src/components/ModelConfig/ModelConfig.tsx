@@ -16,6 +16,7 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import { useConfigStore } from "@/store/configStore";
+import { SchemaSection } from "@/components/SchemaForm";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -42,7 +43,10 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { ProviderLogo } from "./ProviderLogos";
 import { getProviderInfo, getProviderList } from "@/lib/providers";
-import type { ProviderType } from "@/types/config";
+import type {
+  ModelConfig as ModelConfigType,
+  ProviderType,
+} from "@/types/config";
 
 interface RowDraft {
   modelName: string;
@@ -324,9 +328,37 @@ function renderTableValue<TContext>(
   return renderer;
 }
 
+/**
+ * ModelConfig keys this page renders by hand; More settings shows the rest.
+ * API keys stay out of config.yaml: the page stores them as credentials.
+ */
+const MODEL_EDITOR_FIELDS = [
+  "provider",
+  "id",
+  "display_name",
+  "icon",
+  "api_key",
+  "context_window",
+] as const;
+
+/** Fields More settings leaves out because saving the row drops them for this provider. */
+function modelEditorFields(provider: string): string[] {
+  return [
+    ...MODEL_EDITOR_FIELDS,
+    ...(provider === "ollama" ? [] : ["host"]),
+    ...(provider === "openai" ? [] : ["api"]),
+  ];
+}
+
 export function ModelConfig() {
-  const { config, updateModel, deleteModel, saveConfig, isLoading } =
-    useConfigStore();
+  const {
+    config,
+    updateConfigValue,
+    deleteModel,
+    saveConfig,
+    isLoading,
+    loadedConfig,
+  } = useConfigStore();
 
   const [providerKeys, setProviderKeys] = useState<Record<string, KeyStatus>>(
     {},
@@ -339,6 +371,14 @@ export function ModelConfig() {
 
   const [editingRowId, setEditingRowId] = useState<string | null>(null);
   const [rowDraft, setRowDraft] = useState<RowDraft | null>(null);
+  // The model and loaded config as they were when row editing began, so
+  // Cancel can also undo More settings edits and Save only writes a Base URL
+  // the row changed.
+  const [editingStart, setEditingStart] = useState<{
+    config: ModelConfigType;
+    baseUrl: string;
+    loadedConfig: typeof loadedConfig;
+  } | null>(null);
   const [isSavingRow, setIsSavingRow] = useState(false);
 
   const [isAddingRow, setIsAddingRow] = useState(false);
@@ -509,7 +549,30 @@ export function ModelConfig() {
   };
 
   const startEditingRow = (row: ModelRowData) => {
+    if (isAddingRow) {
+      toast({
+        title: "Finish adding first",
+        description:
+          "Save or cancel the new model row before editing another row.",
+      });
+      return;
+    }
+    if (editingRowId != null) {
+      if (editingRowId !== row.modelName) {
+        toast({
+          title: "Finish current edit first",
+          description:
+            "Save or cancel the active row before editing another one.",
+        });
+      }
+      return;
+    }
     setEditingRowId(row.modelName);
+    setEditingStart({
+      config: models[row.modelName],
+      baseUrl: row.openAIBaseUrl || "",
+      loadedConfig,
+    });
     setRowDraft({
       modelName: row.modelName,
       provider: row.provider,
@@ -524,9 +587,25 @@ export function ModelConfig() {
     });
   };
 
-  const cancelEditingRow = () => {
+  const finishEditingRow = () => {
     setEditingRowId(null);
     setRowDraft(null);
+    setEditingStart(null);
+  };
+
+  const cancelEditingRow = () => {
+    if (editingRowId != null && editingStart != null) {
+      // A save since editing began committed the More settings edits, so
+      // Cancel restores the committed model rather than the pre-edit one.
+      const restored =
+        loadedConfig === editingStart.loadedConfig
+          ? editingStart.config
+          : (loadedConfig?.models[editingRowId] ?? editingStart.config);
+      if (JSON.stringify(models[editingRowId]) !== JSON.stringify(restored)) {
+        updateConfigValue(["models", editingRowId], restored);
+      }
+    }
+    finishEditingRow();
   };
 
   const startAddingRow = () => {
@@ -702,16 +781,18 @@ export function ModelConfig() {
 
     const nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
     if (rowDraft.provider === "openai") {
-      if (normalizedBaseUrl) {
-        nextExtraKwargs.base_url = normalizedBaseUrl;
-      } else {
-        delete nextExtraKwargs.base_url;
+      // More settings may have edited extra_kwargs; keep its base_url unless
+      // the row's own Base URL input changed.
+      if (rowDraft.baseUrl !== editingStart?.baseUrl) {
+        if (normalizedBaseUrl) {
+          nextExtraKwargs.base_url = normalizedBaseUrl;
+        } else {
+          delete nextExtraKwargs.base_url;
+        }
       }
     } else {
       delete nextExtraKwargs.base_url;
-      if (nextModelConfig.api != null) {
-        nextModelConfig.api = null;
-      }
+      delete nextModelConfig.api;
     }
     if (Object.keys(nextExtraKwargs).length > 0) {
       nextModelConfig.extra_kwargs = nextExtraKwargs;
@@ -728,14 +809,15 @@ export function ModelConfig() {
       delete nextModelConfig.host;
     }
 
-    updateModel(targetModelName, nextModelConfig);
+    // Replace the model so fields the row cleared are removed.
+    updateConfigValue(["models", targetModelName], nextModelConfig);
     if (renamed) {
       deleteModel(originalModelName);
     }
 
     await fetchAllKeyStatuses();
     setIsSavingRow(false);
-    cancelEditingRow();
+    finishEditingRow();
 
     toast({
       title: "Model Updated",
@@ -828,7 +910,7 @@ export function ModelConfig() {
       nextModelConfig.context_window = normalizedContextWindow;
     }
 
-    updateModel(modelName, nextModelConfig);
+    updateConfigValue(["models", modelName], nextModelConfig);
 
     await fetchAllKeyStatuses();
     setIsSavingNewRow(false);
@@ -1636,32 +1718,7 @@ export function ModelConfig() {
                     return (
                       <tr
                         key={row.id}
-                        onClick={() => {
-                          if (isAddingRow) {
-                            toast({
-                              title: "Finish adding first",
-                              description:
-                                "Save or cancel the new model row before editing another row.",
-                            });
-                            return;
-                          }
-
-                          if (
-                            editingRowId &&
-                            editingRowId !== row.original.modelName
-                          ) {
-                            toast({
-                              title: "Finish current edit first",
-                              description:
-                                "Save or cancel the active row before editing another one.",
-                            });
-                            return;
-                          }
-
-                          if (!editingRowId) {
-                            startEditingRow(row.original);
-                          }
-                        }}
+                        onClick={() => startEditingRow(row.original)}
                         className={cn(
                           "border-b transition-colors last:border-b-0",
                           isEditing
@@ -1691,6 +1748,21 @@ export function ModelConfig() {
             </table>
           </div>
         </div>
+
+        {editingRowId != null &&
+          rowDraft != null &&
+          models[editingRowId] != null && (
+            <SchemaSection
+              title={`More settings for ${editingRowId}`}
+              definition="ModelConfig"
+              value={models[editingRowId]}
+              path={["models", editingRowId]}
+              exclude={modelEditorFields(rowDraft.provider)}
+              onFieldChange={(key, next) =>
+                updateConfigValue(["models", editingRowId, key], next)
+              }
+            />
+          )}
 
         <Button
           onClick={() => void handleSaveAllChanges()}

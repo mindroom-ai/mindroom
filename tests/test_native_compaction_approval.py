@@ -91,6 +91,7 @@ async def _resume_approval(
                 denial_reasons={tool_call_id: None},
                 tool_trace_collector=[],
                 typing_log_context={},
+                progress=None,
             )
     else:
         config = _build_test_config()
@@ -133,6 +134,7 @@ async def _resume_approval(
                 denial_reasons={tool_call_id: None},
                 refresh_scheduler=None,
                 prior_presentation_state=_TeamStreamPresentation.new([], [], show_tool_calls=True).to_state(),
+                progress=None,
             )
 
     return result

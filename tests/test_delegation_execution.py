@@ -502,9 +502,9 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                 events = drive_delegation_stream(rebuilt, stored_run(), run_child=start_child, **options)
                 if team_parent:
                     assert team_presentation is not None
-                    continuation = _collect_team_continuation(events, team_presentation)
+                    continuation = _collect_team_continuation(events, team_presentation, progress=None)
                 else:
-                    continuation = _collect_agent_continuation(events, presentation)
+                    continuation = _collect_agent_continuation(events, presentation, progress=None)
                 if outcome == "parent_provider_error":
                     with pytest.raises(RuntimeError, match="provider connection lost") as caught:
                         await continuation

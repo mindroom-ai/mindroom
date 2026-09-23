@@ -204,6 +204,7 @@ _.validate_agent_reply_permissions  # unused method (src/mindroom/config/main.py
 _.validate_unique_entries  # unused method (src/mindroom/config/matrix.py)
 standalone_login  # unused function (src/mindroom/api/auth.py)
 get_raw_config_source  # unused function (src/mindroom/api/main.py)
+get_config_schema  # FastAPI route (src/mindroom/api/config_schema.py)
 default_style  # TypedDict key (src/mindroom/yaml_io.py)
 default_flow_style  # TypedDict key (src/mindroom/yaml_io.py)
 allow_unicode  # TypedDict key (src/mindroom/yaml_io.py)
@@ -365,6 +366,8 @@ FINAL  # unused variable (src/mindroom/event_journal/models.py)
 _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
 
 # Agno 3 adapter overrides: agno reads the run-object cache attribute and calls drop_session itself.
+_.flush_in_flight_messages_on_error  # Agno terminal cleanup (src/mindroom/agno_compat_run_messages.py)
+_.flush_in_flight_messages_on_error_team  # Agno terminal cleanup (src/mindroom/agno_compat_run_messages.py)
 _.external_execution_silent  # Agno suppresses the internal delegation wait message (src/mindroom/agents.py)
 _.external_execution_required  # Agno reads the retained tool pause flags (src/mindroom/delegation/execution.py)
 _._run_object_cache  # agno SqliteDb attribute replaced by the adapter (src/mindroom/agent_storage.py)
@@ -402,6 +405,7 @@ stream_ticket  # FastAPI Computer endpoint
 delete_session  # FastAPI Computer endpoint
 _.config_identity  # ComputerTarget dataclass equality field
 _.require_adoption_room_id  # Pydantic model validator for explicit personal-room adoption
+_.validate_additional_user_ids  # Pydantic field validator for imported room membership attestations
 
 _.embed_captions  # MoviePyVideoTools registers this caption-style override dynamically.
 # AgentQL and Agno invoke these owner-local overrides through inherited SDK methods.

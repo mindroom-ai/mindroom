@@ -6,6 +6,9 @@ import { useConfigStore } from "@/store/configStore";
 vi.mock("@/store/configStore", () => ({
   useConfigStore: vi.fn(),
 }));
+vi.mock("@/hooks/useConfigSchema", () => ({
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
+}));
 
 vi.mock("@/components/ui/toaster", () => ({
   toast: vi.fn(),
@@ -26,7 +29,7 @@ describe("ModelConfig - Add Row Behavior", () => {
       },
       router: { model: "existing" },
     },
-    updateModel: vi.fn(),
+    updateConfigValue: vi.fn(),
     deleteModel: vi.fn(),
     saveConfig: vi.fn(),
   };
@@ -88,7 +91,7 @@ describe("ModelConfig - Add Row Behavior", () => {
           variant: "destructive",
         }),
       );
-      expect(mockStore.updateModel).not.toHaveBeenCalled();
+      expect(mockStore.updateConfigValue).not.toHaveBeenCalled();
     });
   });
 });

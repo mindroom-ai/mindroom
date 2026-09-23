@@ -544,6 +544,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agent_storage"
 depends_on = [
+    "mindroom.agno_compat_run_messages",
     "mindroom.agno_compat_session_metrics",
     "mindroom.agno_compat_sqlite",
     "mindroom.agno_compat_session_persistence",
@@ -648,6 +649,11 @@ visibility = ["mindroom.agent_storage", "mindroom.ai"]
 [[modules]]
 path = "mindroom.agno_compat_session_metrics"
 depends_on = []
+visibility = ["mindroom.agent_storage"]
+
+[[modules]]
+path = "mindroom.agno_compat_run_messages"
+depends_on = ["mindroom.usage_storage"]
 visibility = ["mindroom.agent_storage"]
 
 [[modules]]
@@ -1311,6 +1317,7 @@ depends_on = [
     "mindroom.runtime_state",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.workers.runtime",
+    "mindroom.api.config_schema",
 ]
 
 [[modules]]
@@ -2366,7 +2373,7 @@ visibility = [
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
 path = "mindroom.config.memory"
-depends_on = ["mindroom.config.models", "mindroom.path_globs"]
+depends_on = ["mindroom.config.models", "mindroom.config.schema_hints", "mindroom.path_globs"]
 
 [[modules]]
 path = "mindroom.config.models"
@@ -2381,6 +2388,7 @@ depends_on = [
     "mindroom.matrix.identity",
     "mindroom.model_defaults",
     "mindroom.tool_system.worker_routing",
+    "mindroom.config.schema_hints",
 ]
 
 [[modules]]
@@ -2424,6 +2432,7 @@ depends_on = [
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
+    "mindroom.config.schema_hints",
 ]
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
@@ -5032,6 +5041,7 @@ exclusive = true
 expose = [
     "RoomJoinOutcome",
     "add_room_to_space",
+    "admin_join_room_user",
     "create_room",
     "create_space",
     "ensure_room_admin_power_levels",
@@ -5969,6 +5979,14 @@ path = "mindroom.cli.config_bundle"
 depends_on = ["mindroom.cli.config", "mindroom.config.main", "mindroom.config_bundle", "mindroom.constants"]
 
 [[modules]]
+path = "mindroom.api.config_schema"
+depends_on = ["mindroom.config.main"]
+
+[[modules]]
+path = "mindroom.config.schema_hints"
+depends_on = []
+
+[[modules]]
 path = "mindroom.api.config_reload"
 depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.config_reload", "mindroom.runtime_state"]
 
@@ -6169,7 +6187,7 @@ visibility = ["mindroom.model_loading"]
 
 [[modules]]
 path = "mindroom.config.participation"
-depends_on = ["mindroom.config.judgment"]
+depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 visibility = ["mindroom.config.agent", "mindroom.turn_policy", "mindroom.response_runner"]
 
 [[modules]]
@@ -6554,7 +6572,7 @@ expose = ["OpenAIChatProviderCompat"]
 
 [[modules]]
 path = "mindroom.agno_compat_openai_responses"
-depends_on = ["mindroom.error_handling"]
+depends_on = ["mindroom.error_handling", "mindroom.usage_storage"]
 visibility = ["mindroom.openai_models"]
 
 [[interfaces]]
@@ -6673,7 +6691,7 @@ expose = ["clear_stale_singleton_locks"]
 [[modules]]
 path = "mindroom.usage_storage"
 depends_on = []
-visibility = ["mindroom.agent_storage", "mindroom.agno_compat_sqlite", "mindroom.legacy_usage_storage", "mindroom.usage_stats_storage"]
+visibility = ["mindroom.agent_storage", "mindroom.agno_compat_openai_responses", "mindroom.agno_compat_run_messages", "mindroom.agno_compat_sqlite", "mindroom.legacy_usage_storage", "mindroom.usage_stats_storage"]
 
 [[modules]]
 path = "mindroom.legacy_usage_storage"
@@ -6700,7 +6718,7 @@ visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.config.judgment"
-depends_on = []
+depends_on = ["mindroom.config.schema_hints"]
 
 [[modules]]
 path = "mindroom.judgment.execution"
@@ -6720,7 +6738,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.config.mid_turn"
-depends_on = ["mindroom.config.judgment"]
+depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 
 [[modules]]
 path = "mindroom.mid_turn"

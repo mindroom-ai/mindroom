@@ -1,0 +1,4324 @@
+{
+  "$defs": {
+    "AgentConfig": {
+      "additionalProperties": false,
+      "description": "Configuration for a single agent.",
+      "properties": {
+        "display_name": {
+          "description": "Human-readable name for the agent",
+          "title": "Display Name",
+          "type": "string"
+        },
+        "role": {
+          "default": "",
+          "description": "Description of the agent's purpose",
+          "title": "Role",
+          "type": "string",
+          "x-mindroom": {
+            "multiline": true
+          }
+        },
+        "tools": {
+          "default": [],
+          "description": "List of tool entries with optional inline per-agent overrides",
+          "items": {
+            "$ref": "#/$defs/ToolConfigEntry"
+          },
+          "title": "Tools",
+          "type": "array"
+        },
+        "include_default_tools": {
+          "default": true,
+          "description": "Whether to merge defaults.tools into this agent's tools",
+          "title": "Include Default Tools",
+          "type": "boolean"
+        },
+        "skills": {
+          "default": [],
+          "description": "List of skill names",
+          "items": {
+            "type": "string"
+          },
+          "title": "Skills",
+          "type": "array"
+        },
+        "instructions": {
+          "default": [],
+          "description": "Agent instructions",
+          "items": {
+            "type": "string"
+          },
+          "title": "Instructions",
+          "type": "array"
+        },
+        "rooms": {
+          "default": [],
+          "description": "List of room IDs or names to auto-join",
+          "items": {
+            "type": "string"
+          },
+          "title": "Rooms",
+          "type": "array",
+          "x-mindroom": {
+            "reference": "room"
+          }
+        },
+        "participation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParticipationConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opt-in adaptive participation in existing multi-human threads across all rooms"
+        },
+        "mid_turn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MidTurnConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opt-in judgments for messages queued during this agent's response across all rooms"
+        },
+        "access": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponderAccessConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional membership-based conversation access policy"
+        },
+        "credential_managers": {
+          "default": [],
+          "description": "Concrete Matrix user IDs allowed to manage this agent's credentials",
+          "items": {
+            "type": "string"
+          },
+          "title": "Credential Managers",
+          "type": "array"
+        },
+        "accept_invites": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": true,
+          "description": "true accepts every room invite to this agent, false accepts none, and a list accepts only invites from matching inviter Matrix IDs or glob patterns",
+          "title": "Accept Invites"
+        },
+        "markdown": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether to use markdown formatting",
+          "title": "Markdown"
+        },
+        "learning": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Enable Agno Learning (defaults to true when omitted)",
+          "title": "Learning"
+        },
+        "learning_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "always",
+                "agentic"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Learning mode for Agno Learning: always (automatic) or agentic (tool-driven)",
+          "title": "Learning Mode"
+        },
+        "model": {
+          "default": "default",
+          "description": "Configured model alias used for this agent's replies",
+          "title": "Model",
+          "type": "string",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "memory_backend": {
+          "anyOf": [
+            {
+              "enum": [
+                "mem0",
+                "file",
+                "none"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Memory backend override for this agent ('mem0', 'file', or 'none'); inherits memory.backend when omitted",
+          "title": "Memory Backend"
+        },
+        "memory_search": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentMemorySearchConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional per-agent file-memory search override; omitted fields inherit memory.search"
+        },
+        "compaction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompactionOverrideConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent required-compaction overrides"
+        },
+        "private": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentPrivateConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional requester-private state materialized per private.per partition"
+        },
+        "thread_exports": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentThreadExportConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Keep <workspace>/thread_exports/ current with YAML exports of every thread in rooms this agent is joined to; true enables the defaults"
+        },
+        "knowledge_bases": {
+          "default": [],
+          "description": "Knowledge base IDs assigned to this agent",
+          "items": {
+            "type": "string"
+          },
+          "title": "Knowledge Bases",
+          "type": "array"
+        },
+        "context_files": {
+          "default": [],
+          "description": "Workspace-relative file paths loaded into each freshly built agent instance and prepended to role context",
+          "items": {
+            "type": "string"
+          },
+          "title": "Context Files",
+          "type": "array"
+        },
+        "thread_mode": {
+          "default": "thread",
+          "description": "Conversation threading mode: 'thread' creates Matrix threads per conversation, 'room' uses a single continuous conversation per room (ideal for bridges/mobile)",
+          "enum": [
+            "thread",
+            "room"
+          ],
+          "title": "Thread Mode",
+          "type": "string"
+        },
+        "room_thread_modes": {
+          "additionalProperties": {
+            "enum": [
+              "thread",
+              "room"
+            ],
+            "type": "string"
+          },
+          "default": {},
+          "description": "Per-room thread mode overrides keyed by room alias/name or Matrix room ID",
+          "title": "Room Thread Modes",
+          "type": "object",
+          "x-mindroom": {
+            "key_reference": "room"
+          }
+        },
+        "num_history_runs": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Number of prior Agno runs to include as history context (per-agent override)",
+          "title": "Num History Runs"
+        },
+        "num_history_messages": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Max messages from history (mutually exclusive with num_history_runs)",
+          "title": "Num History Messages"
+        },
+        "compress_tool_results": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Compress tool results in history to save context (per-agent override). On Anthropic/Vertex Claude, setting this to true can mutate replayed tool messages and invalidate prompt-cache prefixes.",
+          "title": "Compress Tool Results"
+        },
+        "max_tool_calls_from_history": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Max tool call messages replayed from history (per-agent override)",
+          "title": "Max Tool Calls From History"
+        },
+        "show_tool_calls": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether to show tool call details inline in responses (per-agent override)",
+          "title": "Show Tool Calls"
+        },
+        "worker_tools": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Tool names to route through scoped workers (overrides defaults; None = use the built-in default routing policy)",
+          "title": "Worker Tools"
+        },
+        "worker_scope": {
+          "anyOf": [
+            {
+              "enum": [
+                "shared",
+                "user",
+                "user_agent"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
+          "title": "Worker Scope"
+        },
+        "allow_self_config": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Allow this agent to modify its own configuration via a tool",
+          "title": "Allow Self Config"
+        },
+        "delegate_to": {
+          "default": [],
+          "description": "Allowed agents for run_subagent and continue_subagent, including this agent when explicitly listed",
+          "items": {
+            "type": "string"
+          },
+          "title": "Delegate To",
+          "type": "array",
+          "x-mindroom": {
+            "reference": "agent"
+          }
+        }
+      },
+      "required": [
+        "display_name"
+      ],
+      "title": "AgentConfig",
+      "type": "object"
+    },
+    "AgentMemorySearchConfig": {
+      "description": "Optional per-agent override for file-backed memory search.",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "keyword",
+                "semantic"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent memory search mode override",
+          "title": "Mode"
+        },
+        "include": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent included memory-search glob patterns",
+          "title": "Include"
+        },
+        "include_entrypoint": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent MEMORY.md indexing override",
+          "title": "Include Entrypoint"
+        }
+      },
+      "title": "AgentMemorySearchConfig",
+      "type": "object"
+    },
+    "AgentPrivateConfig": {
+      "description": "Requester-private materialized state for one shared agent definition.",
+      "properties": {
+        "per": {
+          "description": "Worker boundary that gets its own private copy of this agent's state",
+          "enum": [
+            "user",
+            "user_agent"
+          ],
+          "title": "Per",
+          "type": "string"
+        },
+        "root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Private root path relative to the canonical private-instance state root; defaults to <agent_name>_data",
+          "title": "Root"
+        },
+        "template_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional local directory copied into each requester root on first use",
+          "title": "Template Dir"
+        },
+        "context_files": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional private-root-relative context files loaded into the agent's role context",
+          "title": "Context Files"
+        },
+        "knowledge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentPrivateKnowledgeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional private agent knowledge indexed from the private root"
+        }
+      },
+      "required": [
+        "per"
+      ],
+      "title": "AgentPrivateConfig",
+      "type": "object"
+    },
+    "AgentPrivateKnowledgeConfig": {
+      "description": "PrivateAgentKnowledge indexed from the agent's private root.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Whether to index private agent knowledge for this private agent instance",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "description": {
+          "default": "",
+          "description": "Short description of what this private knowledge contains, shown to agents in knowledge-search tool metadata",
+          "title": "Description",
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Path to a private knowledge directory relative to the private root",
+          "title": "Path"
+        },
+        "watch": {
+          "default": true,
+          "description": "When true, private agent knowledge schedules background refresh on access; when false, direct external edits require explicit refresh",
+          "title": "Watch",
+          "type": "boolean"
+        },
+        "chunk_size": {
+          "default": 5000,
+          "description": "Maximum number of characters per indexed chunk for text-like private knowledge files",
+          "minimum": 128,
+          "title": "Chunk Size",
+          "type": "integer"
+        },
+        "chunk_overlap": {
+          "default": 0,
+          "description": "Number of overlapping characters between adjacent private knowledge chunks",
+          "minimum": 0,
+          "title": "Chunk Overlap",
+          "type": "integer"
+        },
+        "git": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KnowledgeGitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Git sync configuration for private agent knowledge"
+        }
+      },
+      "title": "AgentPrivateKnowledgeConfig",
+      "type": "object"
+    },
+    "AgentThreadExportConfig": {
+      "additionalProperties": false,
+      "description": "Continuous YAML thread exports into this agent's workspace.",
+      "properties": {
+        "invited_rooms": {
+          "default": true,
+          "description": "Also export user-created rooms the agent joined through invites; current membership is always required",
+          "title": "Invited Rooms",
+          "type": "boolean"
+        },
+        "private_room_scope": {
+          "default": "owner_and_agent",
+          "description": "Private agents only: require the owner alone, or both owner and agent, to be joined to an exported room",
+          "enum": [
+            "owner",
+            "owner_and_agent"
+          ],
+          "title": "Private Room Scope",
+          "type": "string"
+        }
+      },
+      "title": "AgentThreadExportConfig",
+      "type": "object"
+    },
+    "ApprovalRuleConfig": {
+      "additionalProperties": false,
+      "description": "One ordered tool-approval rule.",
+      "properties": {
+        "match": {
+          "description": "Case-sensitive glob over exposed tool function names; the first matching rule wins",
+          "title": "Match",
+          "type": "string"
+        },
+        "action": {
+          "anyOf": [
+            {
+              "enum": [
+                "auto_approve",
+                "require_approval"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Fixed decision for matching calls; set exactly one of action or script",
+          "title": "Action"
+        },
+        "script": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Config-relative Python script defining check(tool_name, arguments, agent_name) -> bool; True requires approval",
+          "title": "Script"
+        },
+        "timeout_days": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 36500.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Approval expiry window in days for this rule; unset uses tool_approval.timeout_days",
+          "title": "Timeout Days"
+        }
+      },
+      "required": [
+        "match"
+      ],
+      "title": "ApprovalRuleConfig",
+      "type": "object"
+    },
+    "AuthorizationConfig": {
+      "description": "Authorization configuration with fine-grained permissions.",
+      "properties": {
+        "config_command_enabled": {
+          "default": false,
+          "description": "Enable the chat !config command for platform administrators.",
+          "title": "Config Command Enabled",
+          "type": "boolean"
+        },
+        "aliases": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "description": "Map canonical Matrix user IDs to bridge aliases. A message from any alias is treated as if sent by the canonical user. E.g., {'@alice:example.com': ['@telegram_123:example.com']}",
+          "title": "Aliases",
+          "type": "object"
+        }
+      },
+      "title": "AuthorizationConfig",
+      "type": "object"
+    },
+    "CallsConfig": {
+      "additionalProperties": false,
+      "description": "MatrixRTC settings, named call profiles, and agent assignments.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Enable agents joining Element Call voice calls",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "profiles": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "cascaded": "#/$defs/CascadedCallProfile",
+                "live": "#/$defs/LiveCallProfile",
+                "realtime": "#/$defs/RealtimeCallProfile"
+              },
+              "propertyName": "backend"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/RealtimeCallProfile"
+              },
+              {
+                "$ref": "#/$defs/LiveCallProfile"
+              },
+              {
+                "$ref": "#/$defs/CascadedCallProfile"
+              }
+            ]
+          },
+          "default": {},
+          "description": "Reusable backend-specific call profiles",
+          "title": "Profiles",
+          "type": "object"
+        },
+        "agents": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Call profile name by agent name (at most one agent per room)",
+          "title": "Agents",
+          "type": "object",
+          "x-mindroom": {
+            "key_reference": "agent"
+          }
+        },
+        "livekit_service_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Same-server MatrixRTC authorization service URL override (otherwise discovered from .well-known)",
+          "title": "Livekit Service Url"
+        }
+      },
+      "title": "CallsConfig",
+      "type": "object"
+    },
+    "CascadedCallProfile": {
+      "additionalProperties": false,
+      "description": "One STT, normal agent turn, and TTS call profile.",
+      "properties": {
+        "backend": {
+          "const": "cascaded",
+          "description": "Speech-to-text, a normal agent turn, then text-to-speech",
+          "title": "Backend",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Configured LLM alias for cascaded agent turns",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "stt": {
+          "$ref": "#/$defs/SpeechServiceConfig",
+          "description": "Speech-to-text service"
+        },
+        "tts": {
+          "$ref": "#/$defs/SpeechServiceConfig",
+          "description": "Text-to-speech service"
+        }
+      },
+      "required": [
+        "backend",
+        "stt",
+        "tts"
+      ],
+      "title": "CascadedCallProfile",
+      "type": "object"
+    },
+    "CoalescingConfig": {
+      "additionalProperties": false,
+      "description": "Live dispatch coalescing configuration.",
+      "properties": {
+        "debounce_ms": {
+          "default": 1000,
+          "description": "Sliding window in milliseconds that a media-tailed live batch waits for more attachments or a trailing caption; batches ending in text dispatch immediately",
+          "minimum": 0,
+          "title": "Debounce Ms",
+          "type": "integer"
+        }
+      },
+      "title": "CoalescingConfig",
+      "type": "object"
+    },
+    "CompactionConfig": {
+      "description": "Concrete destructive compaction configuration.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Whether to allow automatic pre-reply destructive compaction for this history scope",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "threshold_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Soft replay trigger budget in tokens (defaults to 80% of the effective replay window when both thresholds are None)",
+          "title": "Threshold Tokens"
+        },
+        "threshold_percent": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1,
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Soft replay trigger budget as a fraction of the effective replay window",
+          "title": "Threshold Percent"
+        },
+        "replay_window_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional operational cap for persisted replay and required-compaction planning; compaction summary input is instead budgeted from the selected compaction model's context window",
+          "title": "Replay Window Tokens"
+        },
+        "reserve_tokens": {
+          "default": 16384,
+          "description": "Reserved headroom for output and tool definitions",
+          "minimum": 0,
+          "title": "Reserve Tokens",
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional model config name to use for summary generation",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "fallback_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional model config name retried once when the summary model refuses for safeguards; summary input is rebuilt under the fallback model's context budget when needed",
+          "title": "Fallback Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "timeout_seconds": {
+          "default": 600.0,
+          "description": "Maximum seconds allowed for each compaction summary request",
+          "exclusiveMinimum": 0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "title": "CompactionConfig",
+      "type": "object"
+    },
+    "CompactionOverrideConfig": {
+      "description": "Optional per-scope overrides for destructive compaction.\n\nAn authored null clears the value inherited from defaults, except for ``enabled``, where it turns compaction off.",
+      "properties": {
+        "enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether to allow automatic pre-reply destructive compaction for this history scope",
+          "title": "Enabled"
+        },
+        "threshold_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Soft replay trigger budget in tokens",
+          "title": "Threshold Tokens"
+        },
+        "threshold_percent": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1,
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Soft replay trigger budget as a fraction of the effective replay window",
+          "title": "Threshold Percent"
+        },
+        "replay_window_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional operational cap for persisted replay and required-compaction planning; compaction summary input is instead budgeted from the selected compaction model's context window",
+          "title": "Replay Window Tokens"
+        },
+        "reserve_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reserved headroom for output and tool definitions",
+          "title": "Reserve Tokens"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional model config name to use for summary generation",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "fallback_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional model config name retried once when the summary model refuses for safeguards; summary input is rebuilt under the fallback model's context budget when needed",
+          "title": "Fallback Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum seconds allowed for each compaction summary request",
+          "title": "Timeout Seconds"
+        }
+      },
+      "title": "CompactionOverrideConfig",
+      "type": "object"
+    },
+    "DebugConfig": {
+      "description": "Debug and diagnostic settings.",
+      "properties": {
+        "log_llm_requests": {
+          "default": false,
+          "description": "Write best-effort JSONL records of provider requests for troubleshooting",
+          "title": "Log Llm Requests",
+          "type": "boolean"
+        },
+        "llm_request_log_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Directory for LLM request logs; defaults to mindroom_data/logs/llm_requests",
+          "title": "Llm Request Log Dir"
+        }
+      },
+      "title": "DebugConfig",
+      "type": "object"
+    },
+    "DefaultsConfig": {
+      "additionalProperties": false,
+      "description": "Default configuration values for agents.",
+      "properties": {
+        "tools": {
+          "default": [
+            "scheduler"
+          ],
+          "description": "Tool entries automatically added to every agent, with optional inline overrides",
+          "items": {
+            "$ref": "#/$defs/ToolConfigEntry"
+          },
+          "title": "Tools",
+          "type": "array",
+          "x-mindroom": {
+            "reference": "tool"
+          }
+        },
+        "markdown": {
+          "default": true,
+          "description": "Default markdown setting",
+          "title": "Markdown",
+          "type": "boolean"
+        },
+        "enable_streaming": {
+          "default": true,
+          "description": "Enable streaming responses via progressive message edits",
+          "title": "Enable Streaming",
+          "type": "boolean"
+        },
+        "large_message_strategy": {
+          "default": "sidecar",
+          "description": "How to deliver oversized text responses: 'sidecar' uploads the full content as an attachment behind a preview event; 'split' sends the full text as lossless segmented messages",
+          "enum": [
+            "sidecar",
+            "split"
+          ],
+          "title": "Large Message Strategy",
+          "type": "string"
+        },
+        "coalescing": {
+          "$ref": "#/$defs/CoalescingConfig",
+          "default": {
+            "debounce_ms": 1000
+          },
+          "description": "Live message coalescing settings for rapid same-sender turns"
+        },
+        "show_stop_button": {
+          "default": true,
+          "description": "Whether to automatically show stop button on messages",
+          "title": "Show Stop Button",
+          "type": "boolean"
+        },
+        "auto_resume_after_restart": {
+          "default": true,
+          "description": "Whether restart cleanup should post a real system message to resume interrupted threaded conversations",
+          "title": "Auto Resume After Restart",
+          "type": "boolean"
+        },
+        "learning": {
+          "default": true,
+          "description": "Default Agno Learning setting",
+          "title": "Learning",
+          "type": "boolean"
+        },
+        "learning_mode": {
+          "default": "always",
+          "description": "Default Agno Learning mode",
+          "enum": [
+            "always",
+            "agentic"
+          ],
+          "title": "Learning Mode",
+          "type": "string"
+        },
+        "compaction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompactionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": {
+            "enabled": true,
+            "threshold_tokens": null,
+            "threshold_percent": null,
+            "replay_window_tokens": null,
+            "reserve_tokens": 16384,
+            "model": null,
+            "fallback_model": null,
+            "timeout_seconds": 600.0
+          },
+          "description": "Default destructive compaction policy (set to null or enabled=false to disable automatic pre-reply compaction)"
+        },
+        "num_history_runs": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Default number of prior Agno runs to include as history context (None = all)",
+          "title": "Num History Runs"
+        },
+        "num_history_messages": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Default max messages from history (mutually exclusive with num_history_runs)",
+          "title": "Num History Messages"
+        },
+        "compress_tool_results": {
+          "default": false,
+          "description": "Compress tool results in history to save context. Disabled by default because on Anthropic/Vertex Claude this can mutate replayed tool messages and invalidate prompt-cache prefixes.",
+          "title": "Compress Tool Results",
+          "type": "boolean"
+        },
+        "max_tool_calls_from_history": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Max tool call messages replayed from history (None = no limit)",
+          "title": "Max Tool Calls From History"
+        },
+        "show_tool_calls": {
+          "default": true,
+          "description": "Whether to show tool call details inline in responses",
+          "title": "Show Tool Calls",
+          "type": "boolean"
+        },
+        "worker_tools": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Tool names to route through scoped workers by default (None = use the built-in default routing policy)",
+          "title": "Worker Tools",
+          "x-mindroom": {
+            "reference": "tool"
+          }
+        },
+        "worker_scope": {
+          "anyOf": [
+            {
+              "enum": [
+                "shared",
+                "user",
+                "user_agent"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Default worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
+          "title": "Worker Scope"
+        },
+        "worker_grantable_credentials": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Credential service names to make available inside isolated workers (None = deny by default). Use built-in names such as openai, anthropic, google, github_private, and ollama, or custom shared credential service names saved through the dashboard or API. This setting only affects tools that actually run inside isolated workers. It never injects provider env vars such as OPENAI_API_KEY. For worker-routed tools, it only controls which shared credentials MindRoom may load inside isolated workers, and it does not affect local shared-only integrations such as homeassistant because those stay in the main runtime. Google OAuth client config, Google OAuth tokens, and google_vertex_adc are intentionally unsupported in isolated workers and must stay in the main runtime.",
+          "title": "Worker Grantable Credentials"
+        },
+        "allow_self_config": {
+          "default": false,
+          "description": "Default setting for allowing agents to modify their own configuration",
+          "title": "Allow Self Config",
+          "type": "boolean"
+        },
+        "max_preload_chars": {
+          "default": 50000,
+          "description": "Hard cap for extra role preload context loaded from context_files",
+          "minimum": 1,
+          "title": "Max Preload Chars",
+          "type": "integer"
+        },
+        "tool_output_auto_save_threshold_bytes": {
+          "default": 51200,
+          "description": "Supported tool outputs larger than this many bytes are automatically saved to the agent workspace and replaced with a compact receipt in the model-visible tool result",
+          "minimum": 1,
+          "title": "Tool Output Auto Save Threshold Bytes",
+          "type": "integer"
+        },
+        "streaming": {
+          "$ref": "#/$defs/StreamingConfig",
+          "default": {
+            "update_interval": 5.0,
+            "min_update_interval": 0.5,
+            "interval_ramp_seconds": 15.0,
+            "max_idle": 2.0
+          },
+          "description": "Streaming response timing parameters"
+        },
+        "thread_summary_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model config name for generating thread summaries (e.g., 'haiku'). Uses 'default' if not set.",
+          "title": "Thread Summary Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "thread_summary_temperature": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 0.2,
+          "description": "Temperature override for automatic thread summaries. Set to null to omit temperature and use provider defaults. MindRoom always uses provider temperature defaults for GPT-6 Astra, Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries.",
+          "title": "Thread Summary Temperature"
+        },
+        "thread_summary_first_threshold": {
+          "default": 1,
+          "description": "Message count required before the first automatic thread summary is generated.",
+          "minimum": 1,
+          "title": "Thread Summary First Threshold",
+          "type": "integer"
+        },
+        "thread_summary_subsequent_interval": {
+          "default": 10,
+          "description": "Additional message count required between automatic thread summaries after the first one.",
+          "minimum": 1,
+          "title": "Thread Summary Subsequent Interval",
+          "type": "integer"
+        }
+      },
+      "title": "DefaultsConfig",
+      "type": "object"
+    },
+    "EmbedderConfig": {
+      "description": "Configuration for memory embedder.",
+      "properties": {
+        "model": {
+          "default": "text-embedding-3-small",
+          "description": "Model name for embeddings",
+          "title": "Model",
+          "type": "string"
+        },
+        "credentials_service": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional credential service used only by this embedder. When omitted, legacy resolution checks the dedicated 'embedder' service and then the provider credential",
+          "title": "Credentials Service"
+        },
+        "api_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Explicit embedder API key. Highest priority, above credentials_service and the legacy dedicated embedder-to-openai fallback",
+          "title": "Api Key",
+          "x-mindroom": {
+            "secret": true
+          }
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Host URL for self-hosted models (Ollama, llama.cpp, etc.)",
+          "title": "Host"
+        },
+        "dimensions": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional embedding dimension override for OpenAI-compatible providers",
+          "title": "Dimensions"
+        }
+      },
+      "title": "EmbedderConfig",
+      "type": "object"
+    },
+    "EventJournalConfig": {
+      "additionalProperties": false,
+      "description": "Where this runtime's durable event journal lives.",
+      "properties": {
+        "backend": {
+          "default": "sqlite",
+          "description": "Storage backend for the durable Matrix event journal.",
+          "enum": [
+            "sqlite",
+            "postgres"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "database_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "PostgreSQL connection URL for the durable Matrix event journal. Prefer database_url_env for secrets.",
+          "title": "Database Url",
+          "x-mindroom": {
+            "secret": true
+          }
+        },
+        "database_url_env": {
+          "default": "MINDROOM_EVENT_CACHE_DATABASE_URL",
+          "description": "Runtime env var that contains the PostgreSQL event-journal connection URL. Must be DATABASE_URL or end with _DATABASE_URL so runtime secret filters withhold it.",
+          "title": "Database Url Env",
+          "type": "string"
+        }
+      },
+      "title": "EventJournalConfig",
+      "type": "object"
+    },
+    "ExternalTriggerPolicyConfig": {
+      "additionalProperties": false,
+      "description": "Global policy for tool-managed external trigger records.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Whether the external trigger API is enabled",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "default_replay_window_seconds": {
+          "default": 300,
+          "description": "Default accepted signature age for newly created signed triggers",
+          "maximum": 3600,
+          "minimum": 30,
+          "title": "Default Replay Window Seconds",
+          "type": "integer"
+        },
+        "max_replay_window_seconds": {
+          "default": 3600,
+          "description": "Maximum accepted signature age any signed trigger may request",
+          "maximum": 3600,
+          "minimum": 30,
+          "title": "Max Replay Window Seconds",
+          "type": "integer"
+        },
+        "default_max_body_bytes": {
+          "default": 65536,
+          "description": "Default request body size limit for newly created triggers",
+          "maximum": 262144,
+          "minimum": 1024,
+          "title": "Default Max Body Bytes",
+          "type": "integer"
+        },
+        "max_body_bytes": {
+          "default": 262144,
+          "description": "Maximum request body size any trigger may request",
+          "maximum": 262144,
+          "minimum": 1024,
+          "title": "Max Body Bytes",
+          "type": "integer"
+        },
+        "max_triggers_per_owner": {
+          "default": 20,
+          "description": "Maximum trigger records one owner may create",
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Triggers Per Owner",
+          "type": "integer"
+        },
+        "admin_users": {
+          "default": [],
+          "description": "Matrix users allowed to manage external triggers for other owners",
+          "items": {
+            "type": "string"
+          },
+          "title": "Admin Users",
+          "type": "array"
+        }
+      },
+      "title": "ExternalTriggerPolicyConfig",
+      "type": "object"
+    },
+    "HookOverrideConfig": {
+      "description": "Per-hook deployer override configuration.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Run this hook; false disables it without removing the plugin",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Override the hook's default execution priority",
+          "title": "Priority"
+        },
+        "timeout_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Override the hook's default timeout in milliseconds",
+          "title": "Timeout Ms"
+        }
+      },
+      "title": "HookOverrideConfig",
+      "type": "object"
+    },
+    "JudgmentConfig": {
+      "discriminator": {
+        "mapping": {
+          "llm": "#/$defs/LLMJudgmentConfig",
+          "typesafe": "#/$defs/TypeSafeJudgmentConfig"
+        },
+        "propertyName": "provider"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/LLMJudgmentConfig"
+        },
+        {
+          "$ref": "#/$defs/TypeSafeJudgmentConfig"
+        }
+      ]
+    },
+    "KnowledgeBaseConfig": {
+      "description": "Knowledge base configuration.",
+      "properties": {
+        "mode": {
+          "default": "semantic",
+          "description": "Knowledge access mode. 'semantic' builds an embedding-backed search index; 'files' skips embeddings and exposes source files for agentic file-tool search.",
+          "enum": [
+            "semantic",
+            "files"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "description": "Short description of what this knowledge base contains, shown to agents in knowledge-search tool metadata",
+          "title": "Description",
+          "type": "string"
+        },
+        "path": {
+          "default": "./knowledge_docs",
+          "description": "Path to knowledge documents folder",
+          "title": "Path",
+          "type": "string"
+        },
+        "watch": {
+          "default": true,
+          "description": "When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations",
+          "title": "Watch",
+          "type": "boolean"
+        },
+        "require_content_before_publish": {
+          "default": false,
+          "description": "Keep a cold semantic index initializing until at least one managed source file exists",
+          "title": "Require Content Before Publish",
+          "type": "boolean"
+        },
+        "chunk_size": {
+          "default": 5000,
+          "description": "Maximum number of characters per indexed chunk for text-like knowledge files",
+          "minimum": 128,
+          "title": "Chunk Size",
+          "type": "integer"
+        },
+        "chunk_overlap": {
+          "default": 0,
+          "description": "Number of overlapping characters between adjacent chunks",
+          "minimum": 0,
+          "title": "Chunk Overlap",
+          "type": "integer"
+        },
+        "include_extensions": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional file extensions to index instead of the default text-like set, for example ['.md', '.py']",
+          "title": "Include Extensions"
+        },
+        "extra_extensions": {
+          "default": [],
+          "description": "Optional file extensions to index in addition to the default text-like set, for example ['.pdf', '.docx']; the matching reader package must be installed",
+          "items": {
+            "type": "string"
+          },
+          "title": "Extra Extensions",
+          "type": "array"
+        },
+        "exclude_extensions": {
+          "default": [],
+          "description": "Optional file extensions to exclude from indexing after include filtering",
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude Extensions",
+          "type": "array"
+        },
+        "include_patterns": {
+          "default": [],
+          "description": "Optional root-anchored glob patterns to include before extension filtering",
+          "items": {
+            "type": "string"
+          },
+          "title": "Include Patterns",
+          "type": "array"
+        },
+        "exclude_patterns": {
+          "default": [],
+          "description": "Optional root-anchored glob patterns to exclude after include filtering",
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude Patterns",
+          "type": "array"
+        },
+        "skip_hidden": {
+          "default": true,
+          "description": "Skip hidden files/folders (paths with components starting with '.') during indexing; writers that update knowledge folders in place use dot-prefixed temp files. Git-backed bases ignore this field and use git.skip_hidden instead",
+          "title": "Skip Hidden",
+          "type": "boolean"
+        },
+        "git": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KnowledgeGitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Git sync configuration for this knowledge base"
+        }
+      },
+      "title": "KnowledgeBaseConfig",
+      "type": "object"
+    },
+    "KnowledgeGitConfig": {
+      "additionalProperties": false,
+      "description": "Git repository synchronization settings for a knowledge base.",
+      "properties": {
+        "repo_url": {
+          "description": "Git repository URL used as the knowledge source; may embed HTTPS credentials",
+          "title": "Repo Url",
+          "type": "string",
+          "x-mindroom": {
+            "secret": true
+          }
+        },
+        "branch": {
+          "default": "main",
+          "description": "Git branch to track",
+          "title": "Branch",
+          "type": "string"
+        },
+        "poll_interval_seconds": {
+          "default": 300,
+          "description": "How often to schedule a background refresh for a Git-backed knowledge base",
+          "minimum": 5,
+          "title": "Poll Interval Seconds",
+          "type": "integer"
+        },
+        "credentials_service": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional CredentialsManager service name used for private HTTPS repos",
+          "title": "Credentials Service"
+        },
+        "lfs": {
+          "default": false,
+          "description": "Enable Git LFS support for repositories that require large-file downloads",
+          "title": "Lfs",
+          "type": "boolean"
+        },
+        "sync_timeout_seconds": {
+          "default": 3600,
+          "description": "Maximum time allowed for one Git sync command before it is aborted",
+          "minimum": 5,
+          "title": "Sync Timeout Seconds",
+          "type": "integer"
+        },
+        "skip_hidden": {
+          "default": true,
+          "description": "Skip hidden files/folders (paths with components starting with '.') during indexing",
+          "title": "Skip Hidden",
+          "type": "boolean"
+        },
+        "include_patterns": {
+          "default": [],
+          "description": "Optional root-anchored glob patterns to include (e.g. 'content/post/*/index.md')",
+          "items": {
+            "type": "string"
+          },
+          "title": "Include Patterns",
+          "type": "array"
+        },
+        "exclude_patterns": {
+          "default": [],
+          "description": "Optional root-anchored glob patterns to exclude after include filtering",
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude Patterns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "repo_url"
+      ],
+      "title": "KnowledgeGitConfig",
+      "type": "object"
+    },
+    "LLMJudgmentConfig": {
+      "additionalProperties": false,
+      "description": "Use a configured model alias for a structured judgment.",
+      "properties": {
+        "provider": {
+          "const": "llm",
+          "description": "Judge with a configured language model",
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "description": "Configured model alias that answers the judgment",
+          "minLength": 1,
+          "title": "Model",
+          "type": "string",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "timeout_seconds": {
+          "default": 5.0,
+          "description": "Seconds to wait for the judgment before falling back",
+          "exclusiveMinimum": 0.0,
+          "maximum": 30.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "title": "LLMJudgmentConfig",
+      "type": "object"
+    },
+    "LiveCallProfile": {
+      "additionalProperties": false,
+      "description": "One OpenAI Live voice session delegating tasks to a normal agent.",
+      "properties": {
+        "backend": {
+          "const": "live",
+          "description": "OpenAI Live voice session that delegates tasks to the agent",
+          "title": "Backend",
+          "type": "string"
+        },
+        "model": {
+          "description": "OpenAI Live speech-to-speech model",
+          "title": "Model",
+          "type": "string"
+        },
+        "credentials_service": {
+          "description": "Named credential service containing the Live API key",
+          "title": "Credentials Service",
+          "type": "string"
+        },
+        "voice": {
+          "description": "Live model voice preset",
+          "title": "Voice",
+          "type": "string"
+        },
+        "agent_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Configured LLM alias for delegated agent turns",
+          "title": "Agent Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        }
+      },
+      "required": [
+        "backend",
+        "model",
+        "credentials_service",
+        "voice"
+      ],
+      "title": "LiveCallProfile",
+      "type": "object"
+    },
+    "MCPOAuthConfig": {
+      "additionalProperties": false,
+      "description": "OAuth settings for worker-scoped remote MCP servers.",
+      "properties": {
+        "type": {
+          "const": "oauth",
+          "description": "Authentication scheme; OAuth is the only supported type",
+          "title": "Type",
+          "type": "string"
+        },
+        "provider_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "OAuth provider id; defaults to mcp_<server_id>",
+          "title": "Provider Id"
+        },
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Human-readable OAuth provider name",
+          "title": "Display Name"
+        },
+        "resource": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "OAuth protected resource identifier",
+          "title": "Resource"
+        },
+        "discovery": {
+          "default": "auto",
+          "description": "OAuth metadata discovery mode",
+          "enum": [
+            "auto",
+            "manual"
+          ],
+          "title": "Discovery",
+          "type": "string"
+        },
+        "authorization_server": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Authorization server issuer/base URL",
+          "title": "Authorization Server"
+        },
+        "authorization_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Manual OAuth authorization endpoint",
+          "title": "Authorization Url"
+        },
+        "token_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Manual OAuth token endpoint",
+          "title": "Token Url"
+        },
+        "registration_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Dynamic client registration endpoint",
+          "title": "Registration Url"
+        },
+        "dynamic_client_registration": {
+          "default": true,
+          "description": "Whether dynamic registration may be used",
+          "title": "Dynamic Client Registration",
+          "type": "boolean"
+        },
+        "token_endpoint_auth_method": {
+          "default": "none",
+          "description": "OAuth token endpoint client authentication method",
+          "enum": [
+            "none",
+            "client_secret_post",
+            "client_secret_basic"
+          ],
+          "title": "Token Endpoint Auth Method",
+          "type": "string"
+        },
+        "pkce_code_challenge_method": {
+          "anyOf": [
+            {
+              "const": "S256",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "S256",
+          "description": "PKCE challenge method",
+          "title": "Pkce Code Challenge Method"
+        },
+        "scopes": {
+          "default": [],
+          "description": "OAuth scopes",
+          "items": {
+            "type": "string"
+          },
+          "title": "Scopes",
+          "type": "array"
+        },
+        "extra_auth_params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Extra authorization request params",
+          "title": "Extra Auth Params",
+          "type": "object"
+        },
+        "extra_token_params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Extra token request params",
+          "title": "Extra Token Params",
+          "type": "object"
+        },
+        "client_config_services": {
+          "default": [],
+          "description": "Provider-specific client config",
+          "items": {
+            "type": "string"
+          },
+          "title": "Client Config Services",
+          "type": "array"
+        },
+        "shared_client_config_services": {
+          "default": [],
+          "description": "Shared client config services",
+          "items": {
+            "type": "string"
+          },
+          "title": "Shared Client Config Services",
+          "type": "array"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "MCPOAuthConfig",
+      "type": "object"
+    },
+    "MCPServerConfig": {
+      "additionalProperties": false,
+      "description": "Config for one MCP server connection.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Whether the server is active",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Human-readable tool name for the dashboard and catalog",
+          "title": "Display Name"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Short capability summary for the dashboard and tool catalog",
+          "title": "Summary"
+        },
+        "icon": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional dashboard icon name, such as SiConfluence or Calendar",
+          "title": "Icon"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the server provides; appended to the OAuth bridge tool descriptions shown to the model. Requires auth.",
+          "title": "Description"
+        },
+        "required": {
+          "default": false,
+          "description": "Block dependent agent startup while this server is unavailable instead of degrading",
+          "title": "Required",
+          "type": "boolean"
+        },
+        "transport": {
+          "description": "Transport type",
+          "enum": [
+            "stdio",
+            "sse",
+            "streamable-http"
+          ],
+          "title": "Transport",
+          "type": "string"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Executable name for stdio transport",
+          "title": "Command"
+        },
+        "args": {
+          "default": [],
+          "description": "Arguments for stdio transport",
+          "items": {
+            "type": "string"
+          },
+          "title": "Args",
+          "type": "array"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Working directory for stdio transport",
+          "title": "Cwd"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Environment variables for stdio transport",
+          "title": "Env",
+          "type": "object",
+          "x-mindroom": {
+            "secret": true
+          }
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Remote URL for SSE or streamable HTTP",
+          "title": "Url"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "HTTP headers for remote transports",
+          "title": "Headers",
+          "type": "object",
+          "x-mindroom": {
+            "secret": true
+          }
+        },
+        "tool_prefix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Prefix for model-visible function names",
+          "title": "Tool Prefix"
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MCPOAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional worker-scoped MCP auth"
+        },
+        "include_tools": {
+          "default": [],
+          "description": "Optional remote tool allowlist",
+          "items": {
+            "type": "string"
+          },
+          "title": "Include Tools",
+          "type": "array"
+        },
+        "exclude_tools": {
+          "default": [],
+          "description": "Optional remote tool denylist",
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude Tools",
+          "type": "array"
+        },
+        "startup_timeout_seconds": {
+          "default": 20.0,
+          "description": "Startup timeout",
+          "exclusiveMinimum": 0,
+          "title": "Startup Timeout Seconds",
+          "type": "number"
+        },
+        "call_timeout_seconds": {
+          "default": 120.0,
+          "description": "Default call timeout",
+          "exclusiveMinimum": 0,
+          "title": "Call Timeout Seconds",
+          "type": "number"
+        },
+        "max_concurrent_calls": {
+          "default": 1,
+          "description": "Maximum concurrent calls",
+          "minimum": 1,
+          "title": "Max Concurrent Calls",
+          "type": "integer"
+        },
+        "auto_reconnect": {
+          "default": true,
+          "description": "Whether to reconnect automatically",
+          "title": "Auto Reconnect",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "transport"
+      ],
+      "title": "MCPServerConfig",
+      "type": "object"
+    },
+    "MatrixSpaceConfig": {
+      "description": "Configuration for the optional root Matrix Space.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Whether to create and maintain a root Matrix Space for managed MindRoom rooms",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "name": {
+          "default": "MindRoom",
+          "description": "Display name for the root Matrix Space when enabled",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "title": "MatrixSpaceConfig",
+      "type": "object"
+    },
+    "MatrixSyncConfig": {
+      "additionalProperties": false,
+      "description": "Configuration for Matrix event sync transport.",
+      "properties": {
+        "mode": {
+          "default": "classic",
+          "description": "Matrix sync transport. 'classic' uses /v3/sync and 'sliding' opts into MSC4186 Simplified Sliding Sync, which requires a homeserver advertising org.matrix.simplified_msc3575.",
+          "enum": [
+            "sliding",
+            "classic"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "sliding_timeline_limit": {
+          "default": 100,
+          "description": "Timeline event limit for each room requested through Simplified Sliding Sync. Sliding positions are connection-scoped, so this also bounds how many per-room events a restarted connection can replay.",
+          "minimum": 1,
+          "title": "Sliding Timeline Limit",
+          "type": "integer"
+        },
+        "max_response_bytes": {
+          "default": 16777216,
+          "description": "Maximum HTTP response size in bytes for each durable Matrix sync session.",
+          "minimum": 1,
+          "title": "Max Response Bytes",
+          "type": "integer"
+        },
+        "max_pending_bytes": {
+          "default": 67108864,
+          "description": "Maximum encoded pending output size in bytes for each durable Matrix sync session.",
+          "minimum": 1,
+          "title": "Max Pending Bytes",
+          "type": "integer"
+        }
+      },
+      "title": "MatrixSyncConfig",
+      "type": "object"
+    },
+    "MemoryAutoFlushConfig": {
+      "description": "Background memory auto-flush configuration.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Enable background file-memory auto-flush worker",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "flush_interval_seconds": {
+          "default": 1800,
+          "description": "Background auto-flush loop interval",
+          "minimum": 5,
+          "title": "Flush Interval Seconds",
+          "type": "integer"
+        },
+        "idle_seconds": {
+          "default": 120,
+          "description": "Session idle time before dirty session becomes flush-eligible",
+          "minimum": 0,
+          "title": "Idle Seconds",
+          "type": "integer"
+        },
+        "max_dirty_age_seconds": {
+          "default": 600,
+          "description": "Force flush eligibility once a session remains dirty for this long",
+          "minimum": 1,
+          "title": "Max Dirty Age Seconds",
+          "type": "integer"
+        },
+        "stale_ttl_seconds": {
+          "default": 86400,
+          "description": "Drop stale flush-state entries older than this TTL",
+          "minimum": 60,
+          "title": "Stale Ttl Seconds",
+          "type": "integer"
+        },
+        "max_cross_session_reprioritize": {
+          "default": 5,
+          "description": "Maximum same-agent dirty sessions reprioritized per incoming prompt",
+          "minimum": 0,
+          "title": "Max Cross Session Reprioritize",
+          "type": "integer"
+        },
+        "retry_cooldown_seconds": {
+          "default": 30,
+          "description": "Cooldown before retrying a failed extraction attempt",
+          "minimum": 1,
+          "title": "Retry Cooldown Seconds",
+          "type": "integer"
+        },
+        "max_retry_cooldown_seconds": {
+          "default": 300,
+          "description": "Upper bound for retry cooldown backoff",
+          "minimum": 1,
+          "title": "Max Retry Cooldown Seconds",
+          "type": "integer"
+        },
+        "batch": {
+          "$ref": "#/$defs/_MemoryAutoFlushBatchConfig",
+          "default": {
+            "max_sessions_per_cycle": 10,
+            "max_sessions_per_agent_per_cycle": 3
+          },
+          "description": "Batch sizing controls for each auto-flush cycle"
+        },
+        "extractor": {
+          "$ref": "#/$defs/_MemoryAutoFlushExtractorConfig",
+          "default": {
+            "no_reply_token": "NO_REPLY",
+            "max_messages_per_flush": 20,
+            "max_chars_per_flush": 12000,
+            "max_extraction_seconds": 30,
+            "include_memory_context": {
+              "memory_snippets": 5,
+              "snippet_max_chars": 400
+            }
+          },
+          "description": "Extraction-window and timeout controls for auto-flush"
+        }
+      },
+      "title": "MemoryAutoFlushConfig",
+      "type": "object"
+    },
+    "MemoryConfig": {
+      "description": "Memory system configuration.",
+      "properties": {
+        "backend": {
+          "default": "mem0",
+          "description": "Memory backend: 'mem0' (vector memory), 'file' (markdown memory files), or 'none' (disabled memory)",
+          "enum": [
+            "mem0",
+            "file",
+            "none"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "team_reads_member_memory": {
+          "default": false,
+          "description": "When true, team-context memory reads can access member agent memories in addition to the shared team scope",
+          "title": "Team Reads Member Memory",
+          "type": "boolean"
+        },
+        "embedder": {
+          "$ref": "#/$defs/_MemoryEmbedderConfig",
+          "default": {
+            "provider": "openai",
+            "config": {
+              "api_key": null,
+              "credentials_service": null,
+              "dimensions": null,
+              "host": null,
+              "model": "text-embedding-3-small"
+            }
+          },
+          "description": "Embedder configuration for memory"
+        },
+        "llm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/_MemoryLLMConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "LLM configuration for memory"
+        },
+        "file": {
+          "$ref": "#/$defs/_MemoryFileConfig",
+          "default": {
+            "path": null,
+            "max_entrypoint_lines": 200
+          },
+          "description": "File-backed memory configuration"
+        },
+        "search": {
+          "$ref": "#/$defs/MemorySearchConfig",
+          "default": {
+            "mode": "keyword",
+            "include": [
+              "memory/**/*.md"
+            ],
+            "include_entrypoint": false
+          },
+          "description": "Search behavior for file-backed memory"
+        },
+        "auto_flush": {
+          "$ref": "#/$defs/MemoryAutoFlushConfig",
+          "default": {
+            "enabled": false,
+            "flush_interval_seconds": 1800,
+            "idle_seconds": 120,
+            "max_dirty_age_seconds": 600,
+            "stale_ttl_seconds": 86400,
+            "max_cross_session_reprioritize": 5,
+            "retry_cooldown_seconds": 30,
+            "max_retry_cooldown_seconds": 300,
+            "batch": {
+              "max_sessions_per_agent_per_cycle": 3,
+              "max_sessions_per_cycle": 10
+            },
+            "extractor": {
+              "include_memory_context": {
+                "memory_snippets": 5,
+                "snippet_max_chars": 400
+              },
+              "max_chars_per_flush": 12000,
+              "max_extraction_seconds": 30,
+              "max_messages_per_flush": 20,
+              "no_reply_token": "NO_REPLY"
+            }
+          },
+          "description": "Background auto-flush behavior for file-backed memory"
+        }
+      },
+      "title": "MemoryConfig",
+      "type": "object"
+    },
+    "MemorySearchConfig": {
+      "description": "Search behavior for file-backed memory.",
+      "properties": {
+        "mode": {
+          "default": "keyword",
+          "description": "Search mode for file-backed memory: keyword or semantic",
+          "enum": [
+            "keyword",
+            "semantic"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "include": {
+          "default": [
+            "memory/**/*.md"
+          ],
+          "description": "Root-relative glob patterns included in file-memory semantic search",
+          "items": {
+            "type": "string"
+          },
+          "title": "Include",
+          "type": "array"
+        },
+        "include_entrypoint": {
+          "default": false,
+          "description": "When true, include MEMORY.md in file-memory semantic search",
+          "title": "Include Entrypoint",
+          "type": "boolean"
+        }
+      },
+      "title": "MemorySearchConfig",
+      "type": "object"
+    },
+    "MidTurnConfig": {
+      "additionalProperties": false,
+      "description": "Choose whether an agent's active turn may finish before handling queued messages.",
+      "properties": {
+        "judgment": {
+          "$ref": "#/$defs/JudgmentConfig",
+          "description": "LLM model alias or TypeSafe backend that makes the decision"
+        },
+        "instructions": {
+          "default": "",
+          "description": "Extra guidance for the finish-or-wrap-up decision",
+          "title": "Instructions",
+          "type": "string",
+          "x-mindroom": {
+            "multiline": true
+          }
+        },
+        "defer_reaction": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reaction such as \ud83d\udc40 added when a queued message can wait; the message remains queued",
+          "title": "Defer Reaction"
+        }
+      },
+      "required": [
+        "judgment"
+      ],
+      "title": "MidTurnConfig",
+      "type": "object"
+    },
+    "MindRoomUserConfig": {
+      "description": "Configuration for the internal MindRoom user account.",
+      "properties": {
+        "username": {
+          "default": "mindroom_user",
+          "description": "Matrix username localpart for the internal user account (without @ or domain); set before first startup",
+          "title": "Username",
+          "type": "string"
+        },
+        "display_name": {
+          "default": "MindRoomUser",
+          "description": "Display name for the internal user account",
+          "title": "Display Name",
+          "type": "string"
+        }
+      },
+      "title": "MindRoomUserConfig",
+      "type": "object"
+    },
+    "ModelConfig": {
+      "description": "Configuration for an AI model.",
+      "properties": {
+        "provider": {
+          "description": "Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
+          "title": "Provider",
+          "type": "string"
+        },
+        "id": {
+          "description": "Model ID specific to the provider",
+          "title": "Id",
+          "type": "string"
+        },
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Friendly model name shown in clients",
+          "title": "Display Name"
+        },
+        "icon": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Config-relative image path or Matrix mxc URI",
+          "title": "Icon"
+        },
+        "api": {
+          "anyOf": [
+            {
+              "enum": [
+                "responses",
+                "chat_completions"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "OpenAI API transport; unset keeps automatic model/endpoint selection",
+          "title": "Api"
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional host URL (e.g., for Ollama)",
+          "title": "Host"
+        },
+        "api_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional API key (usually from env vars)",
+          "title": "Api Key",
+          "x-mindroom": {
+            "secret": true
+          }
+        },
+        "extra_kwargs": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Additional provider-specific parameters passed directly to the model; may include api_key",
+          "title": "Extra Kwargs",
+          "x-mindroom": {
+            "secret": true
+          }
+        },
+        "context_window": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Actual provider context window size in tokens. MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction.replay_window_tokens sets a smaller replay cap. An explicit compaction.model or compaction.fallback_model also needs its own context_window for summary generation. On vertexai_claude models it additionally enables request-time fitting that trims replayed history when a request would exceed the window",
+          "title": "Context Window"
+        }
+      },
+      "required": [
+        "provider",
+        "id"
+      ],
+      "title": "ModelConfig",
+      "type": "object"
+    },
+    "ParticipationConfig": {
+      "additionalProperties": false,
+      "description": "Pause and judgment settings for an agent's existing threads in any room.",
+      "properties": {
+        "debounce_seconds": {
+          "default": 3.0,
+          "description": "Quiet window in seconds for eligible text before deciding whether to participate",
+          "maximum": 30.0,
+          "minimum": 0.0,
+          "title": "Debounce Seconds",
+          "type": "number"
+        },
+        "instructions": {
+          "default": "",
+          "description": "Additional guidance for deciding whether the agent should participate",
+          "title": "Instructions",
+          "type": "string",
+          "x-mindroom": {
+            "multiline": true
+          }
+        },
+        "decline_reaction": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reaction such as \ud83d\udc4d added to a deliberately declined message; unset keeps declines invisible",
+          "title": "Decline Reaction"
+        },
+        "judgment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgmentConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Separate judgment backend for the decision; unset uses the agent's reply model"
+        }
+      },
+      "title": "ParticipationConfig",
+      "type": "object"
+    },
+    "PersonalRoomsConfig": {
+      "additionalProperties": false,
+      "description": "One private room per eligible human, managed by a selected agent.",
+      "properties": {
+        "agent": {
+          "description": "Agent that owns and answers in personal rooms",
+          "title": "Agent",
+          "type": "string",
+          "x-mindroom": {
+            "reference": "agent"
+          }
+        },
+        "onboarding_rooms": {
+          "description": "Configured rooms whose human joins trigger onboarding",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Onboarding Rooms",
+          "type": "array",
+          "x-mindroom": {
+            "reference": "room"
+          }
+        },
+        "commands": {
+          "default": [],
+          "description": "Exact self-onboarding commands accepted in onboarding rooms",
+          "items": {
+            "type": "string"
+          },
+          "title": "Commands",
+          "type": "array"
+        },
+        "alias_prefix": {
+          "default": "personal",
+          "description": "Lowercase prefix for personal room aliases",
+          "pattern": "^[a-z0-9_-]{1,40}$",
+          "title": "Alias Prefix",
+          "type": "string"
+        },
+        "name": {
+          "default": "Personal room for {user}",
+          "description": "New room name template; accepts {user}, {room}, and {agent}",
+          "maxLength": 1000,
+          "title": "Name",
+          "type": "string"
+        },
+        "topic": {
+          "default": "Private conversation with {agent}.",
+          "description": "New room topic template; accepts {user}, {room}, and {agent}",
+          "maxLength": 1000,
+          "title": "Topic",
+          "type": "string"
+        },
+        "welcome": {
+          "default": "Welcome {user}! This is your personal room with {agent}.",
+          "description": "Welcome message template; empty disables new welcomes; accepts {user}, {room}, and {agent}",
+          "maxLength": 10000,
+          "title": "Welcome",
+          "type": "string",
+          "x-mindroom": {
+            "multiline": true
+          }
+        },
+        "confirmation": {
+          "default": "",
+          "description": "Optional once-only notice in the onboarding room; accepts {user}, {room}, and {agent}",
+          "maxLength": 10000,
+          "title": "Confirmation",
+          "type": "string",
+          "x-mindroom": {
+            "multiline": true
+          }
+        },
+        "welcome_dispatch": {
+          "default": false,
+          "description": "Send the welcome through trusted hook dispatch after the human joins",
+          "title": "Welcome Dispatch",
+          "type": "boolean"
+        },
+        "backfill": {
+          "default": false,
+          "description": "On startup, reconcile existing eligible onboarding-room members",
+          "title": "Backfill",
+          "type": "boolean"
+        },
+        "auto_join_requester": {
+          "default": false,
+          "description": "Join the requester automatically only during initial creation of a personal room",
+          "title": "Auto Join Requester",
+          "type": "boolean"
+        },
+        "requester_admin": {
+          "default": false,
+          "description": "Grant the human Matrix room admin capability",
+          "title": "Requester Admin",
+          "type": "boolean"
+        },
+        "avatar": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional room avatar file, relative to the configuration",
+          "title": "Avatar"
+        },
+        "avatar_from_requester": {
+          "default": false,
+          "description": "Copy the requester's profile avatar if the room is empty",
+          "title": "Avatar From Requester",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "agent",
+        "onboarding_rooms"
+      ],
+      "title": "PersonalRoomsConfig",
+      "type": "object"
+    },
+    "PluginEntryConfig": {
+      "description": "Normalized plugin entry from the root config.",
+      "properties": {
+        "path": {
+          "description": "Plugin directory, config-relative path, or Python package spec",
+          "title": "Path",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Load the plugin; false disables it without removing the entry",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "settings": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Free-form settings passed to the plugin at load time; may include credentials",
+          "title": "Settings",
+          "type": "object",
+          "x-mindroom": {
+            "secret": true
+          }
+        },
+        "hooks": {
+          "additionalProperties": {
+            "$ref": "#/$defs/HookOverrideConfig"
+          },
+          "default": {},
+          "description": "Per-hook overrides keyed by hook function name",
+          "title": "Hooks",
+          "type": "object"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "PluginEntryConfig",
+      "type": "object"
+    },
+    "RealtimeCallProfile": {
+      "additionalProperties": false,
+      "description": "One OpenAI realtime speech-to-speech call profile.",
+      "properties": {
+        "backend": {
+          "const": "realtime",
+          "description": "OpenAI realtime speech-to-speech session",
+          "title": "Backend",
+          "type": "string"
+        },
+        "model": {
+          "description": "OpenAI realtime speech-to-speech model",
+          "title": "Model",
+          "type": "string"
+        },
+        "credentials_service": {
+          "description": "Named credential service containing the realtime API key",
+          "title": "Credentials Service",
+          "type": "string"
+        },
+        "voice": {
+          "description": "Realtime model voice preset",
+          "title": "Voice",
+          "type": "string"
+        }
+      },
+      "required": [
+        "backend",
+        "model",
+        "credentials_service",
+        "voice"
+      ],
+      "title": "RealtimeCallProfile",
+      "type": "object"
+    },
+    "ResponderAccessConfig": {
+      "additionalProperties": false,
+      "description": "Authored conversation-access rules for one responder.",
+      "properties": {
+        "current_room_members": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Allow joined members of the current room; the router defaults to true",
+          "title": "Current Room Members"
+        },
+        "members_of_rooms": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Allow joined members of these managed rooms; unset infers the responder's configured rooms and an empty list disables inferred grants",
+          "title": "Members Of Rooms",
+          "x-mindroom": {
+            "reference": "room"
+          }
+        },
+        "users": {
+          "default": [],
+          "description": "Allow these Matrix user IDs or glob patterns",
+          "items": {
+            "type": "string"
+          },
+          "title": "Users",
+          "type": "array"
+        }
+      },
+      "title": "ResponderAccessConfig",
+      "type": "object"
+    },
+    "RoomConfig": {
+      "additionalProperties": false,
+      "description": "Configuration for a managed Matrix room.",
+      "properties": {
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Human-readable Matrix room name",
+          "title": "Display Name"
+        },
+        "description": {
+          "default": "",
+          "description": "Dashboard-facing room purpose",
+          "title": "Description",
+          "type": "string"
+        },
+        "join_policy": {
+          "anyOf": [
+            {
+              "enum": [
+                "invite",
+                "knock",
+                "public"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Room-specific join-policy override",
+          "title": "Join Policy"
+        },
+        "listed": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Room-specific directory-listing override",
+          "title": "Listed"
+        },
+        "encrypted": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether this managed room should have Matrix end-to-end encryption enabled. Unset inherits room_defaults.encrypted. Enabling encryption on a Matrix room is irreversible; MindRoom never disables it.",
+          "title": "Encrypted"
+        },
+        "invite_users": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Room-specific invitation roster override",
+          "title": "Invite Users"
+        },
+        "admins": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Room-specific Matrix administrator override",
+          "title": "Admins"
+        }
+      },
+      "title": "RoomConfig",
+      "type": "object"
+    },
+    "RoomDefaultsConfig": {
+      "additionalProperties": false,
+      "description": "Desired Matrix state inherited by every managed room.",
+      "properties": {
+        "join_policy": {
+          "default": "invite",
+          "description": "How people may join managed rooms",
+          "enum": [
+            "invite",
+            "knock",
+            "public"
+          ],
+          "title": "Join Policy",
+          "type": "string"
+        },
+        "listed": {
+          "default": false,
+          "description": "Publish managed rooms in the server room directory",
+          "title": "Listed",
+          "type": "boolean"
+        },
+        "encrypted": {
+          "default": false,
+          "description": "Enable end-to-end encryption in managed rooms; enabling it on a room is irreversible",
+          "title": "Encrypted",
+          "type": "boolean"
+        },
+        "invite_users": {
+          "default": [],
+          "description": "Matrix users invited to every managed room",
+          "items": {
+            "type": "string"
+          },
+          "title": "Invite Users",
+          "type": "array"
+        },
+        "admins": {
+          "default": [],
+          "description": "Matrix users granted administrator power in every managed room",
+          "items": {
+            "type": "string"
+          },
+          "title": "Admins",
+          "type": "array"
+        }
+      },
+      "title": "RoomDefaultsConfig",
+      "type": "object"
+    },
+    "RouterConfig": {
+      "description": "Configuration for the router system.",
+      "properties": {
+        "model": {
+          "default": "default",
+          "description": "Model to use for routing decisions",
+          "title": "Model",
+          "type": "string",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "judgment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TypeSafeJudgmentConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional JEV responder selection before the LLM router"
+        },
+        "accept_invites": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": true,
+          "description": "true accepts every room invite to the router, false accepts none, and a list accepts only invites from matching inviter Matrix IDs or glob patterns",
+          "title": "Accept Invites"
+        },
+        "access": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponderAccessConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional membership-based conversation access policy"
+        }
+      },
+      "title": "RouterConfig",
+      "type": "object"
+    },
+    "SpeechServiceConfig": {
+      "additionalProperties": false,
+      "description": "Configuration for one OpenAI-compatible speech service.",
+      "properties": {
+        "provider": {
+          "default": "openai",
+          "description": "Speech provider adapter (OpenAI or an OpenAI-compatible endpoint)",
+          "enum": [
+            "openai",
+            "openai_compatible"
+          ],
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "description": "Provider speech model name",
+          "title": "Model",
+          "type": "string"
+        },
+        "api_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional service-specific API key",
+          "title": "Api Key",
+          "x-mindroom": {
+            "secret": true
+          }
+        },
+        "credentials_service": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional named credential service containing the speech API key",
+          "title": "Credentials Service"
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional service root or /v1 base URL",
+          "title": "Host"
+        },
+        "extra_kwargs": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Provider-specific options passed to the speech adapter",
+          "title": "Extra Kwargs",
+          "type": "object",
+          "x-mindroom": {
+            "secret": true
+          }
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "title": "SpeechServiceConfig",
+      "type": "object"
+    },
+    "StreamingConfig": {
+      "description": "Timing parameters for streaming response edits.",
+      "properties": {
+        "update_interval": {
+          "default": 5.0,
+          "description": "Steady-state seconds between message edits during LLM streaming",
+          "exclusiveMinimum": 0,
+          "title": "Update Interval",
+          "type": "number"
+        },
+        "min_update_interval": {
+          "default": 0.5,
+          "description": "Fast edit interval at stream start",
+          "exclusiveMinimum": 0,
+          "title": "Min Update Interval",
+          "type": "number"
+        },
+        "interval_ramp_seconds": {
+          "default": 15.0,
+          "description": "Seconds to ramp from min to steady-state interval (0 disables ramp)",
+          "minimum": 0,
+          "title": "Interval Ramp Seconds",
+          "type": "number"
+        },
+        "max_idle": {
+          "default": 2.0,
+          "description": "Flush buffered streaming text on the next streaming event when no new deltas have arrived for at least this many seconds (event-driven, not a background timer).",
+          "exclusiveMinimum": 0,
+          "title": "Max Idle",
+          "type": "number"
+        }
+      },
+      "title": "StreamingConfig",
+      "type": "object"
+    },
+    "TeamConfig": {
+      "description": "Configuration for a team of agents.",
+      "properties": {
+        "display_name": {
+          "description": "Human-readable name for the team",
+          "title": "Display Name",
+          "type": "string"
+        },
+        "role": {
+          "description": "Description of the team's purpose",
+          "title": "Role",
+          "type": "string",
+          "x-mindroom": {
+            "multiline": true
+          }
+        },
+        "agents": {
+          "description": "List of agent names that compose this team",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Agents",
+          "type": "array",
+          "x-mindroom": {
+            "reference": "agent"
+          }
+        },
+        "rooms": {
+          "default": [],
+          "description": "List of room IDs or names to auto-join",
+          "items": {
+            "type": "string"
+          },
+          "title": "Rooms",
+          "type": "array",
+          "x-mindroom": {
+            "reference": "room"
+          }
+        },
+        "access": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponderAccessConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional membership-based conversation access policy"
+        },
+        "accept_invites": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": true,
+          "description": "true accepts every room invite to this team, false accepts none, and a list accepts only invites from matching inviter Matrix IDs or glob patterns",
+          "title": "Accept Invites"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "default",
+          "description": "Configured model alias used for this team's replies",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "mode": {
+          "default": "coordinate",
+          "description": "Team collaboration mode: coordinate or collaborate",
+          "title": "Mode",
+          "type": "string"
+        },
+        "compaction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompactionOverrideConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-team required-compaction overrides"
+        },
+        "num_history_runs": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Number of prior scoped runs to include as team history context",
+          "title": "Num History Runs"
+        },
+        "num_history_messages": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Max messages from team-scoped history (mutually exclusive with num_history_runs)",
+          "title": "Num History Messages"
+        },
+        "max_tool_calls_from_history": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Max tool call messages replayed from team history",
+          "title": "Max Tool Calls From History"
+        }
+      },
+      "required": [
+        "display_name",
+        "role",
+        "agents"
+      ],
+      "title": "TeamConfig",
+      "type": "object"
+    },
+    "ToolApprovalConfig": {
+      "additionalProperties": false,
+      "description": "Top-level tool-approval settings.",
+      "properties": {
+        "default": {
+          "enum": [
+            "auto_approve",
+            "require_approval"
+          ],
+          "type": "string",
+          "default": "auto_approve",
+          "description": "Decision for tool calls no rule matches",
+          "title": "Default"
+        },
+        "timeout_days": {
+          "default": 7.0,
+          "description": "Default approval expiry window in days",
+          "exclusiveMinimum": 0,
+          "maximum": 36500.0,
+          "title": "Timeout Days",
+          "type": "number"
+        },
+        "rules": {
+          "default": [],
+          "description": "Ordered approval rules; the first matching rule wins",
+          "items": {
+            "$ref": "#/$defs/ApprovalRuleConfig"
+          },
+          "title": "Rules",
+          "type": "array"
+        }
+      },
+      "title": "ToolApprovalConfig",
+      "type": "object"
+    },
+    "ToolConfigEntry": {
+      "additionalProperties": false,
+      "description": "One authored tool entry with optional inline overrides.",
+      "properties": {
+        "name": {
+          "description": "Registered tool name",
+          "title": "Name",
+          "type": "string"
+        },
+        "overrides": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Values for the tool's override fields; defaults.tools entries apply them to every agent",
+          "title": "Overrides",
+          "type": "object"
+        },
+        "defer": {
+          "default": false,
+          "description": "Hide the tool schema until the agent loads the tool for the current session",
+          "title": "Defer",
+          "type": "boolean"
+        },
+        "initial": {
+          "default": false,
+          "description": "Load a deferred tool at session start and keep it loaded; requires defer",
+          "title": "Initial",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ToolConfigEntry",
+      "type": "object"
+    },
+    "TypeSafeJudgmentConfig": {
+      "additionalProperties": false,
+      "description": "Use System One probabilities with a task-specific acceptance threshold.",
+      "properties": {
+        "provider": {
+          "const": "typesafe",
+          "description": "Judge with System One; requires TYPESAFE_API_KEY",
+          "title": "Provider",
+          "type": "string"
+        },
+        "threshold": {
+          "default": 0.8,
+          "description": "Minimum System One probability required to accept an answer",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 1.5,
+          "description": "Seconds to wait for the judgment before falling back",
+          "exclusiveMinimum": 0.0,
+          "maximum": 30.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "title": "TypeSafeJudgmentConfig",
+      "type": "object"
+    },
+    "VoiceConfig": {
+      "description": "Configuration for voice message handling.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Enable voice message processing",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "visible_router_echo": {
+          "default": true,
+          "description": "Show router voice progress, or direct fallback text when transcription is disabled",
+          "title": "Visible Router Echo",
+          "type": "boolean"
+        },
+        "stt": {
+          "$ref": "#/$defs/VoiceSTTConfig",
+          "default": {
+            "provider": "openai",
+            "model": "gpt-transcribe",
+            "api_key": null,
+            "credentials_service": "openai",
+            "host": null,
+            "extra_kwargs": {}
+          },
+          "description": "STT configuration"
+        },
+        "intelligence": {
+          "$ref": "#/$defs/_VoiceLLMConfig",
+          "default": {
+            "model": "default"
+          },
+          "description": "Transcript normalization configuration"
+        }
+      },
+      "title": "VoiceConfig",
+      "type": "object"
+    },
+    "VoiceSTTConfig": {
+      "additionalProperties": false,
+      "description": "Voice-message STT configuration with its historical model default.",
+      "properties": {
+        "provider": {
+          "default": "openai",
+          "description": "Speech provider adapter (OpenAI or an OpenAI-compatible endpoint)",
+          "enum": [
+            "openai",
+            "openai_compatible"
+          ],
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "default": "gpt-transcribe",
+          "description": "STT model name",
+          "title": "Model",
+          "type": "string"
+        },
+        "api_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional service-specific API key",
+          "title": "Api Key",
+          "x-mindroom": {
+            "secret": true
+          }
+        },
+        "credentials_service": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Named speech credential service, defaulting to OpenAI for cloud STT",
+          "title": "Credentials Service"
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional service root or /v1 base URL",
+          "title": "Host"
+        },
+        "extra_kwargs": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Provider-specific options passed to the speech adapter",
+          "title": "Extra Kwargs",
+          "type": "object",
+          "x-mindroom": {
+            "secret": true
+          }
+        }
+      },
+      "title": "VoiceSTTConfig",
+      "type": "object"
+    },
+    "_MemoryAutoFlushBatchConfig": {
+      "description": "Batching controls for background memory auto-flush.",
+      "properties": {
+        "max_sessions_per_cycle": {
+          "default": 10,
+          "description": "Maximum sessions processed in one auto-flush loop iteration",
+          "minimum": 1,
+          "title": "Max Sessions Per Cycle",
+          "type": "integer"
+        },
+        "max_sessions_per_agent_per_cycle": {
+          "default": 3,
+          "description": "Maximum sessions per agent processed in one auto-flush loop iteration",
+          "minimum": 1,
+          "title": "Max Sessions Per Agent Per Cycle",
+          "type": "integer"
+        }
+      },
+      "title": "_MemoryAutoFlushBatchConfig",
+      "type": "object"
+    },
+    "_MemoryAutoFlushContextConfig": {
+      "description": "Existing-memory context limits injected into extraction runs.",
+      "properties": {
+        "memory_snippets": {
+          "default": 5,
+          "description": "Maximum number of MEMORY.md snippets included for extraction dedupe context",
+          "minimum": 0,
+          "title": "Memory Snippets",
+          "type": "integer"
+        },
+        "snippet_max_chars": {
+          "default": 400,
+          "description": "Maximum characters per included memory snippet",
+          "minimum": 1,
+          "title": "Snippet Max Chars",
+          "type": "integer"
+        }
+      },
+      "title": "_MemoryAutoFlushContextConfig",
+      "type": "object"
+    },
+    "_MemoryAutoFlushExtractorConfig": {
+      "description": "Extraction limits for one background memory flush job.",
+      "properties": {
+        "no_reply_token": {
+          "default": "NO_REPLY",
+          "description": "Token indicating no durable memory should be written",
+          "title": "No Reply Token",
+          "type": "string"
+        },
+        "max_messages_per_flush": {
+          "default": 20,
+          "description": "Maximum session chat messages considered by one extraction job",
+          "minimum": 1,
+          "title": "Max Messages Per Flush",
+          "type": "integer"
+        },
+        "max_chars_per_flush": {
+          "default": 12000,
+          "description": "Maximum message characters considered by one extraction job",
+          "minimum": 1,
+          "title": "Max Chars Per Flush",
+          "type": "integer"
+        },
+        "max_extraction_seconds": {
+          "default": 30,
+          "description": "Timeout for one extraction job before retrying in a later cycle",
+          "minimum": 1,
+          "title": "Max Extraction Seconds",
+          "type": "integer"
+        },
+        "include_memory_context": {
+          "$ref": "#/$defs/_MemoryAutoFlushContextConfig",
+          "default": {
+            "memory_snippets": 5,
+            "snippet_max_chars": 400
+          },
+          "description": "Bounds for existing memory context included during extraction"
+        }
+      },
+      "title": "_MemoryAutoFlushExtractorConfig",
+      "type": "object"
+    },
+    "_MemoryEmbedderConfig": {
+      "description": "Memory embedder configuration.",
+      "properties": {
+        "provider": {
+          "default": "openai",
+          "description": "Embedder provider (openai, ollama, huggingface, sentence_transformers, etc)",
+          "title": "Provider",
+          "type": "string"
+        },
+        "config": {
+          "$ref": "#/$defs/EmbedderConfig",
+          "default": {
+            "model": "text-embedding-3-small",
+            "credentials_service": null,
+            "api_key": null,
+            "host": null,
+            "dimensions": null
+          },
+          "description": "Provider-specific config"
+        }
+      },
+      "title": "_MemoryEmbedderConfig",
+      "type": "object"
+    },
+    "_MemoryFileConfig": {
+      "description": "File-backed memory configuration.",
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional fallback root for direct file-memory paths. Relative paths resolve from the config directory. Canonical agent and team file memory live under their canonical workspace or scope roots.",
+          "title": "Path"
+        },
+        "max_entrypoint_lines": {
+          "default": 200,
+          "description": "Maximum number of lines to preload from MEMORY.md",
+          "minimum": 1,
+          "title": "Max Entrypoint Lines",
+          "type": "integer"
+        }
+      },
+      "title": "_MemoryFileConfig",
+      "type": "object"
+    },
+    "_MemoryLLMConfig": {
+      "description": "Memory LLM configuration.",
+      "properties": {
+        "provider": {
+          "default": "ollama",
+          "description": "LLM provider (ollama, openai, anthropic)",
+          "title": "Provider",
+          "type": "string"
+        },
+        "config": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Provider-specific LLM config; may include credentials",
+          "title": "Config",
+          "type": "object",
+          "x-mindroom": {
+            "secret": true
+          }
+        }
+      },
+      "title": "_MemoryLLMConfig",
+      "type": "object"
+    },
+    "_VoiceLLMConfig": {
+      "description": "Configuration for voice transcript normalization.",
+      "properties": {
+        "model": {
+          "default": "default",
+          "description": "Model for mention normalization and light ASR cleanup",
+          "title": "Model",
+          "type": "string",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        }
+      },
+      "title": "_VoiceLLMConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Complete configuration from YAML.",
+  "properties": {
+    "administrators": {
+      "default": [],
+      "description": "Concrete Matrix user IDs with platform-wide administrative authority",
+      "items": {
+        "type": "string"
+      },
+      "title": "Administrators",
+      "type": "array"
+    },
+    "room_defaults": {
+      "$ref": "#/$defs/RoomDefaultsConfig",
+      "default": {
+        "join_policy": "invite",
+        "listed": false,
+        "encrypted": false,
+        "invite_users": [],
+        "admins": []
+      },
+      "description": "Desired Matrix state inherited by managed rooms"
+    },
+    "agents": {
+      "additionalProperties": {
+        "$ref": "#/$defs/AgentConfig"
+      },
+      "default": {},
+      "description": "Agent configurations",
+      "title": "Agents",
+      "type": "object"
+    },
+    "teams": {
+      "additionalProperties": {
+        "$ref": "#/$defs/TeamConfig"
+      },
+      "default": {},
+      "description": "Team configurations",
+      "title": "Teams",
+      "type": "object"
+    },
+    "rooms": {
+      "additionalProperties": {
+        "$ref": "#/$defs/RoomConfig"
+      },
+      "default": {},
+      "description": "Managed Matrix room metadata",
+      "title": "Rooms",
+      "type": "object"
+    },
+    "room_models": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "description": "Room-specific model overrides",
+      "title": "Room Models",
+      "type": "object",
+      "x-mindroom": {
+        "key_reference": "room",
+        "reference": "model"
+      }
+    },
+    "room_thread_summary_models": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "description": "Room-specific model overrides for automatic thread summaries",
+      "title": "Room Thread Summary Models",
+      "type": "object",
+      "x-mindroom": {
+        "key_reference": "room",
+        "reference": "model"
+      }
+    },
+    "plugins": {
+      "default": [],
+      "description": "Plugin entries",
+      "items": {
+        "$ref": "#/$defs/PluginEntryConfig"
+      },
+      "title": "Plugins",
+      "type": "array"
+    },
+    "debug": {
+      "$ref": "#/$defs/DebugConfig",
+      "default": {
+        "log_llm_requests": false,
+        "llm_request_log_dir": null
+      },
+      "description": "Debug and diagnostic settings"
+    },
+    "prompts": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "description": "Built-in prompt overrides keyed by the uppercase global name from mindroom.prompts",
+      "title": "Prompts",
+      "type": "object",
+      "x-mindroom": {
+        "multiline": true
+      }
+    },
+    "defaults": {
+      "$ref": "#/$defs/DefaultsConfig",
+      "default": {
+        "tools": [
+          "scheduler"
+        ],
+        "markdown": true,
+        "enable_streaming": true,
+        "large_message_strategy": "sidecar",
+        "coalescing": {
+          "debounce_ms": 1000
+        },
+        "show_stop_button": true,
+        "auto_resume_after_restart": true,
+        "learning": true,
+        "learning_mode": "always",
+        "compaction": {
+          "enabled": true,
+          "fallback_model": null,
+          "model": null,
+          "replay_window_tokens": null,
+          "reserve_tokens": 16384,
+          "threshold_percent": null,
+          "threshold_tokens": null,
+          "timeout_seconds": 600.0
+        },
+        "num_history_runs": null,
+        "num_history_messages": null,
+        "compress_tool_results": false,
+        "max_tool_calls_from_history": null,
+        "show_tool_calls": true,
+        "worker_tools": null,
+        "worker_scope": null,
+        "worker_grantable_credentials": null,
+        "allow_self_config": false,
+        "max_preload_chars": 50000,
+        "tool_output_auto_save_threshold_bytes": 51200,
+        "streaming": {
+          "interval_ramp_seconds": 15.0,
+          "max_idle": 2.0,
+          "min_update_interval": 0.5,
+          "update_interval": 5.0
+        },
+        "thread_summary_model": null,
+        "thread_summary_temperature": 0.2,
+        "thread_summary_first_threshold": 1,
+        "thread_summary_subsequent_interval": 10
+      },
+      "description": "Default values"
+    },
+    "memory": {
+      "$ref": "#/$defs/MemoryConfig",
+      "default": {
+        "backend": "mem0",
+        "team_reads_member_memory": false,
+        "embedder": {
+          "config": {
+            "api_key": null,
+            "credentials_service": null,
+            "dimensions": null,
+            "host": null,
+            "model": "text-embedding-3-small"
+          },
+          "provider": "openai"
+        },
+        "llm": null,
+        "file": {
+          "max_entrypoint_lines": 200,
+          "path": null
+        },
+        "search": {
+          "include": [
+            "memory/**/*.md"
+          ],
+          "include_entrypoint": false,
+          "mode": "keyword"
+        },
+        "auto_flush": {
+          "batch": {
+            "max_sessions_per_agent_per_cycle": 3,
+            "max_sessions_per_cycle": 10
+          },
+          "enabled": false,
+          "extractor": {
+            "include_memory_context": {
+              "memory_snippets": 5,
+              "snippet_max_chars": 400
+            },
+            "max_chars_per_flush": 12000,
+            "max_extraction_seconds": 30,
+            "max_messages_per_flush": 20,
+            "no_reply_token": "NO_REPLY"
+          },
+          "flush_interval_seconds": 1800,
+          "idle_seconds": 120,
+          "max_cross_session_reprioritize": 5,
+          "max_dirty_age_seconds": 600,
+          "max_retry_cooldown_seconds": 300,
+          "retry_cooldown_seconds": 30,
+          "stale_ttl_seconds": 86400
+        }
+      },
+      "description": "Memory configuration"
+    },
+    "knowledge_bases": {
+      "additionalProperties": {
+        "$ref": "#/$defs/KnowledgeBaseConfig"
+      },
+      "default": {},
+      "description": "Knowledge base configurations keyed by base ID",
+      "title": "Knowledge Bases",
+      "type": "object"
+    },
+    "mcp_servers": {
+      "additionalProperties": {
+        "$ref": "#/$defs/MCPServerConfig"
+      },
+      "default": {},
+      "description": "MCP server configurations keyed by server id",
+      "title": "Mcp Servers",
+      "type": "object"
+    },
+    "external_trigger_policy": {
+      "$ref": "#/$defs/ExternalTriggerPolicyConfig",
+      "default": {
+        "enabled": true,
+        "default_replay_window_seconds": 300,
+        "max_replay_window_seconds": 3600,
+        "default_max_body_bytes": 65536,
+        "max_body_bytes": 262144,
+        "max_triggers_per_owner": 20,
+        "admin_users": []
+      },
+      "description": "Global policy for tool-managed signed external triggers"
+    },
+    "models": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ModelConfig"
+      },
+      "default": {},
+      "description": "Model configurations",
+      "title": "Models",
+      "type": "object"
+    },
+    "tool_approval": {
+      "$ref": "#/$defs/ToolApprovalConfig",
+      "default": {
+        "default": "auto_approve",
+        "timeout_days": 7.0,
+        "rules": []
+      },
+      "description": "Tool-approval rules for agent-initiated tool calls"
+    },
+    "router": {
+      "$ref": "#/$defs/RouterConfig",
+      "default": {
+        "model": "default",
+        "judgment": null,
+        "accept_invites": true,
+        "access": null
+      },
+      "description": "Router configuration"
+    },
+    "personal_rooms": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PersonalRoomsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional native personal agent rooms"
+    },
+    "voice": {
+      "$ref": "#/$defs/VoiceConfig",
+      "default": {
+        "enabled": false,
+        "visible_router_echo": true,
+        "stt": {
+          "api_key": null,
+          "credentials_service": "openai",
+          "extra_kwargs": {},
+          "host": null,
+          "model": "gpt-transcribe",
+          "provider": "openai"
+        },
+        "intelligence": {
+          "model": "default"
+        }
+      },
+      "description": "Voice configuration"
+    },
+    "calls": {
+      "$ref": "#/$defs/CallsConfig",
+      "default": {
+        "enabled": false,
+        "profiles": {},
+        "agents": {},
+        "livekit_service_url": null
+      },
+      "description": "Voice call (MatrixRTC) configuration"
+    },
+    "event_journal": {
+      "$ref": "#/$defs/EventJournalConfig",
+      "default": {
+        "backend": "sqlite",
+        "database_url": null,
+        "database_url_env": "MINDROOM_EVENT_CACHE_DATABASE_URL"
+      },
+      "description": "Durable Matrix event-journal store"
+    },
+    "matrix_sync": {
+      "$ref": "#/$defs/MatrixSyncConfig",
+      "default": {
+        "mode": "classic",
+        "sliding_timeline_limit": 100,
+        "max_response_bytes": 16777216,
+        "max_pending_bytes": 67108864
+      },
+      "description": "Matrix event sync transport configuration"
+    },
+    "timezone": {
+      "default": "UTC",
+      "description": "Timezone for interpreting scheduling requests and displaying scheduled tasks (e.g., 'America/New_York')",
+      "title": "Timezone",
+      "type": "string"
+    },
+    "scheduler_catch_up_grace_seconds": {
+      "default": 3600,
+      "description": "Maximum lateness for recovering a missed recurring task; 0 disables catch-up",
+      "minimum": 0,
+      "title": "Scheduler Catch Up Grace Seconds",
+      "type": "integer"
+    },
+    "mindroom_user": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MindRoomUserConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Configuration for the internal MindRoom user account (omit for hosted/public profiles)"
+    },
+    "matrix_space": {
+      "$ref": "#/$defs/MatrixSpaceConfig",
+      "default": {
+        "enabled": true,
+        "name": "MindRoom"
+      },
+      "description": "Optional root Matrix Space for grouping managed rooms"
+    },
+    "authorization": {
+      "$ref": "#/$defs/AuthorizationConfig",
+      "default": {
+        "config_command_enabled": false,
+        "aliases": {}
+      },
+      "description": "Authorization configuration with fine-grained permissions"
+    },
+    "bot_accounts": {
+      "default": [],
+      "description": "Matrix user IDs of non-MindRoom bots (e.g., bridge bots) that should be treated like agents for response logic \u2014 their messages won't trigger the multi-human-thread mention requirement",
+      "items": {
+        "type": "string"
+      },
+      "title": "Bot Accounts",
+      "type": "array"
+    }
+  },
+  "title": "Config",
+  "type": "object"
+}

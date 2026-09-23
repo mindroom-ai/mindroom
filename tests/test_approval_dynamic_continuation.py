@@ -29,11 +29,17 @@ from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
     PausedAttempt,
+    ResponsePausedForApproval,
     ResumedAttempt,
     paused_attempt_from_response,
 )
 from mindroom.synthetic_model import SyntheticModel
-from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry, serialize_tool_trace
+from mindroom.tool_system.events import (
+    CollectedStreamPresentation,
+    StructuredStreamChunk,
+    ToolTraceEntry,
+    serialize_tool_trace,
+)
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
 from tests.conftest import bind_runtime_paths, unwrap_extracted_collaborator
@@ -292,6 +298,7 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
             tool_trace_collector=trace,
             typing_log_context={},
             run_id_callback=run_ids.append,
+            progress=None,
         )
 
     if outcome in {"error", "preparation_error"}:
@@ -418,7 +425,7 @@ async def test_approval_settlement_preserves_tool_boundary(
         yield RunCompletedEvent(content="After approval.")
         yield RunOutput(run_id="run-saved", session_id="session", status=RunStatus.completed, tools=[tool])
 
-    collected = await _collect_agent_continuation(events(), presentation)
+    collected = await _collect_agent_continuation(events(), presentation, progress=None)
     trace: list[ToolTraceEntry] = []
     result = await _settle_agent_continuation(
         continuation,
@@ -434,6 +441,7 @@ async def test_approval_settlement_preserves_tool_boundary(
         tool_trace_collector=trace,
         run_id_callback=None,
         tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        progress=None,
     )
     assert isinstance(result, CompletedApprovalRun)
     expected = "Before approval.\n\n" + ("🔧 `inspect` [1]\n\n" if show_tool_calls else "") + "After approval."
@@ -504,6 +512,7 @@ async def test_approval_settlement_uses_typed_status(
         tool_trace_collector=[],
         run_id_callback=None,
         tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        progress=None,
     )
     if status is RunStatus.error:
         with pytest.raises(RuntimeError, match="Terminal response"):
@@ -536,8 +545,204 @@ async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: st
         yield RunCompletedEvent(run_id="parent", content="Final parent answer.")
         yield RunOutput(run_id="parent", tools=parent_tools, status=RunStatus.completed, content="Final parent answer.")
 
-    collected = await _collect_agent_continuation(events(), presentation)
+    collected = await _collect_agent_continuation(events(), presentation, progress=None)
 
     assert presentation.final_text() == ""
     assert collected.terminal_content == "Final parent answer."
     assert collected.tool_executions == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["finish", "pause"])
+async def test_approved_run_streams_progress_from_its_saved_presentation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    """Live progress resumes the saved reply, settles the approved tool, then follows the new work."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MATRIX_HOMESERVER": "https://matrix.example.org", "MINDROOM_NAMESPACE": ""},
+    )
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "defaults": {"tools": [], "learning": False},
+                "agents": {"general": {"display_name": "General", "tools": ["calculator"]}},
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+                "tool_approval": {
+                    "default": "auto_approve",
+                    "rules": [
+                        {"match": "add", "action": "require_approval"},
+                        {"match": "multiply", "action": "require_approval"},
+                    ],
+                },
+            },
+        ),
+        paths,
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="progress-session",
+    )
+    responses: list[ModelResponse | RuntimeError] = [
+        _call("add", "approved", a=2, b=3),
+        *(
+            [_call("multiply", "gated", a=5, b=2)]
+            if outcome == "pause"
+            else [_call("subtract", "second", a=5, b=1), ModelResponse(content="Both results are ready.")]
+        ),
+    ]
+    monkeypatch.setattr(
+        "mindroom.agents._load_agent_model_instance",
+        lambda *_args, **_kwargs: _ScriptedModel(id="synthetic", responses=responses),
+    )
+    storage = create_session_storage("general", config, paths, identity)
+    actor = create_agent(
+        "general",
+        config,
+        paths,
+        identity,
+        session_id=identity.session_id,
+        history_storage=storage,
+        dynamic_tool_continuation=True,
+        supports_native_tool_approval=True,
+    )
+    try:
+        paused = await actor.arun(
+            "Add, then keep going.",
+            session_id=identity.session_id,
+            user_id=identity.requester_id,
+        )
+        assert paused.status == RunStatus.paused
+    finally:
+        close_agent_runtime_state_dbs(actor, shared_scope_storage=storage)
+        storage.close()
+    saved = CollectedStreamPresentation(show_tool_calls=True, response_text="Adding first.")
+    saved.start_tool((paused.tools or [])[0])
+    continuation = ApprovalContinuation(
+        approval_id="approval-progress",
+        run_id=paused.run_id,
+        session_id=identity.session_id,
+        entity_kind="agent",
+        entity_name="general",
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+        response_event_id="$waiting",
+        sources=ResponseSources(("$source",), ("$source",)),
+        state="claimed",
+        calls=(ApprovalCall("approved", "add", "general", 2**62, toolkit_name="calculator"),),
+        request_body="Add, then keep going.",
+        response_text=saved.response_text,
+        response_tool_trace=serialize_tool_trace(saved.tool_trace, include_internal=True),
+        show_tool_calls=True,
+    )
+    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
+    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    published: list[StructuredStreamChunk] = []
+
+    async def progress(chunk: StructuredStreamChunk) -> None:
+        published.append(chunk)
+
+    result = await execution.continue_run(
+        continuation,
+        execution_identity=identity,
+        tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        decisions={"approved": True},
+        denial_reasons={"approved": None},
+        tool_trace_collector=[],
+        typing_log_context={},
+        progress=progress,
+    )
+
+    contents = [chunk.content for chunk in published]
+    assert contents[0] == saved.response_text
+    resumed = [content for content in contents if content != saved.response_text]
+    assert resumed[0] == "Adding first.\n\n🔧 `add` [1]\n\n"
+    assert all("🔧 `add` [1] ⏳" not in content for content in resumed)
+    if outcome == "pause":
+        assert isinstance(result, PausedAttempt)
+        assert resumed == ["Adding first.\n\n🔧 `add` [1]\n\n"]
+        assert "🔧 `multiply` [2] ⏳" in result.response_text
+        return
+    assert isinstance(result, CompletedApprovalRun)
+    assert "🔧 `subtract` [2] ⏳" in resumed[1]
+    assert contents[-1] == result.response_text
+    assert result.response_text.endswith("Both results are ready.")
+
+
+@pytest.mark.asyncio
+async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh model attempt after approval streams its text, then hands its pause back with that presentation."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = Config.model_validate({"agents": {"general": {"display_name": "General", "tools": []}}})
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-fresh-pause",
+        run_id="run-saved",
+        session_id="session",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        requester_id="@user:example.org",
+        response_event_id="$waiting",
+        sources=ResponseSources(("$source",), ("$source",)),
+        calls=(),
+        state="claimed",
+        show_tool_calls=True,
+    )
+    gated = ToolExecution(tool_call_id="call-2", tool_name="publish_report", tool_args={})
+
+    async def stream(_ctx: ResponseTurnContext, **_kwargs: object) -> AsyncIterator[object]:
+        yield RunContentEvent(content=" Next, publishing.")
+        yield ToolCallStartedEvent(tool=gated)
+        raise ResponsePausedForApproval(
+            PausedAttempt(session_id="session", run_id="run-fresh", tools=(gated,), toolkit_owners={}),
+        )
+
+    monkeypatch.setattr("mindroom.approval_execution.stream_agent_response", stream)
+    published: list[str] = []
+
+    async def progress(chunk: StructuredStreamChunk) -> None:
+        published.append(chunk.content)
+
+    result = await _settle_agent_continuation(
+        continuation,
+        CollectedStreamPresentation(show_tool_calls=True, response_text="Checked."),
+        resumed_attempt=ResumedAttempt(CompletedAttempt()),
+        model_name="default",
+        metadata=None,
+        config=config,
+        runtime_paths=paths,
+        execution_identity=identity,
+        knowledge=None,
+        refresh_scheduler=None,
+        tool_trace_collector=[],
+        run_id_callback=None,
+        tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        progress=progress,
+    )
+
+    assert isinstance(result, PausedAttempt)
+    assert result.run_id == "run-fresh"
+    assert published == ["Checked. Next, publishing.", "Checked. Next, publishing.\n\n🔧 `publish_report` [1] ⏳\n\n"]
+    assert result.response_text == published[-1].rstrip()

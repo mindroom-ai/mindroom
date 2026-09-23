@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,9 +15,18 @@ import {
 import { useConfigStore } from "@/store/configStore";
 import type { ToolFieldSchema } from "@/hooks/useTools";
 
+/**
+ * Whose tool entry the panel edits: one agent's, where lazy loading applies
+ * unless the tool is a preset or control-plane tool, or the shared
+ * defaults.tools, which rejects lazy loading.
+ */
+export type ToolOverrideTarget =
+  | { kind: "agent"; agentId: string; lazyLoading: boolean }
+  | { kind: "defaults" };
+
 interface ToolConfigPanelProps {
-  agentId: string;
-  toolName: string | null;
+  target: ToolOverrideTarget;
+  toolName: string;
   toolDisplayName?: string;
   /** Dedicated per-agent override fields (curated, e.g. shell). */
   overrideFields?: ToolFieldSchema[] | null;
@@ -96,32 +105,48 @@ function normalizePersistedValue(
 type DraftValues = Record<string, string | string[]>;
 type EnabledFields = Record<string, boolean>;
 
+// Tool entries keep lazy-loading flags beside the override values; a null
+// entry in the merge patch below removes the flag.
+function lazyFlagPatch(defer: boolean, initial: boolean) {
+  return {
+    defer: defer ? true : null,
+    initial: defer && initial ? true : null,
+  };
+}
+
 export function ToolConfigPanel({
-  agentId,
+  target,
   toolName,
   toolDisplayName,
   overrideFields,
   configFields,
 }: ToolConfigPanelProps) {
-  const { getAgentToolOverrides, updateAgentToolOverrides, config } =
-    useConfigStore();
+  const {
+    getAgentToolOverrides,
+    updateAgentToolOverrides,
+    getDefaultToolOverrides,
+    updateDefaultToolOverrides,
+  } = useConfigStore();
+  const lazyLoading = target.kind === "agent" && target.lazyLoading;
   const fields = resolveFields(overrideFields, configFields);
-  const currentOverrides = toolName
-    ? getAgentToolOverrides(agentId, toolName)
-    : null;
+  const hasFields = fields != null && fields.length > 0;
+  const currentOverrides =
+    target.kind === "agent"
+      ? getAgentToolOverrides(target.agentId, toolName)
+      : getDefaultToolOverrides(toolName);
   const overrideSignature = JSON.stringify(currentOverrides ?? null);
-  const globalToolConfig = toolName
-    ? ((config?.tools?.[toolName] ?? {}) as Record<string, unknown>)
-    : {};
+  const deferEnabled = currentOverrides?.defer === true;
+  const lazyId = useId();
+  const initialEnabled = currentOverrides?.initial === true;
 
   const [draftValues, setDraftValues] = useState<DraftValues>({});
   const [enabledFields, setEnabledFields] = useState<EnabledFields>({});
 
-  const title = toolDisplayName ?? toolName ?? "Tool settings";
+  const title = toolDisplayName ?? toolName;
 
   // Initialize draft values and enabled state from current overrides
   useEffect(() => {
-    if (!toolName || !fields || fields.length === 0) {
+    if (!fields || fields.length === 0) {
       setDraftValues({});
       setEnabledFields({});
       return;
@@ -142,11 +167,8 @@ export function ToolConfigPanel({
           currentOverrides[field.name],
         );
       } else {
-        // Pre-fill with global value for when user enables the toggle
-        nextDraft[field.name] = coerceEditValue(
-          field,
-          globalToolConfig[field.name],
-        );
+        // Pre-fill with the tool default for when user enables the toggle
+        nextDraft[field.name] = coerceEditValue(field, field.default);
       }
     }
 
@@ -155,48 +177,35 @@ export function ToolConfigPanel({
   }, [toolName, fields, overrideSignature]);
 
   const isCustomized = useMemo(
-    () => Object.values(enabledFields).some(Boolean),
-    [enabledFields],
+    () => deferEnabled || Object.values(enabledFields).some(Boolean),
+    [deferEnabled, enabledFields],
   );
 
-  if (!toolName) {
-    return (
-      <div className="rounded-lg border border-dashed px-4 py-3 text-sm text-muted-foreground">
-        Select a checked tool to edit per-agent settings.
-      </div>
-    );
-  }
-
-  if (!fields || fields.length === 0) {
-    return (
-      <div className="rounded-lg border border-dashed px-4 py-3 text-sm text-muted-foreground">
-        No per-agent settings available for this tool.
-      </div>
-    );
-  }
-
+  // Send a merge patch: null removes a key, and keys this panel does not
+  // manage stay as authored.
   const commitOverrides = (
     nextEnabled: EnabledFields,
     nextDraft: DraftValues,
+    flags = lazyFlagPatch(deferEnabled, initialEnabled),
   ) => {
-    if (!toolName) return;
-
-    const overrides: Record<string, unknown> = {};
-    let hasAny = false;
-    for (const field of fields) {
-      if (nextEnabled[field.name]) {
-        overrides[field.name] = normalizePersistedValue(
-          field,
-          nextDraft[field.name] ?? "",
-        );
-        hasAny = true;
-      }
+    const patch: Record<string, unknown> = lazyLoading ? { ...flags } : {};
+    for (const field of fields ?? []) {
+      patch[field.name] = nextEnabled[field.name]
+        ? normalizePersistedValue(field, nextDraft[field.name] ?? "")
+        : null;
     }
-    updateAgentToolOverrides(agentId, toolName, hasAny ? overrides : null);
+    if (target.kind === "agent") {
+      updateAgentToolOverrides(target.agentId, toolName, patch);
+    } else {
+      updateDefaultToolOverrides(toolName, patch);
+    }
   };
 
+  const setLazyLoading = (defer: boolean, initial: boolean) =>
+    commitOverrides(enabledFields, draftValues, lazyFlagPatch(defer, initial));
+
   const toggleField = (fieldName: string, checked: boolean) => {
-    const field = fields.find((f) => f.name === fieldName);
+    const field = fields?.find((f) => f.name === fieldName);
     if (!field) return;
 
     const nextEnabled = { ...enabledFields, [fieldName]: checked };
@@ -205,10 +214,10 @@ export function ToolConfigPanel({
       checked &&
       (draftValues[fieldName] === "" || draftValues[fieldName] === undefined)
     ) {
-      // Pre-fill from global default when enabling
+      // Pre-fill from the tool default when enabling
       nextDraft = {
         ...draftValues,
-        [fieldName]: coerceEditValue(field, globalToolConfig[fieldName]),
+        [fieldName]: coerceEditValue(field, field.default),
       };
       setDraftValues(nextDraft);
     }
@@ -226,7 +235,7 @@ export function ToolConfigPanel({
     const isEnabled = enabledFields[field.name] ?? false;
     const draftValue =
       draftValues[field.name] ?? (field.type === "string[]" ? [] : "");
-    const globalValue = globalToolConfig[field.name];
+    const defaultValue = field.default;
     const fieldId = `override-${field.name}`;
 
     if (field.type === "string[]") {
@@ -235,18 +244,18 @@ export function ToolConfigPanel({
           ? draftValue
           : []
         : [];
-      const globalItems = Array.isArray(globalValue) ? globalValue : [];
+      const defaultItems = Array.isArray(defaultValue) ? defaultValue : [];
 
       return (
         <div className="space-y-2">
-          {!isEnabled && globalItems.length > 0 && (
+          {!isEnabled && defaultItems.length > 0 && (
             <div className="text-xs text-muted-foreground italic">
-              Global: {globalItems.join(", ")}
+              Default: {defaultItems.join(", ")}
             </div>
           )}
-          {!isEnabled && globalItems.length === 0 && (
+          {!isEnabled && defaultItems.length === 0 && (
             <div className="text-xs text-muted-foreground italic">
-              No global default
+              No default
             </div>
           )}
           {isEnabled && (
@@ -319,9 +328,9 @@ export function ToolConfigPanel({
             </div>
           ) : (
             <div className="text-xs text-muted-foreground italic">
-              {globalValue != null
-                ? `Global: ${globalValue ? "Enabled" : "Disabled"}`
-                : "No global default"}
+              {defaultValue != null
+                ? `Default: ${defaultValue ? "Enabled" : "Disabled"}`
+                : "No default"}
             </div>
           )}
         </div>
@@ -350,12 +359,12 @@ export function ToolConfigPanel({
             </Select>
           ) : (
             <div className="text-xs text-muted-foreground italic">
-              {globalValue != null
-                ? `Global: ${
-                    field.options.find((o) => o.value === String(globalValue))
-                      ?.label ?? String(globalValue)
+              {defaultValue != null
+                ? `Default: ${
+                    field.options.find((o) => o.value === String(defaultValue))
+                      ?.label ?? String(defaultValue)
                   }`
-                : "No global default"}
+                : "No default"}
             </div>
           )}
         </div>
@@ -396,13 +405,13 @@ export function ToolConfigPanel({
           />
         ) : (
           <div className="text-xs text-muted-foreground italic">
-            {globalValue != null
-              ? `Global: ${
+            {defaultValue != null
+              ? `Default: ${
                   field.type === "password"
                     ? "••••••••"
-                    : coerceDisplayValue(field, globalValue)
+                    : coerceDisplayValue(field, defaultValue)
                 }`
-              : "No global default"}
+              : "No default"}
           </div>
         )}
       </div>
@@ -414,17 +423,73 @@ export function ToolConfigPanel({
       <div className="mb-4 flex items-center justify-between gap-3">
         <div>
           <div className="text-sm font-semibold">
-            {title} — Per-Agent Settings
+            {title} —{" "}
+            {target.kind === "agent"
+              ? "Per-Agent Settings"
+              : "Default Settings"}
           </div>
-          <div className="text-xs text-muted-foreground">
-            Toggle fields to override the global default for this agent.
-          </div>
+          {hasFields && (
+            <div className="text-xs text-muted-foreground">
+              {target.kind === "agent"
+                ? "Toggle fields to override the tool default for this agent."
+                : "Toggle fields to override the tool default for every agent that includes default tools."}
+            </div>
+          )}
         </div>
         {isCustomized && <Badge variant="secondary">Customized</Badge>}
       </div>
 
+      {lazyLoading && (
+        <div className="mb-4 space-y-2 border-b pb-4">
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id={`${lazyId}-defer`}
+              checked={deferEnabled}
+              onCheckedChange={(checked) =>
+                setLazyLoading(checked === true, initialEnabled)
+              }
+            />
+            <Label
+              htmlFor={`${lazyId}-defer`}
+              className="cursor-pointer text-sm"
+            >
+              Load lazily
+            </Label>
+          </div>
+          <p className="pl-6 text-xs text-muted-foreground">
+            Hide this tool until the agent loads it for the current session.
+          </p>
+          <div className="flex items-center gap-2 pl-6">
+            <Checkbox
+              id={`${lazyId}-initial`}
+              checked={initialEnabled}
+              disabled={!deferEnabled}
+              onCheckedChange={(checked) =>
+                setLazyLoading(deferEnabled, checked === true)
+              }
+            />
+            <Label
+              htmlFor={`${lazyId}-initial`}
+              className={`cursor-pointer text-sm ${
+                deferEnabled ? "" : "text-muted-foreground"
+              }`}
+            >
+              Load at session start
+            </Label>
+          </div>
+        </div>
+      )}
+
+      {!hasFields && (
+        <p className="text-sm text-muted-foreground">
+          {lazyLoading
+            ? "This tool has no other settings."
+            : "No settings available for this tool."}
+        </p>
+      )}
+
       <div className="space-y-4">
-        {fields.map((field) => {
+        {(fields ?? []).map((field) => {
           const isEnabled = enabledFields[field.name] ?? false;
 
           return (

@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable, Iterable, MutableMapping
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import nio
 
@@ -61,6 +62,25 @@ async def invite_to_room(
         return True
     logger.error("matrix_room_invite_failed", room_id=room_id, user_id=user_id, error=str(response))
     return False
+
+
+async def admin_join_room_user(client: nio.AsyncClient, room_id: str, user_id: str) -> bool:
+    """Join one user through the Synapse-compatible admin API without changing invites."""
+    if not client.access_token:
+        return False
+    path = f"/_synapse/admin/v1/join/{quote(room_id, safe='')}"
+    response = await client.send(
+        "POST",
+        path,
+        data=json.dumps({"user_id": user_id}),
+        headers={
+            "Authorization": f"Bearer {client.access_token}",
+            "Content-Type": "application/json",
+        },
+    )
+    succeeded = 200 <= response.status < 300
+    response.release()
+    return succeeded
 
 
 def _create_room_initial_state(
@@ -730,6 +750,7 @@ async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
 __all__ = [
     "RoomJoinOutcome",
     "add_room_to_space",
+    "admin_join_room_user",
     "create_room",
     "create_space",
     "ensure_managed_room_power_levels",

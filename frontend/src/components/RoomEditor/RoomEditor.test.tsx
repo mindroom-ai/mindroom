@@ -2,10 +2,14 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { RoomEditor } from "./RoomEditor";
 import { useConfigStore } from "@/store/configStore";
+import { useConfigSchema } from "@/hooks/useConfigSchema";
 import { Room, Agent, Config } from "@/types/config";
 
 // Mock the store
 vi.mock("@/store/configStore");
+vi.mock("@/hooks/useConfigSchema", () => ({
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null, retry: vi.fn() })),
+}));
 
 describe("RoomEditor", () => {
   const mockRoom: Room = {
@@ -285,5 +289,78 @@ describe("RoomEditor", () => {
     expect(
       screen.getByText(/Select agents that should have access to this room/),
     ).toBeInTheDocument();
+  });
+
+  const roomSchema = {
+    type: "object",
+    properties: {},
+    $defs: {
+      RoomConfig: {
+        type: "object",
+        properties: {
+          description: { type: "string" },
+          encrypted: {
+            anyOf: [{ type: "boolean" }, { type: "null" }],
+            default: null,
+          },
+        },
+      },
+    },
+  };
+
+  const renderRoomWithSchema = (
+    rooms: Record<string, Record<string, unknown>>,
+    loadedRooms: Record<string, Record<string, unknown>>,
+  ) => {
+    const mockUpdateConfigValue = vi.fn();
+    (useConfigStore as any).mockReturnValue({
+      rooms: [mockRoom],
+      agents: mockAgents,
+      config: { ...mockConfig, rooms },
+      loadedConfig: { ...mockConfig, rooms: loadedRooms },
+      diagnostics: [],
+      selectedRoomId: "lobby",
+      updateRoom: mockUpdateRoom,
+      updateConfigValue: mockUpdateConfigValue,
+      deleteRoom: mockDeleteRoom,
+      saveConfig: mockSaveConfig,
+      isDirty: false,
+    });
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: roomSchema,
+      error: null,
+      retry: vi.fn(),
+    });
+    render(<RoomEditor />);
+    fireEvent.click(screen.getByRole("button", { name: /More settings/ }));
+    return mockUpdateConfigValue;
+  };
+
+  it("edits per-room Matrix settings through More settings", () => {
+    const authored = { lobby: { description: "Main discussion room" } };
+    const updateConfigValue = renderRoomWithSchema(authored, authored);
+    fireEvent.change(screen.getByRole("combobox", { name: "Encrypted" }), {
+      target: { value: "true" },
+    });
+
+    expect(updateConfigValue).toHaveBeenCalledWith(
+      ["rooms", "lobby", "encrypted"],
+      true,
+    );
+  });
+
+  it("resets a per-room override to its default", () => {
+    const updateConfigValue = renderRoomWithSchema(
+      { lobby: { encrypted: true } },
+      {},
+    );
+    fireEvent.change(screen.getByRole("combobox", { name: "Encrypted" }), {
+      target: { value: "__default__" },
+    });
+
+    expect(updateConfigValue).toHaveBeenCalledWith(
+      ["rooms", "lobby", "encrypted"],
+      undefined,
+    );
   });
 });

@@ -25,6 +25,7 @@ const EXPECTED_ROUTES = [
   ["Voice", "/voice"],
   ["Tools", "/integrations"],
   ["Skills", "/skills"],
+  ["Settings", "/settings"],
 ] as const;
 
 function CurrentPath() {

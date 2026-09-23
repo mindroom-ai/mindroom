@@ -10,7 +10,7 @@ import { useConfigStore } from "@/store/configStore";
 import { isConcreteMatrixUserId } from "@/lib/matrixIds";
 
 export function RoomAdmins() {
-  const { config, isLoading, isDirty, saveConfig, updateRoomDefaults } =
+  const { config, isLoading, isDirty, saveConfig, updateConfigValue } =
     useConfigStore();
   const { toast } = useToast();
   const [newAdminId, setNewAdminId] = useState("");
@@ -20,10 +20,7 @@ export function RoomAdmins() {
   const adminCountLabel = `${roomAdmins.length} ${roomAdmins.length === 1 ? "admin" : "admins"}`;
 
   const setRoomAdmins = (admins: string[]) => {
-    updateRoomDefaults({
-      ...(config?.room_defaults ?? {}),
-      admins,
-    });
+    updateConfigValue(["room_defaults", "admins"], admins);
   };
 
   const handleAdd = () => {

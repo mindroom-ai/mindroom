@@ -458,6 +458,50 @@ def test_runtime_chart_native_bootstrap_runs_in_main_container() -> None:
     )
 
 
+def test_runtime_chart_passes_bootstrap_revision_to_main_container() -> None:
+    """The runtime command receives the declared chart revision."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "config.source=file",
+        "config.path=/app/agent_data/active/config.yaml",
+        "config.bootstrapBundlePath=/app/agent_data/incoming",
+        "config.bootstrapBundleRevision=deploy-2",
+        "workers.backend=kubernetes",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    command = deployment["spec"]["template"]["spec"]["containers"][0]["command"]
+    assert command[command.index("--bootstrap-config-bundle-revision") + 1] == "deploy-2"
+
+
+def test_runtime_chart_rejects_revision_without_source() -> None:
+    """A chart revision cannot silently run without a candidate path."""
+    result = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "config.source=file",
+        "config.path=/app/agent_data/active/config.yaml",
+        "config.bootstrapBundleRevision=one",
+        "workers.backend=kubernetes",
+    )
+    assert result.returncode != 0
+    assert "config.bootstrapBundleRevision" in result.stderr
+
+
+@pytest.mark.parametrize("revision", [" ", "x" * 129])
+def test_runtime_chart_rejects_malformed_revision(revision: str) -> None:
+    """The chart rejects malformed revisions before creating resources."""
+    result = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "config.source=file",
+        "config.path=/app/agent_data/active/config.yaml",
+        "config.bootstrapBundlePath=/app/agent_data/incoming",
+        f"config.bootstrapBundleRevision={revision}",
+        "workers.backend=kubernetes",
+    )
+    assert result.returncode != 0
+    assert "config.bootstrapBundleRevision" in result.stderr
+
+
 @pytest.mark.parametrize(
     "settings",
     [

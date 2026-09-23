@@ -254,6 +254,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 prior_presentation_state=captured.response_presentation_state,
                 prior_response_text=captured.response_text,
                 prior_tool_trace=captured.tool_trace,
+                progress=None,
             )
         runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
         execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
@@ -279,6 +280,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
             denial_reasons={"approved": None},
             tool_trace_collector=[],
             typing_log_context={},
+            progress=None,
         )
 
     assert get_helper_usage_owner() is None
