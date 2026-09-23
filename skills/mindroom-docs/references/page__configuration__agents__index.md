@@ -810,7 +810,7 @@ defaults:
     reserve_tokens: 16384
     timeout_seconds: 600
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
-  max_tool_calls_per_turn: 500         # Tool calls one agent or team turn may execute
+  max_tool_calls_per_turn: 1000        # Tool calls one agent or team turn may execute
   show_tool_calls: true                 # Show tool-call markers and trace metadata; hidden mode still allows generic worker warmup copy
   worker_tools: null                     # Tool names to route through workers (null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null                     # Worker runtime reuse for proxied tools (shared, user, user_agent)

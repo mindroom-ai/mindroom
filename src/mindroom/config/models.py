@@ -435,7 +435,7 @@ class DefaultsConfig(BaseModel):
         description="Max tool call messages replayed from history (None = no limit)",
     )
     max_tool_calls_per_turn: int = Field(
-        default=500,
+        default=1000,
         ge=1,
         description=(
             "Maximum tool calls one agent or team turn may execute; further calls return a tool error, "

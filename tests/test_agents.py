@@ -5043,7 +5043,7 @@ def test_create_agent_passes_resolved_tool_call_budget_to_agno() -> None:
         inheriting = create_agent("general", config, runtime_paths, execution_identity=None)
 
     assert capped.tool_call_limit == 7
-    assert inheriting.tool_call_limit == config.defaults.max_tool_calls_per_turn == 500
+    assert inheriting.tool_call_limit == config.defaults.max_tool_calls_per_turn == 1000
     # The budget must end runaway runs, not only refuse their calls.
     assert [(call.args, call.kwargs) for call in install_cap.call_args_list] == [
         ((capped.model,), {"entity_name": "calculator"}),

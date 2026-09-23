@@ -273,7 +273,7 @@ def test_max_tool_calls_per_turn_resolution() -> None:
 
 
 def test_max_tool_calls_per_turn_defaults_and_validation() -> None:
-    assert DefaultsConfig(tools=[]).max_tool_calls_per_turn == 500
+    assert DefaultsConfig(tools=[]).max_tool_calls_per_turn == 1000
     with pytest.raises(ValueError, match="greater than or equal to 1"):
         DefaultsConfig(tools=[], max_tool_calls_per_turn=0)
     with pytest.raises(ValueError, match="greater than or equal to 1"):

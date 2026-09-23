@@ -341,6 +341,20 @@
           "description": "Max tool call messages replayed from history (per-agent override)",
           "title": "Max Tool Calls From History"
         },
+        "max_tool_calls_per_turn": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum tool calls one turn may execute (per-agent override)",
+          "title": "Max Tool Calls Per Turn"
+        },
         "show_tool_calls": {
           "anyOf": [
             {
@@ -1238,6 +1252,13 @@
           "default": null,
           "description": "Max tool call messages replayed from history (None = no limit)",
           "title": "Max Tool Calls From History"
+        },
+        "max_tool_calls_per_turn": {
+          "default": 1000,
+          "description": "Maximum tool calls one agent or team turn may execute; further calls return a tool error, and the turn ends with its text so far after this many plus two model requests",
+          "minimum": 1,
+          "title": "Max Tool Calls Per Turn",
+          "type": "integer"
         },
         "show_tool_calls": {
           "default": true,
@@ -3539,6 +3560,20 @@
           "default": null,
           "description": "Max tool call messages replayed from team history",
           "title": "Max Tool Calls From History"
+        },
+        "max_tool_calls_per_turn": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum tool calls the team coordinator may execute in one turn, delegations included (per-team override)",
+          "title": "Max Tool Calls Per Turn"
         }
       },
       "required": [
@@ -4075,6 +4110,7 @@
         "num_history_messages": null,
         "compress_tool_results": false,
         "max_tool_calls_from_history": null,
+        "max_tool_calls_per_turn": 1000,
         "show_tool_calls": true,
         "worker_tools": null,
         "worker_scope": null,

@@ -336,7 +336,7 @@ export interface Config {
     num_history_messages?: number | null;
     compress_tool_results?: boolean;
     max_tool_calls_from_history?: number | null;
-    max_tool_calls_per_turn?: number; // Default per-turn tool-call budget (500)
+    max_tool_calls_per_turn?: number; // Default per-turn tool-call budget (1000)
     allow_self_config?: boolean;
   };
   router: {
