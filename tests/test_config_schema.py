@@ -149,7 +149,7 @@ def test_optional_blocks_default_to_their_model_defaults() -> None:
 
 
 def test_object_unions_are_discriminated() -> None:
-    """MatchUnionVariant tells untagged union variants apart only by kind, so object unions must be discriminated."""
+    """Forms match untagged union variants only by kind (matchUnionVariant), so object unions must be discriminated."""
     schema = dashboard_config_schema()
     assert list(_untagged_object_unions(schema, schema["$defs"])) == []
 
