@@ -585,8 +585,9 @@ class ToolJobRuntime:
                 return _BackgroundWait(await self._snapshot(entry), delivery_queued=True)
             entry.wait_token = token
             human_notified = asyncio.Event()
-            if entry.human_signal is not None:
-                entry.human_signal.subscribe(human_notified.set)
+            human_signal = entry.human_signal
+            if human_signal is not None:
+                human_signal.subscribe(human_notified.set)
         try:
             while True:
                 async with self._lock:
@@ -614,8 +615,8 @@ class ToolJobRuntime:
                     human_wait.cancel()
                     await asyncio.gather(changed_wait, human_wait, return_exceptions=True)
         finally:
-            if entry.human_signal is not None:
-                entry.human_signal.unsubscribe(human_notified.set)
+            if human_signal is not None:
+                human_signal.unsubscribe(human_notified.set)
             if not retained:
                 await self.release_wait(job_id, token)
 

@@ -947,16 +947,20 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
             if not isinstance(child_name, str) or not isinstance(task, str):
                 resolve_result("Cannot delegate: task must be a string and agent_name must be a string or null.")
                 continue
-            authorization = authorize_delegation(
-                caller,
-                child_name,
-                task,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=caller_identity,
-                depth=delegation_depth,
-                model=model,
-            )
+            # Stored-job lookup already checked current authority. Retrieval must
+            # not validate launch arguments that retention may have erased.
+            authorization: Config | str = config
+            if background_job is None:
+                authorization = authorize_delegation(
+                    caller,
+                    child_name,
+                    task,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    execution_identity=caller_identity,
+                    depth=delegation_depth,
+                    model=model,
+                )
             output_request = None
             if not isinstance(authorization, str) and (
                 background_job is None or background_job.status == "awaiting_approval"
