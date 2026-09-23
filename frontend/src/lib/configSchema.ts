@@ -291,7 +291,8 @@ export function initialValue(
   root: JsonSchema,
   references: ReferenceOptions,
 ): unknown {
-  if (node.hasDefault && node.defaultValue != null) {
+  // Object defaults list every field; starting empty lets fields show their own defaults.
+  if (node.hasDefault && node.defaultValue != null && node.kind !== "object") {
     return structuredClone(node.defaultValue);
   }
   switch (node.kind) {
@@ -393,4 +394,16 @@ export function setObjectKey(
     copy[key] = next;
   }
   return copy;
+}
+
+/** Whether an absent value and an empty collection mean the same thing. */
+export function hasEmptyDefault(node: SchemaNode): boolean {
+  const value = node.defaultValue;
+  if (!node.hasDefault || value == null) {
+    return true;
+  }
+  if (Array.isArray(value)) {
+    return value.length === 0;
+  }
+  return isPlainObject(value) && Object.keys(value).length === 0;
 }

@@ -23,6 +23,7 @@ import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
 import {
   classifySchemaNode,
   fieldLabel,
+  hasEmptyDefault,
   initialValue,
   isPlainObject,
   matchUnionVariant,
@@ -793,16 +794,28 @@ function ValueEditor({
           }}
         />
       );
+    // Absent collections show their default; emptying one is only the same
+    // as removing the key when the default is empty too.
     case "list":
       return (
         <ListEditor
           label={label}
           node={node}
           root={root}
-          value={Array.isArray(value) ? value : []}
+          value={
+            Array.isArray(value)
+              ? value
+              : value === undefined && Array.isArray(node.defaultValue)
+                ? node.defaultValue
+                : []
+          }
           path={path}
           onChange={(items) =>
-            onChange(items.length === 0 && !node.nullable ? undefined : items)
+            onChange(
+              items.length === 0 && !node.nullable && hasEmptyDefault(node)
+                ? undefined
+                : items,
+            )
           }
         />
       );
@@ -812,11 +825,19 @@ function ValueEditor({
           label={label}
           node={node}
           root={root}
-          value={isPlainObject(value) ? value : {}}
+          value={
+            isPlainObject(value)
+              ? value
+              : value === undefined && isPlainObject(node.defaultValue)
+                ? node.defaultValue
+                : {}
+          }
           path={path}
           onChange={(entries) =>
             onChange(
-              Object.keys(entries).length === 0 && !node.nullable
+              Object.keys(entries).length === 0 &&
+                !node.nullable &&
+                hasEmptyDefault(node)
                 ? undefined
                 : entries,
             )

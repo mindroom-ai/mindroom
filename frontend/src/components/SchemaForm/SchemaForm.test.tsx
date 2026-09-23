@@ -108,6 +108,12 @@ const ROOT: JsonSchema = {
           items: { type: "string" },
           "x-mindroom": { reference: "room" },
         },
+        tools: {
+          type: "array",
+          items: { type: "string" },
+          default: ["scheduler"],
+          "x-mindroom": { reference: "tool" },
+        },
         room_models: {
           type: "object",
           additionalProperties: { type: "string" },
@@ -262,6 +268,12 @@ describe("SchemaFields", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove lobby" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove dev" }));
     expect(lastValue()).toEqual({});
+  });
+
+  it("shows list defaults and keeps an explicitly emptied list", () => {
+    const { lastValue } = renderFixture();
+    fireEvent.click(screen.getByRole("button", { name: "Remove scheduler" }));
+    expect(lastValue()).toEqual({ tools: [] });
   });
 
   it("edits string maps with referenced values", () => {
