@@ -14,6 +14,7 @@ import {
   Plug,
   Puzzle,
   Settings2,
+  SlidersHorizontal,
   type LucideIcon,
   Users,
 } from "lucide-react";
@@ -92,6 +93,12 @@ export const NAV_ITEMS: NavigationItem[] = [
   { value: "voice", label: "Voice", icon: Mic, group: "Configuration" },
   { value: "integrations", label: "Tools", icon: Plug, group: "Configuration" },
   { value: "skills", label: "Skills", icon: Puzzle, group: "Configuration" },
+  {
+    value: "settings",
+    label: "Settings",
+    icon: SlidersHorizontal,
+    group: "Configuration",
+  },
 ];
 
 const NAV_GROUPS: NavigationItem["group"][] = ["Workspace", "Configuration"];

@@ -46,7 +46,7 @@ const COLLECTION_ROOTS = new Set(["agents", "teams", "rooms", "room_models"]);
 
 // Schema-driven editors address roots by name, including roots the typed
 // Config interface does not model.
-function readConfigRoot(config: Config, root: string): unknown {
+export function readConfigRoot(config: Config, root: string): unknown {
   return (config as unknown as Record<string, unknown>)[root];
 }
 
