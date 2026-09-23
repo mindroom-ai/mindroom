@@ -241,14 +241,16 @@ async def test_recovered_agent_retains_prose_and_trace_through_real_tool_executi
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("has_delta", [False, True])
 @pytest.mark.parametrize("joined", [False, True])
+@pytest.mark.parametrize("prefix", ["", "## "])
 async def test_prior_prose_does_not_hide_terminal_only_answer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     streaming: bool,
     has_delta: bool,
     joined: bool,
+    prefix: str,
 ) -> None:
-    """Recovery and job-join prose cannot suppress the next attempt's terminal answer."""
+    """Recovery and joins retain distinct paragraphs for incremental and terminal-only prose."""
     attempts = 0
 
     async def events(*_args: object, **_kwargs: object) -> AsyncIterator[RunContentEvent | RunCompletedEvent]:
@@ -259,8 +261,8 @@ async def test_prior_prose_does_not_hide_terminal_only_answer(
             yield RunCompletedEvent(content="Earlier visible answer.", run_id="first", session_id="session1")
             return
         if has_delta:
-            yield RunContentEvent(content="Fresh streamed answer.")
-        yield RunCompletedEvent(content="Fresh terminal answer.", run_id="recovery", session_id="session1")
+            yield RunContentEvent(content=prefix + "Fresh streamed answer.")
+        yield RunCompletedEvent(content=prefix + "Fresh terminal answer.", run_id="recovery", session_id="session1")
 
     agent = MagicMock()
     agent.arun = MagicMock(side_effect=events)
@@ -311,11 +313,10 @@ async def test_prior_prose_does_not_hide_terminal_only_answer(
             config=config,
             collect_streamed_response=True,
         )
-    expected = "Fresh streamed answer." if has_delta else "Fresh terminal answer."
+    expected = prefix + ("Fresh streamed answer." if has_delta else "Fresh terminal answer.")
     assert body.count("Earlier visible answer.") == 1
     assert body.strip().endswith(expected)
-    if not joined:
-        assert body.strip() == "Earlier visible answer.\n\n" + expected
+    assert body.strip() == "Earlier visible answer.\n\n" + expected
     assert body.count("Fresh terminal answer.") == int(not has_delta)
     assert attempts == (2 if joined else 1)
 
