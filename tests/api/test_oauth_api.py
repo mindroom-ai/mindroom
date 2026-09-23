@@ -2467,14 +2467,17 @@ def _general_agent_reset_target(
     return provider, target
 
 
-def test_shared_browser_reset_uses_one_time_credential_manager_link_without_dashboard_login(tmp_path: Path) -> None:
-    """A shared credential manager link should confirm and reconnect without dashboard access."""
+def test_shared_browser_reset_confirms_without_login_but_reconnect_requires_authorized_login(
+    tmp_path: Path,
+) -> None:
+    """A shared reset link should confirm without dashboard access, then gate reconnection on login."""
     runtime_paths = _runtime_paths(
         tmp_path,
         {
             "TEST_OAUTH_CLIENT_ID": "client-id",
             "TEST_OAUTH_CLIENT_SECRET": "client-secret",
             "CUSTOMER_ID": "tenant-a",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
         },
     )
     api_app = _make_test_app(
@@ -2511,6 +2514,8 @@ def test_shared_browser_reset_uses_one_time_credential_manager_link_without_dash
                 runtime_paths,
                 worker_scope="shared",
             )
+            anonymous_authorization = client.get(confirmed.headers["location"], follow_redirects=False)
+            _login(client)
             authorization = client.get(confirmed.headers["location"], follow_redirects=False)
             state = _state_from_auth_url(authorization.headers["location"])
             callback = client.get(
@@ -2534,6 +2539,7 @@ def test_shared_browser_reset_uses_one_time_credential_manager_link_without_dash
     assert "connect_token" in parse_qs(confirmed_location.query)
     assert after_confirmation is None
     assert replayed.status_code == 400
+    assert urlparse(anonymous_authorization.headers["location"]).path == "/login"
     assert authorization.status_code == 307
     assert urlparse(authorization.headers["location"]).netloc == "auth.example.test"
     assert callback.status_code == 200
@@ -2979,7 +2985,6 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
         execution_identity=None,
     )
     pending = SimpleNamespace(
-        browser_user_required=True,
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
@@ -2989,7 +2994,6 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
     conflict = OAuthCredentialConflictError("OAuth connection state is stale because this credential changed")
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
-    monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
@@ -3029,7 +3033,6 @@ async def test_callback_hides_provider_controlled_exchange_error(
         execution_identity=None,
     )
     pending = SimpleNamespace(
-        browser_user_required=True,
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
@@ -3039,7 +3042,6 @@ async def test_callback_hides_provider_controlled_exchange_error(
     provider_error = OAuthProviderError("provider-controlled-callback-secret")
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
-    monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
@@ -3729,7 +3731,6 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
         execution_identity=None,
     )
     pending = SimpleNamespace(
-        browser_user_required=True,
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
@@ -3753,7 +3754,6 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
 
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", allow_request)
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
-    monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
@@ -3808,7 +3808,6 @@ async def test_callback_finishes_target_verification_after_state_consumption_bef
         execution_identity=None,
     )
     pending = SimpleNamespace(
-        browser_user_required=True,
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
@@ -3825,7 +3824,6 @@ async def test_callback_finishes_target_verification_after_state_consumption_bef
 
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
-    monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", verify)
@@ -5186,17 +5184,19 @@ def test_agent_connect_token_rejects_different_authenticated_requester(tmp_path:
     assert wrong_matrix_credentials is None
 
 
-def test_shared_agent_connect_token_uses_link_target_despite_authenticated_requester(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        {
-            "TEST_OAUTH_CLIENT_ID": "client-id",
-            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
-            constants.OWNER_MATRIX_USER_ID_ENV: "@bob:example.org",
-        },
-    )
-    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
-    provider = _fake_provider()
+def _pending_oauth_states(runtime_paths: constants.RuntimePaths) -> list[dict[str, Any]]:
+    """Return the pending browser OAuth states currently held by one runtime."""
+    state_file = runtime_paths.storage_root / "oauth_state" / "oauth_state.json"
+    if not state_file.exists():
+        return []
+    states = json.loads(state_file.read_text(encoding="utf-8"))["states"]
+    return [record for record in states.values() if record.get("kind") == "dashboard_oauth_state"]
+
+
+def _shared_connect_token_for_alice(
+    provider: OAuthProvider,
+    runtime_paths: constants.RuntimePaths,
+) -> str:
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",
@@ -5208,12 +5208,105 @@ def test_shared_agent_connect_token_uses_link_target_despite_authenticated_reque
     )
     worker_target = resolve_worker_target("shared", "general", execution_identity=identity)
     assert worker_target.execution_identity is not None
-    connect_token = oauth_service._issue_oauth_connect_token(
-        provider,
-        runtime_paths,
-        worker_target,
-    )
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
     assert connect_token is not None
+    return connect_token
+
+
+def test_shared_agent_connect_token_rejects_unauthenticated_browser(tmp_path: Path) -> None:
+    """A shared connect link relayed into a room must not authorize an anonymous browser."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
+    provider = _fake_provider()
+    connect_token = _shared_connect_token_for_alice(provider, runtime_paths)
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=shared"
+                f"&connect_token={connect_token}",
+                follow_redirects=False,
+            )
+
+    assert authorize_response.headers["location"].startswith("/login?")
+    assert _pending_oauth_states(runtime_paths) == []
+    assert _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared") is None
+
+
+def test_shared_agent_connect_token_rejects_requester_without_agent_authority(tmp_path: Path) -> None:
+    """Another authenticated room member must not redeem an administrator's shared connect link."""
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider()
+    connect_token = _shared_connect_token_for_alice(provider, runtime_paths)
+    mallory_headers = trusted_upstream_headers(
+        user_id="mallory",
+        email="mallory@example.com",
+        matrix_user_id="@mallory:example.org",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, headers=mallory_headers) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=shared"
+                f"&connect_token={connect_token}",
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 403
+    assert _pending_oauth_states(runtime_paths) == []
+    assert _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared") is None
+    assert oauth_service.lookup_oauth_connect_token(provider, runtime_paths, connect_token) is not None
+
+
+def test_shared_agent_connect_token_allows_independent_credential_manager(tmp_path: Path) -> None:
+    """A second administrator may redeem a shared connect link issued for another administrator."""
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    payload = _config_payload(worker_scope="shared")
+    payload["administrators"] = ["@alice:example.org", "@bob:example.org"]
+    api_app = _make_test_app(runtime_paths, payload)
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider()
+    connect_token = _shared_connect_token_for_alice(provider, runtime_paths)
+    bob_headers = trusted_upstream_headers(
+        user_id="bob",
+        email="bob@example.com",
+        matrix_user_id="@bob:example.org",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, headers=bob_headers) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=shared"
+                f"&connect_token={connect_token}",
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 307
+    assert urlparse(authorize_response.headers["location"]).netloc == "auth.example.test"
+
+
+def test_shared_agent_connect_callback_requires_authenticated_browser(tmp_path: Path) -> None:
+    """A shared connect callback must not store credentials for a browser that dropped its login."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
+    provider = _fake_provider()
+    connect_token = _shared_connect_token_for_alice(provider, runtime_paths)
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
@@ -5223,9 +5316,16 @@ def test_shared_agent_connect_token_uses_link_target_despite_authenticated_reque
                 f"&connect_token={connect_token}",
                 follow_redirects=False,
             )
+            state = _state_from_auth_url(authorize_response.headers["location"])
+            client.cookies.clear()
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
 
     assert authorize_response.status_code == 307
-    assert urlparse(authorize_response.headers["location"]).netloc == "auth.example.test"
+    assert callback_response.status_code == 401
+    assert _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared") is None
 
 
 def test_callback_rejects_wrong_provider_state(tmp_path: Path) -> None:

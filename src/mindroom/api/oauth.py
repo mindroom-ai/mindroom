@@ -14,11 +14,7 @@ from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import authenticate_user, login_redirect_for_request, verify_user
-from mindroom.api.credentials_oauth_flows import (
-    consume_pending_oauth_request,
-    issue_pending_oauth_state,
-    pending_oauth_state_requires_browser_user,
-)
+from mindroom.api.credentials_oauth_flows import consume_pending_oauth_request, issue_pending_oauth_state
 from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     resolve_requester_credentials_target,
@@ -104,7 +100,9 @@ _OAUTH_BROWSER_SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
 }
-# Only shared credentials permit delegation through a single-use capability.
+# Connect links are relayed into the conversation that produced them, so holding one
+# never authorizes a credential write: every authorize and callback request resolves an
+# authenticated browser user and checks that user's own authority over the target scope.
 
 
 class OAuthConnectResponse(BaseModel):
@@ -293,7 +291,6 @@ async def _issue_authorization_url(
             agent_name,
             payload=payload,
             code_verifier=code_verifier,
-            browser_user_required=connect_target is None or connect_target.binding.worker_scope != "shared",
         )
         auth_url = await provider.authorization_uri_async(
             runtime_paths,
@@ -384,7 +381,9 @@ def _conversation_connect_context(
     requester_id = target.requester_id
     if not agent_name or not requester_id:
         raise HTTPException(status_code=400, detail="OAuth link target is invalid")
-    if binding.worker_scope != "shared":
+    if binding.worker_scope == "shared":
+        _verify_shared_connect_browser_user_authorized(request, config, runtime_paths, agent_name=agent_name)
+    else:
         _verify_connect_target_authorized(request, requester_id, runtime_paths)
     identity = _conversation_execution_identity(agent_name, requester_id, runtime_paths)
     worker_target = build_agent_toolkit_worker_target(
@@ -436,16 +435,45 @@ def _conversation_context_from_pending_payload(
     return _conversation_connect_context(request, provider, runtime_paths, target)
 
 
-def _verify_connect_target_authorized(request: Request, requester_id: str | None, runtime_paths: RuntimePaths) -> None:
+def _oauth_browser_requester_id(request: Request, agent_name: str, runtime_paths: RuntimePaths) -> str | None:
+    """Return the requester identity of the authenticated browser user for one agent lookup."""
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    dashboard_identity = build_dashboard_execution_identity(
+    return build_dashboard_execution_identity(
         request,
-        "oauth",
+        agent_name,
         config=snapshot.runtime_config,
         runtime_paths=runtime_paths,
-    )
-    if requester_id and requester_id != dashboard_identity.requester_id:
+    ).requester_id
+
+
+def _verify_connect_target_authorized(request: Request, requester_id: str | None, runtime_paths: RuntimePaths) -> None:
+    if requester_id and requester_id != _oauth_browser_requester_id(request, "oauth", runtime_paths):
         raise HTTPException(status_code=403, detail="OAuth link does not belong to the current user")
+
+
+def _verify_shared_connect_browser_user_authorized(
+    request: Request,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    agent_name: str,
+) -> None:
+    """Require the browser user itself to manage one agent-wide OAuth connection.
+
+    A shared connect link is relayed into the conversation that produced the missing
+    credential, so every room member can read it and possession proves nothing about
+    the browser user. The link requester is authorized separately; this holds the
+    authenticated browser user to that same standard, which also covers the requester
+    redeeming their own link.
+    """
+    browser_requester_id = _oauth_browser_requester_id(request, agent_name, runtime_paths)
+    if not browser_requester_id or not is_sender_allowed_for_agent_oauth_connection_management(
+        browser_requester_id,
+        agent_name,
+        config,
+        runtime_paths,
+    ):
+        raise HTTPException(status_code=403, detail="The current user cannot manage this agent's credentials")
 
 
 def _verify_connect_target_query(
@@ -595,10 +623,9 @@ async def authorize(
             connect_target = lookup_oauth_connect_token(provider, runtime_paths, connect_token)
         except OAuthProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if connect_target is None or connect_target.binding.worker_scope != "shared":
-        login_redirect = await _require_oauth_browser_user(request, connect_target=connect_target)
-        if login_redirect is not None:
-            return login_redirect
+    login_redirect = await _require_oauth_browser_user(request, connect_target=connect_target)
+    if login_redirect is not None:
+        return login_redirect
     response = await _issue_authorization_url(
         request,
         provider,
@@ -883,9 +910,7 @@ async def callback(provider_id: str, request: Request) -> Response:
         raise HTTPException(status_code=400, detail="No OAuth state received")
 
     provider, runtime_paths = _load_provider(request, provider_id)
-    browser_user_required = pending_oauth_state_requires_browser_user(request, provider.id, state)
-    if browser_user_required:
-        await _require_oauth_api_user(request)
+    await _require_oauth_api_user(request)
     try:
         dashboard_flow = await _complete_oauth_callback(
             request,
