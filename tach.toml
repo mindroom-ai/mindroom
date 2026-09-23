@@ -6484,7 +6484,7 @@ from = ["mindroom.agno_compat_model_hooks"]
 expose = [
     "install_message_projection",
     "install_tool_result_callback",
-    "install_tool_call_limit_stop",
+    "install_response_request_gate",
     "install_async_invocation_hooks",
     "install_stream_invocation_hooks",
     "temporary_async_invocation_hooks",
@@ -6500,7 +6500,7 @@ visibility = ["mindroom.agents", "mindroom.teams", "mindroom.custom_tools.dynami
 
 [[interfaces]]
 from = ["mindroom.tool_call_budget"]
-expose = ["install_tool_call_budget"]
+expose = ["install_model_call_cap"]
 
 [[modules]]
 path = "mindroom.agno_compat_sqlite"

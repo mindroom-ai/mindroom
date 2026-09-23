@@ -29,7 +29,7 @@ from mindroom.dynamic_workflows.validation import DynamicWorkflowError, collect_
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.tool_approval import tool_may_require_approval
-from mindroom.tool_call_budget import install_tool_call_budget
+from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
@@ -684,7 +684,7 @@ async def _aexecute_ephemeral_agent_participant(
     execution_identity = build_execution_identity_from_runtime_context(context)
     model = model_loading.get_model_instance(context.config, context.runtime_paths, model_name, execution_identity)
     agent_id = f"dynamic_workflow_{participant_id}"
-    install_tool_call_budget(model, entity_name=agent_id)
+    install_model_call_cap(model, entity_name=agent_id)
     run_config = _participant_run_config(context, toolkits_by_name)
     _reject_nonresumable_toolkits(toolkits_by_name, run_config)
     bridge = build_tool_hook_bridge(

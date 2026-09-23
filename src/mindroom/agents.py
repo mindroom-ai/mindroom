@@ -34,7 +34,7 @@ from mindroom.runtime_resolution import (
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
-from mindroom.tool_call_budget import install_tool_call_budget
+from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ensure_tool_registry_loaded,
@@ -1865,7 +1865,7 @@ def create_agent(
         role_context.model_name,
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
     )
-    install_tool_call_budget(model, entity_name=agent_name)
+    install_model_call_cap(model, entity_name=agent_name)
     if tool_assembly.deferred_wire_tool_names:
         # Each installer no-ops on the other provider family's model class.
         install_claude_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
