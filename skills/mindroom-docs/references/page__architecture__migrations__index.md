@@ -140,7 +140,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S9 | Isolated | [`legacy_openai_tool_replay.py`][legacy-openai] repairs old stored calls; current sparse-stream filtering stays in the adapters. |
 | S10 | Current behavior | [`agent_storage.py`][agent-storage] and [`history/replay.py`][history-replay] own the current prompt persistence and replay boundary. |
 | S11 | Removed/superseded | [`thread_export/storage.py`][thread-export] refuses populated markerless roots and marks only empty roots. |
-| S12 | Tiny retained default | [`report_publishing/store.py`][report-store] treats missing `artifact_kind` as `html_file`. |
+| S12 | Tiny retained default | [`report_publishing/store.py`][report-store] treats missing `artifact_kind` as `html_file` and missing `access_policy` as `public`. |
 | S13 | Tiny retained default | [`scheduling.py`][scheduling] treats missing `history_limit` as the current `None` default. |
 | S14 | Current behavior | [`history/storage.py`][history-storage] reads current v2 compaction state and ignores v1. |
 | S15 | Current behavior | [`knowledge/candidate_checkpoint.py`][candidate-checkpoint] rebuilds unknown versions and retains current torn-tail recovery. |

@@ -21,6 +21,7 @@ from mindroom.matrix.identity import (
     parse_current_matrix_user_id,
     parse_historical_matrix_user_id,
     try_parse_historical_matrix_user_id,
+    valid_matrix_room_id,
 )
 from mindroom.matrix.state import MatrixState, _write_matrix_state_file
 from mindroom.matrix_identifiers import agent_username_localpart, unnamespaced_agent_name_from_username_localpart
@@ -186,6 +187,38 @@ class TestMatrixID:
         assert mid.username == "mindroom_calculator"
         assert mid.domain == "localhost"
         assert mid.full_id == "@mindroom_calculator:localhost"
+
+    @pytest.mark.parametrize(
+        "room_id",
+        [
+            "!opaque:example.org",
+            "!opaque:example.org:8448",
+            "!opaque:[1234:5678::abcd]",
+            "!opaque room:example.org",
+            "!Nhcu5BS-UMnFX7hBVfVSoXiD7OgH6iRT-xyIuqDnpYQ",
+        ],
+    )
+    def test_valid_matrix_room_id(self, room_id: str) -> None:
+        """Canonical Matrix room IDs, including domainless v12 IDs, should validate."""
+        assert valid_matrix_room_id(room_id)
+
+    @pytest.mark.parametrize(
+        "room_id",
+        [
+            "#alias:example.org",
+            "!opaque",
+            "!" + ("a" * 42),
+            "!" + ("a" * 44),
+            "!" + ("a" * 42) + "=",
+            "!:example.org",
+            "!opaque:",
+            "!opaque:example.org.",
+            "!opaque:[::::]",
+        ],
+    )
+    def test_valid_matrix_room_id_rejects_aliases_and_malformed_ids(self, room_id: str) -> None:
+        """Room authorization metadata must contain a valid canonical room ID."""
+        assert not valid_matrix_room_id(room_id)
 
     def test_agent_name_extraction(self, tmp_path: Path) -> None:
         """Test extracting entity name."""

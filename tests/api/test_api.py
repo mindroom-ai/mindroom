@@ -44,6 +44,7 @@ from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
+from mindroom.trusted_upstream_settings import TrustedUpstreamAuthSettings
 from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
@@ -3817,7 +3818,7 @@ def test_frontend_login_propagates_trusted_upstream_auth_misconfiguration(
             supabase_anon_key=None,
             account_id=None,
             mindroom_api_key="test-key",
-            trusted_upstream=auth._TrustedUpstreamAuthSettings(enabled=True),
+            trusted_upstream=TrustedUpstreamAuthSettings(enabled=True),
         ),
         supabase_auth=None,
     )
@@ -4602,6 +4603,39 @@ def test_trusted_upstream_headers_populate_auth_user_when_enabled(tmp_path: Path
         "matrix_user_id": "@alice:example.org",
         "auth_source": "trusted_upstream",
     }
+
+
+def test_report_viewer_reverifies_prepopulated_trusted_upstream_principal(tmp_path: Path) -> None:
+    """Report auth must not trust a principal merely because another layer prepopulated the request scope."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+        },
+    )
+    api_app = FastAPI()
+    main.initialize_api_app(api_app, runtime_paths)
+
+    async def _verify_seeded_report_viewer(request: Request) -> str | None:
+        request.scope["auth_user"] = {
+            "user_id": "spoofed",
+            "auth_source": "trusted_upstream",
+            "matrix_user_id": "@spoofed:example.org",
+        }
+        return await auth.verified_report_viewer_matrix_user_id(request)
+
+    @api_app.get("/report-viewer")
+    async def _report_viewer(
+        matrix_user_id: Annotated[str | None, Depends(_verify_seeded_report_viewer)],
+    ) -> str | None:
+        return matrix_user_id
+
+    with TestClient(api_app) as client:
+        response = client.get("/report-viewer")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing trusted upstream identity header: X-Trusted-User"
 
 
 def _trusted_upstream_strict_jwt_env(

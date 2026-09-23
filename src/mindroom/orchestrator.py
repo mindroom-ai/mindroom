@@ -126,6 +126,7 @@ from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import build_config_update_plan, configured_entity_names
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
 from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
+from .orchestration.report_authorization_runtime import ReportAuthorizationRuntimeCoordinator
 from .orchestration.rooms import get_room_user_ids_to_invite, get_root_space_user_ids_to_invite
 from .orchestration.runtime import (
     STARTUP_RETRY_INITIAL_DELAY_SECONDS,
@@ -454,6 +455,10 @@ class _MultiAgentOrchestrator:
             api_enabled=self.api_enabled,
             agent_reply_memberships=self.agent_reply_memberships,
         )
+        self._report_authorization_runtime = ReportAuthorizationRuntimeCoordinator(
+            runtime_paths=self.runtime_paths,
+            api_enabled=self.api_enabled,
+        )
         self._todo_poke_runtime = TodoPokeRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
@@ -701,6 +706,7 @@ class _MultiAgentOrchestrator:
         )
         self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
         self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
+        self._report_authorization_runtime.bind_if_ready(self.config, self.agent_bots)
 
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
@@ -970,6 +976,7 @@ class _MultiAgentOrchestrator:
                         await self._recover_pending_replacement_rooms(config)
                     self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
                     self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
+                    self._report_authorization_runtime.bind_if_ready(self.config, self.agent_bots)
                     return
 
                 attempt += 1
@@ -1855,6 +1862,7 @@ class _MultiAgentOrchestrator:
         """Leave rooms before canceling ingestion and releasing removed entities."""
         self._external_trigger_runtime.unbind_for_entity_changes(removed_entities)
         self._computer_runtime.unbind_for_entity_changes(removed_entities)
+        self._report_authorization_runtime.unbind_for_entity_changes(removed_entities)
         for entity_name in removed_entities:
             await self._cancel_bot_start_task(entity_name)
             self._pending_replacement_recovery_room_ids.pop(entity_name, None)
@@ -1899,6 +1907,7 @@ class _MultiAgentOrchestrator:
 
         self._external_trigger_runtime.unbind_for_entity_changes(affected_entities)
         self._computer_runtime.unbind_for_entity_changes(affected_entities)
+        self._report_authorization_runtime.unbind_for_entity_changes(affected_entities)
         replaced_bots = self._replacement_bots(affected_entities)
         for entity_name in affected_entities:
             await self._cancel_bot_start_task(entity_name)
@@ -1924,6 +1933,7 @@ class _MultiAgentOrchestrator:
         if entities_to_stop:
             self._external_trigger_runtime.unbind_for_entity_changes(entities_to_stop)
             self._computer_runtime.unbind_for_entity_changes(entities_to_stop)
+            self._report_authorization_runtime.unbind_for_entity_changes(entities_to_stop)
             for entity_name in entities_to_stop:
                 await self._cancel_bot_start_task(entity_name)
             await self._stop_runtime_entities(
@@ -1993,6 +2003,7 @@ class _MultiAgentOrchestrator:
             self._permanently_failed_entities.difference_update(changed_entities)
             self._external_trigger_runtime.unbind_for_entity_changes(changed_entities)
             self._computer_runtime.unbind_for_entity_changes(changed_entities)
+            self._report_authorization_runtime.unbind_for_entity_changes(changed_entities)
             replaced_bots = self._replacement_bots(changed_entities)
             for entity_name in changed_entities:
                 await self._cancel_bot_start_task(entity_name)
@@ -2012,6 +2023,7 @@ class _MultiAgentOrchestrator:
             await self._recover_pending_replacement_rooms(self.config)
             self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
             self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
+            self._report_authorization_runtime.bind_if_ready(self.config, self.agent_bots)
             for entity_name in start_results.retryable_entities:
                 await self._schedule_bot_start_retry(entity_name)
             if start_results.permanently_failed_entities:
@@ -2074,6 +2086,7 @@ class _MultiAgentOrchestrator:
         await self._approval_recovery.mark_startup_runtime_support_ready()
         self._external_trigger_runtime.bind_if_ready(new_config, self.agent_bots)
         self._computer_runtime.bind_if_ready(new_config, self.agent_bots)
+        self._report_authorization_runtime.bind_if_ready(new_config, self.agent_bots)
         await self._emit_config_reloaded(
             new_config=new_config,
             changed_entities=changed_entities,
@@ -2463,6 +2476,7 @@ class _MultiAgentOrchestrator:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
         self._computer_runtime.unbind()
+        self._report_authorization_runtime.unbind()
         try:
             await _run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:

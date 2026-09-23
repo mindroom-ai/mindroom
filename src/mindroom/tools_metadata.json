@@ -8873,12 +8873,12 @@
       "consumes_workspace_paths": true,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Share reports through public links that you can revoke",
+      "description": "Share reports through public or room-restricted links that you can revoke",
       "display_name": "Report Publishing",
       "docs_url": null,
       "function_names": [
         "publish_report",
-        "revoke_public_report"
+        "revoke_report"
       ],
       "helper_text": null,
       "icon": "Share2",

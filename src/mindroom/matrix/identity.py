@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _CURRENT_USER_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/+-]+$")
+_DOMAINLESS_ROOM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _SERVER_DNS_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,63}$")
 _SERVER_IPV6_LITERAL_PATTERN = re.compile(r"^[0-9A-Fa-f:.]{2,45}$")
 
@@ -25,6 +26,7 @@ __all__ = [
     "parse_current_matrix_user_id",
     "parse_historical_matrix_user_id",
     "try_parse_historical_matrix_user_id",
+    "valid_matrix_room_id",
     "valid_matrix_server_name",
     "validate_email_to_matrix_mapping",
 ]
@@ -135,6 +137,22 @@ def try_parse_historical_matrix_user_id(value: str | None) -> str | None:
         return parse_historical_matrix_user_id(value)
     except ValueError:
         return None
+
+
+def valid_matrix_room_id(room_id: str) -> bool:
+    """Return whether one value is a canonical Matrix room ID, including domainless v12 IDs."""
+    if not room_id.startswith("!"):
+        return False
+    if ":" not in room_id:
+        return _DOMAINLESS_ROOM_ID_PATTERN.fullmatch(room_id[1:]) is not None
+    localpart, server_name = room_id[1:].split(":", 1)
+    return (
+        bool(localpart)
+        and "\x00" not in localpart
+        and not _contains_surrogate(localpart)
+        and valid_matrix_server_name(server_name)
+        and len(room_id.encode("utf-8")) <= 255
+    )
 
 
 def validate_email_to_matrix_mapping(template: str, email_domain: str | None) -> None:

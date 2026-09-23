@@ -123,7 +123,8 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
 
 When using the provisioner, configure the platform chart with `provisioner.trustedUpstreamAuth.enabled="true"` and the matching `provisioner.trustedUpstreamAuth.*Header` values.
 If your access layer cannot supply a Matrix ID header, configure `provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate` with the same template and `provisioner.trustedUpstreamAuth.emailDomain` with the allowed email domain.
-The email-to-Matrix template must contain exactly one `{localpart}` placeholder and requires the matching `emailHeader` and `emailDomain` values in both the instance and platform chart configuration.
+The email-to-Matrix template must contain exactly one `{localpart}` placeholder, no other braces, and must render a valid Matrix user ID.
+It requires the matching `emailHeader` and `emailDomain` values in both the instance and platform chart configuration.
 
 ## Runtime-Only Deployment
 

@@ -45,6 +45,8 @@ if TYPE_CHECKING:
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
+    from mindroom.report_publishing.authorization import ReportAuthorizationReason
+    from mindroom.report_publishing.store import OriginRoomBinding
     from mindroom.response_activity import ResponseIdentity
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
@@ -117,6 +119,13 @@ class ExternalTriggerRuntime:
     wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
 
 
+@dataclass(frozen=True)
+class ReportAuthorizationRuntime:
+    """Runtime callback for live origin-room report authorization."""
+
+    authorize: Callable[[OriginRoomBinding, str], Awaitable[ReportAuthorizationReason]]
+
+
 @dataclass
 class _MindroomAppState:
     """Single typed namespace for FastAPI ``app.state`` attributes used across the API."""
@@ -129,6 +138,7 @@ class _MindroomAppState:
     thread_export_runner: WorkspaceThreadExportRunner | None = None
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None
     external_trigger_runtime: ExternalTriggerRuntime | None = None
+    report_authorization_runtime: ReportAuthorizationRuntime | None = None
     agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
     response_admission_gate: ResponseAdmissionGate | None = None
     openai_responses: set[ResponseIdentity] = field(default_factory=set)

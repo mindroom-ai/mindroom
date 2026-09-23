@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast, get_args
 from urllib.parse import urlsplit
 
 from agno.tools import Toolkit
 
+from mindroom.config.report_publishing import ReportAccessPolicy
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
@@ -14,8 +15,10 @@ from mindroom.custom_tools.dynamic_workflow_context import (
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.custom_tools.toolkit_functions import JSON_OBJECT_SCHEMA, register_toolkit_functions
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
+from mindroom.report_publishing.authorization import current_publisher_matrix_user_id
 from mindroom.report_publishing.store import (
     ARTIFACT_KIND_STATIC_SITE,
+    OriginRoomBinding,
     PublishableReport,
     PublishedReport,
     ReportPublishingError,
@@ -27,6 +30,7 @@ from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
+from mindroom.trusted_upstream_settings import matrix_identity_configuration_error, trusted_upstream_auth_settings
 from mindroom.workspaces import resolve_workspace_relative_path
 
 _DYNAMIC_WORKFLOW_RUN_SOURCE_KEYS = frozenset({"workflow_id", "run_id", "scope"})
@@ -35,10 +39,12 @@ _STATIC_SITE_SOURCE_KEYS = frozenset({"path", "title"})
 
 _TOOL_DESCRIPTIONS = {
     "publish_report": (
-        "Publish an authorized report source through a revocable public link. "
-        "Supports source_type dynamic_workflow_run and static_site."
+        "Publish an authorized report source through a revocable link. "
+        "access_policy origin_room limits viewing to people currently joined to this Matrix room; "
+        "public creates a bearer link anyone holding it can open and requires confirm_public=true. "
+        "Omit access_policy to use the configured default. Supports source_type dynamic_workflow_run and static_site."
     ),
-    "revoke_public_report": "Revoke a previously published public report link.",
+    "revoke_report": "Revoke a previously published report link under either access policy.",
 }
 
 
@@ -49,10 +55,14 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
             "source_type": {"type": "string"},
             "source": JSON_OBJECT_SCHEMA,
             "confirm_public": {"type": "boolean"},
+            "access_policy": {
+                "type": ["string", "null"],
+                "enum": [*get_args(ReportAccessPolicy), None],
+            },
         },
-        "required": ["source_type", "source", "confirm_public"],
+        "required": ["source_type", "source"],
     },
-    "revoke_public_report": {
+    "revoke_report": {
         "type": "object",
         "properties": {"slug": {"type": "string"}},
         "required": ["slug"],
@@ -61,7 +71,7 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
 
 
 class ReportPublishingTools(Toolkit):
-    """Tools that publish authorized report artifacts through revocable public links."""
+    """Tools that publish authorized report artifacts through revocable links."""
 
     def __init__(self) -> None:
         super().__init__(name="report_publishing", tools=[])
@@ -72,11 +82,11 @@ class ReportPublishingTools(Toolkit):
             self,
             sync_entrypoints={
                 "publish_report": self.publish_report,
-                "revoke_public_report": self.revoke_public_report,
+                "revoke_report": self.revoke_report,
             },
             async_entrypoints={
                 "publish_report": self.apublish_report,
-                "revoke_public_report": self.arevoke_public_report,
+                "revoke_report": self.arevoke_report,
             },
             descriptions=_TOOL_DESCRIPTIONS,
             parameters=_TOOL_PARAMETERS,
@@ -97,47 +107,53 @@ class ReportPublishingTools(Toolkit):
         self,
         source_type: str,
         source: dict[str, Any],
-        confirm_public: bool,
+        confirm_public: bool = False,
+        access_policy: str | None = None,
     ) -> str:
-        """Publish an authorized report artifact through a revocable public link."""
+        """Publish an authorized report artifact through a revocable link."""
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
-        if not confirm_public:
-            return self._payload(
-                "error",
-                source_type=source_type,
-                message="Set confirm_public to true to publish this report as a public link.",
-            )
         try:
+            resolved_access_policy = _resolve_access_policy(context, access_policy)
+            _check_publication_policy(context, resolved_access_policy, confirm_public=confirm_public)
+            origin_room = None if resolved_access_policy == "public" else _origin_room_binding(context)
             publishable = _resolve_publishable_source(context, source_type, source)
             report = ReportPublishingStore(context.runtime_paths.storage_root).publish_report(
                 source=publishable,
                 published_by=context.requester_id,
                 base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+                origin_room=origin_room,
             )
         except (DynamicWorkflowError, ReportPublishingError) as exc:
             return self._payload("error", source_type=source_type, message=str(exc))
+        access_message = (
+            "Anyone who possesses this public bearer link can view the report."
+            if report.origin_room is None
+            else "Access is limited to authenticated Matrix users currently joined to the origin room."
+        )
         return self._payload(
             "ok",
             source_type=report.source_type,
             source=report.source,
             slug=report.slug,
-            public_url=report.public_url,
-            public_path=_public_path_for_report(report),
+            access_policy=report.access_policy,
+            report_url=report.public_url,
+            report_path=_report_path_for_report(report),
+            message=access_message,
             published_at=report.published_at,
         )
 
-    def revoke_public_report(self, slug: str) -> str:
-        """Revoke a previously published public report link."""
+    def revoke_report(self, slug: str) -> str:
+        """Revoke a previously published report link under either access policy."""
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
         try:
             store = ReportPublishingStore(context.runtime_paths.storage_root)
-            report = store.get_public_report(slug, include_revoked=True)
-            _authorize_public_report_for_context(context, report)
-            revoked = store.revoke_public_report(slug, revoked_by=context.requester_id)
+            report = store.get_report(slug, include_revoked=True)
+            _authorize_report_for_context(context, report)
+            revoked = store.revoke_report(slug, revoked_by=context.requester_id)
         except ReportPublishingError as exc:
             return self._payload("error", slug=slug, message=str(exc))
         return self._payload(
@@ -145,6 +161,7 @@ class ReportPublishingTools(Toolkit):
             slug=revoked.slug,
             source_type=revoked.source_type,
             source=revoked.source,
+            access_policy=revoked.access_policy,
             revoked_at=revoked.revoked_at,
         )
 
@@ -152,14 +169,15 @@ class ReportPublishingTools(Toolkit):
         self,
         source_type: str,
         source: dict[str, Any],
-        confirm_public: bool,
+        confirm_public: bool = False,
+        access_policy: str | None = None,
     ) -> str:
-        """Publish an authorized report artifact through a revocable public link."""
-        return self.publish_report(source_type, source, confirm_public)
+        """Publish an authorized report artifact through a revocable link."""
+        return self.publish_report(source_type, source, confirm_public, access_policy)
 
-    async def arevoke_public_report(self, slug: str) -> str:
-        """Revoke a previously published public report link."""
-        return self.revoke_public_report(slug)
+    async def arevoke_report(self, slug: str) -> str:
+        """Revoke a previously published report link under either access policy."""
+        return self.revoke_report(slug)
 
 
 def _resolve_publishable_source(
@@ -242,20 +260,69 @@ def _resolve_dynamic_workflow_run_source(
     )
 
 
-def _authorize_public_report_for_context(context: ToolRuntimeContext, report: PublishedReport) -> None:
+def _authorize_report_for_context(context: ToolRuntimeContext, report: PublishedReport) -> None:
     if context.requester_id in {report.requested_by, report.published_by}:
         return
-    msg = "Public report is not available to the current requester."
+    msg = "Report is not available to the current requester."
     raise ReportPublishingError(msg)
 
 
-def _public_path_for_report(report: PublishedReport) -> str:
+def _resolve_access_policy(context: ToolRuntimeContext, access_policy: str | None) -> ReportAccessPolicy:
+    if access_policy is None:
+        return context.current_config.report_publishing.default_access_policy
+    if access_policy not in get_args(ReportAccessPolicy):
+        msg = f"Unsupported report access_policy '{access_policy}'."
+        raise ReportPublishingError(msg)
+    return cast("ReportAccessPolicy", access_policy)
+
+
+def _check_publication_policy(
+    context: ToolRuntimeContext,
+    access_policy: ReportAccessPolicy,
+    *,
+    confirm_public: bool,
+) -> None:
+    if access_policy == "public":
+        if not context.current_config.report_publishing.allow_public:
+            msg = "Public report publication is disabled by report_publishing.allow_public."
+            raise ReportPublishingError(msg)
+        if not confirm_public:
+            msg = "Set confirm_public to true to publish this bearer link; anyone who possesses it can view the report."
+            raise ReportPublishingError(msg)
+        return
+    auth_error = matrix_identity_configuration_error(trusted_upstream_auth_settings(context.runtime_paths))
+    if auth_error is not None:
+        msg = (
+            "Origin-room report publication requires trusted browser authentication with verified Matrix identity: "
+            f"{auth_error}."
+        )
+        raise ReportPublishingError(msg)
+
+
+def _origin_room_binding(context: ToolRuntimeContext) -> OriginRoomBinding:
+    # Delegated and workflow agents publish through the caller's Matrix account, which owns the room membership.
+    publisher_entity_name = context.transport_agent_name or context.agent_name
+    publisher_matrix_user_id = current_publisher_matrix_user_id(
+        context.current_config,
+        context.runtime_paths,
+        publisher_entity_name,
+    )
+    if publisher_matrix_user_id is None:
+        msg = "Origin-room report publication requires a configured publisher identity."
+        raise ReportPublishingError(msg)
+    return OriginRoomBinding(
+        room_id=context.room_id,
+        publisher_entity_name=publisher_entity_name,
+        publisher_matrix_user_id=publisher_matrix_user_id,
+    )
+
+
+def _report_path_for_report(report: PublishedReport) -> str:
     if report.public_url is not None:
         public_path = urlsplit(report.public_url).path
         if public_path:
             return public_path
-    suffix = "/" if report.is_static_site else ""
-    return f"/reports/public/{report.slug}{suffix}"
+    return report.route_path
 
 
 def _reject_unsupported_source_fields(
