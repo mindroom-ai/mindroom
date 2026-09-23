@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState } from "react";
 
-import { API_ENDPOINTS, fetchJSON } from '@/lib/api';
-import type { JsonSchema } from '@/lib/configSchema';
+import { API_ENDPOINTS, fetchJSON } from "@/lib/api";
+import type { JsonSchema } from "@/lib/configSchema";
 
 // The schema only changes with the backend build, so one fetch serves the session.
 let cachedSchema: JsonSchema | null = null;
@@ -9,7 +9,7 @@ let pendingSchema: Promise<JsonSchema> | null = null;
 
 function loadConfigSchema(): Promise<JsonSchema> {
   pendingSchema ??= fetchJSON<JsonSchema>(API_ENDPOINTS.config.schema)
-    .then(schema => {
+    .then((schema) => {
       cachedSchema = schema;
       return schema;
     })
@@ -32,7 +32,7 @@ export function useConfigSchema(): {
     }
     let active = true;
     loadConfigSchema().then(
-      loaded => {
+      (loaded) => {
         if (active) {
           setSchema(loaded);
         }
@@ -42,10 +42,10 @@ export function useConfigSchema(): {
           setError(
             loadError instanceof Error
               ? loadError.message
-              : 'Failed to load the configuration schema.'
+              : "Failed to load the configuration schema.",
           );
         }
-      }
+      },
     );
     return () => {
       active = false;
