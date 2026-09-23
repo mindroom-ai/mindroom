@@ -54,7 +54,7 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
     register_background_runtime,
 )
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry_state import TOOL_REGISTRY, tool_registry_origins
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -473,7 +473,7 @@ def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) ->
                 "construction": {
                     "name": "calculator",
                     "factory_origin": tool_registry_origins()["calculator"],
-                    "config_signature": "{}",
+                    "config_signature": tool_config_signature(None),
                 },
             },
         },

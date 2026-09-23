@@ -133,6 +133,7 @@ async def test_native_result_expires_to_a_compact_receipt_after_restart(
     path = tmp_path / "tool_jobs" / f"{child.delegation_id}.json"
     if legacy_result_copy:
         legacy = json.loads(path.read_text())
+        legacy["schema_version"] = 1
         legacy["adapter"]["child"]["result"] = raw
         path.write_text(json.dumps(legacy))
     restored = ToolJobRuntime(tmp_path)

@@ -63,6 +63,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | Nio first takes durable ownership of a pre-durable crypto store. | Nio's file lease and account/device checks protect keys and trust while only retired recovery rows are cleared. |
 | [`src/mindroom/script_runs/legacy_recovery.py`][script-legacy-recovery] and [`src/mindroom/workers/backends/kubernetes.py`][kubernetes-worker-backend] | Script-runtime startup encounters an unversioned recovery signature or a v2 digest from before the optional seccomp or RuntimeClass fields. | Only an exact recomputation permits migration; pre-seccomp workers require an unset current seccomp policy, an unset RuntimeClass retains the pre-RuntimeClass digest bytes, and the current store owns atomic signature replacement and rejects concurrent revocation or signature changes. |
 | [`src/mindroom/desktop/legacy_command_journal.py`][desktop-legacy-journal] | The desktop SQLite journal finds JSON v1 receipts during its one-time import. | Historical validation stays isolated; the journal retains file permissions, atomic import, replay tombstones, response delivery state, sequence maxima, and admission capacity. |
+| `src/mindroom/tool_jobs/legacy_tool_jobs.py` | Managed runtime recovery finds schema-1 tool-job snapshots. | Preserve exact outcomes, separate notification and consumption facts, and digest saved constructor settings. The runtime retains validation, exclusive ownership, and atomic publication; missing authority or source identity is never reconstructed. |
 
 ## Python provenance and regression coverage
 
@@ -74,7 +75,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 
 | Boundary owners | Behavioral evidence |
 | --- | --- |
-| `tool_jobs/runtime.py` | `tests/test_tool_jobs.py` preserves exact outcomes, native approval state, and consumption evidence while discarding retired pause and Matrix-notification fields from unreleased job snapshots. `tests/test_background_subagents.py` also covers removal of redundant native result copies through the same reader. |
+| `tool_jobs/legacy_tool_jobs.py` | `tests/test_legacy_tool_jobs.py` uses frozen v2026.9.165 shapes to verify exact-generation notification, unread results, child-only outcomes, abandoned holds, repeat recovery and constructor evidence. `tests/test_tool_job_retention.py` protects unread results and pending approvals while expiring consumed historical results. |
 | [`mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | [Gateway OAuth][gateway-oauth-tests], [capacity][gateway-capacity-tests], [lifecycle][gateway-lifecycle-tests], and [account][gateway-account-tests] tests exercise the staged schema upgrades and released token cutoff. |
 | `legacy_usage_storage.py` | `tests/test_legacy_usage_storage.py` covers mixed schemas, current-row precedence, unknown dates, interruption rollback and retry, dormant stores, symlink isolation, and both startup entry points. |
 | [`legacy_session_storage.py`][legacy-session] | [Run-storage tests][agent-runs-tests] use a frozen Agno 2 fixture for merge, deletion, descendant, malformed-data, and transaction behavior; [usage tests][usage-tests] cover import precedence and available usage. |

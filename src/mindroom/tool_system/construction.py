@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 from dataclasses import dataclass
@@ -15,11 +16,12 @@ if TYPE_CHECKING:
 
 
 def tool_config_signature(overrides: Mapping[str, object] | None) -> str:
-    """Freeze constructor options; function filters retain their separate current-grant policy."""
-    return json.dumps(
+    """Digest constructor options without retaining secrets; function filters use current grants."""
+    serialized = json.dumps(
         {key: value for key, value in (overrides or {}).items() if key not in {"include_tools", "exclude_tools"}},
         sort_keys=True,
     )
+    return hashlib.sha256(serialized.encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -28,7 +30,7 @@ class ToolConstruction:
 
     name: str
     factory_origin: tuple[str, str] | None
-    config_signature: str = "{}"
+    config_signature: str = tool_config_signature(None)
 
     @classmethod
     def from_factory(

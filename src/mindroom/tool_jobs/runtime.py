@@ -28,6 +28,7 @@ from mindroom.tool_jobs.control import (
     human_message_signal_context,
     job_control_context,
 )
+from mindroom.tool_jobs.legacy_tool_jobs import upgrade_schema_one_job
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.wait_timeout import validate_wait_timeout
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
@@ -111,23 +112,27 @@ class BackgroundJob:
     wait_acknowledged: bool = False
     result_expired: bool = False
     user_stop_receipt_order: int | None = None
+    legacy_source_untracked: bool = False
+    legacy_notified_generation: int | None = None
 
 
 def read_job_snapshot(path: Path) -> BackgroundJob:
     """Validate one existing snapshot without claiming or changing its execution."""
+    return _read_job_snapshot(path)[0]
+
+
+def _read_job_snapshot(path: Path) -> tuple[BackgroundJob, bool]:
     if path.is_symlink() or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", path.stem) is None:
         raise JobAccessError(_UNAVAILABLE)
     payload = json.loads(path.read_text())
-    if payload.pop("schema_version") != 1 or payload["job_id"] != path.stem:
+    version = payload.pop("schema_version")
+    if version not in {1, 2} or payload["job_id"] != path.stem:
         msg = "Invalid tool job snapshot."
         raise ValueError(msg)
+    if version == 1:
+        upgrade_schema_one_job(payload)
     payload["owner"] = parse_tool_execution_identity_payload(payload["owner"], strict=True)
-    # Retired schema-1 fields and duplicate native output carry no execution authority.
-    payload.pop("human_paused", None)
-    payload.pop("deliveries", None)
-    if payload.get("kind") == "delegation":
-        payload["adapter"]["child"]["result"] = None
-    return BackgroundJob(**payload)
+    return BackgroundJob(**payload), version == 1
 
 
 def format_job_handle(
@@ -298,7 +303,7 @@ class ToolJobRuntime:
         path = self._path(job.job_id)
 
         def write() -> None:
-            write_json_file_durable(path, {"schema_version": 1, **asdict(job)}, strict_atomic_replace=True)
+            write_json_file_durable(path, {"schema_version": 2, **asdict(job)}, strict_atomic_replace=True)
 
         try:
             await run_blocking_until_complete(write)
@@ -318,15 +323,9 @@ class ToolJobRuntime:
             for path in sorted(self._root.glob("*.json")):
                 if path.stem in self._entries:
                     continue
-                # LEGACY_COMPAT: Discard retired metadata and duplicate native results in job snapshots.
-                # Legacy format: Schema 1 included human_paused, deliveries, and a redundant adapter.child.result.
-                # Last legacy release: Unreleased; neither the original nor restored writer is in a release tag.
-                # Replacement: Current schema 1 stores outcome text once and durable wait acknowledgement.
-                # Handling: Drop obsolete metadata; retain result, approval, generation, and consumption evidence.
-                # Coverage: tests/test_tool_jobs.py::test_legacy_job_snapshot_preserves_outcome_and_consumption
-                # Coverage: tests/test_tool_jobs.py::test_legacy_paused_execution_is_interrupted_without_replay
-                # Coverage: tests/test_background_subagents.py::test_native_result_expires_to_a_compact_receipt_after_restart
-                job = await asyncio.to_thread(read_job_snapshot, path)
+                job, upgraded = await asyncio.to_thread(_read_job_snapshot, path)
+                if upgraded and job.result_expired:
+                    job.adapter = self._compact_adapter(job.adapter)
                 entry = _Entry(job, saved=True)
                 interrupted = job.status not in _READY
                 if interrupted:
@@ -338,6 +337,8 @@ class ToolJobRuntime:
                         outcome=outcome,
                     )
                     await self._persist(entry)
+                elif upgraded:
+                    await self._persist(entry, update_timestamp=False)
                 self._index_consumption(entry)
                 self._cool(entry)
                 self._entries[job.job_id] = entry
@@ -875,6 +876,7 @@ class ToolJobRuntime:
     def _unconsumed(self, entry: _Entry) -> bool:
         return (
             not entry.job.wait_acknowledged
+            and entry.job.legacy_notified_generation != entry.job.generation
             and entry.job.user_stop_receipt_order is None
             and entry.wait_token is None
             and self._allowed(entry.job)

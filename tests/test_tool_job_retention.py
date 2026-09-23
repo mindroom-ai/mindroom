@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -21,13 +21,74 @@ from mindroom.event_journal import (
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseSources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, read_job_snapshot
 from mindroom.turn_record import TurnRecord
 from tests.response_runner_helpers import _bot
 from tests.test_subagent_runtime import _job
 
-if TYPE_CHECKING:
-    from pathlib import Path
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("consumed", [False, True])
+@pytest.mark.parametrize("approval", [False, True])
+async def test_released_consumed_result_expires_without_source_history(
+    tmp_path: Path,
+    consumed: bool,
+    approval: bool,
+) -> None:
+    """Released source-less results may expire only after consumption and with no live approval owner."""
+    bot = _bot(tmp_path)
+    bot.config.background_tool_jobs.enabled = True
+    paths = bot.runtime_paths
+    directory = paths.storage_root / "tool_jobs"
+    directory.mkdir()
+    path = directory / "completed.json"
+    fixture = Path(__file__).parent / "fixtures/tool_jobs/v2026.9.165/completed.json"
+    payload = json.loads(fixture.read_text())
+    payload["owner"]["agent_name"] = "general"
+    payload["wait_acknowledged"] = consumed
+    payload["updated_at"] = (datetime.now(UTC) - timedelta(days=31)).isoformat()
+    path.write_text(json.dumps(payload))
+    coordinator = ToolJobRuntimeCoordinator(paths, lambda: bot.config, lambda _: bot, AgentReplyMembershipIndex())
+    await coordinator.initialize(bot._journal_store)
+    try:
+        await coordinator.runtime.recover()
+        if approval:
+            principal = bot.journal_principal()
+            await principal.admit(
+                InboundEvent(
+                    "$approval-source",
+                    "!room:test",
+                    "$root",
+                    EventKind.MESSAGE,
+                    EventClass.ACTIONABLE,
+                    "@alice:test",
+                    1,
+                    {"content": {"body": "continue"}},
+                ),
+                None,
+            )
+            continuation = ApprovalContinuation(
+                approval_id="pending",
+                run_id="paused-run",
+                session_id="parent-session",
+                entity_kind="agent",
+                entity_name="general",
+                room_id="!room:test",
+                thread_id="$root",
+                requester_id="@alice:test",
+                response_event_id="$response",
+                sources=ResponseSources(("$approval-source",), ("$approval-source",)),
+                calls=(ApprovalCall("call", "tool", "general", 2**62, decision=ApprovalDecision.APPROVED),),
+                state="ready",
+            )
+            assert await principal.create_approval_continuation(continuation) is not None
+        await coordinator._expire_consumed_results()
+        saved = read_job_snapshot(path)
+        assert saved.result_expired is (consumed and not approval)
+        if not saved.result_expired:
+            assert saved.result_payload == {"value": [1]}
+    finally:
+        await coordinator.stop()
 
 
 @pytest.mark.asyncio

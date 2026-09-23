@@ -6741,6 +6741,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.runtime"
 depends_on = [
+    "mindroom.tool_jobs.legacy_tool_jobs",
     "mindroom.tool_jobs.wait_timeout",
     "mindroom.ai_runtime",
     "mindroom.background_tasks",
@@ -6763,6 +6764,11 @@ visibility = [
     "mindroom.tool_jobs.completion",
     "mindroom.tool_jobs.agno_compat_execution",
 ]
+
+[[modules]]
+path = "mindroom.tool_jobs.legacy_tool_jobs"
+depends_on = []
+visibility = ["mindroom.tool_jobs.runtime"]
 
 [[modules]]
 path = "mindroom.tool_jobs.control"
