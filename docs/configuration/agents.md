@@ -821,7 +821,7 @@ defaults:
   allow_self_config: false               # Allow agents to read/modify their own config at runtime
 ```
 
-`defaults.streaming` is global-only and controls the timing of progressive message edits for streaming responses.
+`defaults.streaming` is global-only and controls the timing and size limits of progressive message edits for streaming responses.
 
 To opt out a specific agent:
 

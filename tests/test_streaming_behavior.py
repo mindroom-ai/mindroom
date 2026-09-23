@@ -39,7 +39,9 @@ from mindroom.history.interrupted_replay import (
 )
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
@@ -605,38 +607,41 @@ class TestStreamingBehavior:
         streaming.event_id = "$stream_123"
         streaming.accumulated_text = "x" * 40000
 
-        monotonic_values = iter([100.0, 101.0, 106.0])
+        now = {"value": 100.0}
+        delivered_edits: list[dict[str, object]] = []
 
         async def delivered_edit(
             _client: nio.AsyncClient,
             _room_id: str,
-            _event_id: str,
+            event_id: str,
             new_content: dict[str, object],
-            _new_text: str,
+            new_text: str,
             *,
             retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
+            delivered_edits.append(
+                build_edit_event_content(event_id=event_id, new_content=new_content, new_text=new_text),
+            )
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
         with (
-            # The size-proportional term is exercised directly by the
-            # large_messages unit tests; here it is pinned negligible so this
-            # integration test stays focused on the flat 5s floor wiring.
-            patch("mindroom.matrix.large_messages._OVERSIZED_NONTERMINAL_STREAMING_EDIT_BYTES_PER_SECOND", 10**12),
-            patch(
-                "mindroom.matrix.large_messages.monotonic",
-                side_effect=lambda: next(monotonic_values),
-            ),
+            patch("mindroom.matrix.large_messages.monotonic", side_effect=lambda: now["value"]),
             patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=delivered_edit)) as mock_edit,
         ):
             assert await streaming._send_or_edit_message(mock_client)
             assert mock_edit.await_count == 1
+            # Every oversized edit exceeds 27 KB, so its size-proportional
+            # interval always outlasts the 5 s floor.
+            interval = calculate_event_size(delivered_edits[0]) / 4096
+            assert interval > 5.0
 
+            now["value"] = 100.0 + interval - 1.0
             streaming.accumulated_text += "y"
             streaming._mark_nonadditive_text_mutation()
             assert await streaming._send_or_edit_message(mock_client)
             assert mock_edit.await_count == 1
 
+            now["value"] = 100.0 + interval
             streaming.accumulated_text += "z"
             streaming._mark_nonadditive_text_mutation()
             assert await streaming._send_or_edit_message(mock_client)

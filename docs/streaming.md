@@ -58,7 +58,7 @@ defaults:
     max_live_chars: 1000000      # Default: 1000000; stop progressive edits past this many characters
 ```
 
-These timing settings are global-only. Agents inherit them from `defaults` and cannot override them individually.
+These streaming settings are global-only. Agents inherit them from `defaults` and cannot override them individually.
 
 ## Presence-Based Streaming
 

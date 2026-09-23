@@ -461,7 +461,7 @@ class TeamConfig(BaseModel):
     max_tool_calls_per_turn: int | None = Field(
         default=None,
         ge=1,
-        description="Maximum tool calls one team turn may execute (per-team override)",
+        description="Maximum tool calls the team coordinator may execute in one turn, delegations included (per-team override)",
     )
 
     @field_validator("agents")

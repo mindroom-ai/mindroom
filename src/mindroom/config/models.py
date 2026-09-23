@@ -43,7 +43,7 @@ _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
 
 
 class StreamingConfig(BaseModel):
-    """Timing parameters for streaming response edits."""
+    """Timing and size limits for streaming response edits."""
 
     update_interval: float = Field(
         default=5.0,
@@ -474,7 +474,7 @@ class DefaultsConfig(BaseModel):
     )
     streaming: StreamingConfig = Field(
         default_factory=StreamingConfig,
-        description="Streaming response timing parameters",
+        description="Streaming response edit timing and size limits",
     )
     thread_summary_model: str | None = Field(
         default=None,

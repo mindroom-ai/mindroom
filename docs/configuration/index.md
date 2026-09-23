@@ -633,7 +633,7 @@ teams:
     num_history_runs: 8            # Optional: Team-scoped replay policy
     num_history_messages: null     # Optional: Mutually exclusive with num_history_runs
     max_tool_calls_from_history: 6 # Optional: Limit replayed tool call messages
-    max_tool_calls_per_turn: 200   # Optional: Tool calls one team turn may execute (default: defaults.max_tool_calls_per_turn)
+    max_tool_calls_per_turn: 200   # Optional: Coordinator tool calls per team turn, delegations included; members keep their own budgets (default: defaults.max_tool_calls_per_turn)
     compaction:                    # Optional: Team-scoped required-compaction overrides
       # Soft thresholds do not compact by themselves while history still fits.
       enabled: true

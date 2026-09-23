@@ -22,7 +22,9 @@ from mindroom.constants import (
 from mindroom.matrix.client import edit_message_result, send_message_result
 from mindroom.matrix.large_messages import (
     _NORMAL_MESSAGE_LIMIT,
+    calculate_event_size,
     prepare_large_message,
+    should_send_oversized_nonterminal_streaming_edit,
 )
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import (
@@ -334,12 +336,19 @@ async def test_streaming_edit_grows_over_limit() -> None:
 @pytest.mark.asyncio
 async def test_streaming_multiple_edits_with_growth(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test streaming with multiple edits as message grows."""
-    # The size-proportional term is exercised directly by the large_messages
-    # unit tests; here it is pinned negligible so this growth scenario keeps
-    # exercising the flat 5s floor rather than needing exact size arithmetic.
-    monkeypatch.setattr("mindroom.matrix.large_messages._OVERSIZED_NONTERMINAL_STREAMING_EDIT_BYTES_PER_SECOND", 10**12)
-    monotonic_values = iter([100.0, 106.0, 112.0])
-    monkeypatch.setattr("mindroom.matrix.large_messages.monotonic", lambda: next(monotonic_values))
+    now = {"value": 100.0}
+    monkeypatch.setattr("mindroom.matrix.large_messages.monotonic", lambda: now["value"])
+    cadence_edits: list[dict[str, object]] = []
+
+    def recording_cadence(*, room_id: str, original_event_id: str, edit_content: dict[str, object]) -> bool:
+        cadence_edits.append(edit_content)
+        return should_send_oversized_nonterminal_streaming_edit(
+            room_id=room_id,
+            original_event_id=original_event_id,
+            edit_content=edit_content,
+        )
+
+    monkeypatch.setattr("mindroom.streaming.should_send_oversized_nonterminal_streaming_edit", recording_cadence)
     client = MockClient()
     config = MockConfig()
 
@@ -363,6 +372,10 @@ async def test_streaming_multiple_edits_with_growth(monkeypatch: pytest.MonkeyPa
         is_final = label == "Larger"
 
         await streaming._send_or_edit_message(client, is_final=is_final)
+        if cadence_edits:
+            # Wait out the interval the latest in-progress edit reserved; every
+            # oversized edit exceeds 27 KB, so it always outlasts the 5 s floor.
+            now["value"] += calculate_event_size(cadence_edits[-1]) / 4096
 
         # After first, should have event_id
         if label != "Initial":
