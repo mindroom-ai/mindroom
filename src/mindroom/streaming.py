@@ -2259,6 +2259,62 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     return transport_outcome
 
 
+async def _await_task_exit(task: asyncio.Task[None]) -> asyncio.CancelledError | None:
+    """Wait until one task has exited, returning a cancellation of the waiter observed meanwhile."""
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError as error:
+            cancelled = error
+            task.cancel()
+    return cancelled
+
+
+async def _stop_progress_tasks(
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    delivery_task: asyncio.Task[None],
+    progress_task: asyncio.Task[None],
+    pump: WorkerProgressPump,
+    *,
+    event_id: str,
+    room_id: str,
+) -> None:
+    """End every progress task before the caller's terminal update, then re-raise a cancellation seen meanwhile.
+
+    An in-flight edit is allowed to finish so it lands before the terminal
+    update. A cancellation, or a drain past its deadline, cancels it instead,
+    and the wait continues until the task has really exited.
+    """
+    pump.shutdown.set()
+    progress_task.cancel()
+    cancelled = await _await_task_exit(progress_task)
+    if cancelled is None and not delivery_task.done():
+        delivery_queue.put_nowait(None)
+        try:
+            await asyncio.wait({delivery_task}, timeout=_STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS)
+        except asyncio.CancelledError as error:
+            cancelled = error
+        if cancelled is None and not delivery_task.done():
+            logger.warning(
+                "Progress edits did not drain before terminal delivery; cancelling them",
+                event_id=event_id,
+                room_id=room_id,
+            )
+    delivery_task.cancel()
+    cancelled = await _await_task_exit(delivery_task) or cancelled
+    for task in (progress_task, delivery_task):
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.warning(
+                "Progress edits stopped before terminal delivery",
+                event_id=event_id,
+                room_id=room_id,
+                error=str(error),
+            )
+    if cancelled is not None:
+        raise cancelled
+
+
 @asynccontextmanager
 async def stream_progress_edits(
     client: nio.AsyncClient,
@@ -2275,11 +2331,15 @@ async def stream_progress_edits(
     """Stream progress into one existing reply whose terminal update belongs to the caller.
 
     Each publication is the caller's complete presentation. Appended text is
-    throttled like ordinary streamed deltas, and any other change counts as one
-    in-place mutation. The first publication is delivered at once, so the reply
-    leaves whatever state it showed before. Progress is transport only: a
+    throttled like ordinary streamed deltas, a visible tool-trace change is a
+    tool boundary delivered like a streamed tool event, and any other change
+    counts as one in-place mutation. The first publication is delivered at
+    once, so the reply leaves whatever state it showed before. Worker warm-up
+    progress is shown as in ordinary streaming. Progress is transport only: a
     rejected edit stops later progress without failing the caller, whose
-    terminal delivery still owns the reply.
+    terminal delivery still owns the reply. Leaving the scope waits until no
+    progress edit is in flight, even across cancellation, so the caller's
+    terminal update can never race one.
     """
     stream_config = config.defaults.streaming
     streaming = StreamingResponse(
@@ -2297,8 +2357,6 @@ async def stream_progress_edits(
         visible_progress_callback=visible_progress_callback,
         transport_is_current=transport_is_current,
     )
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-    delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
     published = False
 
     def apply_presentation(text: str) -> None:
@@ -2308,33 +2366,44 @@ async def stream_progress_edits(
         streaming.accumulated_text = text
         streaming._mark_nonadditive_text_mutation()
 
-    async def publish(chunk: StructuredStreamChunk) -> None:
-        nonlocal published
-        if delivery_task.done():
-            return
-        if chunk.tool_trace is not None and not _tool_traces_match(streaming.tool_trace, chunk.tool_trace):
-            # Callers keep mutating their trace entries; hold the published state.
-            streaming.tool_trace = deepcopy(chunk.tool_trace)
-        if not published:
-            published = True
-            streaming.accumulated_text = chunk.content
-            _queue_delivery_request(delivery_queue, force_refresh=True, allow_empty_progress=True)
-        elif chunk.content != streaming.accumulated_text:
-            await _apply_visible_text_chunk(
-                streaming,
-                delivery_queue,
-                chunk.content,
-                apply_chunk=apply_presentation,
-            )
+    worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+    with worker_progress_pump_scope(asyncio.get_running_loop(), worker_progress_queue) as pump:
+        delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
+        progress_task = asyncio.create_task(
+            _drain_worker_progress_events(streaming, worker_progress_queue, pump, delivery_queue),
+        )
 
-    try:
-        yield publish
-    finally:
-        delivery_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-        if delivery_error is not None:
-            logger.warning(
-                "Progress edits stopped before terminal delivery",
+        async def publish(chunk: StructuredStreamChunk) -> None:
+            nonlocal published
+            if delivery_task.done():
+                return
+            trace_changed = False
+            if chunk.tool_trace is not None and not _tool_traces_match(streaming.tool_trace, chunk.tool_trace):
+                # Callers keep mutating their trace entries; hold the published state.
+                streaming.tool_trace = deepcopy(chunk.tool_trace)
+                trace_changed = True
+            if not published:
+                published = True
+                streaming.accumulated_text = chunk.content
+                _queue_delivery_request(delivery_queue, force_refresh=True, allow_empty_progress=True)
+            elif chunk.content != streaming.accumulated_text or (trace_changed and streaming.show_tool_calls):
+                await _apply_visible_text_chunk(
+                    streaming,
+                    delivery_queue,
+                    chunk.content,
+                    apply_chunk=apply_presentation,
+                    boundary_refresh=trace_changed and streaming.show_tool_calls,
+                )
+
+        try:
+            yield publish
+        finally:
+            await _stop_progress_tasks(
+                delivery_queue,
+                delivery_task,
+                progress_task,
+                pump,
                 event_id=event_id,
                 room_id=target.room_id,
-                error=str(delivery_error),
             )
