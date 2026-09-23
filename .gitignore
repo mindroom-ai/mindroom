@@ -259,7 +259,6 @@ mindroom-test-storage/
 .claude/REPORT.md
 .claude/settings.local.json
 .claude/reports/
-/.baspowers/sdd/
 REVIEW-*.md
 .codex-worktrees/
 docs/superpowers/

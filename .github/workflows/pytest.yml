@@ -51,6 +51,7 @@ jobs:
           MINDROOM_TEST_BROWSER_EXECUTABLE="$(command -v google-chrome)" \
             uv run pytest -m "not requires_matrix"
 
+      # Guards a Python 3.14 regression where synchronous tools could execute successfully and then be recorded as failed during cleanup.
       - name: Check tool execution on Python 3.14
         if: matrix.python-version == '3.14'
         run: |
