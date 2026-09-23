@@ -6261,6 +6261,60 @@ describe("configStore", () => {
         expect(remainingLocs()).toEqual([]);
       });
 
+      it("clear a missing field error once its container is removed", async () => {
+        await loadBaseConfig({ ...baseConfig, plugins: [{ enabled: true }] });
+        useConfigStore.setState({
+          diagnostics: [
+            issue(["plugins", 0, "path"], "missing"),
+            issue(["personal_rooms", "onboarding_rooms"], "missing"),
+          ],
+        });
+
+        useConfigStore.getState().updateConfigValue(["plugins"], []);
+        useConfigStore
+          .getState()
+          .updateConfigValue(["personal_rooms"], undefined);
+
+        expect(remainingLocs()).toEqual([]);
+      });
+
+      it("keep memory and knowledge errors the edit did not touch", async () => {
+        await loadBaseConfig({
+          ...baseConfig,
+          memory: {
+            ...baseConfig.memory,
+            backend: "mem0",
+            llm: { provider: "openai", config: "bogus" },
+          },
+          knowledge_bases: {
+            docs: { path: "./docs", include_patterns: "bogus" },
+          },
+        });
+        useConfigStore.setState({
+          diagnostics: [
+            issue(["memory", "llm", "config"], "dict_type"),
+            issue(["knowledge_bases", "docs", "include_patterns"], "list_type"),
+          ],
+        });
+        const { memory } = useConfigStore.getState().config!;
+
+        useConfigStore
+          .getState()
+          .updateMemoryConfig({ ...memory, backend: "file" } as never);
+        useConfigStore.getState().updateMemoryConfig({
+          provider: "openai",
+          model: "text-embedding-3-large",
+        });
+        useConfigStore
+          .getState()
+          .updateKnowledgeBase("docs", { watch: false } as never);
+
+        expect(remainingLocs()).toEqual([
+          ["memory", "llm", "config"],
+          ["knowledge_bases", "docs", "include_patterns"],
+        ]);
+      });
+
       it("match union errors reported under their tag value", async () => {
         await loadBaseConfig({
           ...baseConfig,

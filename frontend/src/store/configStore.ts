@@ -147,7 +147,7 @@ function childValue(value: unknown, segment: string | number): unknown {
  * after, the values at prefix, so editing one field keeps the errors of the
  * others. Pydantic adds loc segments that are no key in either value, such as
  * union tags ("llm") and variant types ("list[str]"); those are skipped, except
- * the key a "missing" issue reports as absent.
+ * the absent key of a "missing" issue.
  */
 function issueValueChanged(
   { loc, type }: ConfigValidationIssue,
@@ -166,11 +166,14 @@ function issueValueChanged(
   loc.slice(prefix.length).forEach((segment, index, rest) => {
     const inFrom = hasSegment(from, segment);
     const inTo = hasSegment(to, segment);
-    if (
-      !inFrom &&
-      !inTo &&
-      !(type === "missing" && index === rest.length - 1)
-    ) {
+    // A missing key stays missing while both containers exist; removing a
+    // container still changes the value the issue is about.
+    const missingKey =
+      type === "missing" &&
+      index === rest.length - 1 &&
+      isPlainObject(from) &&
+      isPlainObject(to);
+    if (!inFrom && !inTo && !missingKey) {
       return;
     }
     from = inFrom ? childValue(from, segment) : undefined;
@@ -2103,11 +2106,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateMemoryConfig: (memoryConfig) => {
     set((state) => {
       if (!state.config) return state;
-      if (isMemoryEmbedderUpdate(memoryConfig)) {
-        const nextConfig = {
-          ...state.config,
-          memory: {
-            ...state.config.memory,
+      const currentMemory = state.config.memory;
+      const memory = isMemoryEmbedderUpdate(memoryConfig)
+        ? {
+            ...currentMemory,
             embedder: {
               provider: memoryConfig.provider,
               config: {
@@ -2115,23 +2117,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
                 ...(memoryConfig.host ? { host: memoryConfig.host } : {}),
               },
             },
-          },
-        };
-        preserveRawToolEntries(state.config, nextConfig);
-        return {
-          config: nextConfig,
-          ...markDraftDirty(state, {}, [["memory"]]),
-        };
-      }
-
-      const nextConfig = {
-        ...state.config,
-        memory: memoryConfig,
-      };
+          }
+        : memoryConfig;
+      const nextConfig = { ...state.config, memory };
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["memory"]]),
+        ...markDraftDirty(state, {}, [["memory"]], (issue) =>
+          issueValueChanged(issue, ["memory"], currentMemory, memory),
+        ),
       };
     });
   },
@@ -2140,21 +2134,26 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateKnowledgeBase: (baseName, baseConfig) => {
     set((state) => {
       if (!state.config) return state;
-      const existingBaseConfig = state.config.knowledge_bases?.[baseName] || {};
+      const currentBaseConfig = state.config.knowledge_bases?.[baseName];
+      const nextBaseConfig = { ...(currentBaseConfig || {}), ...baseConfig };
       const nextConfig = {
         ...state.config,
         knowledge_bases: {
           ...(state.config.knowledge_bases || {}),
-          [baseName]: {
-            ...existingBaseConfig,
-            ...baseConfig,
-          },
+          [baseName]: nextBaseConfig,
         },
       };
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["knowledge_bases", baseName]]),
+        ...markDraftDirty(state, {}, [["knowledge_bases", baseName]], (issue) =>
+          issueValueChanged(
+            issue,
+            ["knowledge_bases", baseName],
+            currentBaseConfig,
+            nextBaseConfig,
+          ),
+        ),
       };
     });
   },
