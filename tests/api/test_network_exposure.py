@@ -48,9 +48,13 @@ def _guarded_client(runtime_paths: RuntimePaths, handled: list[str]) -> TestClie
         ("127.0.0.1:8765", 200),
         ("[::1]:8765", 200),
         ("mindroom.localhost:8765", 200),
+        # An address literal cannot be a rebinding target: a page is only
+        # same-origin with it when it is served from that address.
+        ("192.168.1.10:8765", 200),
+        ("[fd00::1]:8765", 200),
         ("attacker.example:8765", 400),
-        ("192.168.1.10:8765", 400),
         ("dashboard.example.org", 400),
+        ("localhost:8765,attacker.example", 400),
     ],
 )
 def test_open_access_answers_only_expected_hosts(tmp_path: Path, host: str, expected: int) -> None:
@@ -64,11 +68,18 @@ def test_open_access_answers_only_expected_hosts(tmp_path: Path, host: str, expe
     assert handled == (["save"] if expected == 200 else [])
 
 
-def test_public_url_host_is_accepted(tmp_path: Path) -> None:
-    """The configured public host is how operators reach a hosted dashboard."""
+@pytest.mark.parametrize(
+    ("env_name", "self_url"),
+    [
+        ("MINDROOM_PUBLIC_URL", "https://dashboard.example.org"),
+        ("MINDROOM_SCRIPT_GATEWAY_URL", "http://dashboard.example.org:8765/api/script-gateway"),
+        ("MINDROOM_URL", "https://dashboard.example.org"),
+    ],
+)
+def test_self_declared_hosts_are_accepted(tmp_path: Path, env_name: str, self_url: str) -> None:
+    """A URL the runtime publishes as its own address names an expected host."""
     handled: list[str] = []
-    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://dashboard.example.org")
-    client = _guarded_client(runtime_paths, handled)
+    client = _guarded_client(_runtime_paths(tmp_path, **{env_name: self_url}), handled)
 
     response = client.post("/api/config/save", json={}, headers={"Host": "dashboard.example.org"})
 
@@ -166,7 +177,7 @@ def test_authenticated_dashboards_keep_answering_every_host(tmp_path: Path, proc
     """Credentialed deployments sit behind proxies that route arbitrary host names."""
     handled: list[str] = []
     runtime_paths = _runtime_paths(tmp_path, **process_env)
-    assert not network_exposure._dashboard_open_access(runtime_paths)
+    assert not network_exposure.dashboard_open_access(runtime_paths)
     client = _guarded_client(runtime_paths, handled)
 
     response = client.post("/api/config/save", json={}, headers={"Host": "anything.example"})
@@ -177,9 +188,9 @@ def test_authenticated_dashboards_keep_answering_every_host(tmp_path: Path, proc
 
 def test_open_access_is_detected_without_configured_auth(tmp_path: Path) -> None:
     """An empty API key is the documented open-access default, not a credential."""
-    assert network_exposure._dashboard_open_access(_runtime_paths(tmp_path))
-    assert network_exposure._dashboard_open_access(_runtime_paths(tmp_path, MINDROOM_API_KEY="  "))
-    assert network_exposure._dashboard_open_access(_runtime_paths(tmp_path, SUPABASE_URL="https://project.supabase.co"))
+    assert network_exposure.dashboard_open_access(_runtime_paths(tmp_path))
+    assert network_exposure.dashboard_open_access(_runtime_paths(tmp_path, MINDROOM_API_KEY="  "))
+    assert network_exposure.dashboard_open_access(_runtime_paths(tmp_path, SUPABASE_URL="https://project.supabase.co"))
 
 
 @pytest.mark.parametrize(

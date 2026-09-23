@@ -3555,7 +3555,10 @@ def test_cors_wildcard_opt_in_disables_credentials(tmp_path: Path) -> None:
     """Explicit wildcard CORS must not be combined with credentialed requests."""
     runtime_paths = _runtime_paths(
         tmp_path,
-        process_env={"MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS": "true"},
+        process_env={
+            "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS": "true",
+            "MINDROOM_API_KEY": "test-key",
+        },
     )
 
     settings = main._dashboard_cors_settings(runtime_paths)
@@ -3573,6 +3576,24 @@ def test_cors_wildcard_opt_in_disables_credentials(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "*"
     assert response.headers.get("access-control-allow-credentials") is None
+
+
+def test_cors_wildcard_is_refused_without_dashboard_authentication(tmp_path: Path) -> None:
+    """Every open-access response is administrator data, so no origin may read it."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS": "true",
+            "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS": "*",
+        },
+    )
+
+    settings = main._dashboard_cors_settings(runtime_paths)
+    test_client = _dashboard_cors_test_client(runtime_paths)
+    response = test_client.get("/api/health", headers={"Origin": "https://attacker.example"})
+
+    assert "*" not in settings.allow_origins
+    assert response.headers.get("access-control-allow-origin") is None
 
 
 def test_cors_empty_allowed_origins_env_uses_default_origins(tmp_path: Path) -> None:

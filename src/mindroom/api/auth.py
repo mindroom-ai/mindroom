@@ -20,7 +20,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
-from mindroom.api.network_exposure import is_loopback_origin
+from mindroom.api.network_exposure import is_forged_browser_mutation
 from mindroom.authorization import is_platform_administrator
 from mindroom.matrix.identity import (
     matrix_user_id_from_email,
@@ -951,20 +951,13 @@ def _require_open_access_mutation_origin(request: Request, settings: _ApiAuthSet
     """Guard mutations a browser could forge while the dashboard needs no credential.
 
     Open access has no credential that could exempt an API client, so the guard
-    applies to every request a browser marked with its own provenance. Browsers
-    attach `Origin` to every mutation, so a request carrying neither `Origin`
-    nor `Sec-Fetch-Site` cannot be a forged cross-origin one.
-
-    Open access is only reachable from this machine (see
-    `mindroom.api.network_exposure`), so a loopback origin such as the frontend
-    dev server is inside the same trust boundary as the dashboard itself.
+    covers every request a browser marked as its own. `mindroom.api.network_exposure`
+    owns that rule and the `Host` allow-list that keeps a rebound attacker host
+    from becoming the expected origin here.
     """
-    origin = request.headers.get("origin")
-    if origin is None and request.headers.get("sec-fetch-site") is None:
-        return
-    if origin is not None and is_loopback_origin(origin):
-        return
-    _require_browser_mutation_origin(request, settings)
+    expected_origin = public_origin(settings.public_url or str(request.base_url))
+    if is_forged_browser_mutation(request, expected_origin=expected_origin):
+        raise HTTPException(403, "Browser changes require a same-origin request")
 
 
 async def authenticate_user(

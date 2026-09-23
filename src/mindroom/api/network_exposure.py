@@ -19,6 +19,7 @@ because the allow-list only makes sense for a served socket.
 from __future__ import annotations
 
 import ipaddress
+import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -27,6 +28,7 @@ from starlette.responses import PlainTextResponse
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from starlette.requests import Request
     from starlette.types import ASGIApp, Receive, Scope, Send
 
     from mindroom.constants import RuntimePaths
@@ -34,13 +36,24 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _DASHBOARD_ALLOWED_HOSTS_ENV = "MINDROOM_DASHBOARD_ALLOWED_HOSTS"
+# Every URL the runtime publishes as its own address. An operator who tells the
+# runtime to be reached there has already named that host as its own.
+_SELF_URL_ENVS = ("MINDROOM_PUBLIC_URL", "MINDROOM_SCRIPT_GATEWAY_URL", "MINDROOM_URL")
+# Only a browser marks a request with its own provenance. All three headers are
+# forbidden names, so a page cannot strip or forge them.
+_BROWSER_PROVENANCE_HEADERS = ("origin", "sec-fetch-site", "sec-fetch-mode")
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+# One well-formed `Host` value: a name or bracketed address literal, plus an
+# optional port. Anything else, such as a proxy's comma-joined duplicate, is
+# not a host this dashboard can be addressed by.
+_HOST_HEADER_PATTERN = re.compile(r"^(?P<name>[a-z0-9._-]+|\[[0-9a-f.:]+\])(:[0-9]+)?$")
 
 # Liveness and readiness probes address the runtime by the scheduler's own
 # routable address (a pod IP, a bridge IP), so the allow-list skips them. A
 # probe is not a browser and never marks its own provenance, which keeps the
 # exemption out of reach of a rebound page.
 _HOST_GUARD_EXEMPT_PATHS = frozenset({"/api/health", "/api/ready"})
-_BROWSER_PROVENANCE_HEADERS = frozenset({b"origin", b"sec-fetch-site", b"sec-fetch-mode"})
+_ENCODED_BROWSER_PROVENANCE_HEADERS = frozenset(name.encode() for name in _BROWSER_PROVENANCE_HEADERS)
 
 
 def _env_text(runtime_paths: RuntimePaths, name: str) -> str | None:
@@ -50,8 +63,12 @@ def _env_text(runtime_paths: RuntimePaths, name: str) -> str | None:
     return value.strip() or None
 
 
-def _dashboard_open_access(runtime_paths: RuntimePaths) -> bool:
-    """Return whether this runtime authenticates dashboard requests without a credential."""
+def dashboard_open_access(runtime_paths: RuntimePaths) -> bool:
+    """Return whether this runtime authenticates dashboard requests without a credential.
+
+    This mirrors the auth modes `auth._build_auth_settings` resolves; a new
+    dashboard auth mode has to be reflected here too.
+    """
     if _env_text(runtime_paths, "MINDROOM_API_KEY") is not None:
         return False
     supabase_configured = (
@@ -76,7 +93,7 @@ def _is_loopback_host(hostname: str) -> bool:
         return False
 
 
-def is_loopback_origin(origin: str) -> bool:
+def _is_loopback_origin(origin: str) -> bool:
     """Return whether one browser origin was served from this machine."""
     parsed = urlsplit(origin.strip())
     if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
@@ -87,10 +104,11 @@ def is_loopback_origin(origin: str) -> bool:
 def _allowed_dashboard_hosts(runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return the configured non-loopback host names an open dashboard answers."""
     hosts: set[str] = set()
-    public_url = _env_text(runtime_paths, "MINDROOM_PUBLIC_URL")
-    public_host = urlsplit(public_url).hostname if public_url else None
-    if public_host:
-        hosts.add(public_host.lower())
+    for env_name in _SELF_URL_ENVS:
+        self_url = _env_text(runtime_paths, env_name)
+        self_host = urlsplit(self_url).hostname if self_url else None
+        if self_host:
+            hosts.add(_normalized_host(self_host))
     configured = _env_text(runtime_paths, _DASHBOARD_ALLOWED_HOSTS_ENV)
     if configured:
         hosts.update(_normalized_host(entry) for entry in configured.split(",") if entry.strip())
@@ -103,14 +121,46 @@ def _dashboard_host_allowed(host_header: str | None, runtime_paths: RuntimePaths
     hostname = _host_header_name(host_header)
     if hostname is None:
         return False
+    if _is_loopback_host(hostname) or _is_ip_literal(hostname):
+        # DNS rebinding needs a name the attacker's DNS answers for. A page can
+        # only be same-origin with an address literal by being served from it.
+        return True
     allowed = _allowed_dashboard_hosts(runtime_paths)
-    return "*" in allowed or hostname in allowed or _is_loopback_host(hostname)
+    return "*" in allowed or hostname in allowed
+
+
+def is_forged_browser_mutation(request: Request, *, expected_origin: str | None) -> bool:
+    """Return whether one credential-free request is a cross-origin browser change.
+
+    Only a browser marks a request with its own provenance, and it attaches
+    `Origin` to every mutation, so a request carrying none of those headers is
+    an API client rather than a forged cross-origin call. A loopback origin,
+    such as the frontend dev server, shares the trust boundary of a dashboard
+    that is reachable from this machine only.
+    """
+    if request.method in _SAFE_METHODS:
+        return False
+    headers = request.headers
+    if all(headers.get(name) is None for name in _BROWSER_PROVENANCE_HEADERS):
+        return False
+    origin = headers.get("origin")
+    if origin is not None and _is_loopback_origin(origin):
+        return False
+    return origin != expected_origin or headers.get("sec-fetch-site") == "cross-site"
 
 
 def warn_unauthenticated_dashboard_exposure(runtime_paths: RuntimePaths, *, host: str) -> None:
     """Log how an unauthenticated dashboard is exposed before it serves requests."""
-    if not _dashboard_open_access(runtime_paths):
+    if not dashboard_open_access(runtime_paths):
         return
+    if "*" in _allowed_dashboard_hosts(runtime_paths):
+        logger.warning(
+            "dashboard_host_allow_list_disabled",
+            detail=(
+                f"{_DASHBOARD_ALLOWED_HOSTS_ENV} is '*', so an unauthenticated dashboard answers any "
+                "host name and a rebound attacker page can reach it. Name the hosts instead."
+            ),
+        )
     if _is_loopback_host(host):
         logger.warning(
             "dashboard_unauthenticated",
@@ -163,7 +213,7 @@ class DashboardHostGuard:
     def _host_allowed(self, scope: Scope) -> bool:
         if _is_infrastructure_probe(scope):
             return True
-        if not _dashboard_open_access(self.runtime_paths):
+        if not dashboard_open_access(self.runtime_paths):
             return True
         return _dashboard_host_allowed(_scope_host_header(scope), self.runtime_paths)
 
@@ -172,7 +222,16 @@ def _is_infrastructure_probe(scope: Scope) -> bool:
     """Return whether one request is a liveness probe rather than a browser request."""
     if scope.get("path", "") not in _HOST_GUARD_EXEMPT_PATHS:
         return False
-    return not any(key in _BROWSER_PROVENANCE_HEADERS for key, _ in scope.get("headers", ()))
+    return not any(key in _ENCODED_BROWSER_PROVENANCE_HEADERS for key, _ in scope.get("headers", ()))
+
+
+def _is_ip_literal(hostname: str) -> bool:
+    """Return whether one host name is an address literal rather than a DNS name."""
+    try:
+        ipaddress.ip_address(_normalized_host(hostname))
+    except ValueError:
+        return False
+    return True
 
 
 def _normalized_host(value: str) -> str:
@@ -180,17 +239,13 @@ def _normalized_host(value: str) -> str:
 
 
 def _host_header_name(host_header: str | None) -> str | None:
-    """Return the host name of one `Host` header value, without its port."""
+    """Return the well-formed host name of one `Host` header value, without its port."""
     if host_header is None:
         return None
-    value = host_header.strip().lower()
-    if not value:
+    match = _HOST_HEADER_PATTERN.match(host_header.strip().lower())
+    if match is None:
         return None
-    if value.startswith("["):
-        closing = value.find("]")
-        return _normalized_host(value[1:closing]) if closing > 1 else None
-    name = value.rsplit(":", 1)[0] if ":" in value else value
-    return _normalized_host(name) or None
+    return _normalized_host(match.group("name")) or None
 
 
 def _scope_host_header(scope: Scope) -> str | None:

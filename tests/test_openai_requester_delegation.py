@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
@@ -358,7 +359,8 @@ def test_invalid_mapping_is_generic_configuration_error(tmp_path: Path, mapping:
         config_path=tmp_path / "config.yaml",
         process_env={"OPENAI_COMPAT_API_KEYS": "key", "OPENAI_COMPAT_API_KEY_REQUESTERS": mapping},
     )
-    response = openai_compat._authenticate_request("Bearer key", runtime_paths)
+    request = Request({"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []})
+    response = openai_compat._authenticate_request(request, "Bearer key", runtime_paths)
     assert isinstance(response, JSONResponse)
     assert response.status_code == 503
     assert json.loads(response.body)["error"]["message"] == "Invalid API requester configuration"

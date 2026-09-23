@@ -107,7 +107,7 @@ uvx mindroom run
 **In chat:** Send a message mentioning your agent in a room where it is configured.
 
 **Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools.
-Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.
+The API binds `127.0.0.1` by default; to reach it from another machine, pass `mindroom run --api-host` and protect it by setting `MINDROOM_API_KEY` in your `.env`.
 
 **Preflight check:** Run `uvx mindroom doctor` before `uvx mindroom run` to verify config, API keys, Matrix connectivity, and storage in one pass.
 

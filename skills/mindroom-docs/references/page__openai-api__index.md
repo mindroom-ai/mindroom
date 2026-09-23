@@ -34,6 +34,7 @@ OPENAI_COMPAT_ALLOW_UNAUTHENTICATED=true
 ```
 
 Without either of these, the API returns 401 on all requests.
+Unauthenticated access still refuses cross-origin browser requests, so a page on another site cannot make an agent run through your browser.
 
 ### 2. Start MindRoom
 

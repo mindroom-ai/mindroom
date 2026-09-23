@@ -27,6 +27,7 @@ import mindroom.workers.runtime as workers_runtime_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle as api_config_lifecycle
 from mindroom.api import main as api_main
+from mindroom.api.network_exposure import DashboardHostGuard
 from mindroom.approval_manager import (
     _ApprovalStartupSweep,
     get_approval_store,
@@ -37,7 +38,6 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import EventJournalConfig
-from mindroom.api.network_exposure import DashboardHostGuard
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,

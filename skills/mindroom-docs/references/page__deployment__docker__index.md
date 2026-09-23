@@ -91,7 +91,7 @@ Key environment variables (set in `.env` or pass directly):
 | `OPENAI_API_KEY` | OpenAI API key (if using OpenAI models) | - |
 | `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765` |
 | `MINDROOM_API_KEY` | API key for dashboard auth (standalone) | - (open access) |
-| `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra `Host` values an open-access dashboard answers, beyond loopback names and the `MINDROOM_PUBLIC_URL` host | - |
+| `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra `Host` values an open-access dashboard answers, beyond loopback names, address literals, and the runtime's own configured URLs | - |
 
 To change the API server port or bind address, pass `--api-port` or `--api-host` to the `mindroom run` command.
 For example, add `command: ["mindroom", "run", "--api-host", "0.0.0.0", "--api-port", "9000"]` to the Docker Compose service.
