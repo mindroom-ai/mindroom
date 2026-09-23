@@ -16,6 +16,7 @@ from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
 from mindroom.message_target import ResponseLifecycleKey
 from mindroom.mid_turn import QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
+from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
@@ -146,6 +147,7 @@ class _QueuedMessageState:
     _active_response_turns: int = 0
     _event: asyncio.Event = field(default_factory=asyncio.Event)
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
+    human_signal: HumanMessageSignal = field(default_factory=HumanMessageSignal)
 
     def __post_init__(self) -> None:
         self._idle_event.set()
@@ -178,6 +180,7 @@ class _QueuedMessageState:
         progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
         self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress)
         self._event.set()
+        self.human_signal.notify()
         return True
 
     def consume_waiting_human_message(self, source_event_id: str) -> None:
@@ -186,6 +189,7 @@ class _QueuedMessageState:
         del self._pending_messages[source_event_id]
         if self.pending_human_messages == 0:
             self._event.clear()
+            self.human_signal.clear()
 
     def has_pending_human_messages(self) -> bool:
         return self.pending_human_messages > 0
@@ -230,6 +234,7 @@ class QueuedHumanNoticeReservation:
 class ResponseLifecycleCoordinator:
     """Serialize response turns and signal active turns about queued human ingress."""
 
+    human_signal_provider: Callable[[MessageTarget], HumanMessageSignal] | None = None
     _response_lifecycle_locks: dict[ResponseLifecycleKey, asyncio.Lock] = field(default_factory=dict)
     _thread_queued_signals: dict[ResponseLifecycleKey, _QueuedMessageState] = field(default_factory=dict)
 
@@ -286,7 +291,9 @@ class ResponseLifecycleCoordinator:
                 # lock state alone silently drops user input.
                 candidate_signal = self._thread_queued_signals.get(candidate)
                 if candidate_signal is not None and (
-                    candidate_signal.has_pending_human_messages() or candidate_signal.has_active_response_turn()
+                    candidate_signal.has_pending_human_messages()
+                    or candidate_signal.has_active_response_turn()
+                    or candidate_signal.human_signal.has_subscribers
                 ):
                     continue
                 self._response_lifecycle_locks.pop(candidate, None)
@@ -328,7 +335,9 @@ class ResponseLifecycleCoordinator:
         signal = self._thread_queued_signals.get(lifecycle_key)
         if signal is not None:
             return signal
-        signal = _QueuedMessageState()
+        signal = _QueuedMessageState(
+            human_signal=self.human_signal_provider(target) if self.human_signal_provider else HumanMessageSignal(),
+        )
         self._thread_queued_signals[lifecycle_key] = signal
         return signal
 
@@ -364,6 +373,9 @@ class ResponseLifecycleCoordinator:
         if not self._should_signal_queued_message(response_envelope):
             return None
         if not self._has_active_response_for_thread_key(target.lifecycle_key):
+            signal = self._get_or_create_queued_signal(target).human_signal
+            signal.notify()
+            signal.clear()
             return None
         queued_signal = self._get_or_create_queued_signal(target)
         if not queued_signal.add_waiting_human_message(
@@ -385,6 +397,9 @@ class ResponseLifecycleCoordinator:
         if not signal_queued_message:
             return None
         if not (existing_turn or lifecycle_lock.locked()):
+            if self._should_signal_queued_message(response_envelope):
+                queued_signal.human_signal.notify()
+                queued_signal.human_signal.clear()
             return None
         if not self._should_signal_queued_message(response_envelope):
             return None
@@ -508,7 +523,10 @@ class ResponseLifecycleCoordinator:
                     queued_signal=queued_signal,
                 )
                 queued_signal.mid_turn_gate = mid_turn_gate
-                with queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate) as notice_context:
+                with (
+                    human_message_signal_context(queued_signal.human_signal),
+                    queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate) as notice_context,
+                ):
                     try:
                         return await locked_operation(target)
                     finally:

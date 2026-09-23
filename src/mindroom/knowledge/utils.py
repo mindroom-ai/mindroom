@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -12,7 +14,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from mindroom.embedding_errors import extract_classified_embedder_detail
-from mindroom.file_memory_knowledge import resolve_agent_file_memory_knowledge
+from mindroom.file_memory_knowledge import agent_file_memory_search, resolve_agent_file_memory_knowledge
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.refresh_policy import (
     RefreshCooldownKey,
@@ -41,6 +43,7 @@ __all__ = [
     "KnowledgeAccessSupport",
     "KnowledgeAvailabilityDetail",
     "KnowledgeBaseAccessResolution",
+    "agent_knowledge_authority_signature",
     "format_knowledge_availability_notice",
     "knowledge_runtime_identity",
     "resolve_agent_knowledge_access",
@@ -216,6 +219,19 @@ def _semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple
         for base_id in config.resolve_entity(agent_name).knowledge_base_ids
         if config.get_knowledge_base_config(base_id).mode == "semantic"
     )
+
+
+def agent_knowledge_authority_signature(agent_name: str, config: Config) -> str | None:
+    """Fingerprint the exact sources a retained search handle may read."""
+    bases = {
+        base_id: config.get_knowledge_base_config(base_id).model_dump(mode="json")
+        for base_id in _semantic_agent_knowledge_base_ids(agent_name, config)
+    }
+    memory = agent_file_memory_search(agent_name, config)
+    if not bases and memory is None:
+        return None
+    sources = {"bases": bases, "memory": memory.model_dump(mode="json") if memory is not None else None}
+    return hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()
 
 
 def _resolve_base_knowledge(

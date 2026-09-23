@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
@@ -50,62 +50,21 @@ from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
-from tests.history_helpers import RecordingModel
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import (
+    DelegationModel,
+    _call,
+    _delegate_runtime_context,
+    _runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
     from agno.db.base import BaseDb
-    from agno.models.message import Message
 
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
-
-
-@dataclass
-class DelegationModel(RecordingModel):
-    """Deterministic model runs real Agno tool and pause machinery."""
-
-    responses: list[ModelResponse] = field(default_factory=list)
-
-    async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
-        """Consume one planned provider response."""
-        self.seen_messages = list(cast("list[Message]", kwargs.get("messages", [])))
-        return self.responses.pop(0)
-
-    async def ainvoke_stream(self, *_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
-        """Use planned responses through Agno's real streaming machinery."""
-        yield await self.ainvoke(*_args, **kwargs)
-
-
-def _call(name: str, call_id: str, **arguments: object) -> dict[str, object]:
-    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
-
-
-def _saved_approval_calls(state: DelegationState) -> tuple[ApprovalCall, ...]:
-    """Supply the saved journal calls when a test drives delegation without Matrix publication."""
-    calls = []
-    for tool in state.pending_tools:
-        call_id = str(tool["tool_call_id"])
-        if state.pending_child_id is None:
-            assert tool["tool_name"] in {"run_subagent", "continue_subagent"}
-            assert state.pending_agent_name is not None
-            invoking_agent, toolkit_name = state.pending_agent_name, "delegate"
-        else:
-            source = state.pending_tool_sources[call_id]
-            invoking_agent, toolkit_name = source.child.child_agent_name, source.toolkit_name
-        calls.append(
-            ApprovalCall(
-                tool_call_id=call_id,
-                tool_name=str(tool["tool_name"]),
-                invoking_agent=invoking_agent,
-                toolkit_name=toolkit_name,
-                expires_at_ns=2**62,
-            ),
-        )
-    return tuple(calls)
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,7 @@ from mindroom.api.openai_streaming_protocol import (
     new_completion_id,
     sse_chunk,
 )
+from mindroom.tool_system.events import BackgroundWaitChunk
 
 
 def _parse_sse_line(line: str) -> dict:
@@ -201,3 +202,11 @@ class TestAgentStreamFailure:
         """Ordinary content never reads as a failure."""
         assert extract_agent_stream_failure("All good") is None
         assert extract_agent_stream_failure(RunContentEvent(content="hi")) is None
+
+
+def test_background_wait_chunk_is_visible_api_content() -> None:
+    """The API streams runtime waiting progress as text, not as a tool event."""
+    assert (
+        extract_stream_text(BackgroundWaitChunk("Waiting for background work"), ToolStreamState())
+        == "Waiting for background work"
+    )

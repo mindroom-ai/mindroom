@@ -9,6 +9,7 @@ from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
 from mindroom.knowledge_source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
+from mindroom.tool_system.output_files import wrap_function_for_output_files
 from mindroom.tool_system.tool_hooks import prepend_function_tool_hook
 
 if TYPE_CHECKING:
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
     from agno.run import RunContext
     from agno.run.agent import RunOutput
     from agno.session import AgentSession
+
+    from mindroom.tool_system.output_files import ToolOutputFilePolicy
 
 _KNOWLEDGE_SEARCH_TOOL_NAME = "search_knowledge_base"
 _MEMORY_SEARCH_TOOL_NAME = "search_memories"
@@ -81,6 +84,7 @@ def _annotate_knowledge_search_tool(
     sources: tuple[KnowledgeSourceDescription, ...],
     *,
     async_mode: bool,
+    output_file_policy: ToolOutputFilePolicy | None,
 ) -> None:
     """Attach MindRoom source descriptions to Agno's generated knowledge-search tool."""
     description = _knowledge_search_tool_description(
@@ -90,6 +94,8 @@ def _annotate_knowledge_search_tool(
     for tool in tools:
         if isinstance(tool, Function) and tool.name == _KNOWLEDGE_SEARCH_TOOL_NAME:
             tool.description = description
+            if output_file_policy is not None:
+                wrap_function_for_output_files(tool, output_file_policy)
 
 
 def _govern_generated_functions(
@@ -119,6 +125,7 @@ class KnowledgeToolDescribingAgent(Agent):
     knowledge_sources: tuple[KnowledgeSourceDescription, ...] = ()
     tool_function_filter: Callable[[Function], bool] | None = None
     tool_hook_bridge: Callable[..., Any] | None = None
+    tool_output_file_policy: ToolOutputFilePolicy | None = None
 
     def get_tools(
         self,
@@ -133,7 +140,12 @@ class KnowledgeToolDescribingAgent(Agent):
             self.tool_function_filter,
             self.tool_hook_bridge,
         )
-        _annotate_knowledge_search_tool(tools, self.knowledge_sources, async_mode=False)
+        _annotate_knowledge_search_tool(
+            tools,
+            self.knowledge_sources,
+            async_mode=False,
+            output_file_policy=self.tool_output_file_policy,
+        )
         return tools
 
     async def aget_tools(
@@ -156,5 +168,10 @@ class KnowledgeToolDescribingAgent(Agent):
             self.tool_function_filter,
             self.tool_hook_bridge,
         )
-        _annotate_knowledge_search_tool(tools, self.knowledge_sources, async_mode=True)
+        _annotate_knowledge_search_tool(
+            tools,
+            self.knowledge_sources,
+            async_mode=True,
+            output_file_policy=self.tool_output_file_policy,
+        )
         return tools

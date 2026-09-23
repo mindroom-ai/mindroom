@@ -9,6 +9,7 @@ from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
+from mindroom.tool_job_completion import ToolJobCompletion  # noqa: TC001
 from mindroom.tool_system.plugin_identity import validate_plugin_name
 
 from .state import (
@@ -237,6 +238,7 @@ class MessageEnvelope:
     agent_name: str
     origin: TurnOrigin = field(kw_only=True)
     hook_source: str | None = None
+    tool_job_completion: ToolJobCompletion | None = None
     message_received_depth: int = 0
     dispatch_policy_source_kind: str | None = None
 

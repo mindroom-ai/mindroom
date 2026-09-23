@@ -8119,7 +8119,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Start allowed subagents, continue their conversations, and return their results",
+      "description": "Start allowed subagents, continue conversations, and return their results",
       "display_name": "Subagents",
       "docs_url": null,
       "executes_code": false,

@@ -18,6 +18,7 @@ from mindroom.orchestration.config_updates import (
     plugin_change_paths,
 )
 from mindroom.orchestration.runtime import cancel_logged_task, create_logged_task
+from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -127,7 +128,12 @@ class ConfigReloadLifecycle:
         """Acknowledge source bytes only after their complete runtime publication."""
         self._fully_applied_config = config
         self.status = ConfigReloadStatus(
-            status="restart_required" if pending_event_journal_restart(config, self.runtime_paths) else "applied",
+            status="restart_required"
+            if (
+                pending_event_journal_restart(config, self.runtime_paths)
+                or pending_background_tool_jobs_restart(config, self.runtime_paths)
+            )
+            else "applied",
             fingerprint=config.source_fingerprint,
         )
 
