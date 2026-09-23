@@ -115,8 +115,10 @@ authenticationRecovery:
   timeoutMs: 5000
 ```
 
-The default navigation URL is the `basePath` application root, including its trailing slash.
-The probe and navigation URLs must be safe same-origin root-relative references, and the timeout must be an integer from 1000 through 30000 milliseconds.
+An empty `navigationUrl` returns to the current pathname, query, and fragment, including routes under `basePath`.
+Set a nonempty root-relative `navigationUrl` to use a fixed destination.
+The probe and any nonempty navigation URL must be safe same-origin root-relative references, and the timeout must be an integer from 1000 through 30000 milliseconds.
+This default requires a client image whose native authentication recovery bootstrap accepts an empty navigation URL; older images that require a nonempty URL disable automatic recovery when given this default.
 The chart serves the image's native `authentication-recovery.js` asset and a fixed `/authentication-recovery-probe` endpoint with no-store caching, then loads the asset from `/runtime-config.js` so cached application HTML also receives the recovery behavior.
 Changing `probeUrl` changes only the client bootstrap target; it does not create another nginx location.
 The selected client image must contain `/usr/share/nginx/html/authentication-recovery.js`.
