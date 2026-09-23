@@ -20,7 +20,7 @@ from mindroom.tool_jobs.results import (
     read_result_payload,
 )
 from tests.test_background_subagents import _owner
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundOutcome
@@ -142,9 +142,9 @@ async def test_runtime_written_summary_reports_its_truncation(tmp_path: Path) ->
         raise RuntimeError(message)
 
     try:
-        await runtime.start("failed", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
+        await start_job(runtime, "failed", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
         waited = await runtime.wait("failed", owner=_owner(), depth=0)
-        await runtime.release_wait("failed", waited.token)
+        await runtime.release_wait("failed", waited.claim)
         assert (waited.job.status, waited.job.has_result_payload) == ("failed", False)
         payload = await read_result_payload(runtime, waited.job)
         assert payload.value == f"{message[:500]}\n{results._SUMMARY_TRUNCATED_NOTICE}"

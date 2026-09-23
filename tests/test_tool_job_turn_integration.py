@@ -12,10 +12,7 @@ from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.models.response import ModelResponse
-from agno.run import RunContext  # noqa: TC002 - Agno resolves tool annotations at runtime.
 from agno.run.agent import RunContentEvent, RunOutput
-from agno.run.team import TeamRunOutput
-from agno.team import Team
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -30,13 +27,10 @@ from mindroom.response_turn import (
     TurnSinks,
     stream_response_turn,
 )
-from mindroom.team_exact_members import ResolvedExactTeamMembers
-from mindroom.teams import _team_response_stream_raw
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
-from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -53,45 +47,64 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("managed", [False, True])
-async def test_team_session_state_is_seeded_only_for_managed_execution(tmp_path: Path, managed: bool) -> None:
-    """Managed team receipts persist while ordinary runs keep the SDK's default output shape."""
+async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Path) -> None:
+    """The saved tool result is the consumption evidence, so a session's state does not grow per consumed job."""
+    executions: list[str] = []
 
-    def mark(run_context: RunContext) -> str:
-        assert run_context.session_state is not None
-        run_context.session_state["receipt"] = "exact"
-        return "recorded"
+    async def report(topic: str) -> str:
+        executions.append(topic)
+        return f"report on {topic}"
 
-    member = Agent(id="member", name="Member", telemetry=False)
-    members = ResolvedExactTeamMembers(["member"], [member], ["Member"], {"member"}, [])
-    storage = SqliteDb(db_file=str(tmp_path / "team.db"))
-    model = DelegationModel(
-        id="test",
-        responses=[ModelResponse(tool_calls=[_call("mark", "receipt")]), ModelResponse(content="done")],
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader")},
     )
-    team = Team(id="team", members=[member], model=model, tools=[mark], db=storage, telemetry=False)
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(paths.storage_root)
+    register_background_runtime(paths, runtime)
+    storage_file = str(tmp_path / "turns.db")
+
+    def storage_factory() -> SqliteDb:
+        return SqliteDb(db_file=storage_file)
+
+    topics = ["alpha", "beta", "gamma"]
+    model = DelegationModel(id="test")
+    for topic in topics:
+        model.responses += [
+            ModelResponse(tool_calls=[_call("report", f"{topic}-call", topic=topic, wait_timeout=None)]),
+            ModelResponse(content=f"The {topic} report is ready."),
+        ]
+    install_tool_job_execution(model)
+    storage = storage_factory()
+    actor = Agent(id="leader", model=model, tools=[report], db=storage, telemetry=False)
+
+    @owned_tool_execution
+    async def run_turn(prompt: str) -> RunOutput:
+        set_consumption_storage(storage_factory)
+        return await actor.arun(prompt, session_id=context.session_id, user_id=owner.requester_id)
+
     try:
-        async with execution_resources() if managed else nullcontext():
-            stream = await _team_response_stream_raw(
-                team,
-                members,
-                "Record a receipt",
-                session_id="session",
-                user_id="requester",
-            )
-            outputs = [item async for item in stream if isinstance(item, TeamRunOutput)]
-        assert len(outputs) == 1
-        output = outputs[0]
-        stored = storage.get_run(output.run_id)
-        assert isinstance(stored, TeamRunOutput)
-        if managed:
-            assert stored.session_state["receipt"] == "exact"
-            assert output.session_state["receipt"] == "exact"
-        else:
-            assert stored.session_state is None
-            assert output.session_state is None
+        with tool_runtime_context(context):
+            runs = [await run_turn(f"Report on {topic}") for topic in topics]
+        session = storage.get_session(context.session_id, session_type=SessionType.AGENT)
+        assert session is not None
+        assert session.session_data is not None
+        assert not session.session_data.get("session_state")
+        assert session.runs is not None
+        assert len(session.runs) == len(topics)
+        assert not any(run.session_state for run in session.runs)
+        assert executions == topics
+        assert [run.tools[0].result for run in runs if run.tools] == [f"report on {topic}" for topic in topics]
+        jobs = await runtime.list_jobs(owner=owner, depth=0)
+        assert len(jobs) == len(topics)
+        assert all(job.consumed for job in jobs)
+        assert await runtime.pending_outcomes() == []
     finally:
         storage.close()
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
 
 
 async def _wait_until_ready(
@@ -242,7 +255,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
         assert wait_result == "durable report"
         assert _provider_tool_content(model, "wait-call") == "durable report"
         assert executions == 1
-        assert (await runtime.lookup(job_id, owner=owner, depth=0)).wait_acknowledged
+        assert (await runtime.lookup(job_id, owner=owner, depth=0)).consumed
         assert await runtime.pending_outcomes() == []
     finally:
         release.set()
@@ -384,12 +397,8 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
             release.set()
             ready = await _wait_until_ready(runtime, job_id, owner=owner)
             assert ready.status == ("failed" if fails else "completed")
-            assert not ready.wait_acknowledged
+            assert not ready.consumed
             assert len(await runtime.pending_outcomes()) == 1
-            session = storage.get_session(context.session_id, session_type=SessionType.AGENT)
-            assert session is None or not any(
-                "mindroom_tool_job_receipts" in (run.session_state or {}) for run in session.runs or []
-            )
             assert not any(isinstance(chunk, BackgroundWaitChunk) for chunk in chunks)
 
             model.release_text.set()
@@ -397,19 +406,20 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
 
         assert executions == 1
         saved = await runtime.lookup(job_id, owner=owner, depth=0)
-        assert saved.wait_acknowledged
+        assert saved.consumed
         assert await runtime.pending_outcomes() == []
         retrieval = next(
             response
             for response in responses
             if response.tools and any(tool.tool_call_id == "retrieve-call" for tool in response.tools)
         )
-        receipt = (retrieval.session_state or {})["mindroom_tool_job_receipts"]
-        assert receipt[f"{retrieval.run_id}:retrieve-call"]["job_id"] == job_id
-        assert receipt[f"{retrieval.run_id}:retrieve-call"]["generation"] == 0
         persisted = storage.get_run(retrieval.run_id)
         assert persisted is not None
-        assert (persisted.session_state or {})["mindroom_tool_job_receipts"] == receipt
+        # The saved retrieval call, finished with a result, is the only consumption evidence.
+        assert any(
+            tool.tool_call_id == "retrieve-call" and tool.result is not None and not tool.is_paused
+            for tool in persisted.tools or []
+        )
         retrieval_tool = next(tool for tool in retrieval.tools or [] if tool.tool_call_id == "retrieve-call")
         if fails:
             assert retrieval_tool.tool_call_error

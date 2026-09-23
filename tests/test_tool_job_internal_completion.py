@@ -50,7 +50,7 @@ from mindroom.event_journal import EventKind
 from mindroom.tool_jobs.completion import completion_envelope, completion_event
 from tests.response_runner_helpers import _bot
 from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_job, tool_job_runtime
 
 
 @pytest.mark.asyncio
@@ -95,7 +95,8 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
         yield AttemptResolved(await attempt(run, state))
 
     try:
-        await runtime.start(
+        await start_job(
+            runtime,
             "quiet",
             tool_name="tool",
             depth=0,
@@ -104,7 +105,7 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
             operation=operation,
         )
         waited = await runtime.wait("quiet", owner=owner, depth=0)
-        await runtime.release_wait("quiet", waited.token)
+        await runtime.release_wait("quiet", waited.claim)
         with tool_runtime_context(context):
             if streaming:
                 async for _ in stream_response_turn(
@@ -180,14 +181,14 @@ async def test_pending_outcomes_require_saved_consumption(tmp_path: Path) -> Non
         return BackgroundOutcome("failed", "tool failed")
 
     try:
-        await runtime.start("quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(runtime, "quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("quiet", owner=owner, depth=0)
         assert not await runtime.pending_outcomes()
-        await runtime.release_wait("quiet", waited.token)
+        await runtime.release_wait("quiet", waited.claim)
         assert (await runtime.outcome("quiet", 0)).result == "tool failed"
         assert [job.job_id for job in await runtime.pending_outcomes()] == ["quiet"]
         waited = await runtime.wait("quiet", owner=owner, depth=0)
-        await runtime.acknowledge_wait("quiet", waited.token)
+        await runtime.acknowledge_wait("quiet", waited.claim)
         assert await runtime.outcome("quiet", 0) is None
         assert not await runtime.pending_outcomes()
     finally:
@@ -230,12 +231,12 @@ async def test_completion_waits_for_active_and_newer_turns(tmp_path: Path, consu
         await runner.deps.approval_store.settle(event.event_id)
 
     try:
-        await runtime.start("quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(runtime, "quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("quiet", owner=owner, depth=0)
         if consumed:
-            await runtime.acknowledge_wait("quiet", waited.token)
+            await runtime.acknowledge_wait("quiet", waited.claim)
         else:
-            await runtime.release_wait("quiet", waited.token)
+            await runtime.release_wait("quiet", waited.claim)
         event = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
         await runner.deps.approval_store.admit(event)
         admitted = await runner.deps.approval_store.load_event(event.event_id)
@@ -293,7 +294,7 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
 
     try:
         with human_message_signal_context(signal):
-            await runtime.start("quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+            await start_job(runtime, "quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         with tool_runtime_context(context), human_message_signal_context(signal):
             stream = join_conversation_jobs(attempted)
             assert "Waiting" in (await anext(stream)).content
@@ -303,7 +304,7 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
             signal.clear()
             finish.set()
             waited = await runtime.wait("quiet", owner=owner, depth=0)
-            await runtime.release_wait("quiet", waited.token)
+            await runtime.release_wait("quiet", waited.claim)
             items = [item async for item in join_conversation_jobs(attempted)]
             assert len(items) == 1
             assert 'job_id="quiet"' in items[0].prompt
@@ -342,9 +343,9 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
         yield AttemptResolved(await attempt(run, state))
 
     try:
-        await runtime.start("quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(runtime, "quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("quiet", owner=owner, depth=0)
-        await runtime.release_wait("quiet", waited.token)
+        await runtime.release_wait("quiet", waited.claim)
         with tool_runtime_context(context):
             if streaming:
                 _ = [
@@ -435,7 +436,8 @@ async def test_failed_completion_admission_retries_and_new_generation_is_admitte
         return BackgroundOutcome("completed", "approved result")
 
     try:
-        await coordinator.runtime.start(
+        await start_job(
+            coordinator.runtime,
             fixture.job_id,
             tool_name=fixture.tool_name,
             depth=0,
@@ -445,7 +447,7 @@ async def test_failed_completion_admission_retries_and_new_generation_is_admitte
             operation=approval,
         )
         waited = await coordinator.runtime.wait(fixture.job_id, owner=fixture.owner, depth=0)
-        await coordinator.runtime.release_wait(fixture.job_id, waited.token)
+        await coordinator.runtime.release_wait(fixture.job_id, waited.claim)
         store = bot._journal_store.principal(bot._journal_principal_id)
         first = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
         with patch.object(type(store), "admit", side_effect=OSError("journal unavailable")):
@@ -463,7 +465,7 @@ async def test_failed_completion_admission_retries_and_new_generation_is_admitte
             operation=complete,
         )
         waited = await coordinator.runtime.wait(fixture.job_id, owner=fixture.owner, depth=0)
-        await coordinator.runtime.release_wait(fixture.job_id, waited.token)
+        await coordinator.runtime.release_wait(fixture.job_id, waited.claim)
         second = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
         assert second.event_id != first.event_id
         await coordinator.deliver_pending()
@@ -485,9 +487,9 @@ async def test_internal_source_envelope_is_stable_after_runtime_recovery(tmp_pat
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "retained")
 
-    await runtime.start("recover", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+    await start_job(runtime, "recover", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
     waited = await runtime.wait("recover", owner=owner, depth=0)
-    await runtime.release_wait("recover", waited.token)
+    await runtime.release_wait("recover", waited.claim)
     event = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
     await bot._journal_store.principal(bot._journal_principal_id).admit(event)
     await runtime.shutdown()
@@ -533,7 +535,8 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
         return BackgroundOutcome("interrupted", "Execution stopped; side effects may have happened.")
 
     try:
-        await runtime.start(
+        await start_job(
+            runtime,
             "retained",
             tool_name="tool",
             depth=0,
@@ -545,9 +548,9 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
         )
         waited = await runtime.wait("retained", owner=owner, depth=0)
         if consumed:
-            await runtime.acknowledge_wait("retained", waited.token)
+            await runtime.acknowledge_wait("retained", waited.claim)
         else:
-            await runtime.release_wait("retained", waited.token)
+            await runtime.release_wait("retained", waited.claim)
         allowed = authorized
         recovered = await runner._recover_tool_job_source(request)
         if matching_source:
@@ -641,7 +644,8 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
     respond = AsyncMock()
 
     try:
-        await runtime.start(
+        await start_job(
+            runtime,
             "recovered",
             tool_name="tool",
             depth=0,
@@ -650,7 +654,7 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
             operation=operation,
         )
         waited = await runtime.wait("recovered", owner=owner, depth=0)
-        await runtime.release_wait("recovered", waited.token)
+        await runtime.release_wait("recovered", waited.claim)
         event = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
         await runner.deps.approval_store.admit(
             replace(
@@ -700,10 +704,18 @@ async def test_ready_approval_is_retrieved_before_waiting_on_other_running_jobs(
         return BackgroundOutcome("awaiting_approval", "Approval required")
 
     try:
-        await runtime.start("running", tool_name="tool", depth=0, adapter={}, owner=owner, operation=running)
-        await runtime.start("approval", tool_name="delegation", depth=0, adapter={}, owner=owner, operation=approval)
+        await start_job(runtime, "running", tool_name="tool", depth=0, adapter={}, owner=owner, operation=running)
+        await start_job(
+            runtime,
+            "approval",
+            tool_name="delegation",
+            depth=0,
+            adapter={},
+            owner=owner,
+            operation=approval,
+        )
         waited = await runtime.wait("approval", owner=owner, depth=0)
-        await runtime.release_wait("approval", waited.token)
+        await runtime.release_wait("approval", waited.claim)
         with tool_runtime_context(context):
             async with asyncio.timeout(1):
                 items = [item async for item in join_conversation_jobs(set())]
@@ -762,7 +774,7 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
 
     task = None
     try:
-        await runtime.start("retained", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(runtime, "retained", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         with tool_runtime_context(context), background_wait_notice(progress):
             task = asyncio.create_task(
                 run_blocking_response_turn(

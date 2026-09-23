@@ -28,7 +28,7 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_ru
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -62,7 +62,7 @@ async def test_job_wait_waits_and_restores_rich_result(tmp_path: Path) -> None:
 
     tools = JobTools(paths, owner)
     try:
-        await runtime.start("ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(runtime, "ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         with tool_runtime_context(context):
             pending = asyncio.create_task(tools.job("wait", "ordinary"))
             await asyncio.sleep(0)
@@ -119,7 +119,8 @@ async def test_only_native_job_wait_projects_external_approval(tmp_path: Path) -
         return BackgroundOutcome("awaiting_approval")
 
     try:
-        await runtime.start(
+        await start_job(
+            runtime,
             "native",
             tool_name="delegate",
             depth=0,
@@ -129,7 +130,7 @@ async def test_only_native_job_wait_projects_external_approval(tmp_path: Path) -
             operation=operation,
         )
         waited = await runtime.wait("native", owner=owner, depth=0)
-        await runtime.release_wait("native", waited.token)
+        await runtime.release_wait("native", waited.claim)
         model = DelegationModel(
             id="test",
             responses=[ModelResponse(tool_calls=[_call("job", "wait", action="wait", job_id="native")])],
@@ -158,7 +159,8 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "saved " * 1000)
 
-    await runtime.start(
+    await start_job(
+        runtime,
         "durable",
         tool_name="tool",
         depth=0,
@@ -168,7 +170,7 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
         operation=operation,
     )
     waited = await runtime.wait("durable", owner=owner, depth=0)
-    await runtime.acknowledge_wait("durable", waited.token)
+    await runtime.acknowledge_wait("durable", waited.claim)
     await runtime.shutdown()
     allowed = True
     runtime = tool_job_runtime(tmp_path, authorize=lambda _: allowed)
@@ -216,9 +218,9 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
 
     storage = storage_factory()
     try:
-        await runtime.start("member-job", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(runtime, "member-job", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("member-job", owner=owner, depth=0)
-        await runtime.release_wait("member-job", waited.token)
+        await runtime.release_wait("member-job", waited.claim)
         member_model = DelegationModel(
             id="test",
             responses=[
@@ -258,7 +260,7 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
         results = response.member_responses[0].tools
         assert json.loads(results[0].result)[0]["job_id"] == "member-job"
         assert results[1].result == "saved member answer"
-        assert (await runtime.lookup("member-job", owner=owner, depth=0)).wait_acknowledged
+        assert (await runtime.lookup("member-job", owner=owner, depth=0)).consumed
     finally:
         storage.close()
         register_background_runtime(paths, None)
@@ -301,9 +303,9 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
 
     storage = storage_factory()
     try:
-        await runtime.start("ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(runtime, "ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("ordinary", owner=owner, depth=0)
-        await runtime.release_wait("ordinary", waited.token)
+        await runtime.release_wait("ordinary", waited.claim)
         model = DelegationModel(
             id="test",
             responses=[
@@ -325,7 +327,7 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
         tool = response.tools[0]
         assert tool.tool_call_error is (status == "failed")
         assert tool.result == expected_result
-        assert (await runtime.lookup("ordinary", owner=owner, depth=0)).wait_acknowledged
+        assert (await runtime.lookup("ordinary", owner=owner, depth=0)).consumed
     finally:
         storage.close()
         register_background_runtime(paths, None)
@@ -353,7 +355,8 @@ async def test_discovery_bounds_large_results_without_truncating_wait(
 
     try:
         adapter = {"child": {"result": None}} if kind == "delegation" else {}
-        await runtime.start(
+        await start_job(
+            runtime,
             "large",
             tool_name="large_tool",
             depth=0,
@@ -363,7 +366,7 @@ async def test_discovery_bounds_large_results_without_truncating_wait(
             operation=operation,
         )
         waited = await runtime.wait("large", owner=owner, depth=0)
-        await runtime.release_wait("large", waited.token)
+        await runtime.release_wait("large", waited.claim)
         with tool_runtime_context(context):
             tools = JobTools(paths, owner)
             discovery = await tools.job("list")
@@ -394,7 +397,7 @@ async def test_job_wait_can_return_immediately_without_cancelling(tmp_path: Path
 
     tools = JobTools(paths, owner)
     try:
-        await runtime.start("ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(runtime, "ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         with tool_runtime_context(context):
             result = await tools.job("wait", "ordinary", wait_timeout=0)
             assert json.loads(result)["status"] == "running"
@@ -432,7 +435,7 @@ async def test_interrupted_payload_read_releases_the_wait_claim(
 
     tools = JobTools(paths, owner)
     try:
-        await runtime.start("read", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(runtime, "read", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         monkeypatch.setattr(runtime, "read_payload", gated_read)
         with tool_runtime_context(context):
             waiting = asyncio.create_task(tools.job("wait", "read"))
@@ -446,8 +449,8 @@ async def test_interrupted_payload_read_releases_the_wait_claim(
                 release.set()
                 assert await waiting == "Tool job is not available in this conversation."
         retried = await runtime.wait("read", owner=owner, depth=0, timeout=0)
-        assert retried.token is not None
-        await runtime.release_wait("read", retried.token)
+        assert retried.claim is not None
+        await runtime.release_wait("read", retried.claim)
     finally:
         release.set()
         register_background_runtime(paths, None)
@@ -485,7 +488,7 @@ async def test_cancel_acknowledges_only_saved_management_result(
 
         monkeypatch.setattr(type(storage), "upsert_run", fail_save)
     try:
-        await runtime.start("cancelled", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(runtime, "cancelled", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         model = DelegationModel(
             id="test",
             responses=[
@@ -505,7 +508,7 @@ async def test_cancel_acknowledges_only_saved_management_result(
             response = await run()
         assert json.loads(response.tools[0].result)["status"] == "cancelled"
         job = await runtime.lookup("cancelled", owner=owner, depth=0)
-        assert job.wait_acknowledged is not save_fails
+        assert job.consumed is not save_fails
     finally:
         storage.close()
         register_background_runtime(paths, None)

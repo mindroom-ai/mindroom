@@ -35,7 +35,7 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_ru
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
 from tests.response_runner_helpers import _target
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_job, tool_job_runtime
 
 
 async def _persist_waiting_continuation(
@@ -96,9 +96,9 @@ async def test_completion_requires_current_unconsumed_exact_claim(tmp_path: Path
         return BackgroundOutcome("completed", "answer")
 
     try:
-        await runtime.start("job", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(runtime, "job", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("job", owner=owner, depth=0)
-        await runtime.release_wait("job", waited.token)
+        await runtime.release_wait("job", waited.claim)
         envelope = completion_envelope(waited.job, sender_id="@mindroom_general:localhost")
         assert await admit_job_completion(envelope, target=target, runtime_paths=paths)
         assert not await admit_job_completion(
@@ -107,7 +107,7 @@ async def test_completion_requires_current_unconsumed_exact_claim(tmp_path: Path
             runtime_paths=paths,
         )
         waited = await runtime.wait("job", owner=owner, depth=0)
-        await runtime.acknowledge_wait("job", waited.token)
+        await runtime.acknowledge_wait("job", waited.claim)
         assert not await admit_job_completion(envelope, target=target, runtime_paths=paths)
     finally:
         register_background_runtime(paths, None)
@@ -143,9 +143,17 @@ async def test_consumed_completion_resumes_its_owned_approval_continuation(  # n
         return BackgroundOutcome("awaiting_approval")
 
     try:
-        await runtime.start("approval-job", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(
+            runtime,
+            "approval-job",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=owner,
+            operation=operation,
+        )
         initial_wait = await runtime.wait("approval-job", owner=owner, depth=0)
-        await runtime.release_wait("approval-job", initial_wait.token)
+        await runtime.release_wait("approval-job", initial_wait.claim)
         completion_wait = await runtime.wait("approval-job", owner=owner, depth=0)
         event = completion_event(completion_wait.job, sender_id="@mindroom_general:localhost")
         source_event_id = event.event_id
@@ -181,7 +189,7 @@ async def test_consumed_completion_resumes_its_owned_approval_continuation(  # n
             principal_id=bot._journal_principal_id,
             continuation=continuation,
         )
-        await runtime.acknowledge_wait("approval-job", completion_wait.token)
+        await runtime.acknowledge_wait("approval-job", completion_wait.claim)
         decision = await store.resolve_continuation_approval_card(
             card_event_id="$approval-card",
             requested_status="approved",
@@ -284,9 +292,9 @@ async def test_completion_rechecks_after_real_lifecycle_lock(tmp_path: Path, con
         settled.append(True)
 
     try:
-        await runtime.start("queued-job", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(runtime, "queued-job", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("queued-job", owner=owner, depth=0)
-        await runtime.release_wait("queued-job", waited.token)
+        await runtime.release_wait("queued-job", waited.claim)
         request = _plain_request(target)
         envelope = completion_envelope(waited.job, sender_id="@mindroom_general:localhost")
         completion = replace(
@@ -315,7 +323,7 @@ async def test_completion_rechecks_after_real_lifecycle_lock(tmp_path: Path, con
         assert not second.done()
         if consume:
             waited = await runtime.wait("queued-job", owner=owner, depth=0)
-            await runtime.acknowledge_wait("queued-job", waited.token)
+            await runtime.acknowledge_wait("queued-job", waited.claim)
         release_first.set()
         await first
         result = await second

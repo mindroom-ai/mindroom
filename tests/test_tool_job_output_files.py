@@ -18,7 +18,7 @@ from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.delegation.background import delegation_outcome, start_delegation
+from mindroom.delegation.background import delegation_outcome
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -30,7 +30,7 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import _call, _delegate_runtime_context, _runtime_paths
 from tests.test_tool_job_exclusions import _SchemaRecordingModel
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -71,7 +71,8 @@ class _OutputAgent:
             return BackgroundOutcome("completed", _LARGE_RESULT, result_payload=payload)
 
         job_id = "a" * 64
-        await self.runtime.start(
+        await start_job(
+            self.runtime,
             job_id,
             tool_name="saved_output",
             depth=0,
@@ -80,7 +81,7 @@ class _OutputAgent:
             operation=operation,
         )
         ready = await self.runtime.wait(job_id, owner=self.owner, depth=0)
-        await self.runtime.release_wait(job_id, ready.token)
+        await self.runtime.release_wait(job_id, ready.claim)
         return job_id
 
 
@@ -180,7 +181,7 @@ async def test_job_output_path_is_validated_before_claiming_result(output_agent:
     assert not response.tools[0].tool_call_error
     assert literal_eval(response.tools[0].result)["mindroom_tool_output"]["status"] == "error"
     saved = await case.runtime.lookup(job_id, owner=case.owner, depth=0)
-    assert not saved.wait_acknowledged
+    assert not saved.consumed
     assert not (case.workspace.parent / "escape.txt").exists()
 
 
@@ -245,9 +246,9 @@ async def test_native_delegation_job_wait_redirects_saved_result(output_agent: _
         msg = "Retrieval must not execute the child again"
         raise AssertionError(msg)
 
-    job = await start_delegation(case.runtime, child, owner=case.owner, operation=completed)
+    job = await start_delegation_job(case.runtime, child, owner=case.owner, operation=completed)
     ready = await case.runtime.wait(job.job_id, owner=case.owner, depth=0)
-    await case.runtime.release_wait(job.job_id, ready.token)
+    await case.runtime.release_wait(job.job_id, ready.claim)
     case.agent.db = create_session_storage("leader", case.config, case.paths, case.owner)
     arguments = {"mindroom_output_path": "results/child.txt"} if explicit else {}
     paused = await case.call("job", action="wait", job_id=job.job_id, **arguments)

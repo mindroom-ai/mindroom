@@ -22,7 +22,7 @@ from tests.response_runner_helpers import _bot
 from tests.test_event_journal_store import ROOM, admit
 from tests.test_tool_jobs import _owner
 from tests.test_user_stop_convergence import _CountingGateway
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,7 +104,8 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
 
     try:
         for job_id, (job_owner, source) in jobs.items():
-            await runtime.start(
+            await start_job(
+                runtime,
                 job_id,
                 tool_name="tool",
                 depth=0,
@@ -147,14 +148,13 @@ async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tm
         return job.job_id == "active"
 
     try:
-        await runtime.start(
+        _, claim = await runtime.start(
             "active",
             tool_name="slow",
             depth=0,
             adapter={},
             owner=_owner(),
             operation=operation,
-            initial_wait_token="parent-wait",  # noqa: S106
         )
         await started.wait()
         await asyncio.wait_for(runtime.stop_jobs(receipt_order=7, matches=selected), 2)
@@ -162,13 +162,13 @@ async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tm
         saved = await runtime.lookup("active", owner=_owner(), depth=0)
         assert saved.status == "cancel_requested"
         assert saved.user_stop_receipt_order == 7
-        assert not saved.wait_acknowledged
+        assert not saved.consumed
         assert await runtime.pending_outcomes() == []
         release.set()
-        await runtime.release_wait("active", "parent-wait")
+        await runtime.release_wait("active", claim)
         waited = await runtime.wait("active", owner=_owner(), depth=0)
         assert waited.job.status == "cancelled"
-        await runtime.release_wait("active", waited.token)
+        await runtime.release_wait("active", waited.claim)
         assert await runtime.pending_outcomes() == []
     finally:
         release.set()
@@ -179,7 +179,7 @@ async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tm
         await restored.recover()
         saved = await restored.lookup("active", owner=_owner(), depth=0)
         assert saved.user_stop_receipt_order == 7
-        assert not saved.wait_acknowledged
+        assert not saved.consumed
         assert await restored.pending_outcomes() == []
     finally:
         await restored.shutdown()
@@ -226,7 +226,8 @@ async def test_replayed_stop_preserves_newer_edit_but_cancels_older_edit_work(
 
     try:
         for job_id, source in (("older-edit", "$old-edit"), ("newer-edit", "$new-edit")):
-            await runtime.start(
+            await start_job(
+                runtime,
                 job_id,
                 tool_name="tool",
                 depth=0,
@@ -288,7 +289,8 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
         return BackgroundOutcome("completed", "Keep the saved answer")
 
     try:
-        await runtime.start(
+        await start_job(
+            runtime,
             "ready",
             tool_name="tool",
             depth=0,
@@ -297,7 +299,7 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
             operation=operation,
         )
         waited = await runtime.wait("ready", owner=owner, depth=0)
-        await runtime.release_wait("ready", waited.token)
+        await runtime.release_wait("ready", waited.claim)
         if restart_gap:
             await bot._turn_store.record_user_stopped_response("$reply", 100, delivery_settled=True)
             await runtime.shutdown()

@@ -64,7 +64,7 @@ from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.test_mcp_toolkit import _oauth_server_config
 from tests.test_queued_message_notify import _envelope
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -226,14 +226,14 @@ async def _finish_job(coordinator: ToolJobRuntimeCoordinator) -> BackgroundJob:
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "Saved answer")
 
-    job = await start_delegation(
+    job = await start_delegation_job(
         coordinator.runtime,
         delegation_child(fixture),
         owner=fixture.owner,
         operation=operation,
     )
     result = await coordinator.runtime.wait(job.job_id, owner=job.owner, depth=0)
-    await coordinator.runtime.release_wait(job.job_id, result.token)
+    await coordinator.runtime.release_wait(job.job_id, result.claim)
     return result.job
 
 
@@ -260,11 +260,11 @@ async def test_revocation_cancels_hidden_work_without_delivering_its_result(tmp_
         cancelled.set()
 
     try:
-        await start_delegation(coordinator.runtime, child, owner=fixture.owner, operation=operation, cancel=cleanup)
+        await start_delegation_job(coordinator.runtime, child, owner=fixture.owner, operation=operation, cancel=cleanup)
         await started.wait()
         if approval:
             waited = await coordinator.runtime.wait(child.delegation_id, owner=fixture.owner, depth=0)
-            await coordinator.runtime.release_wait(child.delegation_id, waited.token)
+            await coordinator.runtime.release_wait(child.delegation_id, waited.claim)
         config.agents["lead"].delegate_to.clear()
         await coordinator.deliver_pending()
         assert await coordinator.runtime.list_jobs(owner=fixture.owner, depth=0) == []
@@ -272,7 +272,7 @@ async def test_revocation_cancels_hidden_work_without_delivering_its_result(tmp_
         config.agents["lead"].delegate_to.append("worker")
         waited = await coordinator.runtime.wait(child.delegation_id, owner=fixture.owner, depth=0)
         assert waited.job.status == "cancelled"
-        await coordinator.runtime.release_wait(child.delegation_id, waited.token)
+        await coordinator.runtime.release_wait(child.delegation_id, waited.claim)
         coordinator.bot_provider("team").wake_tool_job_completion.assert_not_awaited()
     finally:
         await coordinator.stop()
@@ -289,7 +289,8 @@ async def test_completion_scan_shares_membership_read_for_multiple_jobs(tmp_path
 
     try:
         for name in ("one", "two"):
-            await coordinator.runtime.start(
+            await start_job(
+                coordinator.runtime,
                 name,
                 tool_name=fixture.tool_name,
                 depth=0,
@@ -299,7 +300,7 @@ async def test_completion_scan_shares_membership_read_for_multiple_jobs(tmp_path
                 operation=completed,
             )
             waited = await coordinator.runtime.wait(name, owner=fixture.owner, depth=0)
-            await coordinator.runtime.release_wait(name, waited.token)
+            await coordinator.runtime.release_wait(name, waited.claim)
         bot = coordinator.bot_provider("team")
         assert bot is not None
         bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
@@ -333,7 +334,7 @@ async def test_failed_coordinator_stop_releases_pinned_state_before_restart(
         raise AssertionError
 
     fixture = _job()
-    await start_delegation(coordinator.runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
+    await start_delegation_job(coordinator.runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
     await asyncio.wait_for(started.wait(), 10)
 
     async def failed_save(*_args: object, **_kwargs: object) -> None:
@@ -366,7 +367,7 @@ async def test_live_wait_claim_suppresses_completion_delivery(tmp_path: Path) ->
     assert bot is not None
     await coordinator.deliver_pending()
     bot.wake_tool_job_completion.assert_not_awaited()
-    await coordinator.runtime.acknowledge_wait(job.job_id, waiting.token)
+    await coordinator.runtime.acknowledge_wait(job.job_id, waiting.claim)
     await coordinator.deliver_pending()
     bot.wake_tool_job_completion.assert_not_awaited()
     await coordinator.stop()
@@ -392,7 +393,7 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
         raise AssertionError
 
     fixture = _job()
-    await start_delegation(coordinator.runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
+    await start_delegation_job(coordinator.runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
     await started.wait()
     assert get_background_runtime(coordinator.runtime_paths) is coordinator.runtime
     owner = coordinator.runtime
@@ -466,7 +467,7 @@ async def test_replaced_response_runner_releases_wait_without_pausing_job(
 
     fixture = _job()
     with human_message_signal_context(signal):
-        job = await start_delegation(runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
+        job = await start_delegation_job(runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
     waiting = asyncio.create_task(runtime.wait(job.job_id, owner=fixture.owner, depth=0))
     await asyncio.sleep(0)
     replacement = ResponseRunner(deps)
@@ -499,7 +500,7 @@ async def test_replaced_response_runner_releases_wait_without_pausing_job(
         assert completed.job.status == "completed"
         assert tool_executed.is_set()
     finally:
-        await runtime.release_wait(job.job_id, completed.token)
+        await runtime.release_wait(job.job_id, completed.claim)
         await coordinator.stop()
 
 
@@ -541,30 +542,23 @@ async def test_native_admission_reserves_foreground_delivery(tmp_path: Path) -> 
     coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
     fixture = _job()
     done = asyncio.Event()
-    foreground_claim = "foreground"
 
     async def operation() -> BackgroundOutcome:
         done.set()
         return BackgroundOutcome("completed", "answer")
 
     try:
-        job = await start_delegation(
+        job, claim = await start_delegation(
             coordinator.runtime,
             delegation_child(fixture),
             owner=fixture.owner,
             operation=operation,
-            initial_wait_token=foreground_claim,
         )
         await done.wait()
         assert await coordinator.runtime.pending_outcomes() == []
-        waited = await coordinator.runtime.wait(
-            job.job_id,
-            owner=fixture.owner,
-            depth=0,
-            reserved_token=foreground_claim,
-        )
-        assert waited.token == foreground_claim
-        await coordinator.runtime.release_wait(job.job_id, waited.token)
+        waited = await coordinator.runtime.wait(job.job_id, owner=fixture.owner, depth=0, claim=claim)
+        assert waited.claim == claim
+        await coordinator.runtime.release_wait(job.job_id, waited.claim)
         assert len(await coordinator.runtime.pending_outcomes()) == 1
     finally:
         await coordinator.stop()

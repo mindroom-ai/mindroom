@@ -113,7 +113,7 @@ async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
         await coordinator.sync()
         async with execution_resources():
             with tool_runtime_context(replace(memory_context, config_provider=lambda: current)):
-                await coordinator.runtime.start(
+                _, claim = await coordinator.runtime.start(
                     "accepted-memory",
                     tool_name="add_memory",
                     depth=0,
@@ -132,8 +132,8 @@ async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
                 release.set()
                 await asyncio.wait_for(finished.wait(), 30)
                 current = config
-                waited = await coordinator.runtime.wait("accepted-memory", owner=owner, depth=0)
-                await coordinator.runtime.release_wait("accepted-memory", waited.token)
+                waited = await coordinator.runtime.wait("accepted-memory", owner=owner, depth=0, claim=claim)
+                await coordinator.runtime.release_wait("accepted-memory", waited.claim)
                 memories = await list_all_agent_memories(
                     "leader",
                     paths.storage_root,

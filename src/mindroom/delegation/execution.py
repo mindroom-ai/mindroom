@@ -1169,7 +1169,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     fresh=fresh,
                     output_request=output_request,
                 )
-                initial_wait_token = uuid4().hex if child_decisions is None and background_job is None else None
+                claim = None
                 try:
                     if child_decisions is not None:
                         background_job = await continue_delegation(
@@ -1181,12 +1181,11 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             operation=operation,
                         )
                     elif background_job is None:
-                        background_job = await start_delegation(
+                        background_job, claim = await start_delegation(
                             background,
                             child,
                             owner=caller_identity,
                             operation=operation,
-                            initial_wait_token=initial_wait_token,
                             output_path=(
                                 output_request.path.requested_path
                                 if output_request is not None and output_request.path is not None
@@ -1204,11 +1203,10 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         owner=caller_identity,
                         depth=delegation_depth,
                         timeout=wait_timeout,
-                        reserved_token=initial_wait_token,
+                        claim=claim,
                     )
                 except BaseException:
-                    if initial_wait_token is not None:
-                        await background.release_wait(child.delegation_id, initial_wait_token)
+                    await background.release_wait(child.delegation_id, claim)
                     raise
                 background_job = waited.job
                 child = retained_child(background, background_job)
@@ -1230,12 +1228,12 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         )
                         _pending_child(state, child, child_outcome, job_generation=background_job.generation)
                         await persist(state)
-                        if waited.token is not None:
-                            await background.acknowledge_wait(child.delegation_id, waited.token)
+                        if waited.claim is not None:
+                            await background.acknowledge_wait(child.delegation_id, waited.claim)
                         return True
                     result = (
                         await delegation_result(background, background_job)
-                        if waited.token is not None and not waited.delivery_queued
+                        if waited.claim is not None and not waited.delivery_queued
                         else None
                     ) or format_job_handle(
                         background_job,
@@ -1251,11 +1249,10 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         result=result,
                     )
                     await persist(state)
-                    if waited.token is not None:
-                        await background.acknowledge_wait(child.delegation_id, waited.token)
+                    if waited.claim is not None:
+                        await background.acknowledge_wait(child.delegation_id, waited.claim)
                 finally:
-                    if waited.token is not None:
-                        await background.release_wait(child.delegation_id, waited.token)
+                    await background.release_wait(child.delegation_id, waited.claim)
                 return False
             child_outcome = await _run_child(
                 child,

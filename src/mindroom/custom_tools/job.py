@@ -8,9 +8,9 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from agno.tools import Toolkit
+from agno.tools.function import ToolResult
 
-from mindroom.tool_jobs.consumption import consume_tool_job, record_tool_job_receipt
-from mindroom.tool_jobs.results import read_result_payload
+from mindroom.tool_jobs.consumption import consume_tool_job, restore_control, retain_claim
 from mindroom.tool_jobs.runtime import JobAccessError, get_background_runtime
 from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.output_files import wrap_toolkit_for_output_files
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from agno.tools.function import Function, FunctionCall
 
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
+    from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -42,14 +42,15 @@ def is_job_function(function: Function) -> bool:
     return _job_toolkit(function) is not None
 
 
-async def _consume_claimed(runtime: ToolJobRuntime, job: BackgroundJob, token: str) -> Any:  # noqa: ANN401 - SDK tool value.
-    """Return a claimed result, releasing the claim if reading its payload fails."""
-    try:
-        payload = await read_result_payload(runtime, job)
-    except BaseException:
-        await runtime.release_wait(job.job_id, token)
-        raise
-    return await consume_tool_job(runtime, job, payload, token)
+async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: JobClaim) -> Any:  # noqa: ANN401 - SDK tool value.
+    """Return a claimed outcome as this call's own result, raising its control or failure for the SDK to record."""
+    value, payload = await consume_tool_job(runtime, job, claim)
+    if payload.control is not None:
+        raise restore_control(payload.control)
+    if job.status == "failed":
+        text = value.content if isinstance(value, ToolResult) else value
+        raise RuntimeError(str(payload.error or text or "Background tool job failed."))
+    return value
 
 
 def _summary(job: BackgroundJob) -> dict[str, Any]:
@@ -180,14 +181,14 @@ class JobTools(Toolkit):
                 return "job_id is required for this action."
             if action == "wait":
                 waited = await runtime.wait(job_id, owner=owner, depth=self._depth, timeout=wait_timeout)
-                if waited.token is not None:
-                    return await _consume_claimed(runtime, waited.job, waited.token)
+                if waited.claim is not None:
+                    return await _claimed_result(runtime, waited.job, waited.claim)
                 return json.dumps(_summary(waited.job))
             if action == "cancel":
                 job = await runtime.cancel(job_id, owner=owner, depth=self._depth)
                 waited = await runtime.wait(job_id, owner=owner, depth=self._depth, timeout=0)
-                if waited.token is not None:
-                    await record_tool_job_receipt(runtime, waited.job, waited.token)
+                if waited.claim is not None:
+                    await retain_claim(runtime, job_id, waited.claim)
             elif action == "inspect":
                 job = await runtime.lookup(job_id, owner=owner, depth=self._depth, include_result=False)
             else:

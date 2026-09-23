@@ -86,7 +86,7 @@ async def stop_conversation_jobs(
         if event is None or event.receipt_order > cutoff:
             return False
         # Consumption can precede completion of the reply or its approval continuation.
-        if job.wait_acknowledged and job.status not in {"running", "cancel_requested", "awaiting_approval"}:
+        if job.consumed and job.status not in {"running", "cancel_requested", "awaiting_approval"}:
             completion = completion_source_id(job.job_id, job.generation)
             for owned_source in (event.event_id, completion):
                 if (

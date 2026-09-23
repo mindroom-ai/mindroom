@@ -27,7 +27,7 @@ from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation import execution as delegation_execution
-from mindroom.delegation.background import continue_delegation, delegation_child, start_delegation
+from mindroom.delegation.background import continue_delegation, delegation_child
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.lifecycle import prepare_child_turn, start_child_turn
 from mindroom.delegation.recovery import read_child_run
@@ -63,7 +63,7 @@ from tests.test_delegation_execution import (
     test_child_approval_survives_parent_reconstruction as _native_approval_scenario,
 )
 from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_delegation_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -129,9 +129,9 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
             return BackgroundOutcome("completed", "retained")
 
         child = replace(delegation_child(_job()), caller_agent_name="leader", child_agent_name="code")
-        retained = await start_delegation(runtime, child, owner=owner, operation=saved_outcome)
+        retained = await start_delegation_job(runtime, child, owner=owner, operation=saved_outcome)
         waited = await runtime.wait(retained.job_id, owner=owner, depth=0)
-        await runtime.release_wait(retained.job_id, waited.token)
+        await runtime.release_wait(retained.job_id, waited.claim)
         arguments = {"action": "wait", "job_id": retained.job_id, "wait_timeout": budget}
         if persisted:
             jobs.async_functions["job"].external_execution = True
@@ -934,11 +934,11 @@ async def test_native_job_source_survives_approval_continuation_and_restart(
 
     try:
         with tool_runtime_context(context):
-            job = await start_delegation(runtime, child, owner=owner, operation=approval)
+            job = await start_delegation_job(runtime, child, owner=owner, operation=approval)
         waited = await runtime.wait(job.job_id, owner=owner, depth=0)
         assert waited.job.adapter["source_event_id"] == source_event_id
         assert waited.job.owner == owner
-        await runtime.acknowledge_wait(job.job_id, waited.token)
+        await runtime.acknowledge_wait(job.job_id, waited.claim)
         with tool_runtime_context(replace(context, membership_turn_id="$approval-request")):
             await continue_delegation(
                 runtime,
@@ -951,7 +951,7 @@ async def test_native_job_source_survives_approval_continuation_and_restart(
         waited = await runtime.wait(job.job_id, owner=owner, depth=0)
         assert waited.job.adapter["source_event_id"] == source_event_id
         assert waited.job.result == "finished once"
-        await runtime.release_wait(job.job_id, waited.token)
+        await runtime.release_wait(job.job_id, waited.claim)
     finally:
         await runtime.shutdown()
     restored = tool_job_runtime(tmp_path)

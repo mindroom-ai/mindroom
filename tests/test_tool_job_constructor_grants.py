@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 import pytest
 from agno.agent import Agent
@@ -99,7 +98,6 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
     )
     function._agent = actor
     started, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    wait_claim = uuid4().hex
 
     async def operation() -> BackgroundOutcome:
         started.set()
@@ -118,7 +116,7 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
         runtime = coordinator.runtime
         async with execution_resources():
             with tool_runtime_context(context):
-                job = await runtime.start(
+                job, claim = await runtime.start(
                     "outer-job",
                     tool_name=function_name,
                     depth=0,
@@ -126,7 +124,6 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
                     adapter={"origin": function_provenance(function), "authority": function_authority(function)},
                     owner=owner,
                     operation=operation,
-                    initial_wait_token=wait_claim,
                 )
                 await asyncio.wait_for(started.wait(), 2)
                 assert len(await runtime.list_jobs(owner=owner, depth=0)) == 1
@@ -151,11 +148,11 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
                     entry.overrides[flag] = True
                 else:
                     assert (tmp_path / "nested.txt").read_text() == "accepted"
-                waited = await runtime.wait(job.job_id, owner=owner, depth=0, reserved_token=wait_claim)
+                waited = await runtime.wait(job.job_id, owner=owner, depth=0, claim=claim)
                 if revoked:
                     assert waited.job.status == "failed"
                     assert "no longer authorized" in (waited.job.result or "")
-                await runtime.release_wait(job.job_id, waited.token)
+                await runtime.release_wait(job.job_id, waited.claim)
     finally:
         release.set()
         await coordinator.stop()

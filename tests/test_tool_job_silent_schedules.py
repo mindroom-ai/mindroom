@@ -21,7 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.constants import is_silent_schedule_no_report_response
 from mindroom.custom_tools.job import JobTools
-from mindroom.delegation.background import delegation_child, start_delegation
+from mindroom.delegation.background import delegation_child
 from mindroom.delivery_gateway import FinalDeliveryRequest, ResponseIdentity
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.session_context import ScopeSessionContext
@@ -40,7 +40,7 @@ from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -163,7 +163,8 @@ async def test_silent_join_preserves_the_deliverable_report(
 
     try:
         if enabled:
-            await runtime.start(
+            await start_job(
+                runtime,
                 "quiet",
                 tool_name="probe",
                 depth=0,
@@ -172,7 +173,7 @@ async def test_silent_join_preserves_the_deliverable_report(
                 operation=operation,
             )
             ready = await runtime.wait("quiet", owner=owner, depth=0)
-            await runtime.release_wait("quiet", ready.token)
+            await runtime.release_wait("quiet", ready.claim)
         with (
             tool_runtime_context(context),
             patch("mindroom.ai.open_resolved_scope_session_context", return_value=nullcontext(scope)),
@@ -246,7 +247,8 @@ async def test_recovered_silent_schedule_retains_guidance_and_receipt(tmp_path: 
         return BackgroundOutcome("interrupted", "Interrupted; not replayed")
 
     try:
-        await runtime.start(
+        await start_job(
+            runtime,
             "quiet",
             tool_name="tool",
             depth=0,
@@ -255,7 +257,7 @@ async def test_recovered_silent_schedule_retains_guidance_and_receipt(tmp_path: 
             operation=operation,
         )
         waited = await runtime.wait("quiet", owner=owner, depth=0)
-        await runtime.release_wait("quiet", waited.token)
+        await runtime.release_wait("quiet", waited.claim)
         recovered = await runner._recover_tool_job_source(request)
         assert _is_silent_schedule_response(recovered)
         assert recovered.response_envelope.origin.intent is TurnIntent.TOOL_JOB_COMPLETION
@@ -310,7 +312,8 @@ async def test_automatic_join_keeps_quiet_and_visible_results_separate(tmp_path:
 
     try:
         for name, kind in (("quiet", SILENT_SCHEDULE_SOURCE_KIND), ("visible", "message")):
-            await runtime.start(
+            await start_job(
+                runtime,
                 name,
                 tool_name="tool",
                 depth=0,
@@ -319,7 +322,7 @@ async def test_automatic_join_keeps_quiet_and_visible_results_separate(tmp_path:
                 operation=operation,
             )
             waited = await runtime.wait(name, owner=owner, depth=0)
-            await runtime.release_wait(name, waited.token)
+            await runtime.release_wait(name, waited.claim)
         with tool_runtime_context(context):
             joined = [item async for item in join_conversation_jobs(set())]
         assert len(joined) == 1
@@ -372,14 +375,14 @@ async def test_accepted_job_persists_silent_completion_policy_across_restart(tmp
             with tool_runtime_context(context):
                 if native:
                     child = replace(delegation_child(_job()), caller_agent_name="general")
-                    accepted = await start_delegation(runtime, child, owner=owner, operation=native_operation)
+                    accepted = await start_delegation_job(runtime, child, owner=owner, operation=native_operation)
                     job_id = accepted.job_id
                 else:
                     response = await agent.arun("Check quietly", session_id=owner.session_id)
                     job_id = json.loads(response.tools[0].result)["job_id"]
             release.set()
             waited = await runtime.wait(job_id, owner=owner, depth=0)
-            await runtime.release_wait(job_id, waited.token)
+            await runtime.release_wait(job_id, waited.claim)
         await runtime.shutdown()
         runtime = tool_job_runtime(bot.runtime_paths.storage_root)
         await runtime.recover()

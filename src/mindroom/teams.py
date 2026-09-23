@@ -130,7 +130,6 @@ from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.timing import emit_timing_event
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.agno_compat_functions import managed_team_session_state
 from mindroom.tool_jobs.completion import join_approval_jobs
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
@@ -2723,7 +2722,6 @@ async def _retrieve_team_job_results(
             session_id=session_id,
             user_id=user_id,
             metadata=deepcopy(previous.metadata),
-            session_state=managed_team_session_state(),
             stream=True,
             stream_events=True,
             yield_run_output=True,
@@ -3246,7 +3244,6 @@ async def team_response(  # noqa: C901, PLR0915
                     run_id=current_run_id,
                     user_id=user_id,
                     metadata=run_metadata,
-                    session_state=managed_team_session_state(),
                 )
 
         attempt_run_id = continuation_state.active_run_id
@@ -3531,7 +3528,6 @@ async def _team_response_stream_raw(
             run_id=run_id,
             user_id=user_id,
             metadata=metadata,
-            session_state=managed_team_session_state(),
         )
     except Exception as e:
         logger.exception("team_streaming_failed", agents=team_members.display_names)

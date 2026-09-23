@@ -18,7 +18,7 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome, JobRecoveryBlockedErro
 from tests.bot_helpers import _runtime_bound_config
 from tests.conftest import runtime_paths_for
 from tests.test_background_subagents import _owner
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -50,7 +50,7 @@ async def test_shutdown_save_failure_does_not_abandon_orchestrator_cleanup(
         raise OSError(msg)
 
     try:
-        await runtime.start("shutdown", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
+        await start_job(runtime, "shutdown", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
         await asyncio.wait_for(started.wait(), 10)
         with monkeypatch.context() as patch, capture_logs() as logs:
             patch.setattr(runtime_module, "write_json_file_durable", fail_save)
@@ -85,7 +85,15 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
         writer(path, payload, strict_atomic_replace=strict_atomic_replace)
 
     try:
-        await runtime.start("write-failure", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
+        await start_job(
+            runtime,
+            "write-failure",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=_owner(),
+            operation=operation,
+        )
         with monkeypatch.context() as patch:
             patch.setattr(runtime_module, "write_json_file_durable", fail_outcome)
             release.set()
@@ -95,7 +103,7 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
             assert await runtime.read_payload(waited.job) == {"artifact": [1, 2]}
             assert not (tmp_path / "tool_jobs" / "write-failure.g0.result.json").exists()
             assert (tmp_path / "effect.txt").read_text() == "once"
-        await runtime.acknowledge_wait("write-failure", waited.token)
+        await runtime.acknowledge_wait("write-failure", waited.claim)
         await runtime.shutdown()
         restored = tool_job_runtime(tmp_path)
         try:
@@ -104,7 +112,7 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
             assert saved.status == "completed"
             assert saved.result == "retained output"
             assert await restored.read_payload(saved) == {"artifact": [1, 2]}
-            assert saved.wait_acknowledged
+            assert saved.consumed
         finally:
             await restored.shutdown()
     finally:
@@ -135,7 +143,7 @@ async def test_returned_result_survives_stop_during_resource_cleanup(tmp_path: P
 
     stopping = None
     try:
-        await runtime.start("returned", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
+        await start_job(runtime, "returned", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
         await asyncio.wait_for(cleaning.wait(), 2)
         stopping = asyncio.create_task(
             runtime.shutdown() if shutdown else runtime.cancel("returned", owner=_owner(), depth=0),
@@ -185,7 +193,7 @@ async def test_returned_result_survives_cancel_admission_lock(tmp_path: Path, mo
 
     stopping = None
     try:
-        await runtime.start("returned", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
+        await start_job(runtime, "returned", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
         monkeypatch.setattr(runtime, "_publish", delayed_publish)
         stopping = asyncio.create_task(runtime.cancel("returned", owner=_owner(), depth=0))
         await asyncio.wait_for(saving.wait(), 2)
@@ -232,7 +240,8 @@ async def test_shutdown_save_failure_still_drains_every_job_and_releases_lease(
     async def cleanup(job: runtime_module.BackgroundJob) -> None:
         cleaned.append(job.job_id)
 
-    await runtime.start(
+    await start_job(
+        runtime,
         "first",
         tool_name="tool",
         depth=0,
@@ -243,8 +252,9 @@ async def test_shutdown_save_failure_still_drains_every_job_and_releases_lease(
     )
     if first_completed:
         waited = await runtime.wait("first", owner=_owner(), depth=0)
-        await runtime.release_wait("first", waited.token)
-    await runtime.start(
+        await runtime.release_wait("first", waited.claim)
+    await start_job(
+        runtime,
         "second",
         tool_name="tool",
         depth=0,
@@ -309,7 +319,7 @@ async def test_blocked_shutdown_cleanup_still_settles_other_jobs(tmp_path: Path)
         return operation
 
     for name in ("blocked", "later"):
-        await runtime.start(name, tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=running(name))
+        await start_job(runtime, name, tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=running(name))
     await both_started.wait()
     with pytest.raises(ExceptionGroup, match="shutdown") as failure:
         await runtime.shutdown()

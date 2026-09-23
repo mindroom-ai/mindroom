@@ -33,7 +33,7 @@ from tests.delegation_helpers import DelegationModel, _call
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_stale_stream_cleanup import _aiter, _make_message_event, _room_get_event_response
 from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -128,7 +128,8 @@ async def test_recovered_job_source_preserves_latest_visible_edit(
         return BackgroundOutcome("completed", "saved result")
 
     try:
-        await runtime.start(
+        await start_job(
+            runtime,
             "retained",
             tool_name="tool",
             depth=0,

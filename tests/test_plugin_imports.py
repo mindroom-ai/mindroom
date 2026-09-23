@@ -121,7 +121,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
             async def running():
                 await asyncio.Event().wait()
 
-            await runtime.start(
+            _, claim = await runtime.start(
                 "completed-job",
                 tool_name="stable_echo",
                 depth=0,
@@ -130,8 +130,8 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
                 owner=owner,
                 operation=completed,
             )
-            waited = await runtime.wait("completed-job", owner=owner, depth=0)
-            await runtime.release_wait("completed-job", waited.token)
+            waited = await runtime.wait("completed-job", owner=owner, depth=0, claim=claim)
+            await runtime.release_wait("completed-job", waited.claim)
             await runtime.start(
                 "interrupted-job",
                 tool_name="stable_echo",

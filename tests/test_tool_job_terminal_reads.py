@@ -17,7 +17,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.delegation.background import start_delegation
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.message_target import MessageTarget
@@ -32,7 +31,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -93,7 +92,7 @@ async def test_completed_wait_releases_signal_and_idle_conversation(
     waiter = None
     try:
         with human_message_signal_context(signal):
-            await runtime.start("work", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+            await start_job(runtime, "work", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         subscribe = signal.subscribe
 
         def record_subscription(callback: Callable[[], None]) -> None:
@@ -113,7 +112,7 @@ async def test_completed_wait_releases_signal_and_idle_conversation(
             release.set()
         waited = await asyncio.wait_for(waiter, 30)
         assert waited.job.status == terminal
-        await runtime.acknowledge_wait("work", waited.token)
+        await runtime.acknowledge_wait("work", waited.claim)
         assert not signal.has_subscribers
         coordinator._response_lifecycle_lock(MessageTarget.resolve("!room:test", "$after", "$source"))
         assert target.lifecycle_key not in coordinator._thread_queued_signals
@@ -173,9 +172,9 @@ async def test_expired_native_job_stays_unavailable_to_sdk_wait_after_restart(
     actor = Agent(id="leader", model=model, tools=[JobTools(paths, owner)], db=storage, telemetry=False)
     paused = None
     try:
-        await start_delegation(runtime, child, owner=owner, operation=operation)
+        await start_delegation_job(runtime, child, owner=owner, operation=operation)
         waited = await runtime.wait(child.delegation_id, owner=owner, depth=0)
-        await runtime.acknowledge_wait(child.delegation_id, waited.token)
+        await runtime.acknowledge_wait(child.delegation_id, waited.claim)
         async with execution_resources():
             with tool_runtime_context(delegation_context):
                 if after_projection:

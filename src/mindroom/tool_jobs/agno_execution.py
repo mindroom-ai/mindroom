@@ -10,7 +10,6 @@ from collections.abc import AsyncIterator, Iterator
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
 
 from agno.exceptions import AgentRunException
 from agno.run.agent import RUN_EVENT_TYPE_REGISTRY, RunContentEvent
@@ -48,7 +47,7 @@ from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_current_execution_authority
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import current_execution_resources
-from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, encode_tool_result, read_result_payload
+from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, encode_tool_result
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     format_job_handle,
@@ -75,7 +74,7 @@ if TYPE_CHECKING:
 
     from mindroom.tool_jobs.resources import ExecutionResourceReference
     from mindroom.tool_jobs.results import ReplayItem
-    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
+    from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -292,16 +291,12 @@ async def _run_operation(
 async def _consume_result(
     runtime: ToolJobRuntime,
     job: BackgroundJob,
-    token: str,
+    claim: JobClaim,
     call: FunctionCall,
     timer: Timer,
 ) -> ToolCallResult:
-    payload = await read_result_payload(runtime, job)
+    value, payload = await consume_tool_job(runtime, job, claim, function_call=call)
     timer.elapsed_time = payload.elapsed
-    try:
-        value = await consume_tool_job(runtime, job, payload, token, function_call=call)
-    except AgentRunException:
-        value = payload.value
     call.result = value
     call.error = payload.error or (job.result if job.status == "failed" else None)
     success = restore_control(payload.control) if payload.control is not None else job.status == "completed"
@@ -401,11 +396,11 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         owned_call.arguments = application_arguments(owned_call.arguments)
         baseline = deepcopy(run_context.session_state or {})
         reference = resources.acquire()
-        token = uuid4().hex
 
+        claim = None
         retained = False
         try:
-            await runtime.start(
+            _, claim = await runtime.start(
                 job_id,
                 tool_name=call.function.name,
                 depth=depth,
@@ -413,24 +408,23 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
                 adapter=adapter,
                 owner=owner,
                 operation=lambda: _run_operation(original, owned_call, owner, baseline, reference),
-                initial_wait_token=token,
                 reattach=True,
             )
             if not runtime.owns_execution(job_id, adapter):
                 await reference.release()
-            waited = await runtime.wait(job_id, owner=owner, depth=depth, timeout=wait_timeout, reserved_token=token)
+            waited = await runtime.wait(job_id, owner=owner, depth=depth, timeout=wait_timeout, claim=claim)
             timer = Timer()
             timer.start()
             timer.stop()
-            if waited.token is None:
+            if waited.claim is None:
                 call.result = format_job_handle(waited.job)
                 return True, timer, call, FunctionExecutionResult(status="success", result=call.result)
-            response = await _consume_result(runtime, waited.job, waited.token, call, timer)
+            response = await _consume_result(runtime, waited.job, waited.claim, call, timer)
             retained = True
             return response
         finally:
             if not retained:
-                await runtime.release_wait(job_id, token)
+                await runtime.release_wait(job_id, claim)
             if not runtime.owns_execution(job_id, adapter):
                 await reference.release()
 

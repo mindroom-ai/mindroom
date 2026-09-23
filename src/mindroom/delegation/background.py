@@ -12,6 +12,7 @@ from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload,
 from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
+    JobClaim,
     JobRecoveryBlockedError,
     ToolJobRuntime,
 )
@@ -116,11 +117,10 @@ async def start_delegation(
     *,
     owner: ToolExecutionIdentity,
     operation: Callable[[], Awaitable[BackgroundOutcome]],
-    initial_wait_token: str | None = None,
     cancel: Callable[[DelegationChild], Awaitable[None]] | None = None,
     output_path: str | None = None,
-) -> BackgroundJob:
-    """Accept native child ownership without exposing its live object in a generic record."""
+) -> tuple[BackgroundJob, JobClaim | None]:
+    """Accept native child ownership without exposing its live object in a generic record, claiming its outcome."""
     if child.caller_agent_name != owner.agent_name:
         msg = "Child caller does not match its job owner."
         raise SubagentSessionError(msg)
@@ -153,7 +153,6 @@ async def start_delegation(
             adapter=adapter,
             owner=owner,
             operation=run,
-            initial_wait_token=initial_wait_token,
             cancel=cleanup,
         )
     finally:

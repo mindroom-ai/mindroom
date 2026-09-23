@@ -312,7 +312,7 @@ async def test_human_followup_releases_original_sdk_call_once(tmp_path: Path) ->
                     )
                     assert completed.job.status == "completed"
                     assert completed.job.result == "actual result"
-                    await runtime.release_wait(job_id, completed.token)
+                    await runtime.release_wait(job_id, completed.claim)
                     jobs = await runtime.list_jobs(
                         owner=build_execution_identity_from_runtime_context(context),
                         depth=0,
@@ -688,7 +688,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
         assert jobs[0].adapter["arguments"] == encode_tool_result({"wait_timeout": None})
         assert jobs[0].adapter["source_event_id"] == "$original-request"
         assert jobs[0].owner == owner
-        assert jobs[0].wait_acknowledged is not save_fails
+        assert jobs[0].consumed is not save_fails
         assert len(await runtime.pending_outcomes()) == int(save_fails)
         await runtime.shutdown()
         restored = tool_job_runtime(tmp_path)
@@ -697,7 +697,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
             saved = await restored.lookup(jobs[0].job_id, owner=owner, depth=0)
             assert saved.adapter["source_event_id"] == "$original-request"
             assert saved.owner == owner
-            assert saved.wait_acknowledged is not save_fails
+            assert saved.consumed is not save_fails
             assert len(await restored.pending_outcomes()) == int(save_fails)
             assert saved.adapter["arguments"] == encode_tool_result({"wait_timeout": None})
         finally:
@@ -1031,7 +1031,7 @@ async def test_saved_result_reread_preserves_later_session_state(
         )
         assert storage.get_run(first.run_id).session_state["counter"] == 1
         job = (await runtime.list_jobs(owner=owner, depth=0))[0]
-        assert job.wait_acknowledged
+        assert job.consumed
         if restart:
             await runtime.shutdown()
             runtime = tool_job_runtime(tmp_path)
@@ -1104,13 +1104,7 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
                 state.update({"conflict": "newer", "unrelated": "newer"})
                 claims = ConsumptionOwner()
                 with consumption_context(claims):
-                    value = await consume_tool_job(
-                        runtime,
-                        waited.job,
-                        await read_result_payload(runtime, waited.job),
-                        waited.token,
-                        function_call=call,
-                    )
+                    value, _ = await consume_tool_job(runtime, waited.job, waited.claim, function_call=call)
                     await claims.finalize()
                 assert state["changed"] == 1
                 assert state["conflict"] == state["unrelated"] == "newer"
@@ -1236,19 +1230,9 @@ async def test_saved_control_exception_keeps_stop_semantics(tmp_path: Path) -> N
                 assert isinstance(result[0], AgentRunException)
                 assert result[0].stop_execution
                 jobs = await runtime.list_jobs(owner=owner, depth=0)
-                waited = await runtime.wait(jobs[0].job_id, owner=owner, depth=0)
-                claims = ConsumptionOwner()
-                with consumption_context(claims):
-                    with pytest.raises(AgentRunException, match="stop requested") as stopped:
-                        await consume_tool_job(
-                            runtime,
-                            waited.job,
-                            await read_result_payload(runtime, waited.job),
-                            waited.token,
-                            function_call=call,
-                        )
-                    assert stopped.value.stop_execution
-                    await claims.finalize()
+                with pytest.raises(AgentRunException, match="stop requested") as stopped:
+                    await JobTools(paths, owner).job(action="wait", job_id=jobs[0].job_id, wait_timeout=0)
+                assert stopped.value.stop_execution
     finally:
         await runtime.shutdown()
         register_background_runtime(paths, None)

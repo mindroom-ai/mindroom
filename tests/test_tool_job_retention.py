@@ -25,7 +25,7 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
 from mindroom.turn_record import TurnRecord
 from tests.response_runner_helpers import _bot
 from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -53,7 +53,8 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "saved result", result_payload={"value": "saved result"})
 
-    await runtime.start(
+    await start_job(
+        runtime,
         "old",
         tool_name="tool",
         depth=0,
@@ -62,7 +63,7 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
         operation=operation,
     )
     waited = await runtime.wait("old", owner=owner, depth=0)
-    await runtime.acknowledge_wait("old", waited.token)
+    await runtime.acknowledge_wait("old", waited.claim)
     entry = runtime._entries["old"]
     entry.job = replace(entry.job, updated_at=(datetime.now(UTC) - timedelta(days=31)).isoformat())
     record = TurnRecord.create(("$original",), anchor_event_id="$original", completed=source_completed)

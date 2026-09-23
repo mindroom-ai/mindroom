@@ -167,7 +167,7 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
                 assert not (workspace / "report.txt").exists()
                 release.set()
                 waited = await asyncio.wait_for(runtime.wait(handle["job_id"], owner=identity, depth=0), 5)
-                await runtime.release_wait(handle["job_id"], waited.token)
+                await runtime.release_wait(handle["job_id"], waited.claim)
                 if mode == "explicit":
                     relocated_output = workspace / "completed_report.txt"
                     (workspace / "report.txt").rename(relocated_output)

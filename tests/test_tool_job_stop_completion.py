@@ -24,7 +24,7 @@ from tests.test_tool_job_completion import _persist_waiting_continuation
 from tests.test_tool_job_stop import _bind_reply
 from tests.test_tool_jobs import _owner
 from tests.test_user_stop_convergence import _CountingGateway
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -80,7 +80,8 @@ async def test_stop_reaches_active_completion_and_its_descendant(tmp_path: Path,
         return BackgroundOutcome("completed", "unreachable")
 
     try:
-        await runtime.start(
+        await start_job(
+            runtime,
             "prior-job",
             tool_name="tool",
             depth=0,
@@ -89,7 +90,7 @@ async def test_stop_reaches_active_completion_and_its_descendant(tmp_path: Path,
             operation=finished,
         )
         ready = await runtime.wait("prior-job", owner=owner, depth=0)
-        await runtime.release_wait("prior-job", ready.token)
+        await runtime.release_wait("prior-job", ready.claim)
         event = completion_event(ready.job, sender_id=bot.matrix_id.full_id)
         await store.admit(event)
         request = replace(
@@ -101,8 +102,9 @@ async def test_stop_reaches_active_completion_and_its_descendant(tmp_path: Path,
             runner.deps.stop_manager.set_current("$completion-reply", actual_target, asyncio.current_task())
             if consumed:
                 consumed_wait = await runtime.wait("prior-job", owner=owner, depth=0)
-                await runtime.acknowledge_wait("prior-job", consumed_wait.token)
-            await runtime.start(
+                await runtime.acknowledge_wait("prior-job", consumed_wait.claim)
+            await start_job(
+                runtime,
                 "completion-child",
                 tool_name="tool",
                 depth=0,
@@ -194,7 +196,8 @@ async def test_stop_after_placeholder_deletion_still_cancels_jobs(tmp_path: Path
         return BackgroundOutcome("completed", "unreachable")
 
     try:
-        await runtime.start(
+        await start_job(
+            runtime,
             "active",
             tool_name="tool",
             depth=0,
@@ -255,7 +258,8 @@ async def test_stop_blocks_older_job_approval_owned_by_human_source(tmp_path: Pa
         return BackgroundOutcome("awaiting_approval")
 
     try:
-        await runtime.start(
+        await start_job(
+            runtime,
             "older-approval-job",
             tool_name="delegate",
             depth=0,
@@ -264,7 +268,7 @@ async def test_stop_blocks_older_job_approval_owned_by_human_source(tmp_path: Pa
             operation=awaiting,
         )
         waiting = await runtime.wait("older-approval-job", owner=owner, depth=0)
-        await runtime.release_wait("older-approval-job", waiting.token)
+        await runtime.release_wait("older-approval-job", waiting.claim)
         original_request = _plain_request(target, source_event_id="$first")
         if owned_approval:
             continuation = ApprovalContinuation(

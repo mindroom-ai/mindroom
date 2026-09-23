@@ -15,7 +15,7 @@ from agno.team import Team
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.delegation.background import delegation_child, start_delegation
+from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
@@ -37,7 +37,7 @@ from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_c
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
 from tests.test_subagent_runtime import _config, _delivery_coordinator, _job
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -200,11 +200,19 @@ async def test_idle_ad_hoc_completion_reconstructs_member_for_exact_result(  # n
     monkeypatch.setattr(runner, "generate_response", respond)
     monkeypatch.setattr(runner, "generate_team_response_helper", respond)
     try:
-        await runtime.start("late-member", tool_name="report", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(
+            runtime,
+            "late-member",
+            tool_name="report",
+            depth=0,
+            adapter={},
+            owner=owner,
+            operation=operation,
+        )
         # The launching response is gone before its accepted operation completes.
         release.set()
         waited = await runtime.wait("late-member", owner=owner, depth=0)
-        await runtime.release_wait("late-member", waited.token)
+        await runtime.release_wait("late-member", waited.claim)
         event = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
         await runner.deps.approval_store.admit(event)
         admitted = await runner.deps.approval_store.load_event(event.event_id)
@@ -236,9 +244,9 @@ async def test_single_agent_turn_leaves_other_member_jobs_for_their_completion_o
         return BackgroundOutcome("completed", "Member result")
 
     try:
-        await runtime.start("member", tool_name="report", depth=0, adapter={}, owner=owner, operation=operation)
+        await start_job(runtime, "member", tool_name="report", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("member", owner=owner, depth=0)
-        await runtime.release_wait("member", waited.token)
+        await runtime.release_wait("member", waited.claim)
         with tool_runtime_context(context):
             assert [item async for item in join_conversation_jobs(set())] == []
             joined = [item async for item in join_conversation_jobs(set(), agent_names=("lead", "worker"))]
@@ -273,9 +281,9 @@ async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path
     runtime = coordinator.runtime
     register_background_runtime(paths, runtime)
     try:
-        job = await start_delegation(runtime, child, owner=owner, operation=operation)
+        job = await start_delegation_job(runtime, child, owner=owner, operation=operation)
         waited = await runtime.wait(job.job_id, owner=owner, depth=0)
-        await runtime.release_wait(job.job_id, waited.token)
+        await runtime.release_wait(job.job_id, waited.claim)
         assert len(await runtime.list_jobs(owner=owner, depth=0)) == 1
         assert len(await runtime.pending_outcomes()) == 1
         config.agents[changed_agent].worker_scope = "user"
@@ -330,7 +338,7 @@ async def test_ad_hoc_member_native_delegation_retains_transport_and_ancestry(tm
         await coordinator.sync()
         async with execution_resources():
             with tool_runtime_context(context), tool_execution_identity(owner):
-                job = await start_delegation(coordinator.runtime, child, owner=owner, operation=operation)
+                job = await start_delegation_job(coordinator.runtime, child, owner=owner, operation=operation)
                 waited = await coordinator.runtime.wait(job.job_id, owner=owner, depth=0)
                 assert waited.job.status == "completed", waited.job.result
                 assert json.loads(waited.job.result)["result"] == 5

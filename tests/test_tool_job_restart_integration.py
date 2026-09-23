@@ -220,7 +220,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
                 await interrupted_task
 
         before_restart = await runtime.lookup(job_id, owner=owner, depth=0)
-        assert not before_restart.wait_acknowledged
+        assert not before_restart.consumed
         assert len(await runtime.pending_outcomes()) == 1
         await runtime.shutdown()
         register_background_runtime(paths, None)
@@ -230,7 +230,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         register_background_runtime(paths, restored)
         recovered = await restored.lookup(job_id, owner=owner, depth=0)
         assert recovered.result == "retained after restart"
-        assert not recovered.wait_acknowledged
+        assert not recovered.consumed
 
         final_model = DelegationModel(
             id="test",
@@ -267,7 +267,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         assert retrieved.result == "retained after restart"
         assert _provider_tool_content(final_model, "recovered-wait") == "retained after restart"
         assert executions == 1
-        assert (await restored.lookup(job_id, owner=owner, depth=0)).wait_acknowledged
+        assert (await restored.lookup(job_id, owner=owner, depth=0)).consumed
         assert await restored.pending_outcomes() == []
     finally:
         release.set()

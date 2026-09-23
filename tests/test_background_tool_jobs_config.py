@@ -57,7 +57,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
 from tests.test_config_lifecycle import _make_lifecycle
 from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -393,7 +393,8 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
         executions += 1
         return BackgroundOutcome("completed", "kept result")
 
-    await runtime.start(
+    await start_job(
+        runtime,
         "saved",
         tool_name="tool",
         depth=0,
@@ -403,7 +404,7 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
         operation=operation,
     )
     waited = await runtime.wait("saved", owner=owner, depth=0)
-    await runtime.release_wait("saved", waited.token)
+    await runtime.release_wait("saved", waited.claim)
     await runtime.shutdown()
     path = paths.storage_root / "tool_jobs" / "saved.json"
     original = path.read_bytes()
@@ -460,7 +461,7 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
             requester_id="@human:localhost",
         )
         assert recovered.result == "kept result"
-        assert not recovered.wait_acknowledged
+        assert not recovered.consumed
         assert executions == 1
         assert await dispatcher._run_event(event)
     finally:
@@ -471,9 +472,9 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
 @pytest.mark.parametrize(
     "unreadable",
     [
-        '{"schema_version": 3, "job_id": "retired"}',
-        '{"schema_version": 4, "job_id": "trunc',
-        '{"schema_version": 4, "job_id": "another"}',
+        '{"schema_version": 4, "job_id": "retired"}',
+        '{"schema_version": 5, "job_id": "trunc',
+        '{"schema_version": 5, "job_id": "another"}',
     ],
 )
 async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unreadable: str) -> None:
@@ -490,9 +491,9 @@ async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unre
         depth=0,
         adapter={"source_event_id": "$saved"},
         status="completed",
-        has_result_payload=True,
+        payload_generation=0,
     )
-    (directory / "saved.json").write_text(json.dumps({"schema_version": 4, **asdict(saved)}))
+    (directory / "saved.json").write_text(json.dumps({"schema_version": 5, **asdict(saved)}))
     # Payload files are not job metadata, so parking neither reads nor warns about them.
     (directory / "saved.g0.result.json").write_text("{}")
     event = JournalEvent("$saved", "!room:localhost", None, EventKind.MESSAGE, "@user:localhost", 1, {}, 1)

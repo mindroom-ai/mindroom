@@ -1,10 +1,9 @@
-"""Exact durable parent evidence for foreground and later job result claims."""
+"""Acknowledge job result claims once the parent run has saved the exact tool call's result."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +16,7 @@ from mindroom.agent_storage import run_session_storage_operation
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.agno_compat_functions import function_actor, function_agent, function_run_context
+from mindroom.tool_jobs.results import read_result_payload
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -24,54 +24,27 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
 
     from mindroom.tool_jobs.results import ToolResultPayload
-    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
+    from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
 
-_RECEIPTS = "mindroom_tool_job_receipts"
 _CALL: ContextVar[FunctionCall | None] = ContextVar("tool_job_consumer_call", default=None)
 _OWNER: ContextVar[ConsumptionOwner | None] = ContextVar("tool_job_consumption", default=None)
 logger = get_logger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class _Consumption:
     runtime: ToolJobRuntime
     job_id: str
-    token: str
+    claim: JobClaim
     run_id: str
-    session_id: str
-    user_id: str | None
-    actor_id: str | None
     team: bool
-    owning_team_id: str | None
     call_id: str
-    tool_name: str
-    arguments: dict[str, Any] | None
-    receipt: dict[str, Any]
 
-    def saved(self, storage: BaseDb) -> bool:  # noqa: PLR0911 - Reject each independent evidence mismatch.
+    def saved(self, storage: BaseDb) -> bool:
+        """Find the exact tool call, finished with a result, in the saved parent run of the calling agent or team."""
         run = storage.get_run(self.run_id)
-        if not isinstance(run, TeamRunOutput if self.team else RunOutput):
-            return False
-        if run.session_id != self.session_id or run.user_id != self.user_id:
-            return False
-        actor_id = run.team_id if isinstance(run, TeamRunOutput) else run.agent_id
-        if actor_id != self.actor_id:
-            return False
-        if self.owning_team_id:
-            if not run.parent_run_id:
-                return False
-            parent = storage.get_run(run.parent_run_id)
-            if not isinstance(parent, TeamRunOutput) or parent.team_id != self.owning_team_id:
-                return False
-        receipts = (run.session_state or {}).get(_RECEIPTS, {})
-        if receipts.get(f"{self.run_id}:{self.call_id}") != self.receipt:
-            return False
-        return any(
-            tool.tool_call_id == self.call_id
-            and tool.tool_name == self.tool_name
-            and tool.tool_args == self.arguments
-            and not tool.is_paused
-            and tool.result is not None
+        return isinstance(run, TeamRunOutput if self.team else RunOutput) and any(
+            tool.tool_call_id == self.call_id and not tool.is_paused and tool.result is not None
             for tool in run.tools or []
         )
 
@@ -83,62 +56,43 @@ class ConsumptionOwner:
     storage_factory: Callable[[], BaseDb] | None = None
     _claims: list[_Consumption] = field(default_factory=list)
 
-    def register(self, runtime: ToolJobRuntime, job: BackgroundJob, token: str, call: FunctionCall) -> None:
-        """Bind a unique generation receipt to the exact SDK run and tool result."""
+    def register(self, runtime: ToolJobRuntime, job_id: str, claim: JobClaim, call: FunctionCall) -> None:
+        """Keep a claim until the parent run that made this exact tool call is saved."""
         context = function_run_context(call.function)
-        if context is None or context.session_state is None or not call.call_id:
+        if context is None or not call.call_id:
             msg = "Tool result consumption requires exact run and tool-call identity"
             raise ValueError(msg)
-        actor = function_actor(call.function)
-        if actor is None:
+        if function_actor(call.function) is None:
             msg = "Tool result consumption requires a concrete agent or team"
             raise ValueError(msg)
-        agent = function_agent(call.function)
-        receipt = {"job_id": job.job_id, "generation": job.generation, "token": token, "run_id": context.run_id}
-        context.session_state.setdefault(_RECEIPTS, {})[f"{context.run_id}:{call.call_id}"] = receipt
-        self._claims.append(
-            _Consumption(
-                runtime,
-                job.job_id,
-                token,
-                context.run_id,
-                context.session_id,
-                context.user_id,
-                actor.id,
-                agent is None,
-                agent.team_id if agent is not None else None,
-                call.call_id,
-                call.function.name,
-                deepcopy(call.arguments),
-                receipt,
-            ),
-        )
+        team = function_agent(call.function) is None
+        self._claims.append(_Consumption(runtime, job_id, claim, context.run_id, team, call.call_id))
 
     async def finalize(self) -> None:
         """Acknowledge exact saved rows; release missing, failed, or unsaved evidence."""
-        claims, self._claims = self._claims, []
-        for claim in claims:
+        consumptions, self._claims = self._claims, []
+        for consumption in consumptions:
             try:
                 saved = self.storage_factory is not None and await run_session_storage_operation(
                     self.storage_factory,
-                    claim.saved,
+                    consumption.saved,
                 )
                 if saved:
-                    await claim.runtime.acknowledge_wait(claim.job_id, claim.token)
+                    await consumption.runtime.acknowledge_wait(consumption.job_id, consumption.claim)
             except Exception:
                 logger.warning(
                     "Tool result persistence was not confirmed",
-                    job_id=claim.job_id,
-                    run_id=claim.run_id,
+                    job_id=consumption.job_id,
+                    run_id=consumption.run_id,
                     exc_info=True,
                 )
             finally:
-                await claim.runtime.release_wait(claim.job_id, claim.token)
+                await consumption.runtime.release_wait(consumption.job_id, consumption.claim)
 
 
 @contextmanager
 def consumption_context(owner: ConsumptionOwner) -> Iterator[None]:
-    """Bind the response's receipt owner for one call or stream pull."""
+    """Bind the response's claim owner for one call or stream pull."""
     token = _OWNER.set(owner)
     try:
         yield
@@ -180,13 +134,13 @@ def session_state_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[s
             "value": after.get(key),
         }
         for key in before.keys() | after.keys()
-        if key != _RECEIPTS and (key not in before or key not in after or before[key] != after[key])
+        if key not in before or key not in after or before[key] != after[key]
     }
 
 
 def _merge_session_state(value: Any, job: BackgroundJob, payload: ToolResultPayload, call: FunctionCall) -> Any:  # noqa: ANN401
     """Apply unconflicted state changes, reporting conflicts in a new value that leaves the payload intact."""
-    if job.wait_acknowledged or job.status != "completed":
+    if job.consumed or job.status != "completed":
         return value
     context = function_run_context(call.function)
     state = context.session_state if context is not None else None
@@ -215,54 +169,41 @@ def restore_control(control: dict[str, Any]) -> AgentRunException:
     return AgentRunException(values.pop("message"), **values)
 
 
-async def record_tool_job_receipt(
+async def retain_claim(
     runtime: ToolJobRuntime,
-    job: BackgroundJob,
-    token: str,
-    *,
+    job_id: str,
+    claim: JobClaim,
     function_call: FunctionCall | None = None,
 ) -> None:
-    """Retain a control or result receipt until its exact parent tool call is saved."""
+    """Keep a claim until the parent run saves the exact tool call, releasing it when no such run will be saved."""
     call = function_call or _CALL.get()
     owner = _OWNER.get()
+    if call is None or owner is None:
+        await runtime.release_wait(job_id, claim)
+        return
     try:
-        if call is not None and owner is not None:
-            owner.register(runtime, job, token, call)
-        else:
-            await runtime.release_wait(job.job_id, token)
+        owner.register(runtime, job_id, claim, call)
     except BaseException:
-        await runtime.release_wait(job.job_id, token)
+        await runtime.release_wait(job_id, claim)
         raise
 
 
 async def consume_tool_job(
     runtime: ToolJobRuntime,
     job: BackgroundJob,
-    payload: ToolResultPayload,
-    token: str | None,
+    claim: JobClaim,
     *,
     function_call: FunctionCall | None = None,
-) -> Any:  # noqa: ANN401 - SDK tool values are intentionally heterogeneous.
-    """Return one ready outcome's value and retain its claim until exact parent readback."""
-    from mindroom.custom_tools.job import is_job_function  # noqa: PLC0415 - Controls also use consumption receipts.
-
+) -> tuple[Any, ToolResultPayload]:
+    """Read a claimed outcome's value and payload, retaining the claim until the parent run saves this tool call."""
     call = function_call or _CALL.get()
-    value = payload.value
-    owner = _OWNER.get()
-    if token is None:
-        return value
-    if call is None or owner is None:
-        await runtime.release_wait(job.job_id, token)
-        return value
     try:
-        value = _merge_session_state(value, job, payload, call)
-        await record_tool_job_receipt(runtime, job, token, function_call=call)
+        payload = await read_result_payload(runtime, job)
+        value = payload.value
+        if call is not None and _OWNER.get() is not None:
+            value = _merge_session_state(value, job, payload, call)
     except BaseException:
-        await runtime.release_wait(job.job_id, token)
+        await runtime.release_wait(job.job_id, claim)
         raise
-    if payload.control is not None:
-        raise restore_control(payload.control)
-    if is_job_function(call.function) and job.status == "failed":
-        text = value.content if isinstance(value, ToolResult) else value
-        raise RuntimeError(str(payload.error or text or "Background tool job failed."))
-    return value
+    await retain_claim(runtime, job.job_id, claim, call)
+    return value, payload
