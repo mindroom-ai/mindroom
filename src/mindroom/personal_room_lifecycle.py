@@ -148,7 +148,7 @@ class PersonalRoomLifecycle:
                 failed = True
                 continue
             if record is not None:
-                candidates.add((record.user_id, record.source_room_id))
+                candidates.add((record.user_id, record.resume_source_room_id or record.source_room_id))
         return candidates, failed
 
     async def reconcile(self) -> None:

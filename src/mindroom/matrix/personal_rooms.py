@@ -168,6 +168,10 @@ class PersonalRoomService:
                         source_room_id=source_room_id,
                     )
                     await run_blocking_until_complete(write_personal_room, path, record)
+                if (record.resume_source_room_id or record.source_room_id) != source_room_id:
+                    self._require_current_settings(user_id, source_room_id)
+                    record.resume_source_room_id = source_room_id
+                    await run_blocking_until_complete(write_personal_room, path, record)
                 if record.room_id is None:
                     record.room_id = await self._resolve_or_create(record, source_room_id)
                     await run_blocking_until_complete(write_personal_room, path, record)
@@ -561,4 +565,9 @@ class PersonalRoomService:
             if settings is None or not self._allowed(user_id, room_id):
                 return
             roster = await self._validate_room(record)
-            await self._finish(record, path, record.source_room_id, human_joined=roster.get(user_id) == "join")
+            await self._finish(
+                record,
+                path,
+                record.resume_source_room_id or record.source_room_id,
+                human_joined=roster.get(user_id) == "join",
+            )

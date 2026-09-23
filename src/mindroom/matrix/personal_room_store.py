@@ -44,7 +44,10 @@ class PersonalRoomRecord(BaseModel):
 
     user_id: str
     alias: str
+    # Original onboarding source remains the confirmation destination.
     source_room_id: str
+    # Latest source validated for deferred work; absent in older records.
+    resume_source_room_id: str | None = None
     room_id: str | None = None
     welcome_content: dict[str, Any] | None = None
     welcome_event_id: str | None = None

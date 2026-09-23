@@ -36,7 +36,7 @@ from mindroom.matrix.personal_room_store import (
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
+from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import TEST_PASSWORD, install_runtime_journal_support, test_runtime_paths
@@ -245,6 +245,97 @@ def move_onboarding_to_new_room(owner: PersonalRoomService, server: MatrixServer
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("owner_event_processed", [True, False])
+async def test_validated_replacement_source_completes_deferred_welcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_event_processed: bool,
+) -> None:
+    """A validated replacement survives callback delivery and default restart recovery."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome_dispatch=True, welcome="Original {user}")
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    move_onboarding_to_new_room(owner, server)
+    assert await owner.ensure("@alice:localhost", "!new:localhost", server) == room_id
+    path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
+    assert read_personal_room(path).source_room_id == "!lobby:localhost"
+    assert not server.messages
+
+    server.set_member(room_id, "@alice:localhost", "join")
+    if owner_event_processed:
+        lifecycle = PersonalRoomLifecycle(
+            "helper",
+            owner.runtime,
+            owner.runtime_paths,
+            owner,
+            lambda _: None,
+            lambda event: event.sender,
+        )
+        await lifecycle.member_event(
+            nio.MatrixRoom(room_id, server.user_id),
+            _room_member_event(prev_membership="invite"),
+        )
+        assert len(server.messages) == 1
+
+    restarted = service(tmp_path, server, monkeypatch, welcome_dispatch=True, welcome="Changed {user}")
+    restarted.runtime.config = owner.runtime.config
+    router = PersonalRoomLifecycle(
+        "router",
+        restarted.runtime,
+        restarted.runtime_paths,
+        restarted,
+        lambda _: PersonalRoomTarget(restarted, True),
+        lambda event: event.sender,
+    )
+    await router.reconcile()
+    record = read_personal_room(path)
+    assert record.source_room_id == "!lobby:localhost"
+    assert record.welcome_completed
+    assert len(server.messages) == 1
+    assert next(iter(server.messages.values()))["content"]["body"] == "Original @alice:localhost"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rejected_by", ["membership", "access", "locked_membership"])
+async def test_unvalidated_replacement_source_does_not_authorize_deferred_welcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rejected_by: str,
+) -> None:
+    """An owner callback cannot infer replacement source authority from configuration."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome_dispatch=True)
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    move_onboarding_to_new_room(owner, server)
+    if rejected_by == "membership":
+        server.set_member("!new:localhost", "@alice:localhost", "leave")
+    elif rejected_by == "access":
+        owner.runtime.config.agents["helper"].access.users = []
+    else:
+        original_joined_members = server.joined_members
+        lookups = 0
+
+        async def depart_before_locked_lookup(room_id: str) -> object:
+            nonlocal lookups
+            if room_id == "!new:localhost":
+                lookups += 1
+                if lookups == 2:
+                    server.set_member(room_id, "@alice:localhost", "leave")
+            return await original_joined_members(room_id)
+
+        monkeypatch.setattr(server, "joined_members", depart_before_locked_lookup)
+    assert await owner.ensure("@alice:localhost", "!new:localhost", server) is None
+    path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
+    server.set_member(room_id, "@alice:localhost", "join")
+    await owner.owner_membership_event(room_id, "@alice:localhost", "join")
+    record = read_personal_room(path)
+    assert record.source_room_id == "!lobby:localhost"
+    assert record.resume_source_room_id is None
+    assert not record.welcome_completed
+    assert not server.messages
+
+
+@pytest.mark.asyncio
 async def test_concurrent_restart_reuses_room_and_welcome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Concurrent triggers and a fresh service must reuse room and successful welcome."""
     server = MatrixServer()
@@ -301,6 +392,10 @@ async def test_dispatch_waits_for_human_join_and_keeps_requester(
     owner = service(tmp_path, server, monkeypatch, welcome_dispatch=True)
     room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
     assert not server.messages
+    path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
+    legacy_record = json.loads(path.read_text())
+    legacy_record.pop("resume_source_room_id")
+    path.write_text(json.dumps(legacy_record))
     server.set_member(room_id, "@alice:localhost", "join")
     await owner.owner_membership_event(room_id, "@alice:localhost", "join")
     content = next(iter(server.messages.values()))["content"]
