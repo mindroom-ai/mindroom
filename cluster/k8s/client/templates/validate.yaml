@@ -11,12 +11,14 @@
 {{- if or (not .Values.nginx.create) .Values.nginx.existingConfigMap -}}
 {{- fail "authenticationRecovery requires the chart-managed nginx config" -}}
 {{- end -}}
-{{- $recoveryUrls := dict "probeUrl" .Values.authenticationRecovery.probeUrl "navigationUrl" (include "mindroom-client.authenticationRecoveryNavigationUrl" .) -}}
+{{- $recoveryUrls := dict "probeUrl" .Values.authenticationRecovery.probeUrl "navigationUrl" .Values.authenticationRecovery.navigationUrl -}}
 {{- range $name, $url := $recoveryUrls -}}
+{{- if or (ne $name "navigationUrl") (ne $url "") -}}
 {{- $lowerUrl := lower $url -}}
 {{- $lowerPath := regexFind `^[^?#]*` $lowerUrl -}}
 {{- if or (not (hasPrefix "/" $url)) (hasPrefix "//" $url) (contains "\\" $url) (contains "$" $url) (regexMatch `[[:cntrl:]]` $url) (contains "%2f" $lowerPath) (contains "%5c" $lowerPath) (regexMatch `%0[0-9a-f]|%1[0-9a-f]|%7f` $lowerUrl) (regexMatch `(^|/)(\.|%2e)(\.|%2e)?(/|$)` $lowerPath) -}}
 {{- fail (printf "authenticationRecovery.%s must be a safe same-origin root-relative URL" $name) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- $recoveryTimeout := .Values.authenticationRecovery.timeoutMs | toString -}}

@@ -19,6 +19,7 @@ from agno.compression.manager import CompressionManager
 from agno.models.response import ModelResponse, ToolExecution
 from agno.session.agent import AgentSession
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -3511,6 +3512,9 @@ class TestAdaptiveResponse(AgentBotTestBase):
             AsyncMock(return_value=_prepared_prompt_result(agent)),
         )
         monkeypatch.setattr("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=streaming))
+        # Summary inference is separate from the participation judge being counted here.
+        thread_summary = AsyncMock()
+        monkeypatch.setattr("mindroom.post_response_effects.maybe_generate_thread_summary", thread_summary)
         memory_queued: list[str] = []
         monkeypatch.setattr(
             ResponseRunner,
@@ -3556,6 +3560,8 @@ class TestAdaptiveResponse(AgentBotTestBase):
             if action != "sync_restart":
                 raise
             result = None
+        assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
+        assert thread_summary.await_count == (1 if action == "respond" else 0)
         bodies = [call.kwargs["content"].get("body", "") for call in bot.client.room_send.await_args_list]
         reactions = [
             call.kwargs for call in bot.client.room_send.await_args_list if call.kwargs["message_type"] == "m.reaction"

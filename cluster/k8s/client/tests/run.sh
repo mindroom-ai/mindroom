@@ -58,7 +58,12 @@ assert_not_contains "$work_dir/default.yaml" "location = /authentication-recover
 render "$work_dir/enabled.yaml" \
   --set authenticationRecovery.enabled=true \
   --set basePath=/chat
-assert_contains "$work_dir/enabled.yaml" 'window.__AUTHENTICATION_RECOVERY_CONFIG__ = {\"navigationUrl\":\"/chat/\",\"probeUrl\":\"/authentication-recovery-probe\",\"timeoutMs\":5000}'
+assert_contains "$work_dir/enabled.yaml" 'window.__AUTHENTICATION_RECOVERY_CONFIG__ = {\"navigationUrl\":\"\",\"probeUrl\":\"/authentication-recovery-probe\",\"timeoutMs\":5000}'
+render "$work_dir/explicit.yaml" \
+  --set authenticationRecovery.enabled=true \
+  --set basePath=/chat \
+  --set-string authenticationRecovery.navigationUrl=/chat/login
+assert_contains "$work_dir/explicit.yaml" 'window.__AUTHENTICATION_RECOVERY_CONFIG__ = {\"navigationUrl\":\"/chat/login\",\"probeUrl\":\"/authentication-recovery-probe\",\"timeoutMs\":5000}'
 assert_contains "$work_dir/enabled.yaml" 'new URL(\"authentication-recovery.js\", document.currentScript.src).href'
 assert_contains "$work_dir/enabled.yaml" 'location = /authentication-recovery.js'
 assert_contains "$work_dir/enabled.yaml" 'location = /authentication-recovery-probe'

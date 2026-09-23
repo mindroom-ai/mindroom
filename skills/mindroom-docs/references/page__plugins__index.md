@@ -159,9 +159,16 @@ MindRoom instantiates the class when building agents.
 Set `requires_room_context=True` in tool metadata when the toolkit requires the live Matrix room runtime, including its client, requester, or conversation context.
 The MCP gateway omits these toolkits from discovery and rejects direct schema and invocation requests before constructing them.
 Agent runs without a room also hide these tools using the same metadata.
+These toolkits stay in the primary runtime because workers do not provide live room context.
 This requirement describes runtime compatibility; it does not grant or replace tool authorization.
 
 Set `requires_primary_runtime=True` when a toolkit depends on process-local services or primary-runtime authority and must never be routed to a worker, even if an agent lists it in `worker_tools`.
+This also applies to toolkits that retain session state or an in-memory resource between calls: the generic worker runner creates a fresh toolkit for each request.
+This includes functions that read or mutate an injected `Agent`, `Team`, or `RunContext`.
+Worker call arguments accept JSON values and paths; unsupported objects are rejected before worker allocation or credential grants.
+For an SDK function that accepts an `agent` parameter but never uses it, list its function name in `worker_inert_agent_functions`.
+Only those declared functions receive `None` in place of the injected agent when routed to a worker.
+Do not use this declaration for functions that depend on agent identity, configuration, or session state.
 This is distinct from `default_execution_target=PRIMARY`, which is only an overridable default.
 
 ## OAuth providers
@@ -405,6 +412,7 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 | `managed_init_args` | tuple of `ToolManagedInitArg` | `()` | Declares which MindRoom-managed values the toolkit constructor expects (see [Managed init args](#managed-init-args)) |
 | `default_execution_target` | `ToolExecutionTarget` | `PRIMARY` | Default location, `PRIMARY` or `WORKER`; sandbox routing configuration may override it |
 | `requires_primary_runtime` | boolean | `False` | Always execute in the primary runtime, including when sandbox routing requests all tools or explicitly lists this toolkit |
+| `worker_inert_agent_functions` | tuple of strings | `()` | Functions whose unused injected `agent` parameter can safely receive `None` during worker execution |
 
 ### Dependencies
 

@@ -2755,7 +2755,10 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 ## Worker Routing
 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
-When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
+An explicit agent `worker_tools` list takes precedence, followed by `defaults.worker_tools`; an explicit empty list selects local execution.
+When both are omitted, MindRoom follows the [sandbox environment routing policy](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes).
+With the default static backend, no proxy URL, and no environment routing overrides, tools execute locally.
+Invalid non-empty execution modes are rejected when that environment policy is read.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
 Tools whose catalog metadata sets `requires_primary_runtime=True` stay in the primary runtime even when listed.
 Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
@@ -3966,7 +3969,8 @@ The router supports these configuration options:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `model` | string | `"default"` | Model to use for routing decisions |
+| `model` | string | `"default"` | Model to use for ordinary routing and judgment fallback |
+| `judgment` | object or null | `null` | Optional JEV (TypeSafe) responder selection before the LLM router |
 | `access` | object or null | `null` | Membership-based responder access policy |
 | `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted room IDs are persisted, rejoined after restart, and preserved during room cleanup |
 
@@ -3992,6 +3996,52 @@ For configured rooms, routing candidates come only from `agents.<name>.rooms` an
 For ad-hoc rooms accepted through invites, routing candidates come from the sender-visible MindRoom agents and teams currently joined to that room, then are filtered by the same sender permissions.
 
 When multiple responders are eligible, the router uses a structured output schema to ensure consistent routing decisions, including the selected agent or team name and reasoning for the selection.
+
+## Responder selection judgments
+
+Set `router.judgment` to make one bounded choice among the already eligible agents and teams before ordinary routing.
+This is optional; omitting it or setting it to `null` preserves existing behavior, even when a TypeSafe API key is present.
+Explicit mentions, existing thread participation rules, authorization, and deterministic single-candidate routing are unchanged.
+
+LLM routing uses the existing `router.model` setting. To use a cheap LLM, point it at a configured model alias.
+
+```yaml
+router:
+  model: cheap_router  # Must exist under models
+```
+
+To try JEV (System One), set `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env` and enable the judgment.
+There is one LLM routing implementation: it handles ordinary routing and fallback when JEV cannot decide.
+
+```yaml
+router:
+  model: default
+  judgment:
+    provider: typesafe
+    threshold: 0.8
+    timeout_seconds: 1.5
+```
+
+JEV receives candidate descriptions: roles, available tools, delegation capabilities, and the brief instructions used by ordinary routing.
+It sees the current request text and the last three complete visible message bodies, with sender fields replaced by speaker aliases.
+This is a text-only view: no system prompt, private tool results, attachment contents, or full conversation history is added.
+Messages are not cut off to fit: sensitive or oversized input uses ordinary routing instead.
+The complete judgment request is limited to 16,000 UTF-8 bytes and at most 253 candidate responders (plus two special choices).
+
+A selected candidate routes through the existing delivery path.
+A confident `no_fit` produces the existing Matrix message asking the user to mention a responder or rephrase.
+For OpenAI-compatible `model: auto` requests, it returns HTTP 400 with error code `no_suitable_responder` instead of selecting the first agent.
+The `multiple` choice means no single candidate can cover the request; it falls back to ordinary single-responder routing and does not launch several agents.
+Low confidence, abstention, invalid output, missing credentials, capacity exhaustion, or a timeout also falls back to ordinary routing using the existing runtime model resolution.
+The LLM router retains its configured prompts, `router.model`, and room/thread model overrides.
+Its existing context window includes up to three previous messages truncated to 100 characters each.
+
+System One returns a distribution and confidence; both the selected option's probability and confidence must meet `threshold`, and tied winners abstain.
+The dedicated rubric does not use the ordinary router prompt overrides; those still apply to fallback routing.
+
+Judgments share the same process-wide capacity limits as participation and mid-turn checks: eight concurrent calls and one per instance/router owner, without a waiting queue.
+There are no application-level retries; the configured deadline bounds the JEV request.
+Logs record the backend, decision, probability when available, latency, token usage, and failure category without logging the request text.
 
 ## Router Responsibilities
 
@@ -8065,7 +8115,19 @@ image_to_video(
 The current wrapper chooses one of several provider endpoints based on `file_type` and sends a fixed payload template for that media class.
 For PNG and JPG it uses the image endpoint; MP4 and GIF use the text-to-video endpoint and return future-link URLs with an ETA.
 For MP3 and WAV generation, it uses provider voice endpoints and returns audio URLs.
-If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint until the media is ready or the timeout is reached.
+If `wait_for_completion` is enabled and the response includes a finite numeric ETA (as a number or numeric string) and a provider job ID, the tool polls that job at the provider fetch endpoint.
+Confirmed completion returns the fetched output URLs, replacing queued placeholders when present.
+A terminal provider rejection returns its message without unavailable media artifacts.
+Retryable service and rate-limit errors use the remaining polling attempts; exhaustion retains queued media links and the last status-check error.
+A retryable fetch response with a nonempty `Retry-After` header ends the current wait early, returning queued links, the provider explanation, and the requested retry delay without another fetch or an additional sleep.
+A timeout does not mean the remote job failed.
+If a queued response lacks the ID or finite numeric ETA needed for polling, the tool reports that completion could not be checked.
+With completion waiting enabled, generation and fetch requests each use 60-second connect and read timeouts.
+These limit connection establishment and waiting for response bytes, not the overall wall-clock duration.
+HTTP request time remains additional to the polling-attempt budget.
+Positive fractional attempt budgets round up to a whole attempt; with a positive polling cap, a queued job gets one immediate check even when its ETA and `add_to_eta` are zero.
+Setting `max_wait_time: 0` skips status polling.
+The tool sleeps for one second between attempts, never after the final check.
 
 ### Configuration
 
@@ -8077,8 +8139,8 @@ If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint 
 | `width` | `number` | `no` | `512` | Image or video width. |
 | `height` | `number` | `no` | `512` | Image or video height. |
 | `wait_for_completion` | `boolean` | `no` | `false` | Poll the provider fetch endpoint until the output is ready. |
-| `add_to_eta` | `number` | `no` | `15` | Extra seconds added to the provider ETA before timing out. |
-| `max_wait_time` | `number` | `no` | `60` | Maximum total wait time in seconds. |
+| `add_to_eta` | `number` | `no` | `15` | Extra one-second polling attempts added to the provider ETA, capped by `max_wait_time`. |
+| `max_wait_time` | `number` | `no` | `60` | Cap on one-second polling attempts; HTTP request time is additional. |
 
 ### Example
 
@@ -8100,7 +8162,9 @@ generate_media("A looping animation of messages flowing through a Matrix bridge.
 
 - Despite the broad provider branding, the current wrapper exposes one opinionated `generate_media()` path rather than a generic arbitrary-model interface.
 - MP4 and GIF generation use a provider-side video template whose model and dimensions can be overridden with `model_id`, `width`, and `height`.
-- Returned media are provider URLs, and the success message usually includes the provider ETA rather than immediate ready-to-view bytes.
+- Returned media are provider URLs.
+- Without completion waiting, the response retains the provider ETA; queued URLs may not be ready yet.
+- Local media artifact IDs remain separate from the provider job ID used for completion polling.
 
 ## Related Docs
 
@@ -9512,8 +9576,9 @@ The Desktop tool can explain the trusted chat command, but the model cannot regi
 Use `!desktop rotate` to replace a device without dropping the current target before confirmation, or `!desktop disconnect confirm` to remove it.
 
 The `desktop` tool runs in the primary agent process because it needs that live agent's Matrix device and room requester identity.
-The `browser` tool remains worker-routable for host-browser isolation, but its Matrix desktop target requires the primary process's live Matrix context.
-Do not list `browser` in `worker_tools` for an agent that uses `target: desktop`; a worker-routed desktop call fails closed with a live-context error.
+The `browser` tool keeps calls resolving to `target: desktop` in the primary process, including when `default_target: desktop` is configured.
+Host-browser calls still follow the worker routing policy, even with a desktop default or configured desktop device.
+Listing `browser` in `worker_tools` therefore isolates its host calls while preserving desktop control through the live Matrix context.
 It is hidden from OpenAI-compatible API runs when approval policy requires Matrix approval because those runs have no Matrix approval transport.
 
 The separate `browser` tool can still target its Playwright extension transport through its own configuration:
@@ -14033,9 +14098,16 @@ MindRoom instantiates the class when building agents.
 Set `requires_room_context=True` in tool metadata when the toolkit requires the live Matrix room runtime, including its client, requester, or conversation context.
 The MCP gateway omits these toolkits from discovery and rejects direct schema and invocation requests before constructing them.
 Agent runs without a room also hide these tools using the same metadata.
+These toolkits stay in the primary runtime because workers do not provide live room context.
 This requirement describes runtime compatibility; it does not grant or replace tool authorization.
 
 Set `requires_primary_runtime=True` when a toolkit depends on process-local services or primary-runtime authority and must never be routed to a worker, even if an agent lists it in `worker_tools`.
+This also applies to toolkits that retain session state or an in-memory resource between calls: the generic worker runner creates a fresh toolkit for each request.
+This includes functions that read or mutate an injected `Agent`, `Team`, or `RunContext`.
+Worker call arguments accept JSON values and paths; unsupported objects are rejected before worker allocation or credential grants.
+For an SDK function that accepts an `agent` parameter but never uses it, list its function name in `worker_inert_agent_functions`.
+Only those declared functions receive `None` in place of the injected agent when routed to a worker.
+Do not use this declaration for functions that depend on agent identity, configuration, or session state.
 This is distinct from `default_execution_target=PRIMARY`, which is only an overridable default.
 
 ## OAuth providers
@@ -14279,6 +14351,7 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 | `managed_init_args` | tuple of `ToolManagedInitArg` | `()` | Declares which MindRoom-managed values the toolkit constructor expects (see [Managed init args](#managed-init-args)) |
 | `default_execution_target` | `ToolExecutionTarget` | `PRIMARY` | Default location, `PRIMARY` or `WORKER`; sandbox routing configuration may override it |
 | `requires_primary_runtime` | boolean | `False` | Always execute in the primary runtime, including when sandbox routing requests all tools or explicitly lists this toolkit |
+| `worker_inert_agent_functions` | tuple of strings | `()` | Functions whose unused injected `agent` parameter can safely receive `None` during worker execution |
 
 ### Dependencies
 
@@ -19059,7 +19132,7 @@ MindRoom's architecture consists of several key components working together.
 | `mid_turn.py` / `mid_turn_judgment.py` | Per-response finish-or-wrap-up judgments for queued human messages, bound to interchangeable LLM or TypeSafe backends |
 | `config/mid_turn.py` | Opt-in agent settings for the mid-turn judgment backend and decision instructions |
 | `agno_participation.py` | Agno participation adapter: prepared request checks, primary-run isolation, metrics, and scoped model interception |
-| `judgment/` | Backend-independent boolean questions, minimized context, shared execution limits, and LLM/System One adapters |
+| `judgment/` | Backend-independent boolean and choice questions, minimized context, shared execution limits, and LLM/System One adapters |
 | `participation_judgment.py` | Bind the participation rubric to an opt-in LLM or TypeSafe judge and map its result to a participation decision |
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
@@ -19087,6 +19160,7 @@ MindRoom's architecture consists of several key components working together.
 | `personal_room_lifecycle.py` | Personal-room command and membership policy, target-service routing, reconciliation, and separate rejoin/cleanup retention projections |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
+| `routing_judgment.py` | Opt-in bounded System One responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
 | `streaming.py` | Streaming state machine and progressive response state |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `provider_media_fallback.py` | Retries provider requests without rejected inline media and remembers unsupported kinds per model route for the process lifetime |
@@ -20223,6 +20297,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 
 | Observed gap or required extension point | Next upstream work | Local evidence |
 | --- | --- | --- |
+| ModelsLab polls a local artifact UUID and discards completed URLs and wait outcomes. | Poll the provider job ID, accept numeric ETAs, retain completed outputs, and distinguish retryable status failures from terminal rejection. | `tools/agno_compat_modelslabs.py`; `tests/test_modelslabs_tool.py`. |
 | MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, and leaves temporary audio after encoding failures. | Use a portable font default, forward styles, preserve complete glyph bounds, advance wrapped words, and clean owned audio files on every exit; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; regressions in `tests/test_moviepy_video_tools.py`, `tests/test_moviepy_caption_layout.py`, and `tests/test_moviepy_caption_output.py`. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
@@ -20268,6 +20343,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 
 | Compatibility module | Agno adaptation | Policy and lifecycle owner |
 | --- | --- | --- |
+| `tools/agno_compat_modelslabs.py` | Generation orchestration polls provider job identities, accepts numeric ETAs, retains completed outputs, and distinguishes retryable status failures from terminal rejection while reusing SDK payload and media helpers. | `tools/modelslabs.py` retains tool registration, optional imports, and authored file-type normalization; nonwaiting generation stays upstream. |
 | `custom_tools/agno_compat_moviepy.py` | Portable caption fonts, style forwarding, complete glyph bounds, measured canvas sizing, bottom placement, non-overlapping wrapping, and owned temporary audio cleanup; SDK parsing and temporary-file helpers remain shared. | `tools/moviepy_video_tools.py` selects the adapter lazily; rendering settings and atomic output publication are preserved. |
 | `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store and exact-run cancellation drainage. | `agent_storage.py` and storage lifecycle callers; `ai.py` retains canonical history ownership. |
 | `agno_compat_sqlite.py` | Private pragma listener removal, monotonic run insertion with atomic usage snapshots, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy. |
@@ -22011,8 +22087,10 @@ Size and monitor the volume for lifetime callback growth, and use the inspection
 When configured, `coding`, `docker`, `file`, `python`, and `shell` tool calls can be proxied to a separate **sandbox-runner** sidecar container.
 The sidecar runs the same image but without access to secrets, credentials, or the primary data volume.
 This provides real process-level isolation for code-execution tools.
-In a simple local static-runner install with no proxy URL, execution tools continue to run in the MindRoom process.
-When routing is explicitly requested or a dedicated worker backend is configured, misconfigured worker routing fails closed instead of silently falling back to the primary runtime.
+In a simple local static-runner install with no proxy URL and no YAML or environment settings requesting worker routing, execution tools run in the MindRoom process.
+Explicit YAML worker lists take precedence over environment execution modes.
+Requested routing fails closed when its backend is misconfigured, subject to the static runner's explicit `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` fallback.
+Dedicated Docker and Kubernetes workers do not allow that fallback.
 
 See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
 
@@ -22323,7 +22401,8 @@ A change to the browser configuration or prepared process environment closes the
 Cancellation and worker shutdown also clean up browser resources.
 
 Generic and unscoped runners continue to isolate browser calls in separate subprocesses.
-Browser tools configured to use a separate desktop retain their existing routing.
+The `browser` tool keeps calls resolving to its Matrix desktop target in the primary runtime, without allocating a worker.
+An explicit `target: host` still uses the configured worker even when `default_target: desktop` is set.
 For a visible browser and Chat viewer, use [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/).
 
 ## Environment variable reference
@@ -22350,9 +22429,9 @@ The shared static-runner Compose sidecar does not support interactive computers.
 | `MINDROOM_WORKER_BACKEND` | Worker backend name: `static_runner`, `docker`, or `kubernetes` | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | URL of the shared sandbox runner when using `static_runner` | _(none — plain static-runner installs execute locally)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Static-runner bearer token and Kubernetes control-plane secret used to derive per-worker runner tokens | _(required for worker-routed execution)_ |
-| `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off` | _(unset — uses static proxy all-tools routing when `MINDROOM_SANDBOX_PROXY_URL` is set; otherwise uses default worker-routed execution tools)_ |
-| `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy when no agent-level `worker_tools` override is active | `*` for all mode or unset static-proxy mode, empty for selective mode or unset no-proxy mode |
-| `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Permit local execution of `coding`, `docker`, `file`, `python`, and `shell` when routing was explicitly requested but no worker/proxy backend is available | `false` |
+| `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off`; applies when neither agent nor defaults sets `worker_tools` | _(unset — static proxy URL routes eligible tools; dedicated backends route metadata defaults; plain static installs run locally)_ |
+| `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy when neither agent nor defaults sets `worker_tools` | `*` for all mode or unset static-proxy mode, empty for selective mode or unset no-proxy mode |
+| `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Permit tools whose default target is a worker to run locally when static routing is requested without a proxy URL; never bypasses dedicated workers | `false` |
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | HTTP timeout for proxy calls | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Maximum attachment bytes the primary runtime will inline when saving context attachments into a worker workspace with `get_attachment(..., mindroom_output_path=...)` | `16777216` (16 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
@@ -22399,14 +22478,20 @@ If the warm template fails to start, dispatch falls back to spawn-per-call and r
 
 ## Execution modes
 
+Environment modes apply when both the agent's `worker_tools` and `defaults.worker_tools` are null or omitted.
+An explicit YAML list, including `[]`, takes precedence over these modes.
+Tools that require the primary runtime stay local, and runner processes never proxy their own tools.
+
 | Mode | Behavior |
 |------|----------|
-| `selective` | Only tools listed in `MINDROOM_SANDBOX_PROXY_TOOLS` are proxied. Recommended. |
-| `all` / `sandbox_all` | Every tool call goes through the proxy |
-| `off` / `local` / `disabled` | Proxy disabled even if URL is set, and execution tools may run in the primary runtime |
-| _(unset)_ | With a configured static proxy URL, proxies all tools for legacy compatibility. With `MINDROOM_WORKER_BACKEND=docker` or `kubernetes`, routes default worker tools and fails closed if the backend is misconfigured. With plain `static_runner` and no proxy URL, tools execute locally. |
+| `selective` | Proxy eligible tools listed in `MINDROOM_SANDBOX_PROXY_TOOLS`, or all eligible tools for `*`. An empty selection routes nothing. |
+| `all` / `sandbox_all` | Proxy every eligible registry tool enabled for the agent |
+| `off` / `local` / `disabled` | Run tools in the primary runtime even if a proxy URL or dedicated backend is configured |
+| _(unset)_ | An explicit `MINDROOM_SANDBOX_PROXY_TOOLS` selection controls routing. Otherwise, a configured static proxy URL routes all eligible tools, dedicated Docker/Kubernetes backends route metadata defaults, and plain `static_runner` without a proxy URL runs locally. Requested dedicated routing fails closed when misconfigured. |
 
-`MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is an explicit escape hatch for local development that restores primary-runtime execution for `coding`, `docker`, `file`, `python`, and `shell` after routing was explicitly requested without a working worker/proxy backend.
+`MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` permits local execution when routing was requested with `static_runner` but no proxy URL is configured.
+It applies only to tools whose metadata defaults to worker execution, currently `browser_mcp`, `coding`, `docker`, `file`, `python`, and `shell`.
+It does not bypass dedicated Docker or Kubernetes workers, and a configured static proxy URL keeps calls routed.
 Do not set it in hosted or multi-tenant deployments.
 
 ## Shell env and PATH
@@ -22642,17 +22727,37 @@ The `worker_tools` field has three states:
 
 | Value | Behavior |
 |-------|----------|
-| `null` (omitted) | Inherit `defaults.worker_tools`; when both are omitted, use the runtime routing policy, including each toolkit’s metadata defaults |
+| `null` (omitted) | Inherit `defaults.worker_tools`; if that is also null or omitted, use the environment routing policy described under [Execution modes](#execution-modes), including toolkit metadata defaults for a dedicated backend with no explicit mode or tool selection |
 | `[]` (empty list) | Explicitly disable sandbox proxying for this agent |
 | `["shell", "file"]` | Proxy exactly these tools for this agent |
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Tools whose catalog metadata sets `requires_primary_runtime=True` stay in the primary runtime even when listed.
+Tools whose catalog metadata sets `requires_primary_runtime=True` or `requires_room_context=True` stay in the primary runtime even when listed.
+This includes `reasoning`, `daytona`, `mem0`, `slack`, and `claude_agent`, which consume live agent or run state.
+The `browserbase`, `composio`, `duckdb`, `e2b`, `pandas`, `sql`, and `zep` toolkits also stay local because they retain a browser or local shell session, database connection (including in-memory databases), execution result, named dataframe, or generated session identity between calls.
+The generic worker runner creates a fresh toolkit for each request.
+`config_manager` stays primary to manage the authored configuration and live API snapshots; its roomless inspection functions remain available.
+`agent_vault_access` stays primary to read the owner token mounted for self-service Vault grants.
+The `browser` toolkit selects placement per call: desktop uses the primary Matrix context, while host follows the configured worker policy.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
-Without that URL, explicitly selected worker-routed tools fail closed unless `MINDROOM_SANDBOX_EXECUTION_MODE=off|local|disabled` or `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is set.
-If `worker_tools` is omitted and no static proxy URL is configured, simple local installs run those tools in the primary MindRoom process.
+Without that URL, explicitly selected worker-routed tools fail closed, subject to the limited `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` fallback described above.
+The `off`, `local`, and `disabled` modes do not override an explicit YAML list.
+If both YAML worker lists are omitted, no environment setting requests routing, and no static proxy URL is configured, simple local installs run tools in the primary MindRoom process.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
+
+Worker-routed media tools return typed images, audio, video, and files.
+The worker reads generated files and downloads public HTTP(S) media URLs before returning inline bytes; the primary runtime never reads a worker path or follows a media URL from the result.
+Audio preserves explicit formats and recognized filename extensions; when those are absent, known MP3/WAV MIME types supply the format for inline provider requests.
+Media downloads follow at most five redirects and close each intermediate response without reading its body.
+Downloads request `Accept-Encoding: identity`; a final response with another HTTP `Content-Encoding` fails as a tool error before its body is read.
+The final identity response is streamed within the media byte limits below.
+Downloads use the server-fetch destination checks, including redirects, and reject local and metadata-service destinations.
+
+Each result supports at most eight media items, 10 MiB per item, and 20 MiB of media in total.
+Result text is limited to 4,194,304 characters and JSON metadata to 64 KiB of serialized ASCII JSON.
+Unsupported resources or oversized results produce a tool error.
+Run matching MindRoom revisions in the primary and workers so both use the same result protocol.
 
 ## Worker Scope
 
@@ -22714,7 +22819,8 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, M
 
 ## Without configured worker routing
 
-With `MINDROOM_WORKER_BACKEND=static_runner` and no `MINDROOM_SANDBOX_PROXY_URL`, tool calls execute directly in the primary MindRoom runtime process.
+With `MINDROOM_WORKER_BACKEND=static_runner`, no `MINDROOM_SANDBOX_PROXY_URL`, and no YAML or environment settings requesting worker routing, tool calls execute directly in the primary MindRoom runtime process.
+Explicitly requested routing still requires the configured backend, subject to the limited static fallback described under [Execution modes](#execution-modes).
 This is fine for development but not recommended for production deployments where agents run untrusted code.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker-routed tool calls fail closed when the backend is misconfigured instead of silently running locally.
 

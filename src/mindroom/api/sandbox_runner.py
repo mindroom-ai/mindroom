@@ -70,6 +70,7 @@ from mindroom.tool_system.output_files import (
 )
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
+from mindroom.tool_system.worker_media import serialize_worker_tool_result
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
@@ -1152,6 +1153,7 @@ async def _execute_prepared_request_inprocess(
 
         try:
             result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
+            result = await asyncio.to_thread(serialize_worker_tool_result, result)
         except OAuthConnectionRequired as exc:
             logger.info(
                 "sandbox_tool_oauth_connection_required",
@@ -1175,18 +1177,8 @@ async def _execute_prepared_request_inprocess(
 
     return SandboxRunnerExecuteResponse(
         ok=True,
-        result=_serialize_runner_tool_result(prepared.tool_name, result),
+        result=result,
     )
-
-
-def _serialize_runner_tool_result(tool_name: str, result: object) -> object:
-    """Preserve bounded browser images across generic runner transports."""
-    if tool_name in {"browser", "browser_mcp"}:
-        from agno.tools.function import ToolResult  # noqa: PLC0415
-
-        if isinstance(result, ToolResult):
-            return encode_media_result(result)
-    return to_json_compatible(result)
 
 
 async def _execute_request_inprocess(

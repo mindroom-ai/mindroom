@@ -35,7 +35,11 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
-async def test_launch_preapproval_does_not_expand_from_live_script_config(tmp_path: Path) -> None:
+@pytest.mark.parametrize("worker_tools", [[], None], ids=["explicit-local", "missing-static-proxy"])
+async def test_launch_preapproval_does_not_expand_from_live_script_config(
+    tmp_path: Path,
+    worker_tools: list[str] | None,
+) -> None:
     """A live allowlist added after launch cannot bypass Matrix approval."""
     manager, _backend, worker_client = _manager(tmp_path)
     launch_context = _manager_context(tmp_path)
@@ -46,6 +50,8 @@ async def test_launch_preapproval_does_not_expand_from_live_script_config(tmp_pa
     live_watcher = AgentConfig(
         display_name="Watcher",
         worker_scope="user_agent",
+        # Tool routing remains independent of the faked script-process worker.
+        worker_tools=worker_tools,
         tools=["calculator", {"script": {"allowed_tools": ["calculator"]}}],
     )
     live_config = launch_context.config.model_copy(
@@ -71,8 +77,17 @@ async def test_launch_preapproval_does_not_expand_from_live_script_config(tmp_pa
 
     receipt = await _call_through_gateway(broker, request, token_path.read_text(encoding="utf-8"))
 
-    assert receipt.state is ScriptCallState.COMPLETED
     assert approval_events == [f"approval:{durable_run.run_id}:live-allowlist"]
+    if worker_tools is None:
+        assert receipt.state is ScriptCallState.FAILED
+        assert receipt.error == {
+            "kind": "tool_failure",
+            "message": "MINDROOM_SANDBOX_PROXY_URL must be set when sandbox proxying is enabled.",
+            "retryable": False,
+        }
+    else:
+        assert receipt.state is ScriptCallState.COMPLETED
+        assert receipt.result == '{"operation": "addition", "result": 3}'
 
 
 def _origin(*, run_id: str = "run-1", call_id: str = "call-1") -> BackgroundScriptToolOrigin:

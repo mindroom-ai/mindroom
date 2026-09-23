@@ -385,7 +385,8 @@ async def test_runtime_room_override_selects_router_model(tmp_path: Path) -> Non
             room_id=ROOM_ID,
         )
 
-    assert result == "assistant"
+    assert result is not None
+    assert result.entity_name == "assistant"
     assert selected_models == ["large"]
 
 

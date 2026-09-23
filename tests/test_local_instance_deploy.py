@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -14,6 +17,7 @@ from rich.console import Console
 
 from tests.conftest import normalize_console_output
 
+_REAL_SUBPROCESS_RUN = subprocess.run
 _SCRIPT_PATH = Path("local/instances/deploy/deploy.py")
 _MODULE_SPEC = importlib.util.spec_from_file_location("mindroom_local_instance_deploy", _SCRIPT_PATH)
 assert _MODULE_SPEC is not None
@@ -515,6 +519,648 @@ def test_telegram_bridge_compose_renders_configured_image(
 
     overridden_compose = yaml.safe_load(compose_path.read_text())
     assert overridden_compose["services"]["telegram"]["image"] == "registry.example/telegram:compatible"
+
+
+@pytest.fixture
+def authelia_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[deploy.Instance, Path, list[str], Console]:
+    """Keep launch inputs synthetic and capture all Docker commands."""
+    instance = _instance("alpha", matrix_type=deploy.MatrixType.TUWUNEL, data_root=tmp_path)
+    instance.auth_type = deploy.AuthType.AUTHELIA
+    instance.status = deploy.InstanceStatus.RUNNING
+    registry = deploy.Registry(instances={"alpha": instance})
+    env_dir = tmp_path / "envs"
+    env_dir.mkdir()
+    (env_dir / "alpha.env").write_text(f"INSTANCE_NAME=alpha\nDATA_DIR={instance.data_dir}\n")
+    users_file = Path(instance.data_dir) / "authelia" / "users_database.yml"
+    users_file.parent.mkdir(parents=True)
+    users_file.write_text((deploy.SCRIPT_DIR / "templates" / "authelia" / "users_database.yml").read_text())
+    console = Console(record=True, width=240)
+    commands: list[str] = []
+
+    def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
+        commands.append(cmd)
+        if cmd.endswith(" config --format json --no-env-resolution"):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "services": {
+                            "authelia": {
+                                "volumes": [
+                                    {
+                                        "type": "bind",
+                                        "source": str(users_file.parent).replace("$", "$$"),
+                                        "target": "/config",
+                                        "bind": {"create_host_path": True},
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                ),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(deploy, "console", console)
+    monkeypatch.setattr(deploy, "ENV_DIR", env_dir)
+    monkeypatch.setattr(deploy, "REGISTRY_FILE", tmp_path / "instances.json")
+    monkeypatch.setattr(deploy, "load_registry", lambda: registry)
+    monkeypatch.setattr(deploy, "REPO_ROOT", tmp_path / "source")
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path / "home"))
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+    return instance, users_file, commands, console
+
+
+def _launch_authelia(command: str, *, only_matrix: bool = False, use_registry: bool = False) -> None:
+    if command == "start":
+        deploy.start(
+            "alpha",
+            only_matrix=only_matrix,
+            use_registry=use_registry,
+            registry_url=deploy.DEFAULT_REGISTRY,
+            no_build=True,
+        )
+    else:
+        deploy.restart(
+            name=None if command == "restart_all" else "alpha",
+            all_instances=command == "restart_all",
+            only_matrix=only_matrix,
+            use_registry=use_registry,
+            registry_url=deploy.DEFAULT_REGISTRY,
+            no_build=True,
+        )
+
+
+def _launched_services(commands: list[str]) -> list[str]:
+    """Read the selected services from the single captured Compose launch."""
+    launches = [cmd.split(" up -d", 1)[1].split() for cmd in commands if " up -d" in cmd]
+    assert len(launches) == 1
+    services = launches[0]
+    if services and services[0] == "--force-recreate":
+        services = services[1:]
+    return services
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+@pytest.mark.parametrize(
+    "example_state",
+    [
+        "unchanged",
+        "renamed",
+        "enabled_by_default",
+        "literal_block",
+        "internal_crlf",
+        "base64_tail_bits",
+        "zero_padded_parameters",
+        "reordered_duplicate_parameters",
+        "version_segment_parameters",
+        "missing_version",
+        "zero_time",
+        "missing_time",
+        "ignored_key_length",
+        "ldap_crypt",
+        "ldap_argon2",
+        "ldap_both",
+        "binary",
+        "binary_ldap",
+    ],
+)
+def test_authelia_launch_rejects_enabled_public_credentials(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    command: str,
+    example_state: str,
+) -> None:
+    """Reject the public hash before launch effects even after account edits."""
+    instance, users_file, commands, console = authelia_launch
+    database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    public_hash = database["users"]["admin"]["password"]
+    _, variant, version, parameters, salt, digest = public_hash.split("$")
+    prefix = f"${variant}${version}${parameters}$"
+    crlf_salt = "\r\n".join(salt)
+    crlf_digest = "\r\n".join(digest)
+    equivalent_hashes = {
+        "internal_crlf": f"{prefix}{crlf_salt}${crlf_digest}\r\n",
+        "base64_tail_bits": f"{prefix}{salt[:-1]}R${digest[:-1]}p",
+        "zero_padded_parameters": f"${variant}$v=0019$m={'0' * 5000}1024,t=01,p=08${salt}${digest}",
+        "reordered_duplicate_parameters": f"${variant}$v=19$m=1,t=3,p=1,p=8,m=1024,t=1${salt}${digest}",
+        "version_segment_parameters": f"${variant}$v=19,m=1024,t=1,p=8$m=1,t=3,p=1${salt}${digest}",
+        "missing_version": f"${variant}$m=1024$t=1,p=8${salt}${digest}",
+        "zero_time": f"${variant}$v=19$m=1024,t=0,p=8${salt}${digest}",
+        "missing_time": f"${variant}$v=19$m=1024,p=8${salt}${digest}",
+        "ignored_key_length": f"${variant}$v=19$m=1024,t=1,p=8,k=4294967295${salt}${digest}",
+        "ldap_crypt": "{CRYPT}" + public_hash,
+        "ldap_argon2": "{ARGON2}" + public_hash,
+        "ldap_both": "{CRYPT}{ARGON2}" + public_hash,
+    }
+    if example_state == "renamed":
+        database["users"]["operator"] = database["users"].pop("admin")
+    elif example_state == "enabled_by_default":
+        del database["users"]["admin"]["disabled"]
+    elif example_state in {"binary", "binary_ldap"}:
+        encoded_hash = "{CRYPT}" + public_hash + "\n" if example_state == "binary_ldap" else public_hash
+        database["users"]["admin"]["password"] = encoded_hash.encode("utf-8")
+    elif example_state in equivalent_hashes:
+        database["users"]["admin"]["password"] = equivalent_hashes[example_state]
+    if example_state == "literal_block":
+        users_file.write_text(f"users:\n  admin:\n    password: |\n      {public_hash}\n", encoding="utf-8")
+    else:
+        users_file.write_text(yaml.safe_dump(database), encoding="utf-8")
+    before = users_file.read_bytes()
+    env_before = (deploy.ENV_DIR / "alpha.env").read_bytes()
+
+    with pytest.raises(deploy.typer.Exit) as exc:
+        _launch_authelia(command, use_registry=True)
+
+    assert exc.value.exit_code == 1
+    assert commands
+    assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
+    assert users_file.read_bytes() == before
+    assert (deploy.ENV_DIR / "alpha.env").read_bytes() == env_before
+    assert instance.status == deploy.InstanceStatus.RUNNING
+    text = normalize_console_output(console.export_text())
+    assert str(users_file) in text
+    assert "public example" in text.lower()
+    assert "password hash" in text.lower()
+    assert "local/instances/deploy/README.md" in text
+    assert str(database["users"][next(iter(database["users"]))]["password"]) not in text
+    assert public_hash not in text
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+def test_authelia_launch_rejects_colliding_yaml_usernames(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    command: str,
+) -> None:
+    """Ambiguous YAML account keys must not hide an enabled public password."""
+    instance, users_file, commands, console = authelia_launch
+    public_hash = yaml.safe_load(users_file.read_text())["users"]["admin"]["password"]
+    source = (
+        f'users:\n  on:\n    disabled: false\n    password: "{public_hash}"\n'
+        f'  yes:\n    disabled: true\n    password: "{public_hash}"\n'
+    )
+    users_file.write_text(source)
+    env_before = (deploy.ENV_DIR / "alpha.env").read_bytes()
+
+    with pytest.raises(deploy.typer.Exit) as exc:
+        _launch_authelia(command, use_registry=True)
+
+    assert exc.value.exit_code == 1
+    assert commands
+    assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
+    assert users_file.read_text() == source
+    assert (deploy.ENV_DIR / "alpha.env").read_bytes() == env_before
+    assert instance.status == deploy.InstanceStatus.RUNNING
+    assert "Invalid Authelia users database" in normalize_console_output(console.export_text())
+    assert public_hash not in console.export_text()
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+@pytest.mark.parametrize("field", ["password", "disabled"])
+def test_authelia_launch_rejects_binary_account_field_keys(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    command: str,
+    field: str,
+) -> None:
+    """Go decodes binary struct keys as strings; ambiguous Python keys must fail closed."""
+    _instance, users_file, commands, console = authelia_launch
+    database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    user = database["users"]["admin"]
+    user[field.encode("utf-8")] = user.pop(field)
+    users_file.write_text(yaml.safe_dump(database), encoding="utf-8")
+    before = users_file.read_bytes()
+
+    with pytest.raises(deploy.typer.Exit) as exc:
+        _launch_authelia(command)
+
+    assert exc.value.exit_code == 1
+    assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
+    assert users_file.read_bytes() == before
+    assert "Invalid Authelia users database" in normalize_console_output(console.export_text())
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+@pytest.mark.parametrize("example_state", ["replaced", "removed", "disabled", "disabled_encoded"])
+def test_authelia_launch_preserves_configured_users(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    command: str,
+    example_state: str,
+) -> None:
+    """Allow explicit setup without changing the operator's user database."""
+    instance, users_file, commands, _console = authelia_launch
+    database = yaml.safe_load(users_file.read_text())
+    configured = {
+        "disabled": False,
+        "displayname": "Configured User",
+        "password": (
+            "$argon2id$v=19$m=65536,t=3,p=4$MDEyMzQ1Njc4OWFiY2RlZg$e7rBJC02ad64LZ63hb15DFQ2CrfzMkABVvrIFNI6aZ8"
+        ),
+        "email": "operator@example.com",
+        "groups": ["users"],
+    }
+    if example_state == "replaced":
+        database["users"]["admin"] = configured
+    else:
+        database["users"]["operator"] = configured
+        if example_state == "removed":
+            del database["users"]["admin"]
+        else:
+            database["users"]["admin"]["disabled"] = True
+            if example_state == "disabled_encoded":
+                database["users"]["admin"]["password"] = "{CRYPT}" + database["users"]["admin"]["password"] + "\n"
+    users_file.write_text(yaml.safe_dump(database))
+    before = users_file.read_bytes()
+
+    _launch_authelia(command)
+
+    assert users_file.read_bytes() == before
+    assert instance.status == deploy.InstanceStatus.RUNNING
+    services = _launched_services(commands)
+    assert services.count("sandbox-runner") <= 1
+    assert [service for service in services if service != "sandbox-runner"] == [
+        "mindroom",
+        "tuwunel",
+        "wellknown",
+        "authelia",
+    ]
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+def test_authelia_matrix_only_launch_does_not_require_users(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    command: str,
+) -> None:
+    """Matrix-only launches must not inspect the unused authentication database."""
+    instance, users_file, commands, _console = authelia_launch
+    users_file.unlink()
+
+    _launch_authelia(command, only_matrix=True)
+
+    assert instance.status == deploy.InstanceStatus.PARTIAL
+    assert not users_file.exists()
+    assert _launched_services(commands) == ["tuwunel", "wellknown"]
+    assert not any(" config --format json" in cmd for cmd in commands)
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+def test_launch_without_authelia_does_not_require_users(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    command: str,
+) -> None:
+    """Instances without Authelia must not gain an account setup requirement."""
+    instance, users_file, commands, _console = authelia_launch
+    instance.auth_type = None
+    users_file.unlink()
+
+    _launch_authelia(command)
+
+    assert instance.status == deploy.InstanceStatus.RUNNING
+    assert not users_file.exists()
+    services = _launched_services(commands)
+    assert services.count("sandbox-runner") <= 1
+    assert [service for service in services if service != "sandbox-runner"] == ["mindroom", "tuwunel", "wellknown"]
+    assert not any(" config --format json" in cmd for cmd in commands)
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+@pytest.mark.parametrize(
+    "contents",
+    [None, "users: [", "users: []", "users:\n  admin: null\n", b"users:\n  private-marker: \xff\n"],
+)
+def test_authelia_launch_rejects_unreadable_user_database(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    command: str,
+    contents: str | bytes | None,
+) -> None:
+    """An unreadable account database cannot bypass the launch check."""
+    _instance, users_file, commands, console = authelia_launch
+    if contents is None:
+        users_file.unlink()
+    elif isinstance(contents, bytes):
+        users_file.write_bytes(contents)
+    else:
+        users_file.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(deploy.typer.Exit) as exc:
+        _launch_authelia(command)
+
+    assert exc.value.exit_code == 1
+    assert commands
+    assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
+    text = normalize_console_output(console.export_text())
+    assert str(users_file) in text
+    assert "local/instances/deploy/README.md" in text
+    assert "private-marker" not in text
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (1, "argon2i"),
+        (3, "m=1025,t=1,p=8"),
+        (3, "m=1024,t=2,p=8"),
+        (3, "m=1024,t=1,p=9"),
+        (4, "MDEyMzQ1Njc4OWFiY2RlZg"),
+        (5, "e7rBJC02ad64LZ63hb15DFQ2CrfzMkABVvrIFNI6aZ8"),
+    ],
+    ids=["variant", "memory", "time", "parallelism", "salt", "digest"],
+)
+def test_authelia_launch_allows_distinct_argon2_inputs(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    field: int,
+    value: str,
+) -> None:
+    """Public-hash detection must compare all effective Argon2 inputs."""
+    _instance, users_file, commands, _console = authelia_launch
+    database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    parts = database["users"]["admin"]["password"].split("$")
+    parts[field] = value
+    database["users"]["admin"]["password"] = "$".join(parts)
+    users_file.write_text(yaml.safe_dump(database), encoding="utf-8")
+    before = users_file.read_bytes()
+
+    _launch_authelia("start")
+
+    assert "authelia" in _launched_services(commands)
+    assert users_file.read_bytes() == before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Requires a POSIX ASCII C locale")
+def test_authelia_account_check_reads_utf8_under_ascii_locale(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    tmp_path: Path,
+) -> None:
+    """UTF-8 account files and the shipped template must not depend on locale."""
+    _instance, users_file, _commands, _console = authelia_launch
+    database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    database["users"]["admin"].update(disabled=True, displayname="Zoë")
+    users_file.write_text(yaml.safe_dump(database, allow_unicode=True), encoding="utf-8")
+    template = tmp_path / "templates" / "authelia" / "users_database.yml"
+    template.parent.mkdir(parents=True)
+    template.write_text(yaml.safe_dump(database, allow_unicode=True), encoding="utf-8")
+    before = users_file.read_bytes()
+    code = """
+import importlib.util
+import locale
+from pathlib import Path
+import sys
+
+assert sys.flags.utf8_mode == 0
+assert locale.getencoding().lower() in {"ascii", "ansi_x3.4-1968", "us-ascii"}
+spec = importlib.util.spec_from_file_location("deploy_encoding_test", sys.argv[1])
+deploy = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = deploy
+spec.loader.exec_module(deploy)
+users_file = Path(sys.argv[2])
+deploy.SCRIPT_DIR = Path(sys.argv[3])
+deploy._resolve_authelia_users_file = lambda _instance: users_file
+instance = deploy.Instance(name="alpha", mindroom_port=8765, data_dir=str(users_file.parent), domain="localhost")
+deploy._require_authelia_account_setup(instance)
+"""
+    result = _REAL_SUBPROCESS_RUN(
+        [sys.executable, "-X", "utf8=0", "-c", code, str(_SCRIPT_PATH.resolve()), str(users_file), str(tmp_path)],
+        env={**os.environ, "LC_ALL": "C", "PYTHONCOERCECLOCALE": "0"},
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert users_file.read_bytes() == before
+
+
+@pytest.mark.parametrize("auth_enabled", [False, True])
+def test_print_instance_info_authelia_setup_uses_actual_data_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    auth_enabled: bool,
+) -> None:
+    """Only Authelia instances should show setup guidance for their own database."""
+    instance = _instance("alpha", matrix_type=None, data_root=tmp_path / "custom-data")
+    auth_type = deploy.AuthType.AUTHELIA if auth_enabled else None
+    console = Console(record=True, width=240)
+    monkeypatch.setattr(deploy, "console", console)
+
+    deploy._print_instance_info(instance, None, auth_type)
+
+    text = normalize_console_output(console.export_text())
+    users_file = Path(instance.data_dir) / "authelia" / "users_database.yml"
+    if auth_enabled:
+        assert str(users_file) in text
+        assert "Before starting:" in text
+        assert "password hash and email" in text
+        assert "remove/disable" in text
+        assert "local/instances/deploy/README.md" in text
+    else:
+        assert "Authelia" not in text
+        assert str(users_file) not in text
+    assert "Default login:" not in text
+
+
+@pytest.mark.parametrize("account_state", ["public_example", "missing", "malformed"])
+def test_rejected_authelia_start_preserves_existing_instance_data(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    account_state: str,
+) -> None:
+    """Account rejection must precede real setup writes and Matrix database removal."""
+    instance, users_file, commands, _console = authelia_launch
+    data_dir = Path(instance.data_dir)
+    matrix_dir = data_dir / "tuwunel"
+    matrix_dir.mkdir()
+    (matrix_dir / "database-marker").write_bytes(b"existing Matrix data")
+    env_file = deploy.ENV_DIR / "alpha.env"
+    env_file.write_text("INSTANCE_NAME=alpha\nMATRIX_SERVER_NAME=m-previous.localhost\n")
+    env_before = env_file.read_bytes()
+
+    # Let the real setup helpers discover only synthetic config and credentials.
+    deploy.REPO_ROOT.mkdir()
+    source_config = deploy.REPO_ROOT / "config.yaml"
+    source_config.write_text("agents: {}\n")
+    source_credentials = Path.home() / ".mindroom" / "credentials"
+    source_credentials.mkdir(parents=True)
+    credential_file = source_credentials / "test-provider.json"
+    credential_file.write_text('{"api_key": "synthetic-test-value"}\n')
+    if account_state == "missing":
+        users_file.unlink()
+    elif account_state == "malformed":
+        users_file.write_text("users: [")
+    before = {path.relative_to(data_dir): path.read_bytes() if path.is_file() else None for path in data_dir.rglob("*")}
+
+    with pytest.raises(deploy.typer.Exit) as exc:
+        _launch_authelia("start", use_registry=True)
+
+    assert exc.value.exit_code == 1
+    assert {
+        path.relative_to(data_dir): path.read_bytes() if path.is_file() else None for path in data_dir.rglob("*")
+    } == before
+    assert env_file.read_bytes() == env_before
+    assert source_config.read_text() == "agents: {}\n"
+    assert credential_file.read_text() == '{"api_key": "synthetic-test-value"}\n'
+    assert not deploy.REGISTRY_FILE.exists()
+    assert instance.status == deploy.InstanceStatus.RUNNING
+    assert commands
+    assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
+
+
+def test_matrix_only_authelia_start_keeps_real_setup_and_existing_data(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+) -> None:
+    """The account-check exemption must still prepare storage without clearing matching Matrix data."""
+    instance, users_file, commands, _console = authelia_launch
+    users_file.unlink()
+    data_dir = Path(instance.data_dir)
+    matrix_dir = data_dir / "tuwunel"
+    matrix_dir.mkdir()
+    marker = matrix_dir / "database-marker"
+    marker.write_bytes(b"existing Matrix data")
+    (deploy.ENV_DIR / "alpha.env").write_text("INSTANCE_NAME=alpha\nMATRIX_SERVER_NAME=m-alpha.localhost\n")
+
+    _launch_authelia("start", only_matrix=True)
+
+    assert marker.read_bytes() == b"existing Matrix data"
+    assert (data_dir / "config").is_dir()
+    assert (data_dir / "mindroom_data" / "tracking").is_dir()
+    assert not users_file.exists()
+    assert instance.status == deploy.InstanceStatus.PARTIAL
+    assert any(" up -d" in command for command in commands)
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+@pytest.mark.parametrize("case", ["env_public", "shell_public", "shell_configured", "env_configured"])
+def test_authelia_launch_checks_compose_selected_database(  # noqa: PLR0915
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    case: str,
+) -> None:
+    """Validate the mounted database with real Compose interpolation before launch effects."""
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose is required for interpolation coverage")
+    version = _REAL_SUBPROCESS_RUN(
+        ["docker", "compose", "version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if version.returncode:
+        pytest.skip("Docker Compose is required for interpolation coverage")
+
+    instance, registry_users, commands, console = authelia_launch
+    public_text = registry_users.read_text()
+    configured = yaml.safe_load(public_text)
+    configured["users"]["admin"]["disabled"] = True
+    configured_text = yaml.safe_dump(configured)
+    registry_users.write_text(configured_text)
+    public_root = tmp_path / "public $literal $$double"
+    configured_root = tmp_path / "configured $literal $$double"
+    for root, text in [(public_root, public_text), (configured_root, configured_text)]:
+        users_file = root / "authelia" / "users_database.yml"
+        users_file.parent.mkdir(parents=True)
+        users_file.write_text(text)
+
+    env_root = public_root if case in {"env_public", "shell_configured"} else configured_root
+    (deploy.ENV_DIR / "alpha.env").write_text(
+        f"INSTANCE_NAME=alpha\nINSTANCE_DOMAIN=alpha.localhost\n"
+        f"DATA_DIR='{env_root}'\nMATRIX_SERVER_NAME=m-previous.localhost\n",
+    )
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    monkeypatch.delenv("INSTANCE_ENV_FILE", raising=False)
+    if case == "shell_public":
+        monkeypatch.setenv("DATA_DIR", str(public_root))
+    elif case == "shell_configured":
+        monkeypatch.setenv("DATA_DIR", str(configured_root))
+    elif case == "env_configured":
+        registry_users.write_text(public_text)
+    # Older Compose validates socket path length even for daemon-free config commands.
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent-mindroom-test.sock")
+
+    # Rejected starts must not reach real setup or clear the old Matrix database.
+    matrix_dir = Path(instance.data_dir) / "tuwunel"
+    matrix_dir.mkdir()
+    (matrix_dir / "database-marker").write_text("existing Matrix data\n")
+    deploy.REPO_ROOT.mkdir()
+    (deploy.REPO_ROOT / "config.yaml").write_text("agents: {}\n")
+    source_credentials = Path.home() / ".mindroom" / "credentials"
+    source_credentials.mkdir(parents=True)
+    (source_credentials / "synthetic.json").write_text('{"api_key": "synthetic-test-value"}\n')
+    fake_run = deploy.subprocess.run
+
+    def _run(cmd: str, **kwargs: object) -> subprocess.CompletedProcess[str] | SimpleNamespace:
+        if cmd.endswith(" config --format json --no-env-resolution"):
+            commands.append(cmd)
+            result = _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+            assert result.returncode == 0, result.stderr
+            return result
+        return fake_run(cmd, **kwargs)
+
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+    before = {path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")}
+    if case in {"env_public", "shell_public"}:
+        with pytest.raises(deploy.typer.Exit) as exc:
+            _launch_authelia(command, use_registry=True)
+        assert exc.value.exit_code == 1
+        assert commands
+        assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
+        assert {
+            path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")
+        } == before
+        assert instance.status == deploy.InstanceStatus.RUNNING
+        text = normalize_console_output(console.export_text())
+        assert str(public_root / "authelia" / "users_database.yml") in text
+        assert "public example" in text
+    else:
+        _launch_authelia(command)
+        assert "authelia" in _launched_services(commands)
+    assert (public_root / "authelia" / "users_database.yml").read_text() == public_text
+    assert (configured_root / "authelia" / "users_database.yml").read_text() == configured_text
+
+
+@pytest.mark.parametrize("failure", ["command", "json", "missing_mount", "named_volume", "relative_source"])
+def test_authelia_launch_rejects_unresolved_compose_database(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """An unresolved mount must not fall back to a configured registry database."""
+    instance, users_file, commands, console = authelia_launch
+    configured = yaml.safe_load(users_file.read_text())
+    configured["users"]["admin"]["disabled"] = True
+    users_file.write_text(yaml.safe_dump(configured))
+    mount = {"type": "bind", "source": str(users_file.parent), "target": "/config"}
+    if failure == "missing_mount":
+        mount["target"] = "/other"
+    elif failure == "named_volume":
+        mount["type"] = "volume"
+    elif failure == "relative_source":
+        mount["source"] = "relative/authelia"
+    stdout = json.dumps({"services": {"authelia": {"volumes": [mount]}}})
+    if failure == "json":
+        stdout = "synthetic-credential-in-invalid-output"
+
+    def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
+        commands.append(cmd)
+        return SimpleNamespace(
+            returncode=1 if failure == "command" else 0,
+            stdout=stdout,
+            stderr="synthetic-credential-in-error-output",
+        )
+
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+    before = {path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")}
+    with pytest.raises(deploy.typer.Exit) as exc:
+        _launch_authelia("start", use_registry=True)
+    assert exc.value.exit_code == 1
+    assert commands
+    assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
+    assert {
+        path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")
+    } == before
+    assert instance.status == deploy.InstanceStatus.RUNNING
+    assert "synthetic-credential" not in console.export_text()
 
 
 @pytest.mark.parametrize("matrix_type", [None, deploy.MatrixType.TUWUNEL, deploy.MatrixType.SYNAPSE])

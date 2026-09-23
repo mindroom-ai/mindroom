@@ -83,12 +83,12 @@ async def run_judgment_thread[T](function: Callable[[], T]) -> T:
     return await asyncio.shield(future)
 
 
-def _result(
+def _result[T](
     request: JudgmentRequest,
     started: float,
     failure: JudgmentFailure | None,
-    response: JudgmentResponse | None = None,
-) -> JudgmentResult:
+    response: JudgmentResponse[T] | None = None,
+) -> JudgmentResult[T]:
     usage = response.usage if response is not None else None
     return JudgmentResult(
         decision=None if response is None else response.decision,
@@ -102,15 +102,15 @@ def _result(
     )
 
 
-async def run_judgment(
+async def run_judgment[T](
     request: JudgmentRequest,
-    evaluate: Callable[[JudgmentRequest], Awaitable[JudgmentResponse]],
+    evaluate: Callable[[JudgmentRequest], Awaitable[JudgmentResponse[T]]],
     *,
     owner: str,
     timeout_seconds: float,
     allow_network: bool,
     capacity: JudgmentCapacity = SHARED_CAPACITY,
-) -> JudgmentResult:
+) -> JudgmentResult[T]:
     """Run one bounded attempt; abandoned worker threads retain their capacity."""
     started = perf_counter()
     if not request.complete or request.body is None:
@@ -127,7 +127,7 @@ async def run_judgment(
     lease = capacity._acquire_nowait(owner)
     if lease is None:
         return _result(request, started, "capacity_exhausted")
-    response: JudgmentResponse | None = None
+    response: JudgmentResponse[T] | None = None
     failure: JudgmentFailure | None = None
     token = _CURRENT_LEASE.set(lease)
     try:

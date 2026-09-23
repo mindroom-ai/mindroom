@@ -310,25 +310,23 @@ async def test_headless_cancellation_drains_profile_before_reuse(
 
 
 @pytest.mark.asyncio
-async def test_headless_worker_preserves_configured_desktop_target(
+async def test_headless_worker_rejects_configured_desktop_target(
     headless_client: tuple[httpx.AsyncClient, dict[str, object], Path, Config],
     browser_processes: list[BrowserProcess],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Retaining host resources must not turn a configured desktop browser into a host browser."""
     client, payload, _root, _config = headless_client
-
-    async def desktop(_self: browser_module.BrowserTools, **kwargs: object) -> str:
-        return json.dumps({"target": "desktop", "action": kwargs["action"]})
-
-    monkeypatch.setattr(browser_module.BrowserTools, "_desktop_browser", desktop)
     payload["tool_config_overrides"] = {
         "default_target": "desktop",
         "device_user_id": "@desktop:example.org",
         "device_id": "DEVICE",
         "device_ed25519": "fingerprint",
     }
-    assert await _call(client, payload, action="tabs") == {"target": "desktop", "action": "tabs"}
+    response = await client.post("/api/sandbox-runner/execute", json={**payload, "kwargs": {"action": "tabs"}})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is False
+    assert "Worker browser does not support desktop routing." in body["error"]
     assert not browser_processes
 
 

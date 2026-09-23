@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="eleven_labs",
+    worker_inert_agent_functions=("text_to_speech",),
     display_name="Eleven Labs",
     description="Text-to-speech and sound effect generation using AI voices",
     category=ToolCategory.DEVELOPMENT,

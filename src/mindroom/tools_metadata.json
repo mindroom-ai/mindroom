@@ -597,6 +597,7 @@
       "icon": "SiSlack",
       "icon_color": "text-purple-600",
       "name": "slack",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -2182,6 +2183,7 @@
       "icon": "Bot",
       "icon_color": "text-orange-500",
       "name": "claude_agent",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -2263,6 +2265,7 @@
       "icon": "Settings",
       "icon_color": "text-purple-500",
       "name": "config_manager",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -2733,6 +2736,7 @@
       "icon": "FaTerminal",
       "icon_color": "text-blue-600",
       "name": "daytona",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -2897,6 +2901,7 @@
       "icon": "Terminal",
       "icon_color": "text-blue-600",
       "name": "e2b",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -4752,7 +4757,7 @@
         {
           "authored_override": true,
           "default": 15,
-          "description": "Time in seconds to add to the ETA to account for the time it takes to fetch the media",
+          "description": "Extra one-second polling attempts added to the provider ETA; fractional attempt budgets round up",
           "label": "Add to ETA",
           "name": "add_to_eta",
           "options": null,
@@ -4764,7 +4769,7 @@
         {
           "authored_override": true,
           "default": 60,
-          "description": "Maximum time in seconds to wait for the media to be ready",
+          "description": "Cap on polling attempts, rounded up; zero skips polling and HTTP request time is additional",
           "label": "Max Wait Time",
           "name": "max_wait_time",
           "options": null,
@@ -5631,6 +5636,7 @@
       "icon": "FaBrain",
       "icon_color": "text-purple-500",
       "name": "reasoning",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -7257,6 +7263,7 @@
       "icon": "Lock",
       "icon_color": "text-amber-600",
       "name": "agent_vault_access",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
@@ -7520,6 +7527,7 @@
       "icon": "FaConnectdevelop",
       "icon_color": "text-blue-600",
       "name": "composio",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -8064,6 +8072,7 @@
       "icon": "Database",
       "icon_color": "text-yellow-600",
       "name": "duckdb",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -8525,6 +8534,7 @@
       "icon": "Brain",
       "icon_color": "text-purple-600",
       "name": "mem0",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -8850,6 +8860,7 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "pandas",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -9084,6 +9095,7 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "sql",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
@@ -9482,6 +9494,7 @@
       "icon": "Brain",
       "icon_color": "text-purple-600",
       "name": "zep",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -10361,6 +10374,7 @@
       "icon": "FaChrome",
       "icon_color": "text-blue-600",
       "name": "browserbase",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"

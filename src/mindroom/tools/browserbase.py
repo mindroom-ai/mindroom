@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="browserbase",
+    requires_primary_runtime=True,
     display_name="Browserbase",
     description="Browser automation and web scraping using headless browsers",
     category=ToolCategory.RESEARCH,
