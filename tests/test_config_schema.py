@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import typing
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from pydantic import BaseModel
 
@@ -49,7 +49,7 @@ def _collect_hints(node: object) -> Iterator[dict[str, object]]:
         for key, value in node.items():
             if key == HINT_KEY:
                 assert isinstance(value, dict)
-                yield value
+                yield cast("dict[str, object]", value)
             else:
                 yield from _collect_hints(value)
     elif isinstance(node, list):
