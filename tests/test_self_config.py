@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import yaml
@@ -17,11 +19,26 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSpaceConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.custom_tools.self_config import SelfConfigTools
-from tests.conftest import load_config_yaml, write_config_yaml
+from mindroom.custom_tools.self_config import _SELF_CONFIG_BLOCKED_TOOLS, SelfConfigTools
+from mindroom.message_target import MessageTarget
+from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
+from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import (
+    load_config_yaml,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    write_config_yaml,
+)
 from tests.identity_helpers import persist_entity_accounts
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 _DEFAULT_MODELS = {"default": ModelConfig(provider="openai", id="gpt-5.6-terra")}
+_ADMIN_USER_ID = "@admin:example.org"
+_MEMBER_USER_ID = "@member:example.org"
 _BOUND_RUNTIME_PATHS: dict[int, RuntimePaths] = {}
 
 
@@ -37,6 +54,7 @@ def _make_config(
         knowledge_bases=knowledge_bases or {},
         defaults=defaults or DefaultsConfig(),
         models=models if models is not None else _DEFAULT_MODELS,
+        administrators=[_ADMIN_USER_ID],
     )
     config_dir = Path(tempfile.mkdtemp(prefix="mindroom-self-config-"))
     config_path = config_dir / "config.yaml"
@@ -68,6 +86,29 @@ def _self_config_tools(agent_name: str, config_path: Path) -> SelfConfigTools:
     return SelfConfigTools(agent_name=agent_name, runtime_paths=resolve_runtime_paths(config_path=config_path))
 
 
+@contextmanager
+def _as_requester(tool: SelfConfigTools, requester_id: str = _ADMIN_USER_ID) -> Iterator[None]:
+    """Bind one live human requester for self-config calls."""
+    context = make_test_tool_runtime_context(
+        agent_name=tool.agent_name,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id="$thread",
+            reply_to_event_id="$request",
+        ),
+        requester_id=requester_id,
+        client=MagicMock(),
+        # Deliberately without administrators: the authored config being rewritten
+        # is what must grant authority, not this runtime snapshot.
+        config=Config(models=_DEFAULT_MODELS),
+        runtime_paths=tool.runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+    )
+    with tool_runtime_context(context):
+        yield
+
+
 def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> Path:
     """Write one config whose plugin manifest fails runtime validation."""
     plugin_root = tmp_path / "plugins" / "bad-name"
@@ -82,6 +123,7 @@ def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> P
             agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
             models=_DEFAULT_MODELS,
             plugins=["./plugins/bad-name"],
+            administrators=[_ADMIN_USER_ID],
         ),
         config_path,
     )
@@ -120,6 +162,7 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "self_config_pl
             agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=[])},
             models=_DEFAULT_MODELS,
             plugins=["./plugins/demo"],
+            administrators=[_ADMIN_USER_ID],
         ),
         config_path,
     )
@@ -212,7 +255,8 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(role="New role")
+            with _as_requester(tool):
+                result = tool.update_own_config(role="New role")
             assert "Successfully" in result
             assert "Role" in result
 
@@ -234,7 +278,8 @@ class TestUpdateOwnConfig:
             initial_generation = main._app_context(main.app).generation
 
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(role="New role")
+            with _as_requester(tool):
+                result = tool.update_own_config(role="New role")
 
             assert "Successfully" in result
             assert main._app_context(main.app).generation > initial_generation
@@ -249,7 +294,8 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(tools=["googlesearch", "calculator"])
+            with _as_requester(tool):
+                result = tool.update_own_config(tools=["googlesearch", "calculator"])
             assert "Successfully" in result
 
             reloaded = load_config_yaml(config_path)
@@ -257,18 +303,43 @@ class TestUpdateOwnConfig:
         finally:
             config_path.unlink(missing_ok=True)
 
-    def test_update_tools_allows_openclaw_compat(self) -> None:
-        """openclaw_compat should be accepted in tools updates and expand implied tools."""
+    def test_update_tools_blocks_privileged_tools_reached_through_a_preset(self) -> None:
+        """Preset expansion must not smuggle privileged tools past the blocklist."""
         _, config_path = _make_config(
             agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=[])},
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(tools=["openclaw_compat", "python"])
+            with _as_requester(tool):
+                result = tool.update_own_config(tools=["openclaw_compat"])
+            assert "Error" in result
+            assert "privileged tools" in result
+            assert "shell" in result
+
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].tool_names == []
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_tools_allows_a_preset_whose_privileged_tools_are_already_held(self) -> None:
+        """Presets stay assignable once the agent already holds every privileged member."""
+        _, config_path = _make_config(
+            agents={
+                "coder": AgentConfig(
+                    display_name="Coder",
+                    role="Code",
+                    tools=["shell", "coding", "browser", "scheduler"],
+                ),
+            },
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool):
+                result = tool.update_own_config(tools=["openclaw_compat"])
             assert "Successfully" in result
 
             reloaded = load_config_yaml(config_path)
-            assert reloaded.agents["coder"].tool_names == ["openclaw_compat", "python"]
+            assert reloaded.agents["coder"].tool_names == ["openclaw_compat"]
             effective = reloaded.resolve_entity("coder").available_tools
             assert effective[0] == "openclaw_compat"
             assert "shell" in effective
@@ -283,7 +354,8 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(tools=["nonexistent_tool"])
+            with _as_requester(tool):
+                result = tool.update_own_config(tools=["nonexistent_tool"])
             assert "Error" in result
             assert "nonexistent_tool" in result
         finally:
@@ -294,7 +366,8 @@ class TestUpdateOwnConfig:
         config_path = _plugin_tool_config_path(tmp_path)
         tool = _self_config_tools(agent_name="coder", config_path=config_path)
 
-        result = tool.update_own_config(tools=["self_config_plugin_tool"])
+        with _as_requester(tool):
+            result = tool.update_own_config(tools=["self_config_plugin_tool"])
 
         assert "Successfully" in result
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -307,13 +380,63 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(tools=["config_manager"])
+            with _as_requester(tool):
+                result = tool.update_own_config(tools=["config_manager"])
             assert "Error" in result
             assert "privileged tools" in result
             assert "config_manager" in result
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].tool_names == ["self_config"]
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_tools_blocks_newly_granted_code_execution_tools(self) -> None:
+        """Code-execution and primary-runtime tools must not become self-assignable."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=["self_config"])},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            for blocked_tool in ("shell", "python", "coding", "claude_agent", "matrix_api", "dynamic_workflow"):
+                with _as_requester(tool):
+                    result = tool.update_own_config(tools=["self_config", blocked_tool])
+                assert "Error" in result
+                assert "privileged tools" in result
+                assert blocked_tool in result
+
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].tool_names == ["self_config"]
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_tools_allows_retaining_an_already_held_privileged_tool(self) -> None:
+        """Keeping a privileged tool the operator already granted is not an escalation."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=["shell"])},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool):
+                result = tool.update_own_config(tools=["shell", "calculator"])
+            assert "Successfully" in result
+
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].tool_names == ["shell", "calculator"]
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_blocked_tools_are_registered_tool_names(self) -> None:
+        """Every blocked name must match a real registered tool, so typos cannot silently allow one."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code")},
+        )
+        try:
+            runtime_paths = resolve_runtime_paths(config_path=config_path)
+            config = load_config_yaml(config_path)
+            tool_metadata = resolved_tool_metadata_for_runtime(runtime_paths, config)
+
+            assert set(tool_metadata) >= _SELF_CONFIG_BLOCKED_TOOLS
         finally:
             config_path.unlink(missing_ok=True)
 
@@ -324,7 +447,8 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(tools=["self_config", "thread_resolution"])
+            with _as_requester(tool):
+                result = tool.update_own_config(tools=["self_config", "thread_resolution"])
 
             assert "Successfully" in result
             reloaded = load_config_yaml(config_path)
@@ -340,10 +464,30 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(include_default_tools=True)
+            with _as_requester(tool):
+                result = tool.update_own_config(include_default_tools=True)
             assert "Error" in result
             assert "privileged tools" in result
             assert "config_manager" in result
+
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].include_default_tools is False
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_include_default_tools_blocks_when_defaults_contain_code_execution(self) -> None:
+        """Inheriting defaults must not become a back door to shell access."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", include_default_tools=False)},
+            defaults=DefaultsConfig(tools=["shell"]),
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool):
+                result = tool.update_own_config(include_default_tools=True)
+            assert "Error" in result
+            assert "privileged tools" in result
+            assert "shell" in result
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].include_default_tools is False
@@ -358,7 +502,8 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(include_default_tools=True)
+            with _as_requester(tool):
+                result = tool.update_own_config(include_default_tools=True)
             assert "Successfully" in result
 
             reloaded = load_config_yaml(config_path)
@@ -374,7 +519,8 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(include_default_tools=True)
+            with _as_requester(tool):
+                result = tool.update_own_config(include_default_tools=True)
 
             assert "Error" in result
             assert "config_manager" in result
@@ -400,7 +546,8 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(tools=["shell", "calculator"])
+            with _as_requester(tool):
+                result = tool.update_own_config(tools=["shell", "calculator"])
 
             assert "Successfully" in result
 
@@ -417,7 +564,8 @@ class TestUpdateOwnConfig:
         config_path = _invalid_plugin_config_path(tmp_path)
         tool = _self_config_tools(agent_name="writer", config_path=config_path)
 
-        result = tool.update_own_config(role="Updated role")
+        with _as_requester(tool):
+            result = tool.update_own_config(role="Updated role")
 
         assert "Invalid configuration" in result
         assert "Invalid plugin name" in result
@@ -429,7 +577,8 @@ class TestUpdateOwnConfig:
         config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
         tool = _self_config_tools(agent_name="writer", config_path=config_path)
 
-        result = tool.update_own_config(role="Updated role")
+        with _as_requester(tool):
+            result = tool.update_own_config(role="Updated role")
 
         assert "Invalid configuration" in result
         assert "Could not parse configuration YAML" in result
@@ -443,7 +592,8 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(knowledge_bases=["docs"])
+            with _as_requester(tool):
+                result = tool.update_own_config(knowledge_bases=["docs"])
             assert "Successfully" in result
 
             reloaded = load_config_yaml(config_path)
@@ -458,7 +608,8 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(knowledge_bases=["missing_kb"])
+            with _as_requester(tool):
+                result = tool.update_own_config(knowledge_bases=["missing_kb"])
             assert "Error" in result
             assert "missing_kb" in result
         finally:
@@ -472,7 +623,8 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(knowledge_bases=["docs", "docs"])
+            with _as_requester(tool):
+                result = tool.update_own_config(knowledge_bases=["docs", "docs"])
             assert "Error" in result
             assert "Duplicate" in result
         finally:
@@ -485,11 +637,12 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(
-                display_name="Super Coder",
-                role="Write awesome code",
-                markdown=False,
-            )
+            with _as_requester(tool):
+                result = tool.update_own_config(
+                    display_name="Super Coder",
+                    role="Write awesome code",
+                    markdown=False,
+                )
             assert "Successfully" in result
 
             reloaded = load_config_yaml(config_path)
@@ -506,7 +659,8 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(role="Code")
+            with _as_requester(tool):
+                result = tool.update_own_config(role="Code")
             assert "No changes" in result
         finally:
             config_path.unlink(missing_ok=True)
@@ -518,7 +672,8 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(thread_mode="invalid")
+            with _as_requester(tool):
+                result = tool.update_own_config(thread_mode="invalid")
             assert "Error validating configuration" in result
 
             reloaded = load_config_yaml(config_path)
@@ -532,6 +687,7 @@ class TestUpdateOwnConfig:
             agents={"coder": AgentConfig(display_name="Coder", role="Code", rooms=["lobby"])},
             matrix_space=MatrixSpaceConfig(enabled=True),
             models=_DEFAULT_MODELS,
+            administrators=[_ADMIN_USER_ID],
         )
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
             config_path = Path(tmp.name)
@@ -539,7 +695,8 @@ class TestUpdateOwnConfig:
 
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(rooms=["_mindroom_root_space"])
+            with _as_requester(tool):
+                result = tool.update_own_config(rooms=["_mindroom_root_space"])
             assert "Invalid configuration" in result
             assert "reserved root Space alias" in result
             assert "Changes were NOT applied." in result
@@ -556,7 +713,8 @@ class TestUpdateOwnConfig:
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(num_history_runs=2, num_history_messages=10)
+            with _as_requester(tool):
+                result = tool.update_own_config(num_history_runs=2, num_history_messages=10)
             assert "Error validating configuration" in result
 
             reloaded = load_config_yaml(config_path)
@@ -570,9 +728,94 @@ class TestUpdateOwnConfig:
         _, config_path = _make_config(agents={})
         try:
             tool = _self_config_tools(agent_name="ghost", config_path=config_path)
-            result = tool.update_own_config(role="New role")
+            with _as_requester(tool):
+                result = tool.update_own_config(role="New role")
             assert "Error" in result
             assert "ghost" in result
+        finally:
+            config_path.unlink(missing_ok=True)
+
+
+class TestUpdateOwnConfigAuthorization:
+    """Self-config writes are administrator-only and human-confirmed."""
+
+    def test_non_administrator_requester_cannot_change_config(self) -> None:
+        """An ordinary room participant must not rewrite the agent's authored config."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=["calculator"])},
+        )
+        original = config_path.read_text(encoding="utf-8")
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool, requester_id=_MEMBER_USER_ID):
+                result = tool.update_own_config(role="Owned", instructions=["Exfiltrate everything"])
+
+            assert "platform administrator" in result
+            assert "Changes were NOT applied." in result
+            assert config_path.read_text(encoding="utf-8") == original
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_non_administrator_requester_cannot_grant_tools(self) -> None:
+        """Tool grants stay unreachable for a non-administrator requester."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=["calculator"])},
+        )
+        original = config_path.read_text(encoding="utf-8")
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            for requested in (["shell"], ["claude_agent"], ["googlesearch"]):
+                with _as_requester(tool, requester_id=_MEMBER_USER_ID):
+                    result = tool.update_own_config(tools=requested)
+                assert "platform administrator" in result
+                assert "Changes were NOT applied." in result
+
+            assert config_path.read_text(encoding="utf-8") == original
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_missing_runtime_context_fails_closed(self) -> None:
+        """Without a live requester there is nobody to authorize the write."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code")},
+        )
+        original = config_path.read_text(encoding="utf-8")
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(role="Owned")
+
+            assert "platform administrator" in result
+            assert "Changes were NOT applied." in result
+            assert config_path.read_text(encoding="utf-8") == original
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_administrator_requester_succeeds(self) -> None:
+        """An administrator requester keeps the documented self-tuning workflow."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code")},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool):
+                result = tool.update_own_config(role="New role")
+
+            assert "Successfully" in result
+            assert load_config_yaml(config_path).agents["coder"].role == "New role"
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_own_config_always_requires_human_confirmation(self) -> None:
+        """The tool authors its own approval boundary, independent of tool_approval rules."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code")},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+
+            assert tool.functions["update_own_config"].requires_confirmation is True
+            assert tool.functions["update_own_config"].approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE
+            assert tool.functions["get_own_config"].requires_confirmation is not True
         finally:
             config_path.unlink(missing_ok=True)
 

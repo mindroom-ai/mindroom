@@ -238,7 +238,7 @@ Explicit IDs are normalized to their canonical thread root, and unresolved targe
 
 This tool has no tool-specific inline configuration fields.
 It is not included in starter configs or default tool sets, so ordinary agents cannot resolve threads.
-Operators may grant it directly, and agents explicitly granted `self_config` may add it to their own tool list.
+Operators may grant it directly, and agents explicitly granted `self_config` may add it to their own tool list on behalf of an administrator requester.
 
 ### Example
 
