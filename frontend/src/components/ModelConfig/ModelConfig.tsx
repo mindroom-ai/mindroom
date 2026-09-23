@@ -358,6 +358,7 @@ export function ModelConfig() {
     deleteModel,
     saveConfig,
     isLoading,
+    loadedConfig,
   } = useConfigStore();
 
   const [providerKeys, setProviderKeys] = useState<Record<string, KeyStatus>>(
@@ -371,11 +372,13 @@ export function ModelConfig() {
 
   const [editingRowId, setEditingRowId] = useState<string | null>(null);
   const [rowDraft, setRowDraft] = useState<RowDraft | null>(null);
-  // The model as it was when row editing began, so Cancel can also undo
-  // More settings edits and Save only writes a Base URL the row changed.
+  // The model and loaded config as they were when row editing began, so
+  // Cancel can also undo More settings edits and Save only writes a Base URL
+  // the row changed.
   const [editingStart, setEditingStart] = useState<{
     config: ModelConfigType;
     baseUrl: string;
+    loadedConfig: typeof loadedConfig;
   } | null>(null);
   const [isSavingRow, setIsSavingRow] = useState(false);
 
@@ -569,6 +572,7 @@ export function ModelConfig() {
     setEditingStart({
       config: models[row.modelName],
       baseUrl: row.openAIBaseUrl || "",
+      loadedConfig,
     });
     setRowDraft({
       modelName: row.modelName,
@@ -591,13 +595,16 @@ export function ModelConfig() {
   };
 
   const cancelEditingRow = () => {
-    if (
-      editingRowId != null &&
-      editingStart != null &&
-      JSON.stringify(models[editingRowId]) !==
-        JSON.stringify(editingStart.config)
-    ) {
-      updateConfigValue(["models", editingRowId], editingStart.config);
+    if (editingRowId != null && editingStart != null) {
+      // A save since editing began committed the More settings edits, so
+      // Cancel restores the committed model rather than the pre-edit one.
+      const restored =
+        loadedConfig === editingStart.loadedConfig
+          ? editingStart.config
+          : (loadedConfig?.models[editingRowId] ?? editingStart.config);
+      if (JSON.stringify(models[editingRowId]) !== JSON.stringify(restored)) {
+        updateConfigValue(["models", editingRowId], restored);
+      }
     }
     finishEditingRow();
   };
@@ -937,17 +944,7 @@ export function ModelConfig() {
   };
 
   const handleSaveAllChanges = async () => {
-    const start = editingStart;
-    const savedModel = editingRowId == null ? undefined : models[editingRowId];
     const result = await saveConfig();
-    if (result.status === "saved" && savedModel !== undefined) {
-      // Cancelling the row edit afterwards must not revert what was saved.
-      setEditingStart((current) =>
-        current != null && current === start
-          ? { ...current, config: savedModel }
-          : current,
-      );
-    }
     showSaveFailureToastIfNeeded(result);
   };
 

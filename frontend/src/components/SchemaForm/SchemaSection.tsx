@@ -76,6 +76,8 @@ export function SchemaSection({
       {open && (
         <div className="border-t border-border/60 px-4 py-4">
           <SchemaFields
+            // Remount per entity so unfinished input never carries over.
+            key={path.join("\u001f")}
             schema={schema}
             root={root}
             value={value}

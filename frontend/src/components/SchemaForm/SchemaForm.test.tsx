@@ -847,6 +847,33 @@ describe("SchemaSection", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("drops unfinished input when it switches to another entity", () => {
+    const onFieldChange = vi.fn();
+    const section = (entity: string) => (
+      <SchemaSection
+        title="More settings"
+        definition="Fixture"
+        value={{}}
+        path={["knowledge_bases", entity]}
+        exclude={Object.keys(ROOT.$defs!.Fixture.properties!).filter(
+          (key) => key !== "onboarding_rooms",
+        )}
+        onFieldChange={onFieldChange}
+      />
+    );
+    const { rerender } = render(section("docs"));
+    fireEvent.click(screen.getByRole("button", { name: /More settings/ }));
+    fireEvent.change(screen.getByLabelText("New onboarding rooms entry"), {
+      target: { value: "private" },
+    });
+
+    rerender(section("code"));
+    const draft = screen.getByLabelText("New onboarding rooms entry");
+    expect(draft).toHaveValue("");
+    fireEvent.keyDown(draft, { key: "Enter" });
+    expect(onFieldChange).not.toHaveBeenCalled();
+  });
+
   it("explains when the schema cannot be loaded", () => {
     vi.mocked(useConfigSchema).mockReturnValue({
       schema: null,

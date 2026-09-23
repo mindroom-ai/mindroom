@@ -107,6 +107,8 @@ Configure AI model providers:
 - **Add/edit models** with provider, model ID, host URL, and advanced settings
 - **Provider API keys** section for configuring credentials
 
+While a model row is being edited, its **More settings** section appears below the table, and cancelling the row edit also reverts the More settings changes made since the last save.
+
 **Runtime-supported providers:** Anthropic, Bedrock Claude, Azure OpenAI, OpenAI, Codex CLI ChatGPT authentication, Kimi Code, Google Gemini, Vertex AI Claude, Ollama, llama.cpp, Groq, OpenRouter, Cerebras, DeepSeek, Z.ai, and the internal synthetic provider.
 The dashboard preserves provider IDs already present in the configuration; not every runtime provider has a dedicated icon or preset in the add-model dropdown.
 

@@ -343,13 +343,13 @@ describe("RoomEditor", () => {
       target: { value: "true" },
     });
 
-    expect(updateConfigValue).toHaveBeenCalledWith(["rooms", "lobby"], {
-      description: "Main discussion room",
-      encrypted: true,
-    });
+    expect(updateConfigValue).toHaveBeenCalledWith(
+      ["rooms", "lobby", "encrypted"],
+      true,
+    );
   });
 
-  it("leaves a room unauthored when its only override is reset", () => {
+  it("resets a per-room override to its default", () => {
     const updateConfigValue = renderRoomWithSchema(
       { lobby: { encrypted: true } },
       {},
@@ -359,7 +359,7 @@ describe("RoomEditor", () => {
     });
 
     expect(updateConfigValue).toHaveBeenCalledWith(
-      ["rooms", "lobby"],
+      ["rooms", "lobby", "encrypted"],
       undefined,
     );
   });

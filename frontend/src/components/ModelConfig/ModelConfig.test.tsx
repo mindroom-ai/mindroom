@@ -809,24 +809,38 @@ describe("ModelConfig", () => {
       });
     });
 
-    it("keeps saved More settings edits when the row edit is cancelled afterwards", async () => {
-      const updateConfigValue = vi.fn();
-      const { rerender } = render(<ModelConfig />);
-      fireEvent.click(screen.getByText("openai_local"));
-      vi.mocked(useConfigStore).mockReturnValue({
-        ...withEditedExtraKwargs(),
-        updateConfigValue,
-      } as never);
-      rerender(<ModelConfig />);
+    it.each(["saved", "stale"] as const)(
+      "keeps committed More settings edits when the row edit is cancelled after a %s save",
+      async (status) => {
+        mockStore.saveConfig.mockResolvedValueOnce({ status });
+        const updateConfigValue = vi.fn();
+        const { rerender } = render(<ModelConfig />);
+        fireEvent.click(screen.getByText("openai_local"));
+        const edited = withEditedExtraKwargs();
+        vi.mocked(useConfigStore).mockReturnValue({
+          ...edited,
+          updateConfigValue,
+        } as never);
+        rerender(<ModelConfig />);
 
-      fireEvent.click(screen.getByRole("button", { name: "Save All Changes" }));
-      await waitFor(() => expect(mockStore.saveConfig).toHaveBeenCalled());
-      const row = screen.getByDisplayValue("openai_local").closest("tr");
-      if (!row) throw new Error("row not found");
-      fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+        fireEvent.click(
+          screen.getByRole("button", { name: "Save All Changes" }),
+        );
+        await waitFor(() => expect(mockStore.saveConfig).toHaveBeenCalled());
+        // Both results commit the draft, which becomes the loaded config.
+        vi.mocked(useConfigStore).mockReturnValue({
+          ...edited,
+          loadedConfig: edited.config,
+          updateConfigValue,
+        } as never);
+        rerender(<ModelConfig />);
+        const row = screen.getByDisplayValue("openai_local").closest("tr");
+        if (!row) throw new Error("row not found");
+        fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
 
-      expect(updateConfigValue).not.toHaveBeenCalled();
-    });
+        expect(updateConfigValue).not.toHaveBeenCalled();
+      },
+    );
 
     it("keeps the edited row when another row's Edit button is clicked", async () => {
       const updateConfigValue = vi.fn();

@@ -14,7 +14,7 @@ from mindroom.config.main import Config, dashboard_config_schema
 from mindroom.config.schema_hints import dashboard_hint
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from pydantic.fields import FieldInfo
 
@@ -142,6 +142,19 @@ def test_compaction_override_fields_clear_inherited_values() -> None:
     clearing = {name for name, field in properties.items() if field.get(HINT_KEY, {}).get("clears_inherited")}
     # An authored null enabled turns compaction off instead of clearing back to the inherited value.
     assert clearing == set(properties) - {"enabled"}
+
+
+def test_optional_blocks_default_to_their_model_defaults() -> None:
+    """Dashboard forms drop an emptied optional block, which must mean the same as authoring it empty."""
+    differing = [
+        f"{model.__name__}.{name}"
+        for model, name, field in _walk_fields()
+        if field.default_factory is not None
+        and not field.default_factory_takes_validated_data
+        and isinstance(produced := cast("Callable[[], object]", field.default_factory)(), BaseModel)
+        and produced.model_dump() != type(produced)().model_dump()
+    ]
+    assert differing == []
 
 
 def test_object_unions_are_discriminated() -> None:

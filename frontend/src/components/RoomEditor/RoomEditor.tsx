@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { useConfigStore } from "@/store/configStore";
 import { SchemaSection } from "@/components/SchemaForm";
-import { setObjectKey } from "@/lib/configSchema";
 import { useSwipeBack } from "@/hooks/useSwipeBack";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -36,7 +35,6 @@ export function RoomEditor() {
     isLoading,
     selectRoom,
     updateConfigValue,
-    loadedConfig,
   } = useConfigStore();
 
   const selectedRoom = rooms.find((r) => r.id === selectedRoomId);
@@ -198,22 +196,9 @@ export function RoomEditor() {
         value={config?.rooms?.[selectedRoom.id]}
         path={["rooms", selectedRoom.id]}
         exclude={ROOM_EDITOR_FIELDS}
-        onFieldChange={(key, next) => {
-          const roomConfig = setObjectKey(
-            config?.rooms?.[selectedRoom.id],
-            key,
-            next,
-          );
-          // Rooms that exist only through agent membership stay unauthored
-          // once their last override is reset.
-          const authored = loadedConfig?.rooms?.[selectedRoom.id] != null;
-          updateConfigValue(
-            ["rooms", selectedRoom.id],
-            Object.keys(roomConfig).length === 0 && !authored
-              ? undefined
-              : roomConfig,
-          );
-        }}
+        onFieldChange={(key, next) =>
+          updateConfigValue(["rooms", selectedRoom.id, key], next)
+        }
       />
     </EditorPanel>
   );

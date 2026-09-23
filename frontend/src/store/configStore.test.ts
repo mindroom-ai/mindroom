@@ -4336,58 +4336,22 @@ describe("configStore", () => {
 
       const { updateMemoryConfig } = useConfigStore.getState();
       const newMemoryConfig = {
-        provider: "ollama",
-        model: "nomic-embed-text",
-        host: "http://localhost:11434",
-      };
-
-      updateMemoryConfig(newMemoryConfig);
-
-      const state = useConfigStore.getState();
-      expect(state.config?.memory.embedder.provider).toBe("ollama");
-      expect(state.config?.memory.embedder.config.model).toBe(
-        "nomic-embed-text",
-      );
-      expect(state.config?.memory.embedder.config.host).toBe(
-        "http://localhost:11434",
-      );
-      expect(state.isDirty).toBe(true);
-    });
-
-    it("should handle memory config without host", () => {
-      useConfigStore.setState({
-        config: {
-          memory: {
-            embedder: {
-              provider: "openai",
-              config: {
-                model: "text-embedding-3-small",
-              },
-            },
+        backend: "mem0" as const,
+        embedder: {
+          provider: "ollama",
+          config: {
+            model: "nomic-embed-text",
+            host: "http://localhost:11434",
           },
-          models: {},
-          agents: {},
-          defaults: {
-            markdown: true,
-          },
-          router: { model: "default" },
         },
-      });
-
-      const { updateMemoryConfig } = useConfigStore.getState();
-      const newMemoryConfig = {
-        provider: "openai",
-        model: "text-embedding-3-small",
       };
 
       updateMemoryConfig(newMemoryConfig);
 
       const state = useConfigStore.getState();
-      expect(state.config?.memory.embedder.provider).toBe("openai");
-      expect(state.config?.memory.embedder.config.model).toBe(
-        "text-embedding-3-small",
-      );
-      expect(state.config?.memory.embedder.config.host).toBeUndefined();
+      expect(state.config?.memory).toEqual(newMemoryConfig);
+      expect(state.dirtyRoots).toEqual(["memory"]);
+      expect(state.isDirty).toBe(true);
     });
   });
 
@@ -6302,9 +6266,12 @@ describe("configStore", () => {
           .getState()
           .updateMemoryConfig({ ...memory, backend: "file" } as never);
         useConfigStore.getState().updateMemoryConfig({
-          provider: "openai",
-          model: "text-embedding-3-large",
-        });
+          ...memory,
+          embedder: {
+            provider: "openai",
+            config: { model: "text-embedding-3-large" },
+          },
+        } as never);
         useConfigStore
           .getState()
           .updateKnowledgeBase("docs", { watch: false } as never);
@@ -6458,6 +6425,31 @@ describe("configStore", () => {
 
       expect(useConfigStore.getState().config).not.toHaveProperty("defaults");
       expect(await savedPayload()).not.toHaveProperty("defaults");
+    });
+
+    it("drops blocks emptied by a reset unless the loaded config authors them", async () => {
+      await loadBaseConfig({
+        ...baseConfig,
+        memory: { embedder: { provider: "openai" } },
+        rooms: { dev: { encrypted: true } },
+      });
+      const { updateConfigValue } = useConfigStore.getState();
+      updateConfigValue(["voice", "stt", "credentials_service"], "speech");
+      updateConfigValue(["voice", "stt", "credentials_service"], undefined);
+      updateConfigValue(["memory", "embedder", "config", "dimensions"], 256);
+      updateConfigValue(
+        ["memory", "embedder", "config", "dimensions"],
+        undefined,
+      );
+      updateConfigValue(["rooms", "lobby", "encrypted"], true);
+      updateConfigValue(["rooms", "lobby", "encrypted"], undefined);
+      updateConfigValue(["rooms", "dev", "encrypted"], undefined);
+
+      const { config } = useConfigStore.getState();
+      expect(config).not.toHaveProperty("voice");
+      expect(config?.memory).toEqual({ embedder: { provider: "openai" } });
+      // The loaded config declares dev, so it stays even without settings.
+      expect(config?.rooms).toEqual({ dev: {} });
     });
 
     it("removes a root when given undefined", async () => {

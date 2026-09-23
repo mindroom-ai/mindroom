@@ -13,6 +13,7 @@ import {
   normalizeTeamUpdates,
 } from "@/types/config";
 import {
+  getPathValue,
   isPlainObject,
   setPathValue,
   type ConfigPath,
@@ -512,18 +513,6 @@ function agentPoliciesDiagnostic(blocking: boolean): ConfigDiagnostic {
   };
 }
 
-type MemoryEmbedderUpdate = {
-  provider: string;
-  model: string;
-  host?: string;
-};
-
-function isMemoryEmbedderUpdate(
-  update: object,
-): update is MemoryEmbedderUpdate {
-  return "provider" in update && "model" in update;
-}
-
 const rawToolEntriesByConfig = new WeakMap<Config, Map<string, ToolEntry[]>>();
 const rawDefaultToolEntriesByConfig = new WeakMap<
   Config,
@@ -714,9 +703,7 @@ interface ConfigState {
   addAgentToRoom: (roomId: string, agentId: string) => void;
   removeAgentFromRoom: (roomId: string, agentId: string) => void;
   updateRoomModels: (roomModels: Record<string, string>) => void;
-  updateMemoryConfig: (
-    memoryConfig: MemoryEmbedderUpdate | Config["memory"],
-  ) => void;
+  updateMemoryConfig: (memoryConfig: Config["memory"]) => void;
   updateKnowledgeBase: (
     baseName: string,
     baseConfig: KnowledgeBaseConfig,
@@ -2116,24 +2103,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((state) => {
       if (!state.config) return state;
       const currentMemory = state.config.memory;
-      const memory = isMemoryEmbedderUpdate(memoryConfig)
-        ? {
-            ...currentMemory,
-            embedder: {
-              provider: memoryConfig.provider,
-              config: {
-                model: memoryConfig.model,
-                ...(memoryConfig.host ? { host: memoryConfig.host } : {}),
-              },
-            },
-          }
-        : memoryConfig;
-      const nextConfig = { ...state.config, memory };
+      const nextConfig = { ...state.config, memory: memoryConfig };
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
         ...markDraftDirty(state, {}, [["memory"]], (issue) =>
-          issueValueChanged(issue, ["memory"], currentMemory, memory),
+          issueValueChanged(issue, ["memory"], currentMemory, memoryConfig),
         ),
       };
     });
@@ -2257,16 +2232,24 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       if (!state.config) return state;
       const [root] = path;
       let nextConfig = setPathValue(state.config, path, value);
-      // A root emptied by removing its last key falls back to its defaults
-      // instead of persisting as an empty mapping.
-      const nextRoot = readConfigRoot(nextConfig, root);
-      if (
-        value === undefined &&
-        path.length > 1 &&
-        isPlainObject(nextRoot) &&
-        Object.keys(nextRoot).length === 0
+      // Blocks emptied by removing their last key fall back to their defaults
+      // instead of persisting as empty mappings. Nested entries the loaded
+      // config authors, such as a room declared without settings, stay.
+      for (
+        let depth = path.length - 1;
+        value === undefined && depth > 0;
+        depth--
       ) {
-        nextConfig = setPathValue(nextConfig, [root], undefined);
+        const block = path.slice(0, depth) as unknown as ConfigPath;
+        const emptied = getPathValue(nextConfig, block);
+        if (
+          !isPlainObject(emptied) ||
+          Object.keys(emptied).length > 0 ||
+          (depth > 1 && getPathValue(state.loadedConfig, block) !== undefined)
+        ) {
+          break;
+        }
+        nextConfig = setPathValue(nextConfig, block, undefined);
       }
       preserveRawToolEntries(state.config, nextConfig);
       return {
