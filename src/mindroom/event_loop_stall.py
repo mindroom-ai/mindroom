@@ -51,6 +51,8 @@ _MAX_OTHER_THREAD_STACK_CHARACTERS = 1_000
 _STACK_TRUNCATION_MARKER = "\n...\n"
 _GC_REPORT_THRESHOLD_SECONDS = 0.05
 _MAX_GC_RECORDS = 128
+_MAX_GC_TRIGGER_FRAMES = 8
+_MAX_GC_LOCATION_CHARACTERS = 240
 
 
 def _event_loop_stall_threshold_seconds(runtime_paths: RuntimePaths) -> float:
@@ -107,6 +109,31 @@ class _GcCollection:
     thread_ident: int
     collected: int
     uncollectable: int
+    trigger_locations: tuple[tuple[str, int, str], ...]
+
+
+def _gc_trigger_locations(frame: FrameType | None) -> tuple[tuple[str, int, str], ...]:
+    """Copy bounded code locations, never frames, locals, or source lines.
+
+    A collection may hold the GIL for the whole pause, preventing the native
+    watchdog from sampling its trigger until that trigger has returned.
+    Avoid traceback formatting here: its source lookup and locks do not belong
+    inside a collection callback.
+    """
+    locations: list[tuple[str, int, str]] = []
+    for _ in range(_MAX_GC_TRIGGER_FRAMES):
+        if frame is None:
+            break
+        code = frame.f_code
+        locations.append(
+            (
+                code.co_filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1][:_MAX_GC_LOCATION_CHARACTERS],
+                frame.f_lineno,
+                code.co_name[:_MAX_GC_LOCATION_CHARACTERS],
+            ),
+        )
+        frame = frame.f_back
+    return tuple(locations)
 
 
 class EventLoopStallDetector:
@@ -221,6 +248,7 @@ class EventLoopStallDetector:
                 thread_ident,
                 info["collected"],
                 info["uncollectable"],
+                _gc_trigger_locations(sys._getframe(1)),
             ),
         )
 
@@ -245,6 +273,10 @@ class EventLoopStallDetector:
                 thread_ident=record.thread_ident,
                 collected=record.collected,
                 uncollectable=record.uncollectable,
+                trigger_locations=[
+                    {"file": filename, "line": line, "function": function}
+                    for filename, line, function in record.trigger_locations
+                ],
             )
         if dropped:
             logger.info("event_loop_gc_records_dropped", count=dropped)

@@ -617,6 +617,42 @@ def test_gc_records_are_bounded_and_report_overflow(monkeypatch: pytest.MonkeyPa
     assert sum(entry["count"] for entry in overflow) + len(collections) == 300
 
 
+def test_slow_gc_reports_trigger_without_retaining_caller_locals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deferred evidence identifies the collector without keeping its heap alive."""
+    import gc  # noqa: PLC0415
+    import weakref  # noqa: PLC0415
+
+    class Payload:
+        pass
+
+    detector = _detector()
+    detector._gc_tracking = True
+    monkeypatch.setattr(event_loop_stall, "_GC_REPORT_THRESHOLD_SECONDS", 0)
+
+    def trigger_collection() -> weakref.ReferenceType[Payload]:
+        private_payload = Payload()
+        reference = weakref.ref(private_payload)
+        gc.collect(2)
+        return reference
+
+    gc.callbacks.append(detector._gc_callback)
+    try:
+        with capture_logs() as logs:
+            reference = trigger_collection()
+            assert logs == []
+            assert reference() is None
+            detector._report_gc()
+        collection = next(entry for entry in logs if entry["generation"] == 2)
+        assert 1 <= len(collection["trigger_locations"]) <= 8
+        caller = collection["trigger_locations"][0]
+        assert caller["file"] == "test_event_loop_stall.py"
+        assert caller["function"] == "trigger_collection"
+        assert isinstance(caller["line"], int)
+        assert "private_payload" not in str(collection)
+    finally:
+        gc.callbacks.remove(detector._gc_callback)
+
+
 @pytest.mark.asyncio
 async def test_gc_callback_follows_detector_lifecycle() -> None:
     """Stopping diagnostics removes only its callback and drops incomplete collection state."""

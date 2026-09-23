@@ -388,6 +388,7 @@ class AgentBot:
     _decryption_diagnostics: DecryptionDiagnostics
     _local_membership_lock: asyncio.Lock
     _ingestion_admission_progress: asyncio.Event
+    _ingestion_acknowledgement_count: int
     _sync_continuity_store: SyncContinuityStore
     _response_recovery_diagnostic_classes: set[tuple[str, tuple[str, ...], str | None]]
 
@@ -473,6 +474,7 @@ class AgentBot:
         self._call_rooms_reconcile_pending = set()
         self._local_membership_lock = asyncio.Lock()
         self._ingestion_admission_progress = asyncio.Event()
+        self._ingestion_acknowledgement_count = 0
         self._response_recovery_diagnostic_classes = set()
 
         async def send_room_lifecycle_response(
@@ -1491,9 +1493,17 @@ class AgentBot:
         return time.monotonic() - self._last_sync_monotonic
 
     def durable_ingestion_progress_generation(self) -> int | None:
-        """Return nio's commit-gated progress generation for the owned session."""
+        """Observe both source publication and committed backlog consumption."""
         session = self._ingestion_session
-        return session.progress_generation if session is not None else None
+        # Nio's high-water mark stays fixed while already queued batches drain.
+        # Acknowledgements must advance health too, without counting failed
+        # admission attempts or weakening the watchdog's finite grace period.
+        return session.progress_generation + self._ingestion_acknowledgement_count if session is not None else None
+
+    def _on_ingestion_batch_acknowledged(self) -> None:
+        """Publish progress only after the committed batch is acknowledged."""
+        self._ingestion_acknowledgement_count += 1
+        self._ingestion_admission_progress.set()
 
     def _mark_sync_progress(self) -> None:
         """Advance watchdog and health freshness from one sync progress event."""
@@ -2471,7 +2481,7 @@ class AgentBot:
                 before_admission=self._before_ingestion_admission,
                 after_admission=self._after_ingestion_admission,
                 after_sync=self._on_ingestion_frame_completion,
-                after_ack=self._ingestion_admission_progress.set,
+                after_ack=self._on_ingestion_batch_acknowledged,
                 on_decryption_failure=self._decryption_diagnostics.schedule,
                 schedule_trigger_sender_is_managed=self._ingress_validator.sender_is_trusted_for_ingress_metadata,
             ),

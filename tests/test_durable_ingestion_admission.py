@@ -111,6 +111,7 @@ async def test_acknowledged_retry_wakes_an_idle_semantic_worker(
     worker_idle = asyncio.Event()
     pump_idle = asyncio.Event()
     handled = asyncio.Event()
+    acknowledged_progress: list[bool] = []
 
     async def handle(_event: JournalEvent) -> bool:
         handled.set()
@@ -149,9 +150,11 @@ async def test_acknowledged_retry_wakes_an_idle_semantic_worker(
                 wait_for_work=wait_for_work,
                 wake_semantic_dispatch=worker.wake,
                 after_admission=interrupt_after_commit,
+                after_ack=lambda: acknowledged_progress.append(True),
             )
         assert await principal.is_pending("$interrupted")
         assert session.acked == []
+        assert acknowledged_progress == []
         retry = asyncio.create_task(
             durable_ingestion.run_ingestion_pump(
                 session,
@@ -159,10 +162,12 @@ async def test_acknowledged_retry_wakes_an_idle_semantic_worker(
                 account_id=ACCOUNT,
                 wait_for_work=wait_for_work,
                 wake_semantic_dispatch=worker.wake,
+                after_ack=lambda: acknowledged_progress.append(True),
             ),
         )
         await asyncio.wait_for(pump_idle.wait(), 1)
         assert session.acked == [batch]
+        assert acknowledged_progress == [True]
         await asyncio.wait_for(handled.wait(), 1)
     finally:
         if retry is not None:
