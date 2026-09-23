@@ -422,8 +422,8 @@ class DefaultsConfig(BaseModel):
         default=500,
         ge=1,
         description=(
-            "Maximum tool calls one agent or team turn may execute; further calls return a tool error "
-            "so the model must answer"
+            "Maximum tool calls one agent or team turn may execute; further calls return a tool error, "
+            "the model gets one more response to answer, and the turn ends if it requests tools again"
         ),
     )
     show_tool_calls: bool = Field(

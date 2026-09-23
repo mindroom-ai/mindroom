@@ -34,6 +34,7 @@ from mindroom.history.types import (
 )
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.tool_call_budget import install_tool_call_budget
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
     FakeModel,
@@ -401,6 +402,7 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
             team_name="pair",
         ) as scope_context,
         patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")),
+        patch("mindroom.teams.install_tool_call_budget", wraps=install_tool_call_budget) as install_budget,
     ):
         assert scope_context is not None
         team = _create_team_instance(
@@ -415,6 +417,7 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
             configured_team_name="pair",
         )
 
+    install_budget.assert_called_once_with(team.model, entity_name="pair")
     assert alpha.add_history_to_context is False
     assert zeta.add_history_to_context is False
     assert team.add_history_to_context is True

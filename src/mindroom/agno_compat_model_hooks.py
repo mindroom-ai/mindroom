@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
+    from agno.tools.function import FunctionCall
 
 type _AsyncInvoke = Callable[..., Coroutine[object, object, ModelResponse]]
 type _AsyncStream = Callable[..., AsyncIterator[ModelResponse]]
@@ -202,6 +203,77 @@ def install_tool_result_callback(
     except AttributeError:
         return
     model_dict["_handle_function_call_media"] = handle_media
+
+
+# AGNO_COMPAT: tool_call_limit refuses tool calls without ever ending the run.
+# Reason: Agno 3.0.9 answers each tool call past tool_call_limit with a "Tool call limit
+# reached" error result and keeps calling the model for as long as it requests tools, so a
+# model that ignores the refusal keeps its run alive indefinitely. The run's tool-call count
+# reaches only arun_function_calls, so post-tool callbacks cannot tell the first refused batch
+# from a repeated one, and model-level state is unsafe because concurrent runs share a model.
+# Upstream issue: https://github.com/agno-agi/agno/issues/8304 and
+# https://github.com/agno-agi/agno/issues/10041.
+# Upstream PR: https://github.com/agno-agi/agno/pull/10042 and
+# https://github.com/agno-agi/agno/pull/8324 are open and end the run at a refused batch
+# without first granting the model one closing response.
+# Remove when: Agno ends a run whose model requests tools again after its first refused batch,
+# in both async streaming and non-streaming loops, while still granting that one response;
+# the owner's once-per-run tool_call_limit_reached warning must remain.
+# Coverage: tests/test_tool_call_budget.py.
+def install_tool_call_limit_stop(
+    model: Model,
+    *,
+    marker: str,
+    on_limit_reached: Callable[[int], None],
+) -> None:
+    """End a run whose model requests tools again after Agno refused a batch at ``tool_call_limit``.
+
+    Agno counts one run's tool calls in ``aresponse`` and ``aresponse_stream`` and passes
+    that running count to ``arun_function_calls`` for every batch. The first batch that
+    crosses the limit is refused and reported once through ``on_limit_reached``, and the
+    model then gets one more response. A batch that arrives with the limit already
+    exceeded is refused too; marking its results ``stop_after_tool_call`` makes Agno's
+    loop break instead of calling the model again. Every call counts against the limit
+    because MindRoom enables no Agno result store.
+    """
+    model_dict = vars(model)
+    if model_dict.get(marker) is True:
+        return
+    model_dict[marker] = True
+    original = cast(
+        "Callable[..., AsyncGenerator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]]",
+        model.arun_function_calls,
+    )
+
+    async def arun_function_calls(
+        function_calls: list[FunctionCall],
+        function_call_results: list[Message],
+        *args: object,
+        current_function_call_count: int = 0,
+        function_call_limit: int | None = None,
+        **kwargs: object,
+    ) -> AsyncIterator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]:
+        async with aclosing(
+            original(
+                function_calls,
+                function_call_results,
+                *args,
+                current_function_call_count=current_function_call_count,
+                function_call_limit=function_call_limit,
+                **kwargs,
+            ),
+        ) as stream:
+            async for event in stream:
+                yield event
+        if function_call_limit is None:
+            return
+        if current_function_call_count > function_call_limit:
+            for result in function_call_results:
+                result.stop_after_tool_call = True
+        elif current_function_call_count + len(function_calls) > function_call_limit:
+            on_limit_reached(function_call_limit)
+
+    model_dict["arun_function_calls"] = arun_function_calls
 
 
 # AGNO_COMPAT: Model invocation and streaming lack composable middleware.

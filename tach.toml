@@ -490,6 +490,7 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.timing",
     "mindroom.tool_approval",
+    "mindroom.tool_call_budget",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.dynamic_toolkits",
@@ -2349,6 +2350,7 @@ depends_on = [
     "mindroom.model_loading",
     "mindroom.response_turn",
     "mindroom.team_exact_members",
+    "mindroom.tool_call_budget",
     "mindroom.tool_system.events",
     "mindroom.delegation.execution",
 ]
@@ -6474,6 +6476,7 @@ visibility = [
     "mindroom.provider_media_fallback",
     "mindroom.provider_stream_retry",
     "mindroom.claude_prompt_cache",
+    "mindroom.tool_call_budget",
 ]
 
 [[interfaces]]
@@ -6481,6 +6484,7 @@ from = ["mindroom.agno_compat_model_hooks"]
 expose = [
     "install_message_projection",
     "install_tool_result_callback",
+    "install_tool_call_limit_stop",
     "install_async_invocation_hooks",
     "install_stream_invocation_hooks",
     "temporary_async_invocation_hooks",
@@ -6488,6 +6492,15 @@ expose = [
     "install_client_factories",
 ]
 
+
+[[modules]]
+path = "mindroom.tool_call_budget"
+depends_on = ["mindroom.agno_compat_model_hooks", "mindroom.logging_config"]
+visibility = ["mindroom.agents", "mindroom.teams", "mindroom.custom_tools.dynamic_workflow"]
+
+[[interfaces]]
+from = ["mindroom.tool_call_budget"]
+expose = ["install_tool_call_budget"]
 
 [[modules]]
 path = "mindroom.agno_compat_sqlite"

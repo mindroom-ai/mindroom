@@ -483,6 +483,10 @@ class _FakeResponseModel:
         del messages
         yield ModelResponse(content="ok")
 
+    async def arun_function_calls(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        return
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
 
 class _FakeModel(_FakeResponseModel):
     def format_function_call_results(

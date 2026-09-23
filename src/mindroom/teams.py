@@ -125,6 +125,7 @@ from mindroom.team_exact_members import (
 )
 from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.timing import emit_timing_event
+from mindroom.tool_call_budget import install_tool_call_budget
 from mindroom.tool_system.events import (
     StreamingToolTracker,
     StructuredStreamChunk,
@@ -2280,6 +2281,8 @@ def _create_team_instance(
         model,
         notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
     )
+    # The team budget caps the coordinator's own calls; members carry their own.
+    install_tool_call_budget(model, entity_name=configured_team_name or team_display_name)
     team_scope = config.resolve_entity(
         configured_team_name if configured_team_name is not None and configured_team_name in config.teams else None,
     )
