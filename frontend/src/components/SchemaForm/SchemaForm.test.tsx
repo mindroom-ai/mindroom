@@ -562,6 +562,23 @@ describe("SchemaFields", () => {
     expect(lastValue()).toEqual({ call_profile: { backend: "cascaded" } });
   });
 
+  it("prompts for a missing required choice instead of preselecting one", () => {
+    const { lastValue } = renderFixture({
+      participation: { judgment: { provider: "llm" } },
+    });
+    // The fixture's own model comes first; the judgment's required one second.
+    const [, select] = screen.getAllByRole("combobox", { name: "Model" });
+    expect(select).toHaveDisplayValue("Choose…");
+
+    fireEvent.change(select, { target: { value: "default" } });
+    expect(lastValue()).toEqual({
+      participation: { judgment: { provider: "llm", model: "default" } },
+    });
+    expect(
+      within(select).queryByRole("option", { name: "Choose…" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps fields both variants define when switching union variants", () => {
     const { lastValue } = renderFixture({
       participation: {

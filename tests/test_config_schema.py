@@ -59,6 +59,28 @@ def _collect_hints(node: object) -> Iterator[dict[str, object]]:
             yield from _collect_hints(item)
 
 
+def _is_object_schema(member: dict[str, object], defs: dict[str, dict[str, object]]) -> bool:
+    ref = member.get("$ref")
+    if isinstance(ref, str):
+        member = defs[ref.removeprefix("#/$defs/")]
+    return member.get("type") == "object"
+
+
+def _untagged_object_unions(node: object, defs: dict[str, dict[str, object]], path: str = "") -> Iterator[str]:
+    if isinstance(node, dict):
+        for key in ("anyOf", "oneOf"):
+            members = node.get(key)
+            if isinstance(members, list) and "discriminator" not in node:
+                objects = [member for member in members if _is_object_schema(member, defs)]
+                if len(objects) > 1:
+                    yield path
+        for key, value in node.items():
+            yield from _untagged_object_unions(value, defs, f"{path}/{key}")
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            yield from _untagged_object_unions(item, defs, f"{path}/{index}")
+
+
 def test_every_config_field_has_description() -> None:
     """The dashboard shows each description as helper text, so none may be missing."""
     missing = [f"{model.__name__}.{name}" for model, name, field in _walk_fields() if not field.description]
@@ -120,6 +142,12 @@ def test_compaction_override_fields_clear_inherited_values() -> None:
     clearing = {name for name, field in properties.items() if field.get(HINT_KEY, {}).get("clears_inherited")}
     # An authored null enabled turns compaction off instead of clearing back to the inherited value.
     assert clearing == set(properties) - {"enabled"}
+
+
+def test_object_unions_are_discriminated() -> None:
+    """Dashboard forms and validation errors tell object union variants apart by their tag."""
+    schema = dashboard_config_schema()
+    assert list(_untagged_object_unions(schema, schema["$defs"])) == []
 
 
 def test_dashboard_schema_reports_default_factory_values() -> None:

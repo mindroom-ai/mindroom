@@ -43,7 +43,7 @@ import {
   moveItem,
   noneLabel,
   presenceMode,
-  unsetLabel,
+  unsetOptions,
   type SchemaPath,
 } from "./inputs";
 import { useReferenceOptions } from "./references";
@@ -194,7 +194,7 @@ export function SchemaField({
       );
     }
     const options = [
-      { value: DEFAULT_OPTION, label: unsetLabel(node, "Default") },
+      ...unsetOptions(node, required, value, "Default"),
       { value: "true", label: "On" },
       { value: "false", label: "Off" },
       ...(presence === "tri"
@@ -327,9 +327,7 @@ export function SchemaField({
               : "custom"
         }
         options={[
-          ...(required
-            ? []
-            : [{ value: DEFAULT_OPTION, label: unsetLabel(node, "Default") }]),
+          ...unsetOptions(node, required, value, "Default"),
           { value: NONE_OPTION, label: noneLabel(node) },
           { value: "custom", label: "Custom" },
         ]}

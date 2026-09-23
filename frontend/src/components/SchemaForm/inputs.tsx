@@ -62,8 +62,26 @@ export function presenceMode(
 // inherits it and null restores the built-in default rather than meaning none.
 const INHERITED_LABEL = "Inherited";
 
-export function unsetLabel(node: SchemaNode, label: string): string {
+function unsetLabel(node: SchemaNode, label: string): string {
   return node.hint.clears_inherited === true ? INHERITED_LABEL : label;
+}
+
+/**
+ * Select options for an absent value: the default of an optional field, or a
+ * prompt while a required one is missing, so no real option looks selected.
+ */
+export function unsetOptions(
+  node: SchemaNode,
+  required: boolean,
+  value: unknown,
+  label: string,
+): Array<{ value: string; label: string }> {
+  if (!required) {
+    return [{ value: DEFAULT_OPTION, label: unsetLabel(node, label) }];
+  }
+  return value === undefined
+    ? [{ value: DEFAULT_OPTION, label: "Choose…" }]
+    : [];
 }
 
 export function noneLabel(node: SchemaNode): string {
@@ -332,17 +350,12 @@ export function ScalarInput({
         ? selectOptions
         : [current, ...selectOptions];
     const options = [
-      ...(required
-        ? []
-        : [
-            {
-              value: DEFAULT_OPTION,
-              label: unsetLabel(
-                node,
-                summary ? `Default (${summary})` : "Not set",
-              ),
-            },
-          ]),
+      ...unsetOptions(
+        node,
+        required,
+        value,
+        summary ? `Default (${summary})` : "Not set",
+      ),
       ...(presence === "tri"
         ? [{ value: NONE_OPTION, label: noneLabel(node) }]
         : []),

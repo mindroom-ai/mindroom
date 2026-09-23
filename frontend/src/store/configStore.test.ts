@@ -6341,6 +6341,54 @@ describe("configStore", () => {
         expect(remainingLocs()).toEqual([]);
       });
 
+      it("clear the errors of a union variant once another is chosen", async () => {
+        await loadBaseConfig({
+          ...baseConfig,
+          agents: {
+            helper: {
+              ...baseConfig.agents.helper,
+              participation: { judgment: { provider: "llm" } },
+            },
+          },
+          calls: { profiles: { p: { backend: "realtime" } } },
+        });
+        const judgmentModel = [
+          "agents",
+          "helper",
+          "participation",
+          "judgment",
+          "llm",
+          "model",
+        ];
+        useConfigStore.setState({
+          diagnostics: [
+            issue(judgmentModel, "missing"),
+            issue(["calls", "profiles", "p", "realtime", "voice"], "missing"),
+          ],
+        });
+
+        useConfigStore.getState().updateAgent("helper", {
+          participation: {
+            debounce_seconds: 2,
+            judgment: { provider: "llm" },
+          },
+        } as never);
+        expect(remainingLocs()).toEqual([
+          judgmentModel,
+          ["calls", "profiles", "p", "realtime", "voice"],
+        ]);
+
+        useConfigStore.getState().updateAgent("helper", {
+          participation: { judgment: { provider: "typesafe" } },
+        } as never);
+        useConfigStore
+          .getState()
+          .updateConfigValue(["calls", "profiles", "p"], {
+            backend: "cascaded",
+          });
+        expect(remainingLocs()).toEqual([]);
+      });
+
       it("keep sibling errors when a whole entity is replaced", async () => {
         await loadBaseConfig({
           ...baseConfig,

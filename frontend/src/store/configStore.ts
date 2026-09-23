@@ -145,9 +145,10 @@ function childValue(value: unknown, segment: string | number): unknown {
 /**
  * Whether the value a validation issue points at differs between before and
  * after, the values at prefix, so editing one field keeps the errors of the
- * others. Pydantic adds loc segments that are no key in either value, such as
- * union tags ("llm") and variant types ("list[str]"); those are skipped, except
- * the absent key of a "missing" issue.
+ * others. Pydantic adds loc segments that are no key in either value: the tag
+ * of a discriminated union variant ("llm"), which changes when the variant
+ * does, and the type of a plain union member ("list[str]"), which is skipped.
+ * tests/test_config_schema.py keeps every object union discriminated.
  */
 function issueValueChanged(
   { loc, type }: ConfigValidationIssue,
@@ -161,24 +162,32 @@ function issueValueChanged(
   if (!pathStartsWith(loc, prefix)) {
     return false;
   }
+  const rest = loc.slice(prefix.length);
   let from = before;
   let to = after;
-  loc.slice(prefix.length).forEach((segment, index, rest) => {
+  for (let index = 0; index < rest.length; index += 1) {
+    const segment = rest[index];
     const inFrom = hasSegment(from, segment);
     const inTo = hasSegment(to, segment);
-    // A missing key stays missing while both containers exist; removing a
-    // container still changes the value the issue is about.
-    const missingKey =
-      type === "missing" &&
-      index === rest.length - 1 &&
-      isPlainObject(from) &&
-      isPlainObject(to);
-    if (!inFrom && !inTo && !missingKey) {
-      return;
+    if (!inFrom && !inTo) {
+      if (!isPlainObject(from) || !isPlainObject(to)) {
+        continue;
+      }
+      // A missing key stays missing while both containers exist.
+      if (type === "missing" && index === rest.length - 1) {
+        return false;
+      }
+      if (
+        Object.values(from).includes(segment) !==
+        Object.values(to).includes(segment)
+      ) {
+        return true;
+      }
+      continue;
     }
     from = inFrom ? childValue(from, segment) : undefined;
     to = inTo ? childValue(to, segment) : undefined;
-  });
+  }
   return !sameValue(from, to);
 }
 
