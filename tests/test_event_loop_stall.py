@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import _thread
 import asyncio
+import gc
 import threading
 import time
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -619,8 +621,6 @@ def test_gc_records_are_bounded_and_report_overflow(monkeypatch: pytest.MonkeyPa
 
 def test_slow_gc_reports_trigger_without_retaining_caller_locals(monkeypatch: pytest.MonkeyPatch) -> None:
     """Deferred evidence identifies the collector without keeping its heap alive."""
-    import gc  # noqa: PLC0415
-    import weakref  # noqa: PLC0415
 
     class Payload:
         pass

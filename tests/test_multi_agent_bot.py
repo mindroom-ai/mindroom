@@ -68,7 +68,7 @@ from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable
+    from collections.abc import AsyncGenerator
     from pathlib import Path
 
 
@@ -469,7 +469,6 @@ class TestAgentBot(AgentBotTestBase):
         ingestion_session = SimpleNamespace(
             run=AsyncMock(side_effect=run_owned),
             wait_for_work=wait_for_work,
-            progress_generation=7,
         )
         mock_login.return_value = _owned_login(mock_client, ingestion_session)
         mock_ensure_user.return_value = None
@@ -484,7 +483,7 @@ class TestAgentBot(AgentBotTestBase):
             *,
             account_id: str,
             after_sync: object,
-            after_ack: Callable[[], None],
+            after_ack: object,
             wait_for_work: object,
             wake_semantic_dispatch: object,
             wait_for_delivery_projection: object,
@@ -494,16 +493,7 @@ class TestAgentBot(AgentBotTestBase):
             schedule_trigger_sender_is_managed: object,
         ) -> None:
             assert after_sync == bot._on_ingestion_frame_completion
-            # Draining queued batches must remain visible even when nio's
-            # newest produced batch stays fixed throughout the drain.
-            assert bot.durable_ingestion_progress_generation() == 7
-            after_ack()
-            assert bot._ingestion_admission_progress.is_set()
-            assert bot.durable_ingestion_progress_generation() == 8
-            after_ack()
-            assert bot.durable_ingestion_progress_generation() == 9
-            ingestion_session.progress_generation = 8
-            assert bot.durable_ingestion_progress_generation() == 10
+            assert after_ack == bot._on_ingestion_batch_acknowledged
             assert before_admission == bot._before_ingestion_admission
             assert wait_for_delivery_projection == bot._wait_for_delivery_projection
             assert after_admission == bot._after_ingestion_admission
