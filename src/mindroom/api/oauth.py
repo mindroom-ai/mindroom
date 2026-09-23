@@ -72,7 +72,6 @@ from mindroom.oauth.service import (
     OAuthConnectTarget,
     consume_oauth_connect_token,
     lookup_oauth_connect_token,
-    oauth_connect_url,
     oauth_provider_service_account_configured,
     oauth_success_redirect_url,
 )
@@ -104,7 +103,6 @@ _OAUTH_BROWSER_SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
 }
-# Only shared credentials permit delegation through a single-use capability.
 
 
 class OAuthConnectResponse(BaseModel):
@@ -293,7 +291,6 @@ async def _issue_authorization_url(
             agent_name,
             payload=payload,
             code_verifier=code_verifier,
-            browser_user_required=connect_target is None or connect_target.binding.worker_scope != "shared",
         )
         auth_url = await provider.authorization_uri_async(
             runtime_paths,
@@ -384,7 +381,17 @@ def _conversation_connect_context(
     requester_id = target.requester_id
     if not agent_name or not requester_id:
         raise HTTPException(status_code=400, detail="OAuth link target is invalid")
-    if binding.worker_scope != "shared":
+    if binding.worker_scope == "shared":
+        # A shared credential belongs to the agent instead of one dashboard user, so the
+        # signed-in visitor must hold credential authority over that agent. The link only
+        # names the frozen target; it never carries the issuing requester's authority.
+        require_agent_oauth_connection_authorized(
+            request,
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name=agent_name,
+        )
+    else:
         _verify_connect_target_authorized(request, requester_id, runtime_paths)
     identity = _conversation_execution_identity(agent_name, requester_id, runtime_paths)
     worker_target = build_agent_toolkit_worker_target(
@@ -484,23 +491,19 @@ def _verify_browser_reset_intent(
         raise HTTPException(status_code=503, detail="OAuth reset requires an active configuration")
     if not agent_name:
         raise HTTPException(status_code=403, detail="The current requester cannot manage this agent's credentials")
-    # Deliberate split. A reset POST deletes a live credential before provider
-    # authorization, so a leaked requester-scoped link must not let another room
-    # member wipe the owner's connection and bind their own provider account into
-    # that scope; only a dashboard login as the token's requester proves the clicker
-    # is that requester. Shared credentials have no single human owner to log in
-    # as, so the one-time bearer link is the delegated authority for a configured
-    # credential manager and is consumed on POST instead.
-    if intent.binding.worker_scope == "shared":
-        identity = _conversation_execution_identity(agent_name, intent.requester_id, runtime_paths)
-    else:
+    # A reset deletes a live credential before provider authorization, so the link never
+    # carries its issuer's authority: every scope requires a signed-in dashboard visitor
+    # who may manage this agent's OAuth connections. Requester-scoped credentials live in
+    # one requester's private scope, so they additionally require that visitor to be the
+    # requester the link was issued to.
+    if intent.binding.worker_scope != "shared":
         _verify_connect_target_authorized(request, intent.requester_id, runtime_paths)
-        identity = require_agent_oauth_connection_authorized(
-            request,
-            config=config,
-            runtime_paths=runtime_paths,
-            agent_name=agent_name,
-        )
+    identity = require_agent_oauth_connection_authorized(
+        request,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name=agent_name,
+    )
     try:
         target = resolve_oauth_reset_target(
             provider.id,
@@ -595,10 +598,9 @@ async def authorize(
             connect_target = lookup_oauth_connect_token(provider, runtime_paths, connect_token)
         except OAuthProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if connect_target is None or connect_target.binding.worker_scope != "shared":
-        login_redirect = await _require_oauth_browser_user(request, connect_target=connect_target)
-        if login_redirect is not None:
-            return login_redirect
+    login_redirect = await _require_oauth_browser_user(request, connect_target=connect_target)
+    if login_redirect is not None:
+        return login_redirect
     response = await _issue_authorization_url(
         request,
         provider,
@@ -633,14 +635,13 @@ async def confirm_reset(
     agent_name: str | None = None,
     execution_scope: str | None = None,
 ) -> Response:
-    """Show human confirmation for one authenticated or shared-capability reset."""
+    """Show human confirmation for one authenticated reset."""
     try:
         provider, runtime_paths = _load_provider(request, provider_id)
+        login_redirect = await _require_oauth_browser_user(request)
+        if login_redirect is not None:
+            return login_redirect
         intent = _browser_reset_intent(provider, runtime_paths, reset_token)
-        if intent.binding.worker_scope != "shared":
-            login_redirect = await _require_oauth_browser_user(request)
-            if login_redirect is not None:
-                return login_redirect
         _verify_browser_reset_intent(
             request,
             provider,
@@ -655,17 +656,15 @@ async def confirm_reset(
     target_agent = escape(intent.binding.requested_agent_name or "unknown")
     target_scope = escape(intent.binding.worker_scope)
     shared_warning = (
-        "<p><strong>This one-time link can reset the shared connection for every requester using this agent. "
-        "Do not share it.</strong></p>"
+        "<p><strong>This resets the shared connection for every requester using this agent.</strong></p>"
         if intent.binding.worker_scope == "shared"
         else ""
     )
     # Native form submissions need a non-opaque Origin for authenticated reset requests.
-    referrer_policy = "no-referrer" if intent.binding.worker_scope == "shared" else "strict-origin"
     return HTMLResponse(
         f"""<!doctype html>
 <html lang="en">
-  <head><meta charset="utf-8"><meta name="referrer" content="{referrer_policy}"><title>Reset {display_name}</title></head>
+  <head><meta charset="utf-8"><meta name="referrer" content="strict-origin"><title>Reset {display_name}</title></head>
   <body>
     <h1>Reset and reconnect {display_name}</h1>
     <p>This removes the current scoped credential, then opens the provider authorization page.</p>
@@ -675,7 +674,7 @@ async def confirm_reset(
     <form method="post"><button type="submit">Reset and reconnect</button></form>
   </body>
 </html>""",
-        headers={**_OAUTH_BROWSER_SECURITY_HEADERS, "Referrer-Policy": referrer_policy},
+        headers={**_OAUTH_BROWSER_SECURITY_HEADERS, "Referrer-Policy": "strict-origin"},
     )
 
 
@@ -689,10 +688,9 @@ async def reset_and_authorize(
 ) -> Response:
     """Commit one browser-confirmed reset and continue into provider authorization."""
     provider, runtime_paths = _load_provider(request, provider_id)
+    await _require_oauth_api_user(request)
     intent = _browser_reset_intent(provider, runtime_paths, reset_token)
-    shared_capability = intent.binding.worker_scope == "shared"
-    if not shared_capability:
-        await _require_oauth_api_user(request)
+    shared_reset = intent.binding.worker_scope == "shared"
     try:
         context = _verify_browser_reset_intent(
             request,
@@ -702,7 +700,7 @@ async def reset_and_authorize(
             agent_name=agent_name,
             execution_scope=execution_scope,
         )
-        if shared_capability:
+        if shared_reset:
             consume_browser_oauth_reset_intent(runtime_paths, reset_token)
     except HTTPException as exc:
         if exc.status_code == 409:
@@ -721,20 +719,18 @@ async def reset_and_authorize(
             operation_id=intent.operation_id,
             expected_connection_generation=intent.connection_generation,
         )
+        # Reconnection continues in this authenticated session instead of minting a new
+        # delegated capability, so the reset cannot hand anyone a fresh connect link.
         authorization_url = (
-            oauth_connect_url(provider, runtime_paths, worker_target=context.worker_target)
-            if shared_capability
-            else (
-                await _issue_authorization_url(
-                    request,
-                    provider,
-                    runtime_paths,
-                    agent_name=agent_name,
-                )
-            ).auth_url
-        )
+            await _issue_authorization_url(
+                request,
+                provider,
+                runtime_paths,
+                agent_name=agent_name,
+            )
+        ).auth_url
     except OAuthCredentialConflictError:
-        stale_message = _OAUTH_STALE_SHARED_RESET_MESSAGE if shared_capability else _OAUTH_STALE_CONNECTION_MESSAGE
+        stale_message = _OAUTH_STALE_SHARED_RESET_MESSAGE if shared_reset else _OAUTH_STALE_CONNECTION_MESSAGE
         return _oauth_browser_error_response(stale_message, status_code=409)
     except OAuthResetPreparationError as exc:
         logger.warning(

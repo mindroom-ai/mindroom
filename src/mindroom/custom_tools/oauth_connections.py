@@ -29,10 +29,10 @@ class OAuthConnectionTools(Toolkit):
         """Return a browser link to reset and reconnect an OAuth connection this requester may manage.
 
         Use this only when an OAuth connection is stuck or revoked. The operation
-        opens a browser confirmation before changing credentials. User scope can
-        affect this requester across agents; shared scope affects every requester
-        of this agent. It does not revoke the grant at the provider. Shared-scope
-        links are short-lived bearer capabilities, so keep them private.
+        opens a browser confirmation before changing credentials, and confirming it
+        requires signing in to the MindRoom dashboard. User scope can affect this
+        requester across agents; shared scope affects every requester of this agent.
+        It does not revoke the grant at the provider.
 
         Args:
             provider_id: OAuth provider ID backing one of this agent's configured tools.
@@ -58,13 +58,14 @@ class OAuthConnectionTools(Toolkit):
             reset_url = await issue_browser_oauth_reset_url(target)
         except OAuthResetTargetError as exc:
             return f"Error: {exc}"
-        privacy_guidance = (
-            " Keep this link private because anyone with the complete URL can confirm a shared-scope reset."
+        shared_guidance = (
+            " Confirming it resets the connection for every requester of this agent."
             if target.worker_target.worker_scope == "shared"
             else ""
         )
         return (
             f"Open this requester-issued browser link to confirm resetting provider `{provider_id}`. "
-            f"No credentials change until you confirm in the browser. `reset_url`: {reset_url}; "
-            f"the link is valid for 10 minutes.{privacy_guidance}"
+            "Confirming it requires signing in to the MindRoom dashboard as a user who may manage this "
+            "agent's connections, and no credentials change until you confirm in the browser. "
+            f"`reset_url`: {reset_url}; the link is valid for 10 minutes.{shared_guidance}"
         )

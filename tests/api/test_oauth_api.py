@@ -2467,14 +2467,15 @@ def _general_agent_reset_target(
     return provider, target
 
 
-def test_shared_browser_reset_uses_one_time_credential_manager_link_without_dashboard_login(tmp_path: Path) -> None:
-    """A shared credential manager link should confirm and reconnect without dashboard access."""
+def test_shared_browser_reset_requires_signed_in_credential_manager(tmp_path: Path) -> None:
+    """A shared reset link must never act for an anonymous visitor who holds the URL."""
     runtime_paths = _runtime_paths(
         tmp_path,
         {
             "TEST_OAUTH_CLIENT_ID": "client-id",
             "TEST_OAUTH_CLIENT_SECRET": "client-secret",
             "CUSTOMER_ID": "tenant-a",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
         },
     )
     api_app = _make_test_app(
@@ -2499,50 +2500,93 @@ def test_shared_browser_reset_uses_one_time_credential_manager_link_without_dash
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
-            confirmation = client.get(reset_url, follow_redirects=False)
-            before_confirmation = _stored_oauth_credentials(
+            anonymous_confirmation = client.get(reset_url, follow_redirects=False)
+            anonymous_reset = client.post(reset_url, follow_redirects=False)
+            after_anonymous_reset = _stored_oauth_credentials(
                 provider,
                 runtime_paths,
                 worker_scope="shared",
             )
+            _login(client)
+            confirmation = client.get(reset_url, follow_redirects=False)
             confirmed = client.post(reset_url, follow_redirects=False)
             after_confirmation = _stored_oauth_credentials(
                 provider,
                 runtime_paths,
                 worker_scope="shared",
             )
-            authorization = client.get(confirmed.headers["location"], follow_redirects=False)
-            state = _state_from_auth_url(authorization.headers["location"])
+            state = _state_from_auth_url(confirmed.headers["location"])
             callback = client.get(
                 f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
                 follow_redirects=False,
             )
             replayed = client.post(reset_url, follow_redirects=False)
-            after_replay = _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared")
 
+    assert anonymous_confirmation.status_code == 307
+    assert anonymous_confirmation.headers["location"].startswith("/login")
+    assert anonymous_reset.status_code == 401
+    assert after_anonymous_reset is not None
+    assert after_anonymous_reset["refresh_token"] == "old-refresh-token"
     assert confirmation.status_code == 200
     assert "shared scope" in confirmation.text
-    assert "reset the shared connection for every requester" in confirmation.text
-    assert 'name="referrer" content="no-referrer"' in confirmation.text
-    assert confirmation.headers["referrer-policy"] == "no-referrer"
+    assert "resets the shared connection for every requester" in confirmation.text
+    assert confirmation.headers["referrer-policy"] == "strict-origin"
     assert confirmation.headers["cache-control"] == "no-store"
-    assert before_confirmation is not None
-    assert before_confirmation["refresh_token"] == "old-refresh-token"
     assert confirmed.status_code == 303
+    # Reconnection continues in this authenticated session: no fresh bearer capability.
     confirmed_location = urlparse(confirmed.headers["location"])
-    assert confirmed_location.path == f"/api/oauth/{provider.id}/authorize"
-    assert "connect_token" in parse_qs(confirmed_location.query)
+    assert confirmed_location.netloc == "auth.example.test"
+    assert "connect_token" not in parse_qs(confirmed_location.query)
     assert after_confirmation is None
     assert replayed.status_code == 400
-    assert authorization.status_code == 307
-    assert urlparse(authorization.headers["location"]).netloc == "auth.example.test"
-    assert callback.status_code == 200
-    assert "Test Drive is connected" in callback.text
+    assert callback.status_code == 307
     stored = _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared")
     assert stored is not None
     assert stored["token"] == "google_drive-access-token"
-    assert after_replay is not None
-    assert after_replay["token"] == "google_drive-access-token"
+
+
+def test_shared_browser_reset_rejects_signed_in_user_without_credential_authority(tmp_path: Path) -> None:
+    """A shared reset link must not work for a dashboard user who may not manage the agent."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@bob:example.org",
+        },
+    )
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(worker_scope="shared", allowed_users=["@alice:example.org"]),
+    )
+    provider, target = _general_agent_reset_target(api_app, runtime_paths)
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
+        {
+            "token": "old-access-token",
+            "refresh_token": "old-refresh-token",
+            "client_id": "client-id",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+        worker_scope="shared",
+    )
+    reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url="http://localhost:8765") as client:
+            _login(client)
+            confirmation = client.get(reset_url, follow_redirects=False)
+            reset = client.post(reset_url, follow_redirects=False)
+
+    assert confirmation.status_code == 403
+    assert "Not authorized" in confirmation.text
+    assert reset.status_code == 403
+    stored = _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared")
+    assert stored is not None
+    assert stored["refresh_token"] == "old-refresh-token"
 
 
 def test_shared_browser_reset_consumes_stale_link_without_deleting_replacement(tmp_path: Path) -> None:
@@ -2552,6 +2596,7 @@ def test_shared_browser_reset_consumes_stale_link_without_deleting_replacement(t
         {
             "TEST_OAUTH_CLIENT_ID": "client-id",
             "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
         },
     )
     api_app = _make_test_app(
@@ -2580,6 +2625,7 @@ def test_shared_browser_reset_consumes_stale_link_without_deleting_replacement(t
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
+            _login(client)
             stale = client.post(reset_url, follow_redirects=False)
             replayed = client.post(reset_url, follow_redirects=False)
 
@@ -2595,12 +2641,13 @@ def test_shared_browser_reset_consumes_stale_link_without_deleting_replacement(t
 
 
 def test_shared_browser_reset_rechecks_credential_manager_authority(tmp_path: Path) -> None:
-    """A shared reset link should fail after its requester's credential authority is removed."""
+    """A shared reset link should fail after the signed-in user's credential authority is removed."""
     runtime_paths = _runtime_paths(
         tmp_path,
         {
             "TEST_OAUTH_CLIENT_ID": "client-id",
             "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
         },
     )
     api_app = _make_test_app(
@@ -2613,13 +2660,13 @@ def test_shared_browser_reset_rechecks_credential_manager_authority(tmp_path: Pa
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
+            _login(client)
             confirmation = client.get(reset_url, follow_redirects=False)
             reset = client.post(reset_url, follow_redirects=False)
 
-    assert confirmation.status_code == 409
-    assert "not authorized" in confirmation.text
-    assert reset.status_code == 409
-    assert "not authorized" in reset.text
+    assert confirmation.status_code == 403
+    assert "Not authorized" in confirmation.text
+    assert reset.status_code == 403
 
 
 def test_private_agent_requester_can_resolve_own_oauth_reset_target(tmp_path: Path) -> None:
@@ -5195,7 +5242,10 @@ def test_shared_agent_connect_token_uses_link_target_despite_authenticated_reque
             constants.OWNER_MATRIX_USER_ID_ENV: "@bob:example.org",
         },
     )
-    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(worker_scope="shared", allowed_users=["@alice:example.org", "@bob:example.org"]),
+    )
     provider = _fake_provider()
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5226,6 +5276,49 @@ def test_shared_agent_connect_token_uses_link_target_despite_authenticated_reque
 
     assert authorize_response.status_code == 307
     assert urlparse(authorize_response.headers["location"]).netloc == "auth.example.test"
+
+
+def test_shared_agent_connect_token_requires_signed_in_credential_manager(tmp_path: Path) -> None:
+    """A shared connect link must not let an anonymous or unauthorized visitor bind an account."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@bob:example.org",
+        },
+    )
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(worker_scope="shared", allowed_users=["@alice:example.org"]),
+    )
+    provider = _fake_provider()
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("shared", "general", execution_identity=identity)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+    authorize_path = (
+        f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=shared&connect_token={connect_token}"
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            anonymous_response = client.get(authorize_path, follow_redirects=False)
+            _login(client)
+            unauthorized_response = client.get(authorize_path, follow_redirects=False)
+
+    assert anonymous_response.status_code == 307
+    assert anonymous_response.headers["location"].startswith("/login")
+    assert unauthorized_response.status_code == 403
+    assert _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared") is None
 
 
 def test_callback_rejects_wrong_provider_state(tmp_path: Path) -> None:

@@ -70,7 +70,7 @@ agents:
 
 | Connection type | Who confirms the reset | What the reset affects |
 | --- | --- | --- |
-| Shared (`shared`) | An administrator or configured credential manager can request the link. Anyone with the complete link can confirm it before it expires. | Everyone using this agent |
+| Shared (`shared`) | An administrator or configured credential manager, signed in to the dashboard | Everyone using this agent |
 | Personal (`user`) | The same MindRoom user who requested the link, signed in to the dashboard | That user's connection across agents |
 | Personal for one agent (`user_agent`) | The same MindRoom user who requested the link, signed in to the dashboard | That user's connection for this agent only |
 
@@ -82,12 +82,13 @@ Some providers always use personal connections, regardless of the agent's config
 ### Reset A Connection
 
 1. Ask the agent to call `reset_oauth_connection()` for the affected provider.
-2. Open the returned link within 10 minutes.
+2. Open the returned link within 10 minutes and sign in to the MindRoom dashboard.
 3. Review which agent and connection type will be affected, then confirm the reset.
 4. Sign in at the provider and retry the original request.
 
-Keep a shared reset link private.
-Anyone with the complete link can confirm it before it expires, and confirming it can disconnect the service for everyone using that agent until reconnection finishes.
+The link names the connection to reset; it never carries the requesting user's authority.
+MindRoom refuses the reset unless the signed-in dashboard user may manage that agent's connections, so a link posted in a shared room does not let other members reset or rebind the connection.
+Confirming a shared reset disconnects the service for everyone using that agent until reconnection finishes.
 
 ### Notes
 

@@ -22,12 +22,13 @@ For providers that follow agent scope, credential targets use saved configuratio
 Unauthorized agent-scoped OAuth connect, authorize, status, disconnect, and callback requests return HTTP 403 before credentials are exposed or changed.
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result.
 The token binds the exact provider, Matrix requester, worker target, and credential connection generation.
-Requester-scoped credentials require the browser to authenticate as that requester at authorization and callback, using the same identity check as requester-scoped resets.
-Shared-scope credentials permit delegation through the short-lived token without a dashboard login.
+Every conversation link requires a dashboard login at authorization and callback, so the link names the credential target and never carries its issuer's authority.
+Requester-scoped credentials require the browser to authenticate as that requester, using the same identity check as requester-scoped resets.
+Shared-scope credentials require the authenticated browser user to be allowed to manage that agent's OAuth connections.
 MindRoom rechecks the conversation link requester's agent credential-management permission at authorization and callback, and rejects a link if its credential generation changed after issuance.
 For a non-private agent, this link flow requires an administrator or configured credential manager even when the connection uses requester-only storage; responder access alone is insufficient.
 The requester-private-agent exception still applies to its isolated connection.
-Shared-scope reset links use the same capability model for configured credential managers: the GET is non-mutating, the confirmation POST consumes the reset capability before deleting the scoped credential, and reconnection continues through a fresh single-use connect capability.
+Shared-scope reset links follow the same model: the GET is non-mutating, the confirmation POST consumes the reset capability before deleting the scoped credential, and reconnection continues in the same authenticated browser session rather than through a new connect capability.
 Requester-scoped reset links still require the original authenticated browser user.
 Executions without a concrete requester cannot form a conversation capability; their links omit the connect token and use the existing dashboard-authenticated flow.
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` through pairing so dashboard credential management and agent-issued OAuth links resolve to the owner Matrix user instead of the generic dashboard API-key principal.

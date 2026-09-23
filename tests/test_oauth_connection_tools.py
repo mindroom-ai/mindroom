@@ -281,7 +281,8 @@ async def test_reset_oauth_connection_issues_browser_confirmation_for_shared_sco
     assert intent.binding.requested_agent_name == "research"
     assert intent.requester_id == "@alice:example.org"
     assert intent.binding.worker_scope == "shared"
-    assert "Keep this link private" in result
+    assert "requires signing in to the MindRoom dashboard" in result
+    assert "resets the connection for every requester of this agent" in result
 
 
 @pytest.mark.asyncio
