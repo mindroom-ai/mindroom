@@ -192,9 +192,11 @@ Connect external services to enable agent capabilities:
 
 ### Settings
 
-The **Settings** tab lists every top-level configuration root that has no dedicated tab, in `config.yaml` order, so new options are never hidden.
-Object roots such as `defaults` and `router` are collapsible blocks, and roots another tab edits in part, such as `voice` and `room_defaults`, show only the fields that tab does not render.
-Below the roots, **Default tool settings** edits per-tool overrides for the default tools every agent inherits.
+The **Settings** tab edits every top-level configuration root that has no dedicated tab.
+Sections group related roots: response defaults, history and context, tools and workers, router, personal rooms, room defaults, tool approval, prompts, MCP servers, plugins, access and identity, Matrix and runtime, and diagnostics.
+A root or field that no tab or section claims appears under **Other**, so new options are never hidden.
+The **Tools and workers** section also edits per-tool overrides for the default tools every agent inherits.
+Sections with validation errors from the last save are marked **Needs attention**.
 Changes join the same draft as every other tab and are saved with **Save**.
 
 ## Features

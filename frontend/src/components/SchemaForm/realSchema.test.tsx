@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Settings } from "@/components/Settings/Settings";
+import { resolveSettingsSections } from "@/components/Settings/settingsSections";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
 import { useTools } from "@/hooks/useTools";
 import { setObjectKey, type JsonSchema } from "@/lib/configSchema";
@@ -109,13 +110,20 @@ describe("forms rendered from the real configuration schema", () => {
     consoleError.mockRestore();
   });
 
-  it("renders and expands every Settings root", () => {
+  it("renders and expands every Settings section", () => {
+    const sections = resolveSettingsSections(ROOT);
     render(<Settings />);
-    expandEverything();
-    // Reached through the router's optional judgment block.
-    expect(
-      screen.getByRole("spinbutton", { name: "Threshold" }),
-    ).toBeInTheDocument();
+
+    for (const section of sections) {
+      fireEvent.click(screen.getByRole("button", { name: section.title }));
+      expandEverything();
+      if (section.id === "router") {
+        // Reached through the optional judgment block.
+        expect(
+          screen.getByRole("spinbutton", { name: "Threshold" }),
+        ).toBeInTheDocument();
+      }
+    }
     expect(consoleError).not.toHaveBeenCalled();
   });
 
