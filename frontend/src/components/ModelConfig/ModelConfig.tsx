@@ -547,6 +547,24 @@ export function ModelConfig() {
   };
 
   const startEditingRow = (row: ModelRowData) => {
+    if (isAddingRow) {
+      toast({
+        title: "Finish adding first",
+        description:
+          "Save or cancel the new model row before editing another row.",
+      });
+      return;
+    }
+    if (editingRowId != null) {
+      if (editingRowId !== row.modelName) {
+        toast({
+          title: "Finish current edit first",
+          description:
+            "Save or cancel the active row before editing another one.",
+        });
+      }
+      return;
+    }
     setEditingRowId(row.modelName);
     setEditingStart({
       config: models[row.modelName],
@@ -919,7 +937,17 @@ export function ModelConfig() {
   };
 
   const handleSaveAllChanges = async () => {
+    const start = editingStart;
+    const savedModel = editingRowId == null ? undefined : models[editingRowId];
     const result = await saveConfig();
+    if (result.status === "saved" && savedModel !== undefined) {
+      // Cancelling the row edit afterwards must not revert what was saved.
+      setEditingStart((current) =>
+        current != null && current === start
+          ? { ...current, config: savedModel }
+          : current,
+      );
+    }
     showSaveFailureToastIfNeeded(result);
   };
 
@@ -1695,32 +1723,7 @@ export function ModelConfig() {
                     return (
                       <tr
                         key={row.id}
-                        onClick={() => {
-                          if (isAddingRow) {
-                            toast({
-                              title: "Finish adding first",
-                              description:
-                                "Save or cancel the new model row before editing another row.",
-                            });
-                            return;
-                          }
-
-                          if (
-                            editingRowId &&
-                            editingRowId !== row.original.modelName
-                          ) {
-                            toast({
-                              title: "Finish current edit first",
-                              description:
-                                "Save or cancel the active row before editing another one.",
-                            });
-                            return;
-                          }
-
-                          if (!editingRowId) {
-                            startEditingRow(row.original);
-                          }
-                        }}
+                        onClick={() => startEditingRow(row.original)}
                         className={cn(
                           "border-b transition-colors last:border-b-0",
                           isEditing

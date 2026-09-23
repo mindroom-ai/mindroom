@@ -809,6 +809,50 @@ describe("ModelConfig", () => {
       });
     });
 
+    it("keeps saved More settings edits when the row edit is cancelled afterwards", async () => {
+      const updateConfigValue = vi.fn();
+      const { rerender } = render(<ModelConfig />);
+      fireEvent.click(screen.getByText("openai_local"));
+      vi.mocked(useConfigStore).mockReturnValue({
+        ...withEditedExtraKwargs(),
+        updateConfigValue,
+      } as never);
+      rerender(<ModelConfig />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Save All Changes" }));
+      await waitFor(() => expect(mockStore.saveConfig).toHaveBeenCalled());
+      const row = screen.getByDisplayValue("openai_local").closest("tr");
+      if (!row) throw new Error("row not found");
+      fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+
+      expect(updateConfigValue).not.toHaveBeenCalled();
+    });
+
+    it("keeps the edited row when another row's Edit button is clicked", async () => {
+      const updateConfigValue = vi.fn();
+      const { rerender } = render(<ModelConfig />);
+      fireEvent.click(screen.getByText("openai_local"));
+      vi.mocked(useConfigStore).mockReturnValue({
+        ...withEditedExtraKwargs(),
+        updateConfigValue,
+      } as never);
+      rerender(<ModelConfig />);
+
+      fireEvent.click(screen.getAllByTitle("Edit")[0]);
+      const { toast } = await import("@/components/ui/toaster");
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "Finish current edit first" }),
+      );
+
+      const row = screen.getByDisplayValue("openai_local").closest("tr");
+      if (!row) throw new Error("row not found");
+      fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+      expect(updateConfigValue).toHaveBeenCalledWith(
+        ["models", "openai_local"],
+        mockStore.config.models.openai_local,
+      );
+    });
+
     it("reverts More settings edits when the row edit is cancelled", () => {
       const updateConfigValue = vi.fn();
       const { rerender } = render(<ModelConfig />);
