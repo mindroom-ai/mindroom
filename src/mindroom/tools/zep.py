@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="zep",
+    requires_primary_runtime=True,
     display_name="Zep Memory",
     description="Memory system for storing, retrieving, and searching conversational data",
     category=ToolCategory.PRODUCTIVITY,

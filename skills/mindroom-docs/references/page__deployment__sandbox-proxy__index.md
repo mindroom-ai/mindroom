@@ -302,7 +302,8 @@ A change to the browser configuration or prepared process environment closes the
 Cancellation and worker shutdown also clean up browser resources.
 
 Generic and unscoped runners continue to isolate browser calls in separate subprocesses.
-Browser tools configured to use a separate desktop retain their existing routing.
+The `browser` tool keeps calls resolving to its Matrix desktop target in the primary runtime, without allocating a worker.
+An explicit `target: host` still uses the configured worker even when `default_target: desktop` is set.
 For a visible browser and Chat viewer, use [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/).
 
 ## Environment variable reference
@@ -329,9 +330,9 @@ The shared static-runner Compose sidecar does not support interactive computers.
 | `MINDROOM_WORKER_BACKEND` | Worker backend name: `static_runner`, `docker`, or `kubernetes` | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | URL of the shared sandbox runner when using `static_runner` | _(none — plain static-runner installs execute locally)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Static-runner bearer token and Kubernetes control-plane secret used to derive per-worker runner tokens | _(required for worker-routed execution)_ |
-| `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off` | _(unset — uses static proxy all-tools routing when `MINDROOM_SANDBOX_PROXY_URL` is set; otherwise uses default worker-routed execution tools)_ |
-| `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy when no agent-level `worker_tools` override is active | `*` for all mode or unset static-proxy mode, empty for selective mode or unset no-proxy mode |
-| `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Permit local execution of `coding`, `docker`, `file`, `python`, and `shell` when routing was explicitly requested but no worker/proxy backend is available | `false` |
+| `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off`; applies when neither agent nor defaults sets `worker_tools` | _(unset — static proxy URL routes eligible tools; dedicated backends route metadata defaults; plain static installs run locally)_ |
+| `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy when neither agent nor defaults sets `worker_tools` | `*` for all mode or unset static-proxy mode, empty for selective mode or unset no-proxy mode |
+| `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Permit tools whose default target is a worker to run locally when static routing is requested without a proxy URL; never bypasses dedicated workers | `false` |
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | HTTP timeout for proxy calls | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Maximum attachment bytes the primary runtime will inline when saving context attachments into a worker workspace with `get_attachment(..., mindroom_output_path=...)` | `16777216` (16 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
@@ -378,14 +379,20 @@ If the warm template fails to start, dispatch falls back to spawn-per-call and r
 
 ## Execution modes
 
+Environment modes apply when both the agent's `worker_tools` and `defaults.worker_tools` are null or omitted.
+An explicit YAML list, including `[]`, takes precedence over these modes.
+Tools that require the primary runtime stay local, and runner processes never proxy their own tools.
+
 | Mode | Behavior |
 |------|----------|
-| `selective` | Only tools listed in `MINDROOM_SANDBOX_PROXY_TOOLS` are proxied. Recommended. |
-| `all` / `sandbox_all` | Every tool call goes through the proxy |
-| `off` / `local` / `disabled` | Proxy disabled even if URL is set, and execution tools may run in the primary runtime |
-| _(unset)_ | With a configured static proxy URL, proxies all tools for legacy compatibility. With `MINDROOM_WORKER_BACKEND=docker` or `kubernetes`, routes default worker tools and fails closed if the backend is misconfigured. With plain `static_runner` and no proxy URL, tools execute locally. |
+| `selective` | Proxy eligible tools listed in `MINDROOM_SANDBOX_PROXY_TOOLS`, or all eligible tools for `*`. An empty selection routes nothing. |
+| `all` / `sandbox_all` | Proxy every eligible registry tool enabled for the agent |
+| `off` / `local` / `disabled` | Run tools in the primary runtime even if a proxy URL or dedicated backend is configured |
+| _(unset)_ | An explicit `MINDROOM_SANDBOX_PROXY_TOOLS` selection controls routing. Otherwise, a configured static proxy URL routes all eligible tools, dedicated Docker/Kubernetes backends route metadata defaults, and plain `static_runner` without a proxy URL runs locally. Requested dedicated routing fails closed when misconfigured. |
 
-`MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is an explicit escape hatch for local development that restores primary-runtime execution for `coding`, `docker`, `file`, `python`, and `shell` after routing was explicitly requested without a working worker/proxy backend.
+`MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` permits local execution when routing was requested with `static_runner` but no proxy URL is configured.
+It applies only to tools whose metadata defaults to worker execution, currently `browser_mcp`, `coding`, `docker`, `file`, `python`, and `shell`.
+It does not bypass dedicated Docker or Kubernetes workers, and a configured static proxy URL keeps calls routed.
 Do not set it in hosted or multi-tenant deployments.
 
 ## Shell env and PATH
@@ -621,17 +628,37 @@ The `worker_tools` field has three states:
 
 | Value | Behavior |
 |-------|----------|
-| `null` (omitted) | Inherit `defaults.worker_tools`; when both are omitted, use the runtime routing policy, including each toolkit’s metadata defaults |
+| `null` (omitted) | Inherit `defaults.worker_tools`; if that is also null or omitted, use the environment routing policy described under [Execution modes](#execution-modes), including toolkit metadata defaults for a dedicated backend with no explicit mode or tool selection |
 | `[]` (empty list) | Explicitly disable sandbox proxying for this agent |
 | `["shell", "file"]` | Proxy exactly these tools for this agent |
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Tools whose catalog metadata sets `requires_primary_runtime=True` stay in the primary runtime even when listed.
+Tools whose catalog metadata sets `requires_primary_runtime=True` or `requires_room_context=True` stay in the primary runtime even when listed.
+This includes `reasoning`, `daytona`, `mem0`, `slack`, and `claude_agent`, which consume live agent or run state.
+The `browserbase`, `composio`, `duckdb`, `e2b`, `pandas`, `sql`, and `zep` toolkits also stay local because they retain a browser or local shell session, database connection (including in-memory databases), execution result, named dataframe, or generated session identity between calls.
+The generic worker runner creates a fresh toolkit for each request.
+`config_manager` stays primary to manage the authored configuration and live API snapshots; its roomless inspection functions remain available.
+`agent_vault_access` stays primary to read the owner token mounted for self-service Vault grants.
+The `browser` toolkit selects placement per call: desktop uses the primary Matrix context, while host follows the configured worker policy.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
-Without that URL, explicitly selected worker-routed tools fail closed unless `MINDROOM_SANDBOX_EXECUTION_MODE=off|local|disabled` or `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is set.
-If `worker_tools` is omitted and no static proxy URL is configured, simple local installs run those tools in the primary MindRoom process.
+Without that URL, explicitly selected worker-routed tools fail closed, subject to the limited `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` fallback described above.
+The `off`, `local`, and `disabled` modes do not override an explicit YAML list.
+If both YAML worker lists are omitted, no environment setting requests routing, and no static proxy URL is configured, simple local installs run tools in the primary MindRoom process.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
+
+Worker-routed media tools return typed images, audio, video, and files.
+The worker reads generated files and downloads public HTTP(S) media URLs before returning inline bytes; the primary runtime never reads a worker path or follows a media URL from the result.
+Audio preserves explicit formats and recognized filename extensions; when those are absent, known MP3/WAV MIME types supply the format for inline provider requests.
+Media downloads follow at most five redirects and close each intermediate response without reading its body.
+Downloads request `Accept-Encoding: identity`; a final response with another HTTP `Content-Encoding` fails as a tool error before its body is read.
+The final identity response is streamed within the media byte limits below.
+Downloads use the server-fetch destination checks, including redirects, and reject local and metadata-service destinations.
+
+Each result supports at most eight media items, 10 MiB per item, and 20 MiB of media in total.
+Result text is limited to 4,194,304 characters and JSON metadata to 64 KiB of serialized ASCII JSON.
+Unsupported resources or oversized results produce a tool error.
+Run matching MindRoom revisions in the primary and workers so both use the same result protocol.
 
 ## Worker Scope
 
@@ -693,6 +720,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, M
 
 ## Without configured worker routing
 
-With `MINDROOM_WORKER_BACKEND=static_runner` and no `MINDROOM_SANDBOX_PROXY_URL`, tool calls execute directly in the primary MindRoom runtime process.
+With `MINDROOM_WORKER_BACKEND=static_runner`, no `MINDROOM_SANDBOX_PROXY_URL`, and no YAML or environment settings requesting worker routing, tool calls execute directly in the primary MindRoom runtime process.
+Explicitly requested routing still requires the configured backend, subject to the limited static fallback described under [Execution modes](#execution-modes).
 This is fine for development but not recommended for production deployments where agents run untrusted code.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker-routed tool calls fail closed when the backend is misconfigured instead of silently running locally.

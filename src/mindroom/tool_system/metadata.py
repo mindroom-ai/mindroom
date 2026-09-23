@@ -21,7 +21,6 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     ToolAuthoredOverrideValidator,
     ToolCategory,
-    ToolExecutionTarget,
     ToolManagedInitArg,
     ToolMetadata,
     ToolValidationInfo,
@@ -1387,16 +1386,6 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
     return snapshot
 
 
-def default_worker_routed_tools(tool_names: list[str]) -> list[str]:
-    """Return the tool names that default to worker execution."""
-    selected_tools: list[str] = []
-    for tool_name in tool_names:
-        metadata = TOOL_METADATA.get(tool_name)
-        if metadata is not None and metadata.default_execution_target == ToolExecutionTarget.WORKER:
-            selected_tools.append(tool_name)
-    return selected_tools
-
-
 def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) -> list[dict[str, Any]]:
     """Export tool metadata as JSON-serializable dictionaries."""
     tools: list[dict[str, Any]] = []
@@ -1416,6 +1405,7 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
             tool_dict.pop("requires_primary_runtime", None)
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
+        tool_dict.pop("worker_inert_agent_functions", None)
         tool_dict.pop("supports_toolkit_filters", None)
         tool_dict.pop("factory", None)
         tools.append(tool_dict)

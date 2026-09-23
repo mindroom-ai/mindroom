@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="replicate",
+    worker_inert_agent_functions=("generate_media",),
     display_name="Replicate",
     description="Generate images and videos using AI models on the Replicate platform",
     category=ToolCategory.DEVELOPMENT,

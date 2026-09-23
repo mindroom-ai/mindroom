@@ -36,7 +36,6 @@ from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
-    default_worker_routed_tools,
     ensure_tool_registry_loaded,
     get_tool_by_name,
 )
@@ -879,7 +878,11 @@ def resolve_runtime_worker_tools(
 
     if not tool_registry_preloaded:
         ensure_tool_registry_loaded(runtime_paths, config)
-    return default_worker_routed_tools(runtime_tool_names)
+    return [
+        tool_name
+        for tool_name in runtime_tool_names
+        if sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths)
+    ]
 
 
 def _render_tool_execution_environment(

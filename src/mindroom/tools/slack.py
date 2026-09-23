@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="slack",
+    requires_primary_runtime=True,
     display_name="Slack",
     description="Send messages and manage channels",
     category=ToolCategory.COMMUNICATION,

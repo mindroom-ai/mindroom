@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     category=ToolCategory.INTEGRATIONS,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
+    requires_primary_runtime=True,
     icon="FaConnectdevelop",
     icon_color="text-blue-600",
     config_fields=[

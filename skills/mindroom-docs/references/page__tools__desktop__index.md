@@ -297,8 +297,9 @@ The Desktop tool can explain the trusted chat command, but the model cannot regi
 Use `!desktop rotate` to replace a device without dropping the current target before confirmation, or `!desktop disconnect confirm` to remove it.
 
 The `desktop` tool runs in the primary agent process because it needs that live agent's Matrix device and room requester identity.
-The `browser` tool remains worker-routable for host-browser isolation, but its Matrix desktop target requires the primary process's live Matrix context.
-Do not list `browser` in `worker_tools` for an agent that uses `target: desktop`; a worker-routed desktop call fails closed with a live-context error.
+The `browser` tool keeps calls resolving to `target: desktop` in the primary process, including when `default_target: desktop` is configured.
+Host-browser calls still follow the worker routing policy, even with a desktop default or configured desktop device.
+Listing `browser` in `worker_tools` therefore isolates its host calls while preserving desktop control through the live Matrix context.
 It is hidden from OpenAI-compatible API runs when approval policy requires Matrix approval because those runs have no Matrix approval transport.
 
 The separate `browser` tool can still target its Playwright extension transport through its own configuration:

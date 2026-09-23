@@ -36,7 +36,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.routing import suggest_responder_for_message
+from mindroom.routing import ResponderSelection, suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
 from mindroom.text_ingress_dispatch import _run_admitted_router_relay
 from mindroom.thread_utils import AgentResponseDecision
@@ -302,7 +302,7 @@ async def test_suggest_responder_for_message_returns_aliases_for_actual_ids(
         runtime_paths,
         usernames={"router": "actual_router", "news": "actual_news", "facts": "actual_facts"},
     )
-    mock_suggest_responder.return_value = "news"
+    mock_suggest_responder.return_value = ResponderSelection("news")
 
     result = await suggest_responder_for_message(
         "what happened?",

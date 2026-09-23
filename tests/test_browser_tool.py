@@ -2349,3 +2349,31 @@ def test_worker_default_output_rejects_symlink_escape(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="output_dir must stay inside"):
         browser.bind_worker_display(":99", workspace)
     assert not list(outside.iterdir())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headed", [False, True])
+async def test_worker_browser_accepts_host_override_of_desktop_default(tmp_path: Path, headed: bool) -> None:
+    """Both worker owners bind desktop-default config while rejecting resolved desktop calls."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(
+        paths,
+        default_target="desktop",
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+    workspace = tmp_path / "workspace"
+    if headed:
+        browser.bind_worker_display(":99", workspace)
+    else:
+        browser.bind_worker_headless(workspace, {})
+    try:
+        status = json.loads(await browser.browser("status", target="host"))
+        assert status["running"] is False
+        assert browser._resolve_output_dir() == workspace / "browser"
+        for target in (None, "desktop"):
+            with pytest.raises(ValueError, match="Worker browser does not support desktop routing"):
+                await browser.browser("status", target=target)
+    finally:
+        await browser.aclose()
