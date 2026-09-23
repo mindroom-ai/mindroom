@@ -384,8 +384,6 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         identity = {"owner": asdict(owner), "run_id": run_context.run_id, "tool_call_id": call.call_id}
         job_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         adapter = {
-            "source_event_id": context.membership_turn_id,
-            "source_kind": context.source_kind,
             "run_id": run_context.run_id,
             "tool_call_id": call.call_id,
             "arguments": encode_tool_result(call.arguments),
@@ -405,6 +403,8 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
                 tool_name=call.function.name,
                 depth=depth,
                 toolkit_name=call.function.owning_toolkit,
+                source_event_id=context.membership_turn_id,
+                source_kind=context.source_kind,
                 adapter=adapter,
                 owner=owner,
                 operation=lambda: _run_operation(original, owned_call, owner, baseline, reference),

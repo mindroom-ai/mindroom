@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 
 from mindroom.event_journal import EventKind
 from mindroom.handled_turns import TurnRecordCodec
-from mindroom.tool_jobs.completion import completion_source_id
-from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.completion import completion_event_id, parse_completion_event_id
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, get_background_runtime
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -45,8 +45,9 @@ async def _original_event(runtime: ToolJobRuntime, store: PrincipalStore, source
     event = await store.load_event(source)
     seen = {source}
     while event is not None and event.kind is EventKind.TOOL_JOB_COMPLETION:
-        parent_id = event.source.get("job_id")
-        parent_source = runtime.source_event_id(parent_id) if isinstance(parent_id, str) else None
+        # A settled event keeps no payload, so its identity is the only durable record of the job it delivered.
+        completion = parse_completion_event_id(event.event_id)
+        parent_source = runtime.source_event_id(completion[0]) if completion is not None else None
         if parent_source is None or parent_source in seen:
             return None
         seen.add(parent_source)
@@ -71,24 +72,22 @@ async def stop_conversation_jobs(
 
     async def matches(job: BackgroundJob) -> bool:
         owner = job.owner
-        source = job.adapter.get("source_event_id")
         if (
             owner.channel != "matrix"
-            or (owner.transport_agent_name or owner.agent_name) != stopped.response_owner
+            or owner.recipient != stopped.response_owner
             or owner.room_id != target.room_id
             or owner.resolved_thread_id != target.resolved_thread_id
             or owner.session_id != target.session_id
             or owner.requester_id != stopped.requester_id
-            or not isinstance(source, str)
+            or job.source_event_id is None
         ):
             return False
-        event = await _original_event(runtime, store, source)
+        event = await _original_event(runtime, store, job.source_event_id)
         if event is None or event.receipt_order > cutoff:
             return False
         # Consumption can precede completion of the reply or its approval continuation.
-        if job.consumed and job.status not in {"running", "cancel_requested", "awaiting_approval"}:
-            completion = completion_source_id(job.job_id, job.generation)
-            for owned_source in (event.event_id, completion):
+        if job.consumed and job.status in TERMINAL_STATUSES:
+            for owned_source in (event.event_id, completion_event_id(job)):
                 if (
                     await store.is_pending(owned_source)
                     or await store.approval_continuation_for_source(owned_source) is not None
@@ -100,27 +99,15 @@ async def stop_conversation_jobs(
     await runtime.stop_jobs(receipt_order=stop_receipt_order, matches=matches)
 
 
-async def response_was_stopped(
-    source_event_id: str,
-    store: PrincipalStore,
-    runtime_paths: RuntimePaths,
-    transport_agent_name: str,
-) -> bool:
+async def response_was_stopped(source_event_id: str, runtime_paths: RuntimePaths, transport_agent_name: str) -> bool:
     """Fence original and completion responses, including their owned approvals."""
     runtime = get_background_runtime(runtime_paths)
     if runtime is None:
         return False
     if await runtime.is_source_user_stopped(source_event_id, transport_agent_name):
         return True
-    if not source_event_id.startswith("tool-job:"):
-        return False
-    event = await store.load_event(source_event_id)
-    return (
-        event is not None
-        and event.kind is EventKind.TOOL_JOB_COMPLETION
-        and isinstance(job_id := event.source.get("job_id"), str)
-        and await runtime.is_user_stopped(job_id)
-    )
+    completion = parse_completion_event_id(source_event_id)
+    return completion is not None and await runtime.is_user_stopped(completion[0])
 
 
 async def restore_user_stops(runtime: ToolJobRuntime, store: PrincipalStore, turns: TurnRecordStore) -> None:

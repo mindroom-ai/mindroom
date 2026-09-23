@@ -196,7 +196,6 @@ Generic ownership lives in `src/mindroom/tool_jobs/`; native child execution and
 | `tool_jobs/results.py` | Typed job result payload and non-executable serialization of durable tool values, media, and SDK artifacts |
 | `custom_tools/job.py` | One reserved management schema and exact native wait projection |
 | `tool_jobs/completion.py` | Internal completion sources, admission and automatic joining at response boundaries |
-| `tool_job_completion.py` | Immutable exact job/generation reference carried by response ownership |
 | `tool_jobs/control.py` | Human-follow-up wait signals and explicit cancellation checkpoints |
 | `tool_jobs/wait_timeout.py` | Validation and separation of framework waiting metadata from application arguments |
 | `orchestration/tool_job_runtime.py` | Job service lifecycle and internal completion wakeups |

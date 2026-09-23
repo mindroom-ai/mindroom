@@ -619,6 +619,67 @@ async def test_result_expiry_deletes_only_old_consumed_jobs_with_finished_source
 
 
 @pytest.mark.asyncio
+async def test_source_and_conversation_lookups_follow_admission_recovery_and_expiry(tmp_path: Path) -> None:
+    """Per-turn lookups find exactly one source's or conversation's jobs in admission order, and forget expired ones."""
+    owner = _owner()
+    jobs = {
+        "a": (owner, "$turn"),
+        "b": (owner, "$turn"),
+        "c": (owner, "$later-turn"),
+        "d": (replace(owner, requester_id="@bob:test"), "$turn"),
+        "unsourced": (owner, None),
+    }
+    source = {"transport_agent_name": "parent", "room_id": "!room:test", "thread_id": "$root"}
+
+    async def completed() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    async def lookups(runtime: ToolJobRuntime) -> tuple[list[str], list[str]]:
+        by_source = await runtime.source_jobs(
+            "$turn",
+            **source,
+            session_id="parent-session",
+            requester_id="@alice:test",
+        )
+        by_conversation = await runtime.conversation_jobs(**source, requester_id="@alice:test")
+        return [job.job_id for job in by_source], [job.job_id for job in by_conversation]
+
+    runtime = tool_job_runtime(tmp_path)
+    try:
+        for job_id, (job_owner, source_event_id) in jobs.items():
+            await start_job(
+                runtime,
+                job_id,
+                tool_name="tool",
+                depth=0,
+                source_event_id=source_event_id,
+                adapter={},
+                owner=job_owner,
+                operation=completed,
+            )
+            waited = await runtime.wait(job_id, owner=job_owner, depth=0)
+            await runtime.release_wait(job_id, waited.claim)
+        assert await lookups(runtime) == (["a", "b"], ["a", "b", "c", "unsourced"])
+        waited = await runtime.wait("a", owner=owner, depth=0)
+        await runtime.acknowledge_wait("a", waited.claim)
+        _age(runtime, "a", datetime.now(UTC) - timedelta(days=31))
+
+        async def source_finished(_job: runtime_module.BackgroundJob) -> bool:
+            return True
+
+        await runtime.expire_consumed(before=datetime.now(UTC) - timedelta(days=30), source_finished=source_finished)
+        assert await lookups(runtime) == (["b"], ["b", "c", "unsourced"])
+    finally:
+        await runtime.shutdown()
+    restored = tool_job_runtime(tmp_path)
+    try:
+        await restored.recover()
+        assert await lookups(restored) == (["b"], ["b", "c", "unsourced"])
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_scoped_listing_keeps_consumed_outcomes_across_turns_and_restart(tmp_path: Path) -> None:
     """Discovery survives forgotten handles without exposing another caller or consuming results."""
     runtime = tool_job_runtime(tmp_path)

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import sys
 import textwrap
+import threading
 from dataclasses import asdict, replace
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import yaml
@@ -43,6 +45,7 @@ from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
+    ToolJobRuntime,
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, pending_background_tool_jobs_restart
@@ -95,7 +98,7 @@ async def test_authority_stays_out_of_saved_metadata_with_startup_feature_settin
     config.defaults.tools = []
     paths = test_runtime_paths(tmp_path)
     persist_entity_accounts(config, paths)
-    pin_background_tool_jobs(config, paths)
+    instance = pin_background_tool_jobs(config, paths)
     config.background_tool_jobs.enabled = not enabled
     model = DelegationModel(id="test", responses=[ModelResponse(content="done")])
     monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
@@ -117,7 +120,7 @@ async def test_authority_stays_out_of_saved_metadata_with_startup_feature_settin
         assert ("mindroom_tool_authority" in vars(agent)) is enabled
     finally:
         storage.close()
-        release_background_tool_jobs(paths)
+        release_background_tool_jobs(paths, instance)
 
 
 @pytest.mark.asyncio
@@ -141,7 +144,10 @@ async def test_default_startup_does_not_create_job_runtime(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_recreated_coordinator_pins_its_own_setting(tmp_path: Path) -> None:
-    """A coordinator whose stop never ran, as when shutdown skips it for pending responses, cannot decide the next one's mode."""
+    """A coordinator whose stop never ran, as when shutdown skips it for pending responses, cannot decide the next one's mode.
+
+    Its late stop withdraws only the instance it pinned, never the one that replaced it.
+    """
     paths = test_runtime_paths(tmp_path)
     disabled = Config()
     enabled = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=True))
@@ -150,10 +156,46 @@ async def test_recreated_coordinator_pins_its_own_setting(tmp_path: Path) -> Non
     recreated = ToolJobRuntimeCoordinator(paths, lambda: enabled, lambda _: None, AgentReplyMembershipIndex())
     try:
         await recreated.sync()
-        assert background_tool_jobs_enabled(enabled, paths)
+        # The authored setting is disabled, so only the recreated coordinator's pin can report it enabled.
+        assert background_tool_jobs_enabled(disabled, paths)
+        assert get_background_runtime(paths) is not None
+        await stale.stop()
+        assert background_tool_jobs_enabled(disabled, paths)
         assert get_background_runtime(paths) is not None
     finally:
         await recreated.stop()
+
+
+@pytest.mark.asyncio
+async def test_initialize_retry_after_cancellation_reuses_claimed_storage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A startup cancelled while claiming job storage keeps that claim, so its retry does not claim the store twice."""
+    paths = test_runtime_paths(tmp_path)
+    enabled = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=True))
+    coordinator = ToolJobRuntimeCoordinator(paths, lambda: enabled, lambda _: None, AgentReplyMembershipIndex())
+    claiming, release = threading.Event(), threading.Event()
+
+    def claim_after_release(*args: Any, **kwargs: Any) -> ToolJobRuntime:  # noqa: ANN401
+        claiming.set()
+        release.wait()
+        return ToolJobRuntime(*args, **kwargs)
+
+    monkeypatch.setattr("mindroom.orchestration.tool_job_runtime.ToolJobRuntime", claim_after_release)
+    startup = asyncio.create_task(coordinator.initialize())
+    try:
+        assert await asyncio.to_thread(claiming.wait, 30)
+        startup.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await startup
+        claimed = coordinator.runtime
+        await coordinator.initialize()
+        assert coordinator.runtime is claimed
+    finally:
+        release.set()
+        await coordinator.stop()
 
 
 @pytest.mark.asyncio
@@ -272,7 +314,7 @@ def test_reload_reports_restart_and_keeps_effective_mode(tmp_path: Path, initial
     """Reload can publish other settings without switching execution ownership."""
     paths = test_runtime_paths(tmp_path)
     config = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=initial))
-    pin_background_tool_jobs(config, paths)
+    instance = pin_background_tool_jobs(config, paths)
     try:
         changed = Config(
             background_tool_jobs=BackgroundToolJobsConfig(enabled=not initial),
@@ -285,23 +327,24 @@ def test_reload_reports_restart_and_keeps_effective_mode(tmp_path: Path, initial
         lifecycle.record_applied(config)
         assert lifecycle.status.status == "applied"
     finally:
-        release_background_tool_jobs(paths)
-    assert pin_background_tool_jobs(changed, paths).settings.enabled is not initial
-    release_background_tool_jobs(paths)
+        release_background_tool_jobs(paths, instance)
+    restarted = pin_background_tool_jobs(changed, paths)
+    assert restarted.settings.enabled is not initial
+    release_background_tool_jobs(paths, restarted)
 
 
 def test_exclusion_order_is_not_an_execution_policy_change(tmp_path: Path) -> None:
     """Reordering toolkit exclusions does not claim a process restart is needed."""
     paths = test_runtime_paths(tmp_path)
     config = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=True, exclude_toolkits=["shell", "plugin"]))
-    pin_background_tool_jobs(config, paths)
+    instance = pin_background_tool_jobs(config, paths)
     try:
         config.background_tool_jobs.exclude_toolkits = ["plugin", "shell", "shell"]
         assert not pending_background_tool_jobs_restart(config, paths)
         config.background_tool_jobs.exclude_toolkits = ["plugin"]
         assert pending_background_tool_jobs_restart(config, paths)
     finally:
-        release_background_tool_jobs(paths)
+        release_background_tool_jobs(paths, instance)
 
 
 @pytest.mark.asyncio
@@ -412,7 +455,8 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
         tool_name="tool",
         depth=0,
         kind=kind,
-        adapter={**(_job().adapter if kind == "delegation" else {}), "source_event_id": "$saved"},
+        source_event_id="$saved",
+        adapter=_job().adapter if kind == "delegation" else {},
         owner=owner,
         operation=operation,
     )
@@ -486,8 +530,8 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
     "unreadable",
     [
         '{"schema_version": 4, "job_id": "retired"}',
-        '{"schema_version": 5, "job_id": "trunc',
-        '{"schema_version": 5, "job_id": "another"}',
+        '{"schema_version": 6, "job_id": "trunc',
+        '{"schema_version": 6, "job_id": "another"}',
     ],
 )
 async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unreadable: str) -> None:
@@ -502,11 +546,11 @@ async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unre
         owner=owner,
         tool_name="tool",
         depth=0,
-        adapter={"source_event_id": "$saved"},
+        source_event_id="$saved",
         status="completed",
         payload_generation=0,
     )
-    (directory / "saved.json").write_text(json.dumps({"schema_version": 5, **asdict(saved)}))
+    (directory / "saved.json").write_text(json.dumps({"schema_version": 6, **asdict(saved)}))
     # Payload files are not job metadata, so parking neither reads nor warns about them.
     (directory / "saved.g0.result.json").write_text("{}")
     event = JournalEvent("$saved", "!room:localhost", None, EventKind.MESSAGE, "@user:localhost", 1, {}, 1)

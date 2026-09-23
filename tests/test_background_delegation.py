@@ -938,7 +938,7 @@ async def test_native_job_source_survives_approval_continuation_and_restart(
         with tool_runtime_context(context):
             job = await start_delegation_job(runtime, child, owner=owner, operation=approval)
         waited = await runtime.wait(job.job_id, owner=owner, depth=0)
-        assert waited.job.adapter["source_event_id"] == source_event_id
+        assert waited.job.source_event_id == source_event_id
         assert waited.job.owner == owner
         await runtime.acknowledge_wait(job.job_id, waited.claim)
         with tool_runtime_context(replace(context, membership_turn_id="$approval-request")):
@@ -951,7 +951,7 @@ async def test_native_job_source_survives_approval_continuation_and_restart(
                 operation=completed,
             )
         waited = await runtime.wait(job.job_id, owner=owner, depth=0)
-        assert waited.job.adapter["source_event_id"] == source_event_id
+        assert waited.job.source_event_id == source_event_id
         assert waited.job.result == "finished once"
         await runtime.release_wait(job.job_id, waited.claim)
     finally:
@@ -960,7 +960,7 @@ async def test_native_job_source_survives_approval_continuation_and_restart(
     try:
         await restored.recover()
         saved = await restored.lookup(child.delegation_id, owner=owner, depth=0)
-        assert saved.adapter["source_event_id"] == source_event_id
+        assert saved.source_event_id == source_event_id
         assert saved.owner == owner
         assert delegation_child(saved).run_id == child.run_id
         assert saved.status == "completed"

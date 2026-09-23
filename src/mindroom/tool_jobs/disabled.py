@@ -67,9 +67,8 @@ def _saved_sources(runtime_paths: RuntimePaths) -> ParkedWork:
                 error=str(error),
             )
             continue
-        source = job.adapter.get("source_event_id")
-        if isinstance(source, str):
-            parked.sources.add((job.owner.transport_agent_name or job.owner.agent_name, source))
+        if job.source_event_id is not None:
+            parked.sources.add((job.owner.recipient, job.source_event_id))
     return parked
 
 

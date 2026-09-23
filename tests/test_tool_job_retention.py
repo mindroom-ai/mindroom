@@ -58,7 +58,8 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
         "old",
         tool_name="tool",
         depth=0,
-        adapter={"source_event_id": "$original"},
+        source_event_id="$original",
+        adapter={},
         owner=owner,
         operation=operation,
     )

@@ -688,7 +688,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
         jobs = await runtime.list_jobs(owner=owner, depth=0)
         assert len(jobs) == 1
         assert jobs[0].adapter["arguments"] == encode_tool_result({"wait_timeout": None})
-        assert jobs[0].adapter["source_event_id"] == "$original-request"
+        assert jobs[0].source_event_id == "$original-request"
         assert jobs[0].owner == owner
         assert jobs[0].consumed is not save_fails
         assert len(await runtime.pending_outcomes()) == int(save_fails)
@@ -697,7 +697,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
         try:
             await restored.recover()
             saved = await restored.lookup(jobs[0].job_id, owner=owner, depth=0)
-            assert saved.adapter["source_event_id"] == "$original-request"
+            assert saved.source_event_id == "$original-request"
             assert saved.owner == owner
             assert saved.consumed is not save_fails
             assert len(await restored.pending_outcomes()) == int(save_fails)

@@ -3343,7 +3343,6 @@ depends_on = [
 path = "mindroom.matrix.client_delivery"
 depends_on = []
 visibility = [
-    "mindroom.orchestration.tool_job_runtime",
     "mindroom.matrix.personal_rooms",
     "mindroom.custom_tools.matrix_message_idempotency",
     "mindroom.approval_transport",
@@ -4537,7 +4536,6 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.runtime_protocols",
     "mindroom.tool_system.plugin_identity",
-    "mindroom.tool_job_completion",
 ]
 
 [[modules]]
@@ -7955,7 +7953,6 @@ depends_on = [
     "mindroom.tool_jobs.runtime",
     "mindroom.event_journal",
     "mindroom.hooks",
-    "mindroom.tool_job_completion",
     "mindroom.tool_jobs.control",
     "mindroom.tool_system.runtime_context",
 ]
@@ -7969,14 +7966,6 @@ visibility = [
     "mindroom.tool_jobs.user_stop",
 ]
 
-
-[[modules]]
-path = "mindroom.tool_job_completion"
-depends_on = []
-visibility = [
-    "mindroom.hooks.context",
-    "mindroom.tool_jobs.completion",
-]
 
 [[modules]]
 path = "mindroom.tool_jobs.provenance"

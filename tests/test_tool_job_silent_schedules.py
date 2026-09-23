@@ -170,7 +170,8 @@ async def test_silent_join_preserves_the_deliverable_report(
                 "quiet",
                 tool_name="probe",
                 depth=0,
-                adapter={"source_kind": SILENT_SCHEDULE_SOURCE_KIND},
+                source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+                adapter={},
                 owner=owner,
                 operation=operation,
             )
@@ -254,7 +255,8 @@ async def test_recovered_silent_schedule_retains_guidance_and_receipt(tmp_path: 
             "quiet",
             tool_name="tool",
             depth=0,
-            adapter={"source_event_id": envelope.source_event_id},
+            source_event_id=envelope.source_event_id,
+            adapter={},
             owner=owner,
             operation=operation,
         )
@@ -319,7 +321,8 @@ async def test_automatic_join_keeps_quiet_and_visible_results_separate(tmp_path:
                 name,
                 tool_name="tool",
                 depth=0,
-                adapter={"source_kind": kind},
+                source_kind=kind,
+                adapter={},
                 owner=owner,
                 operation=operation,
             )

@@ -135,7 +135,8 @@ async def test_recovered_job_source_preserves_latest_visible_edit(
             "retained",
             tool_name="tool",
             depth=0,
-            adapter={"source_event_id": "$event"},
+            source_event_id="$event",
+            adapter={},
             owner=owner,
             operation=operation,
         )

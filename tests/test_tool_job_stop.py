@@ -13,6 +13,7 @@ from mindroom.event_journal import DeliveryStage
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseAttempt, ResponseSources
+from mindroom.tool_jobs.completion import completion_event
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_jobs.user_stop import stop_conversation_jobs
@@ -110,7 +111,8 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
                 job_id,
                 tool_name="tool",
                 depth=0,
-                adapter={"source_event_id": source},
+                source_event_id=source,
+                adapter={},
                 owner=job_owner,
                 operation=operation,
             )
@@ -126,6 +128,75 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
             else:
                 assert job.user_stop_receipt_order is None
                 assert job.status == "running"
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stop_follows_ancestry_through_an_answered_completion(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """Work started by an already answered completion turn still belongs to the human turn behind that completion."""
+    store = journal_store.principal("agent@alice")
+    for source in ("$first", "$follow-up"):
+        await admit(store, source)
+    await _bind_reply(store, "$follow-up", "$reply")
+    target = MessageTarget.resolve(ROOM, "$thread", "$thread")
+    owner = replace(
+        _owner(),
+        agent_name="agent",
+        room_id=ROOM,
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=target.session_id,
+    )
+    stopped = TurnRecord.create(
+        ("$follow-up",),
+        response_event_id="$reply",
+        conversation_target=target,
+        requester_id=owner.requester_id,
+        response_owner="agent",
+        user_stop_receipt_order=100,
+    )
+    runtime = tool_job_runtime(tmp_path)
+
+    async def finished() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "prior result")
+
+    async def running() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        return BackgroundOutcome("completed", "unreachable")
+
+    try:
+        await start_job(
+            runtime,
+            "prior",
+            tool_name="tool",
+            depth=0,
+            source_event_id="$first",
+            adapter={},
+            owner=owner,
+            operation=finished,
+        )
+        ready = await runtime.wait("prior", owner=owner, depth=0)
+        await runtime.release_wait("prior", ready.claim)
+        completion = completion_event(ready.job, sender_id="@mindroom_agent:example.org")
+        await store.admit(completion)
+        await start_job(
+            runtime,
+            "descendant",
+            tool_name="tool",
+            depth=0,
+            source_event_id=completion.event_id,
+            adapter={},
+            owner=owner,
+            operation=running,
+        )
+        # Answering the completion turn settles its journal event, which releases the event's saved payload.
+        await store.settle(completion.event_id)
+        await stop_conversation_jobs(runtime, store, stopped, stop_receipt_order=100)
+        assert await runtime.is_user_stopped("descendant")
     finally:
         await runtime.shutdown()
 
@@ -232,7 +303,8 @@ async def test_replayed_stop_preserves_newer_edit_but_cancels_older_edit_work(
                 job_id,
                 tool_name="tool",
                 depth=0,
-                adapter={"source_event_id": source},
+                source_event_id=source,
+                adapter={},
                 owner=owner,
                 operation=operation,
             )
@@ -283,7 +355,7 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
         ),
     )
     runtime = tool_job_runtime(paths.storage_root)
-    pin_background_tool_jobs(config, paths)
+    instance = pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     coordinator = None
 
@@ -296,7 +368,8 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
             "ready",
             tool_name="tool",
             depth=0,
-            adapter={"source_event_id": "$source"},
+            source_event_id="$source",
+            adapter={},
             owner=owner,
             operation=operation,
         )
@@ -305,7 +378,7 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
         if restart_gap:
             await bot._turn_store.record_user_stopped_response("$reply", 100, delivery_settled=True)
             await runtime.shutdown()
-            release_background_tool_jobs(paths)
+            release_background_tool_jobs(paths, instance)
             coordinator = ToolJobRuntimeCoordinator(
                 paths,
                 lambda: config,

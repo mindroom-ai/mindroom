@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore
+    from mindroom.tool_jobs.instances import ToolJobInstance
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -67,6 +68,7 @@ class ToolJobRuntimeCoordinator:
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], AgentBot | TeamBot | None]
     agent_reply_memberships: AgentReplyMembershipIndex
+    _instance: ToolJobInstance | None = field(default=None, init=False)
     _runtime: ToolJobRuntime | None = field(default=None, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
     _initialized: bool = field(default=False, init=False)
@@ -83,10 +85,12 @@ class ToolJobRuntimeCoordinator:
         config = self.config_provider()
         if config is None:
             return
-        instance = pin_background_tool_jobs(config, self.runtime_paths)
+        self._instance = instance = pin_background_tool_jobs(config, self.runtime_paths)
         if instance.settings.enabled:
-            # The thread itself keeps the runtime, so a cancelled startup still leaves its lease for stop to release.
-            await run_blocking_until_complete(self._claim_storage)
+            # The thread itself keeps the runtime, so a cancelled startup leaves its lease for a retry to reuse
+            # and for stop to release.
+            if self._runtime is None:
+                await run_blocking_until_complete(self._claim_storage)
         else:
             instance.parked = await index_parked_work(self.runtime_paths, journal)
         self._initialized = True
@@ -134,7 +138,7 @@ class ToolJobRuntimeCoordinator:
         caller = config.agents.get(owner.agent_name)
         if caller is None:
             return False
-        entities = {owner.agent_name, owner.transport_agent_name or owner.agent_name}
+        entities = {owner.agent_name, owner.recipient}
         if job.kind == "delegation":
             child = delegation_child(job)
             child_name = child.child_agent_name
@@ -155,8 +159,7 @@ class ToolJobRuntimeCoordinator:
             authority=job.adapter.get("authority", {}),
         ):
             return False
-        recipient = owner.transport_agent_name or owner.agent_name
-        if not _transport_allows_actor(config, recipient, owner.agent_name):
+        if not _transport_allows_actor(config, owner.recipient, owner.agent_name):
             return False
         return all(
             is_sender_allowed_for_responder(
@@ -267,8 +270,9 @@ class ToolJobRuntimeCoordinator:
                 if self._runtime is not None:
                     await self._runtime.shutdown()
         finally:
-            release_background_tool_jobs(self.runtime_paths)
-            self._runtime = self._journal = None
+            if self._instance is not None:
+                release_background_tool_jobs(self.runtime_paths, self._instance)
+            self._instance = self._runtime = self._journal = None
             self._initialized = False
             self._admitted.clear()
 
@@ -310,9 +314,9 @@ class ToolJobRuntimeCoordinator:
         finished: dict[tuple[str, str], bool] = {}
 
         async def source_finished(job: BackgroundJob) -> bool:
-            entity = job.owner.transport_agent_name or job.owner.agent_name
-            source = job.adapter.get("source_event_id")
-            if not isinstance(source, str) or (entity, job.owner.session_id) in protected_sessions:
+            entity = job.owner.recipient
+            source = job.source_event_id
+            if source is None or (entity, job.owner.session_id) in protected_sessions:
                 return False
             key = (entity, source)
             if key not in finished:
@@ -337,8 +341,7 @@ class ToolJobRuntimeCoordinator:
         generation = (job.job_id, job.generation)
         if generation in self._admitted:
             return
-        recipient = job.owner.transport_agent_name or job.owner.agent_name
-        bot = self.bot_provider(recipient)
+        bot = self.bot_provider(job.owner.recipient)
         if (
             bot is None
             or not bot.running

@@ -311,7 +311,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(config, paths)
+    instance = pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     excluded = excluded_name == "native_plugin"
     try:
@@ -351,13 +351,13 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                         assert "wait_timeout" not in properties
                 assert (plugin / "executions").read_text().splitlines() == [step.result, "status"]
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
-                release_background_tool_jobs(paths)
-                pin_background_tool_jobs(config, paths)
+                release_background_tool_jobs(paths, instance)
+                instance = pin_background_tool_jobs(config, paths)
                 register_background_runtime(paths, runtime)
                 rejected = await _invoke(actor, model, "native_step", wait_timeout=3)
                 assert rejected.tool_call_error
                 assert "exclude_toolkits" in rejected.result
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:
-        release_background_tool_jobs(paths)
+        release_background_tool_jobs(paths, instance)
         await runtime.shutdown()

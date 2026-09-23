@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -19,9 +20,8 @@ from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.hooks import MessageEnvelope
 from mindroom.message_target import MessageTarget
-from mindroom.tool_job_completion import ToolJobCompletion
 from mindroom.tool_jobs.control import current_human_message_signal, job_owns_execution
-from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.runtime import READY_STATUSES, get_background_runtime
 from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
@@ -31,9 +31,12 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.streaming import StreamingPresentation
-    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
+    from mindroom.tool_jobs.runtime import BackgroundJob, JobWait, ToolJobRuntime
 
 
+_COMPLETION_EVENT_ID = re.compile(r"tool-job:(?P<job_id>[^:]+):(?P<generation>0|[1-9][0-9]*)")
+# The source kind of a completion whose job started outside any admitted turn.
+_UNSOURCED_COMPLETION_SOURCE_KIND = "tool_job_completion"
 _WAIT_NOTICE: ContextVar[Callable[[StreamingPresentation, str | None], Awaitable[None]] | None] = ContextVar(
     "background_wait_notice",
     default=None,
@@ -79,9 +82,15 @@ def background_wait_edit(
     )
 
 
-def completion_source_id(job_id: str, generation: int) -> str:
-    """Return an internal source identity stable across worker and process retries."""
-    return f"tool-job:{job_id}:{generation}"
+def completion_event_id(job: BackgroundJob) -> str:
+    """Name the internal source that delivers one job generation's outcome, stable across worker and process retries."""
+    return f"tool-job:{job.job_id}:{job.generation}"
+
+
+def parse_completion_event_id(event_id: str) -> tuple[str, int] | None:
+    """Return the job ID and generation an internal completion source names, or None for any other event."""
+    match = _COMPLETION_EVENT_ID.fullmatch(event_id)
+    return None if match is None else (match["job_id"], int(match["generation"]))
 
 
 def completion_prompt(jobs: Sequence[BackgroundJob]) -> str:
@@ -101,14 +110,14 @@ def completion_event(job: BackgroundJob, *, sender_id: str) -> InboundEvent:
     """Admit response ownership without manufacturing a Matrix timeline event."""
     assert job.owner.room_id is not None
     return InboundEvent(
-        event_id=completion_source_id(job.job_id, job.generation),
+        event_id=completion_event_id(job),
         room_id=job.owner.room_id,
         thread_id=job.owner.resolved_thread_id,
         kind=EventKind.TOOL_JOB_COMPLETION,
         event_class=EventClass.ACTIONABLE,
         sender=sender_id,
         origin_server_ts=int(datetime.fromisoformat(job.created_at).timestamp() * 1000),
-        source={"job_id": job.job_id, "generation": job.generation},
+        source={},
     )
 
 
@@ -118,58 +127,41 @@ def completion_envelope(job: BackgroundJob, *, sender_id: str) -> MessageEnvelop
     assert owner.room_id is not None
     assert owner.requester_id is not None
     assert owner.session_id is not None
-    recipient = owner.transport_agent_name or owner.agent_name
     return MessageEnvelope(
-        source_event_id=completion_source_id(job.job_id, job.generation),
+        source_event_id=completion_event_id(job),
         target=MessageTarget(owner.room_id, owner.resolved_thread_id, owner.resolved_thread_id, None, owner.session_id),
         body=completion_prompt([job]),
         attachment_ids=(),
         mentioned_agents=(),
-        agent_name=recipient,
+        agent_name=owner.recipient,
         origin=TurnOrigin(
             transport_sender_id=sender_id,
             requester_id=owner.requester_id,
-            sender_entity_name=recipient,
+            sender_entity_name=owner.recipient,
             requester_entity_name=None,
             sender_kind=SenderKind.MANAGED_ENTITY,
             requester_kind=SenderKind.USER,
             intent=TurnIntent.TOOL_JOB_COMPLETION,
-            source_kind=job.adapter.get("source_kind") or "tool_job_completion",
+            source_kind=job.source_kind or _UNSOURCED_COMPLETION_SOURCE_KIND,
             trust=TurnTrust.TRUSTED_INTERNAL,
         ),
-        hook_source="tool_job_completion",
-        tool_job_completion=ToolJobCompletion(job.job_id, job.generation),
     )
 
 
-async def admit_job_completion(
-    envelope: MessageEnvelope,
-    *,
-    target: MessageTarget,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    """Recheck current outcome and exact requester under the conversation lock."""
-    if envelope.hook_source != "tool_job_completion":
+async def admit_job_completion(source_event_id: str, runtime_paths: RuntimePaths) -> bool:
+    """Under the conversation lock, admit an internal completion only while the runtime still offers its generation.
+
+    A completion envelope is built from that same job's immutable owner, so its current outcome is the only recheck.
+    Every other source is admitted.
+    """
+    completion = parse_completion_event_id(source_event_id)
+    if completion is None:
         return True
-    reference = envelope.tool_job_completion
-    if reference is None or envelope.origin.intent is not TurnIntent.TOOL_JOB_COMPLETION:
-        return False
     runtime = get_background_runtime(runtime_paths)
     if runtime is None:
         msg = "Tool job runtime is not ready for completion admission"
         raise RuntimeError(msg)
-    job = await runtime.outcome(reference.job_id, reference.generation)
-    if job is None:
-        return False
-    owner = job.owner
-    return (
-        envelope.source_event_id == completion_source_id(job.job_id, job.generation)
-        and envelope.requester_id == owner.requester_id
-        and envelope.agent_name == (owner.transport_agent_name or owner.agent_name)
-        and target.room_id == owner.room_id
-        and target.resolved_thread_id == owner.resolved_thread_id
-        and target.session_id == owner.session_id
-    )
+    return await runtime.outcome(*completion) is not None
 
 
 @dataclass(frozen=True)
@@ -215,14 +207,14 @@ async def join_conversation_jobs(
         jobs = await pending()
         if human.is_set() or not jobs:
             return
-        ready = [job for job in jobs if job.status not in {"running", "cancel_requested"}]
+        ready = [job for job in jobs if job.status in READY_STATUSES]
         if not ready:
             yield BackgroundWaitChunk("⏳ Waiting for background work…")
             await _wait_for_ready_jobs(runtime, jobs, human)
             yield BackgroundWaitChunk(None)
             if human.is_set():
                 return
-            ready = [job for job in await pending() if job.status not in {"running", "cancel_requested"}]
+            ready = [job for job in await pending() if job.status in READY_STATUSES]
         if ready and not human.is_set():
             attempted.update((job.job_id, job.generation) for job in ready)
             yield _ReadyJobContinuation(completion_prompt(ready))
@@ -232,7 +224,7 @@ async def join_conversation_jobs(
 
 
 async def _wait_for_job(runtime: ToolJobRuntime, job: BackgroundJob) -> None:
-    waited = None
+    waited: JobWait | None = None
     try:
         waited = await runtime.wait(job.job_id, owner=job.owner, depth=job.depth)
     finally:

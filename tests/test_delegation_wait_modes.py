@@ -66,7 +66,7 @@ async def test_delegate_policy_approval_keeps_wait_owner_after_restart(  # noqa:
     )
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
     runtime = tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(config, paths)
+    instance = pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     storage = create_session_storage("leader", config, paths, owner)
     executed: list[str] = []
@@ -144,9 +144,9 @@ async def test_delegate_policy_approval_keeps_wait_owner_after_restart(  # noqa:
                 assert not executed
                 saved = (TeamRunOutput if team else RunOutput).from_dict(paused.to_dict())
                 await runtime.shutdown()
-                release_background_tool_jobs(paths)
+                release_background_tool_jobs(paths, instance)
                 config.background_tool_jobs.exclude_toolkits = [] if initially_excluded else ["delegate"]
-                pin_background_tool_jobs(config, paths)
+                instance = pin_background_tool_jobs(config, paths)
                 runtime = tool_job_runtime(tmp_path)
                 await runtime.recover()
                 register_background_runtime(paths, runtime)
@@ -165,5 +165,5 @@ async def test_delegate_policy_approval_keeps_wait_owner_after_restart(  # noqa:
                 assert len(jobs) == (0 if initially_excluded else 1)
     finally:
         await runtime.shutdown()
-        release_background_tool_jobs(paths)
+        release_background_tool_jobs(paths, instance)
         storage.close()

@@ -100,7 +100,8 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
             "quiet",
             tool_name="tool",
             depth=0,
-            adapter={"source_kind": SILENT_SCHEDULE_SOURCE_KIND},
+            source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+            adapter={},
             owner=owner,
             operation=operation,
         )
@@ -544,9 +545,8 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
             "retained",
             tool_name="tool",
             depth=0,
-            adapter={
-                "source_event_id": request.response_envelope.source_event_id if matching_source else "$unrelated",
-            },
+            source_event_id=request.response_envelope.source_event_id if matching_source else "$unrelated",
+            adapter={},
             owner=owner,
             operation=operation,
         )
@@ -653,7 +653,8 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
             "recovered",
             tool_name="tool",
             depth=0,
-            adapter={"source_event_id": "$event"},
+            source_event_id="$event",
+            adapter={},
             owner=owner,
             operation=operation,
         )

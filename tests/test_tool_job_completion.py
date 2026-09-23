@@ -31,9 +31,15 @@ from mindroom.event_journal import (
     PrincipalStore,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.tool_jobs.completion import admit_job_completion, completion_envelope, completion_event
+from mindroom.tool_jobs.completion import (
+    admit_job_completion,
+    completion_envelope,
+    completion_event,
+    completion_event_id,
+    parse_completion_event_id,
+)
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
-from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
 from tests.response_runner_helpers import _target
@@ -77,6 +83,15 @@ async def _persist_waiting_continuation(
     )
 
 
+def test_completion_event_id_names_exactly_one_job_generation() -> None:
+    """Only the internal identity of one job generation parses, and it parses back to that generation."""
+    owner = ToolExecutionIdentity("matrix", "general", "@human:localhost", "!room:localhost", None, None, "session")
+    job = BackgroundJob(job_id="job-1", owner=owner, tool_name="tool", depth=0, generation=3)
+    assert parse_completion_event_id(completion_event_id(job)) == ("job-1", 3)
+    for event_id in ("$event:localhost", "tool-job:job-1", "tool-job:job-1:03", "tool-job:job-1:-1", "tool-job:a:b:1"):
+        assert parse_completion_event_id(event_id) is None
+
+
 @pytest.mark.asyncio
 async def test_completion_requires_current_unconsumed_exact_claim(tmp_path: Path) -> None:
     """Completion requires current unconsumed exact claim."""
@@ -103,15 +118,11 @@ async def test_completion_requires_current_unconsumed_exact_claim(tmp_path: Path
         waited = await runtime.wait("job", owner=owner, depth=0)
         await runtime.release_wait("job", waited.claim)
         envelope = completion_envelope(waited.job, sender_id="@mindroom_general:localhost")
-        assert await admit_job_completion(envelope, target=target, runtime_paths=paths)
-        assert not await admit_job_completion(
-            replace(envelope, tool_job_completion=replace(envelope.tool_job_completion, generation=999)),
-            target=target,
-            runtime_paths=paths,
-        )
+        assert await admit_job_completion(envelope.source_event_id, paths)
+        assert not await admit_job_completion(completion_event_id(replace(waited.job, generation=999)), paths)
         waited = await runtime.wait("job", owner=owner, depth=0)
         await runtime.acknowledge_wait("job", waited.claim)
-        assert not await admit_job_completion(envelope, target=target, runtime_paths=paths)
+        assert not await admit_job_completion(envelope.source_event_id, paths)
     finally:
         await runtime.shutdown()
 
@@ -183,7 +194,6 @@ async def test_consumed_completion_resumes_its_owned_approval_continuation(  # n
             state="waiting",
             runtime_generation=runner.deps.approval_runtime_generation,
             origin=completion_envelope(completion_wait.job, sender_id="@mindroom_general:localhost").origin,
-            hook_source="tool_job_completion",
             requires_background_tool_jobs=True,
         )
         assert continuation_target(continuation, reply_to_event_id=source_event_id).reply_to_event_id is None

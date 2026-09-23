@@ -46,14 +46,15 @@ async def test_execution_authorizers_are_scoped_to_runtime(tmp_path: Path) -> No
 
     first_runtime = tool_job_runtime(first.storage_root, authorize_execution=denied)
     second_runtime = tool_job_runtime(second.storage_root)
-    for paths, runtime in ((first, first_runtime), (second, second_runtime)):
-        pin_background_tool_jobs(config, paths)
-        register_background_runtime(paths, runtime)
+    pin_background_tool_jobs(config, first)
+    register_background_runtime(first, first_runtime)
+    second_instance = pin_background_tool_jobs(config, second)
+    register_background_runtime(second, second_runtime)
     try:
         with tool_runtime_context(context), authorized_tool_call(owner, function):
             with pytest.raises(JobAccessError, match="Revoked"):
                 check_current_execution_authority()
-            release_background_tool_jobs(second)
+            release_background_tool_jobs(second, second_instance)
             with pytest.raises(JobAccessError, match="Revoked"):
                 check_current_execution_authority()
         with tool_runtime_context(replace(context, runtime_paths=second)), authorized_tool_call(owner, function):

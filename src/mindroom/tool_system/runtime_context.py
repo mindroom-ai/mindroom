@@ -563,8 +563,7 @@ def execution_identity_matches_tool_runtime_context(
         and execution_identity.session_id == target.session_id
         and execution_identity.tenant_id == context.runtime_paths.env_value("CUSTOMER_ID")
         and execution_identity.account_id == context.runtime_paths.env_value("ACCOUNT_ID")
-        and (execution_identity.transport_agent_name or execution_identity.agent_name)
-        == (context.transport_agent_name or context.agent_name)
+        and execution_identity.recipient == (context.transport_agent_name or context.agent_name)
     )
 
 

@@ -145,7 +145,7 @@ from mindroom.tool_jobs.completion import (
     background_wait_notice,
     completion_envelope,
     completion_prompt,
-    completion_source_id,
+    parse_completion_event_id,
 )
 from mindroom.tool_jobs.control import HumanMessageSignal
 from mindroom.tool_jobs.runtime import get_background_runtime
@@ -164,7 +164,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
-from mindroom.turn_origin import SenderKind
+from mindroom.turn_origin import SenderKind, TurnIntent
 from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
 
@@ -1494,8 +1494,7 @@ class ResponseRunner:
                     source_kind=request.response_envelope.source_kind,
                     requires_background_tool_jobs=(
                         self._approval_responses.requires_background_jobs(paused, plan.calls)
-                        or request.response_envelope.source_kind in {"tool_job_completion", "tool_job_recovery"}
-                        or request.response_envelope.hook_source in {"tool_job_completion", "tool_job_recovery"}
+                        or request.response_envelope.origin.intent is TurnIntent.TOOL_JOB_COMPLETION
                     ),
                     attachment_ids=tuple(request.attachment_ids or ()),
                     mentioned_agents=request.response_envelope.mentioned_agents,
@@ -2701,12 +2700,7 @@ class ResponseRunner:
                 if task.done() or task.cancelling():
                     continue
                 for source in ownership.source_event_ids:
-                    if await response_was_stopped(
-                        source,
-                        self.deps.approval_store,
-                        self.deps.runtime_paths,
-                        self.deps.agent_name,
-                    ):
+                    if await response_was_stopped(source, self.deps.runtime_paths, self.deps.agent_name):
                         self.deps.stop_manager.request_task_stop(task)
                         break
 
@@ -2952,7 +2946,6 @@ class ResponseRunner:
         while True:
             if await response_was_stopped(
                 request.response_envelope.source_event_id,
-                self.deps.approval_store,
                 self.deps.runtime_paths,
                 self.deps.agent_name,
             ):
@@ -3013,16 +3006,12 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
         """Admit internal outcomes and bind wait progress to the ordinary response owner."""
+        source_event_id = request.response_envelope.source_event_id
         if await response_was_stopped(
-            request.response_envelope.source_event_id,
-            self.deps.approval_store,
+            source_event_id,
             self.deps.runtime_paths,
             self.deps.agent_name,
-        ) or not await admit_job_completion(
-            request.response_envelope,
-            target=target,
-            runtime_paths=self.deps.runtime_paths,
-        ):
+        ) or not await admit_job_completion(source_event_id, self.deps.runtime_paths):
             if request.on_no_response_handled is not None:
 
                 async def settle() -> None:
@@ -3122,14 +3111,11 @@ class ResponseRunner:
         if event.kind is not EventKind.TOOL_JOB_COMPLETION:
             msg = "Expected an internal tool-job completion source"
             raise ValueError(msg)
-        job_id, generation = event.source.get("job_id"), event.source.get("generation")
-        if (
-            not isinstance(job_id, str)
-            or type(generation) is not int
-            or event.event_id != completion_source_id(job_id, generation)
-        ):
+        completion = parse_completion_event_id(event.event_id)
+        if completion is None:
             msg = "Invalid internal tool-job completion identity"
             raise ValueError(msg)
+        job_id, generation = completion
         if not self.has_live_inbox_response(event.event_id):
             self.track_inbox_response(
                 self._resume_tool_job_completion(event, job_id, generation),
@@ -3155,8 +3141,8 @@ class ResponseRunner:
         if envelope.agent_name != self.deps.agent_name or envelope.room_id != event.room_id:
             msg = "Internal tool-job completion owner does not match its journal"
             raise ValueError(msg)
-        original_source_id = job.adapter.get("source_event_id")
-        if isinstance(original_source_id, str) and original_source_id != event.event_id:
+        original_source_id = job.source_event_id
+        if original_source_id is not None and original_source_id != event.event_id:
             original = await self.deps.approval_store.load_event(original_source_id)
             if (
                 original is not None
@@ -3817,7 +3803,7 @@ class ResponseRunner:
             payload_preparation=None,
             initial_presentation=initial_presentation,
             existing_event_is_placeholder=existing_event_is_placeholder,
-            response_envelope=replace(envelope, body=prompt, origin=origin, hook_source="tool_job_recovery"),
+            response_envelope=replace(envelope, body=prompt, origin=origin),
         )
 
     async def _admit_locked_turn(

@@ -52,11 +52,13 @@ type _BackgroundStatus = Literal[
     "interrupted",
 ]
 type _OutcomeStatus = Literal["awaiting_approval", "completed", "failed", "cancelled", "denied", "interrupted"]
-_TERMINAL = frozenset({"completed", "failed", "cancelled", "denied", "interrupted"})
-_READY = _TERMINAL | {"awaiting_approval"}
+# Statuses after which execution has ended for good.
+TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied", "interrupted"})
+# Statuses whose outcome a parent can retrieve: a terminal one, or an approval that pauses execution.
+READY_STATUSES = TERMINAL_STATUSES | {"awaiting_approval"}
 _UNAVAILABLE = "Tool job is not available in this conversation."
 _JOB_SUMMARY_MAX_CHARS = 500
-_SNAPSHOT_SCHEMA_VERSION = 5
+_SNAPSHOT_SCHEMA_VERSION = 6
 _JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _PAYLOAD_SUFFIX = ".result.json"
 # Consumed jobs are deleted this long after their last change, once their originating turn has finished.
@@ -106,6 +108,9 @@ class BackgroundJob:
     depth: int
     kind: str = "tool"
     toolkit_name: str | None = None
+    # The admitted turn whose run started this job, and that turn's ingress source kind; None outside a turn.
+    source_event_id: str | None = None
+    source_kind: str | None = None
     adapter: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
@@ -204,7 +209,7 @@ def format_job_handle(
 
 
 @dataclass(frozen=True)
-class _BackgroundWait:
+class JobWait:
     """A waited job, with the claim on its ready outcome that only the parent's saved tool result acknowledges."""
 
     job: BackgroundJob
@@ -253,6 +258,35 @@ class _Entry:
         return live if live == claim else None
 
 
+# A job's recipient and the turn that started it.
+type _SourceKey = tuple[str, str]
+# A job's recipient, room, resolved thread, and requester.
+type _ConversationKey = tuple[str, str | None, str | None, str | None]
+
+
+def _conversation_key(owner: ToolExecutionIdentity) -> _ConversationKey:
+    return (owner.recipient, owner.room_id, owner.resolved_thread_id, owner.requester_id)
+
+
+@dataclass
+class _EntryIndex[Key]:
+    """Accepted jobs grouped by an identity that stays fixed for each job's life, in admission order."""
+
+    groups: dict[Key, dict[str, _Entry]] = field(default_factory=dict)
+
+    def add(self, key: Key, entry: _Entry) -> None:
+        self.groups.setdefault(key, {})[entry.job.job_id] = entry
+
+    def remove(self, key: Key, job_id: str) -> None:
+        group = self.groups[key]
+        del group[job_id]
+        if not group:
+            del self.groups[key]
+
+    def get(self, key: Key) -> list[_Entry]:
+        return list(self.groups.get(key, {}).values())
+
+
 def get_background_runtime(runtime_paths: RuntimePaths) -> ToolJobRuntime | None:
     """Find the managed Matrix runtime for one storage root, if present."""
     instance = tool_job_instance(runtime_paths)
@@ -294,6 +328,9 @@ class ToolJobRuntime:
         self._authorize_execution = authorize_execution
         self._cancel = cancel
         self._entries: dict[str, _Entry] = {}
+        # Per-turn lookups read these instead of scanning every entry; `_add_entry` and `_remove_entry` keep them.
+        self._by_source = _EntryIndex[_SourceKey]()
+        self._by_conversation = _EntryIndex[_ConversationKey]()
         self._lock = asyncio.Lock()
         self._closed = False
         self._shutdown_task: asyncio.Task[None] | None = None
@@ -351,8 +388,21 @@ class ToolJobRuntime:
     def source_event_id(self, job_id: str) -> str | None:
         """Read accepted provenance for internal Stop ancestry without acquiring the admission lock."""
         entry = self._entries.get(job_id)
-        source = entry.job.adapter.get("source_event_id") if entry is not None else None
-        return source if isinstance(source, str) else None
+        return entry.job.source_event_id if entry is not None else None
+
+    def _add_entry(self, entry: _Entry) -> None:
+        """Make an accepted job current and findable by its source and conversation, which never change."""
+        job = entry.job
+        self._entries[job.job_id] = entry
+        if job.source_event_id is not None:
+            self._by_source.add((job.owner.recipient, job.source_event_id), entry)
+        self._by_conversation.add(_conversation_key(job.owner), entry)
+
+    def _remove_entry(self, job_id: str) -> None:
+        job = self._entries.pop(job_id).job
+        if job.source_event_id is not None:
+            self._by_source.remove((job.owner.recipient, job.source_event_id), job_id)
+        self._by_conversation.remove(_conversation_key(job.owner), job_id)
 
     def _entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> _Entry:
         self._ensure_open()
@@ -398,7 +448,7 @@ class ToolJobRuntime:
         async def publish() -> None:
             await asyncio.to_thread(write)
             entry.job, entry.saved, entry.unsaved_payload = job, True, None
-            if job.status in _TERMINAL:
+            if job.status in TERMINAL_STATUSES:
                 # A durable terminal outcome ends execution; drop what only running work needed.
                 self._release_control(entry)
                 entry.human_signal, entry.cancel, entry.task = None, None, None
@@ -444,7 +494,7 @@ class ToolJobRuntime:
                 if path.stem in self._entries:
                     continue
                 entry = _Entry(await asyncio.to_thread(read_job_snapshot, path))
-                if entry.job.status not in _READY:
+                if entry.job.status not in READY_STATUSES:
                     outcome = await self._cleanup(entry)
                     await self._publish_outcome(
                         entry,
@@ -455,7 +505,7 @@ class ToolJobRuntime:
                             outcome=outcome,
                         ),
                     )
-                self._entries[entry.job.job_id] = entry
+                self._add_entry(entry)
                 self._restore_approval_signal(entry)
             referenced = {
                 _payload_name(entry.job.job_id, entry.job.generation)
@@ -476,11 +526,7 @@ class ToolJobRuntime:
             return
         owner = entry.job.owner
         if owner.room_id is not None:
-            entry.human_signal = self.human_signal_for(
-                owner.transport_agent_name or owner.agent_name,
-                owner.room_id,
-                owner.resolved_thread_id,
-            )
+            entry.human_signal = self.human_signal_for(owner.recipient, owner.room_id, owner.resolved_thread_id)
             entry.human_signal.subscribe(entry.notify_changed)
 
     async def start(
@@ -491,6 +537,8 @@ class ToolJobRuntime:
         depth: int,
         kind: str = "tool",
         toolkit_name: str | None = None,
+        source_event_id: str | None = None,
+        source_kind: str | None = None,
         adapter: dict[str, Any],
         owner: ToolExecutionIdentity,
         operation: Callable[[], Awaitable[BackgroundOutcome]],
@@ -510,6 +558,8 @@ class ToolJobRuntime:
                     existing.job.tool_name != tool_name
                     or existing.job.toolkit_name != toolkit_name
                     or existing.job.kind != kind
+                    or existing.job.source_event_id != source_event_id
+                    or existing.job.source_kind != source_kind
                     or existing.job.adapter != adapter
                 ):
                     raise JobAccessError(_UNAVAILABLE)
@@ -525,6 +575,8 @@ class ToolJobRuntime:
                 depth=depth,
                 kind=kind,
                 toolkit_name=toolkit_name,
+                source_event_id=source_event_id,
+                source_kind=source_kind,
                 # Native adapters mutate this exact mapping; owns_execution verifies its identity.
                 adapter=adapter,
             )
@@ -543,7 +595,7 @@ class ToolJobRuntime:
     ) -> None:
         """Publish accepted ownership, then launch it; callers finish this before propagating cancellation."""
         await self._publish(entry, job)
-        self._entries[job.job_id] = entry
+        self._add_entry(entry)
         signal = current_human_message_signal()
         if entry.human_signal is None and signal is not None:
             entry.human_signal = signal
@@ -587,7 +639,7 @@ class ToolJobRuntime:
                 # Runtime-owned cancellation and shutdown set the control; their settlement consumes this outcome.
                 if entry.control.cancelled:
                     entry.stopped_outcome = outcome
-                elif entry.job.status not in _TERMINAL:
+                elif entry.job.status not in TERMINAL_STATUSES:
                     try:
                         await self._publish_outcome(entry, outcome)
                     except Exception:
@@ -601,7 +653,7 @@ class ToolJobRuntime:
                 entry.stopped_outcome = outcome
             raise
         finally:
-            if entry.job.status in _TERMINAL:
+            if entry.job.status in TERMINAL_STATUSES:
                 self._release_control(entry)
 
     @staticmethod
@@ -650,7 +702,7 @@ class ToolJobRuntime:
                 and self._authorize(entry.job)
             ]
             entries.sort(key=lambda entry: entry.job.updated_at, reverse=True)
-            entries.sort(key=lambda entry: entry.job.status in _TERMINAL)
+            entries.sort(key=lambda entry: entry.job.status in TERMINAL_STATUSES)
             return [await self._snapshot(entry, include_result=False) for entry in entries[offset : offset + limit]]
 
     async def wait(
@@ -661,7 +713,7 @@ class ToolJobRuntime:
         depth: int,
         timeout: float | None = None,  # noqa: ASYNC109
         claim: JobClaim | None = None,
-    ) -> _BackgroundWait:
+    ) -> JobWait:
         """Wait without cancelling execution; retain a claim on the ready outcome until acknowledgement.
 
         A caller holding the current claim, such as the one `start` returned, keeps it; otherwise the wait claims the
@@ -674,7 +726,7 @@ class ToolJobRuntime:
             entry = self._entry(job_id, owner, depth)
             claim = entry.claim_for(claim)
             if claim is None:
-                return _BackgroundWait(await self._snapshot(entry), delivery_queued=True)
+                return JobWait(await self._snapshot(entry), delivery_queued=True)
             human_notified = asyncio.Event()
             human_signal = entry.human_signal
             if human_signal is not None:
@@ -683,21 +735,21 @@ class ToolJobRuntime:
             while True:
                 async with self._lock:
                     self._entry(job_id, owner, depth)
-                    if entry.job.status in _READY:
+                    if entry.job.status in READY_STATUSES:
                         # A continuation or cancellation can start a newer generation before this waiter sees the one
                         # it claimed; that stale claim owns nothing, so claim the ready one unless another waiter has.
                         ready = entry.claim_for(claim)
                         if ready is None:
-                            return _BackgroundWait(await self._snapshot(entry), delivery_queued=True)
+                            return JobWait(await self._snapshot(entry), delivery_queued=True)
                         claim = ready
                         snapshot = await self._snapshot(entry)
                         retained = True
-                        return _BackgroundWait(snapshot, claim)
+                        return JobWait(snapshot, claim)
                     if human_notified.is_set():
-                        return _BackgroundWait(await self._snapshot(entry))
+                        return JobWait(await self._snapshot(entry))
                     remaining = None if deadline is None else deadline - asyncio.get_running_loop().time()
                     if remaining is not None and remaining <= 0:
-                        return _BackgroundWait(await self._snapshot(entry))
+                        return JobWait(await self._snapshot(entry))
                     changed = entry.changed
                 changed_wait = asyncio.create_task(changed.wait())
                 human_wait = asyncio.create_task(human_notified.wait())
@@ -772,7 +824,7 @@ class ToolJobRuntime:
                     continue
                 order = max(entry.job.user_stop_receipt_order or 0, receipt_order)
                 await self._publish(entry, _updated(entry.job, user_stop_receipt_order=order))
-                if entry.job.status not in _TERMINAL:
+                if entry.job.status not in TERMINAL_STATUSES:
                     await self._request_cancel(entry)
 
     async def is_user_stopped(self, job_id: str) -> bool:
@@ -786,9 +838,7 @@ class ToolJobRuntime:
         async with self._lock:
             return any(
                 entry.job.user_stop_receipt_order is not None
-                and entry.job.adapter.get("source_event_id") == source_event_id
-                and (entry.job.owner.transport_agent_name or entry.job.owner.agent_name) == transport_agent_name
-                for entry in self._entries.values()
+                for entry in self._by_source.get((transport_agent_name, source_event_id))
             )
 
     async def cancel_owned(
@@ -814,7 +864,7 @@ class ToolJobRuntime:
             revoked = [
                 entry
                 for entry in self._entries.values()
-                if entry.job.status not in _TERMINAL and not self._authorize(entry.job)
+                if entry.job.status not in TERMINAL_STATUSES and not self._authorize(entry.job)
             ]
             for entry in revoked:
                 await self._request_cancel(entry)
@@ -886,12 +936,12 @@ class ToolJobRuntime:
         """Choose the terminal outcome, consuming the stopped one, after owned execution and cleanup settle."""
         if (
             entry.stopped_outcome is not None
-            and entry.stopped_outcome.status in _TERMINAL
+            and entry.stopped_outcome.status in TERMINAL_STATUSES
             and (outcome is None or outcome.status not in {"completed", "failed", "denied"})
         ):
             outcome = entry.stopped_outcome
         entry.stopped_outcome = None
-        if outcome is None or outcome.status not in _TERMINAL:
+        if outcome is None or outcome.status not in TERMINAL_STATUSES:
             outcome = BackgroundOutcome(status, reason)
         return outcome
 
@@ -941,7 +991,7 @@ class ToolJobRuntime:
             return [
                 await self._snapshot(entry, include_result=False)
                 for entry in self._entries.values()
-                if entry.job.status in _READY and self._unconsumed(entry)
+                if entry.job.status in READY_STATUSES and self._unconsumed(entry)
             ]
 
     async def outcome(self, job_id: str, generation: int) -> BackgroundJob | None:
@@ -952,7 +1002,7 @@ class ToolJobRuntime:
                 self._closed
                 or entry is None
                 or entry.job.generation != generation
-                or entry.job.status not in _READY
+                or entry.job.status not in READY_STATUSES
                 or not self._unconsumed(entry)
             ):
                 return None
@@ -978,10 +1028,8 @@ class ToolJobRuntime:
                 return []
             return [
                 await self._snapshot(entry, include_result=False)
-                for entry in self._entries.values()
-                if entry.job.adapter.get("source_event_id") == source_event_id
-                and (entry.job.owner.transport_agent_name or entry.job.owner.agent_name) == transport_agent_name
-                and entry.job.owner.room_id == room_id
+                for entry in self._by_source.get((transport_agent_name, source_event_id))
+                if entry.job.owner.room_id == room_id
                 and entry.job.owner.resolved_thread_id == thread_id
                 and entry.job.owner.session_id == session_id
                 and entry.job.owner.requester_id == requester_id
@@ -997,19 +1045,14 @@ class ToolJobRuntime:
         source_kind: str | None = None,
     ) -> list[BackgroundJob]:
         """Discover outstanding work for one requester, conversation, and delivery policy."""
+        silent = source_kind == SILENT_SCHEDULE_SOURCE_KIND
         async with self._lock:
             if self._closed:
                 return []
             return [
                 await self._snapshot(entry, include_result=False)
-                for entry in self._entries.values()
-                if (entry.job.owner.transport_agent_name or entry.job.owner.agent_name) == transport_agent_name
-                and entry.job.owner.room_id == room_id
-                and entry.job.owner.resolved_thread_id == thread_id
-                and entry.job.owner.requester_id == requester_id
-                and (entry.job.adapter.get("source_kind") == SILENT_SCHEDULE_SOURCE_KIND)
-                == (source_kind == SILENT_SCHEDULE_SOURCE_KIND)
-                and self._unconsumed(entry)
+                for entry in self._by_conversation.get((transport_agent_name, room_id, thread_id, requester_id))
+                if (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) == silent and self._unconsumed(entry)
             ]
 
     async def expire_consumed(
@@ -1031,7 +1074,7 @@ class ToolJobRuntime:
             candidates = [
                 await self._snapshot(entry, include_result=False)
                 for entry in self._entries.values()
-                if entry.job.status in _TERMINAL
+                if entry.job.status in TERMINAL_STATUSES
                 and entry.job.consumed
                 and entry.live_claim is None
                 and entry.saved
@@ -1054,7 +1097,7 @@ class ToolJobRuntime:
                 files = [self._path(job.job_id)]
                 if entry.job.has_result_payload:
                     files.append(self._path(job.job_id, entry.job.generation))
-                del self._entries[job.job_id]
+                self._remove_entry(job.job_id)
                 # Metadata goes first, so a crash can leave only a payload, which recovery deletes.
                 await run_blocking_until_complete(_unlink_in_order, files)
 
@@ -1085,7 +1128,7 @@ class ToolJobRuntime:
         failures = []
         async with self._lock:
             for entry in self._entries.values():
-                if entry.job.status not in _READY:
+                if entry.job.status not in READY_STATUSES:
                     entry.control.cancel()
                 self._release_control(entry)
                 if entry.drain is not None:
@@ -1096,7 +1139,7 @@ class ToolJobRuntime:
                     tasks.append(entry.task)
         await asyncio.gather(*tasks, return_exceptions=True)
         for entry in self._entries.values():
-            settling = entry.job.status not in _READY
+            settling = entry.job.status not in READY_STATUSES
             try:
                 outcome = await self._cleanup(entry) if settling else None
                 async with self._lock:

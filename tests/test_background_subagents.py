@@ -223,7 +223,7 @@ async def test_timeout_and_cancelled_waiter_leave_one_child_alive(tmp_path: Path
         assert first.job.status == "running"
         entered = asyncio.Event()
 
-        async def wait_for_result() -> background._BackgroundWait:
+        async def wait_for_result() -> background.JobWait:
             entered.set()
             return await runtime.wait(job.job_id, owner=_owner(), depth=0)
 

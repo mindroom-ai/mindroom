@@ -318,7 +318,7 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
         membership_turn_id="$approval-source",
     )
     runtime = tool_job_runtime(paths.storage_root)
-    pin_background_tool_jobs(context.config, paths)
+    instance = pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     side_effects: list[str] = []
 
@@ -428,7 +428,7 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
 
         storage.close()
         config.agents["general"].private = AgentPrivateConfig(per="user")
-        release_background_tool_jobs(paths)
+        release_background_tool_jobs(paths, instance)
         await runtime.shutdown()
         config.background_tool_jobs.enabled = False
         disabled = ToolJobRuntimeCoordinator(

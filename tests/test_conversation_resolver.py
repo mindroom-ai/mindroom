@@ -40,6 +40,7 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
+from mindroom.turn_origin import TurnIntent
 from tests.conftest import (
     bind_runtime_paths,
     make_matrix_client_mock,
@@ -1097,4 +1098,4 @@ def test_matrix_metadata_cannot_create_internal_completion_reference(
             context=context,
             target=target,
         )
-    assert envelope.tool_job_completion is None
+    assert envelope.origin.intent is not TurnIntent.TOOL_JOB_COMPLETION

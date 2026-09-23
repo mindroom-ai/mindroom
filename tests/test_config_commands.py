@@ -2255,7 +2255,7 @@ async def test_apply_config_change_reports_all_pending_restart_conditions(
     runtime_paths = _runtime_paths_for_config(config_path)
     startup = load_config(runtime_paths)
     record_opened_event_journal(startup.event_journal, runtime_paths=runtime_paths)
-    pin_background_tool_jobs(startup, runtime_paths)
+    instance = pin_background_tool_jobs(startup, runtime_paths)
     try:
         if jobs_pending:
             await apply_config_change(
@@ -2281,7 +2281,7 @@ async def test_apply_config_change_reports_all_pending_restart_conditions(
         assert saved.event_journal.backend == ("postgres" if journal_pending else "sqlite")
         assert saved.defaults.markdown is False
     finally:
-        release_background_tool_jobs(runtime_paths)
+        release_background_tool_jobs(runtime_paths, instance)
 
 
 @pytest.mark.asyncio
