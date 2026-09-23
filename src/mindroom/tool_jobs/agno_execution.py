@@ -135,12 +135,13 @@ class _CollectedResult:
             if event["event"] not in _EVENT_TYPES:
                 msg = f"Unsupported durable tool event: {event['event']}"
                 raise TypeError(msg)
+            if isinstance(item, (RunContentEvent, TeamRunContentEvent)):
+                # Agno concatenates content during replay; model dictionaries must remain JSON text.
+                content = item.content.model_dump_json() if isinstance(item.content, BaseModel) else item.content
+                event["content"] = content
+                self.chunks.append(str(content or ""))
             self.events.append(event)
             self.replay.append({"event": event})
-            if isinstance(item, (RunContentEvent, TeamRunContentEvent)):
-                self.chunks.append(
-                    item.content.model_dump_json() if isinstance(item.content, BaseModel) else str(item.content or ""),
-                )
         elif isinstance(item, ToolResult):
             self.has_rich = True
             self.chunks.append(item.content)

@@ -17,9 +17,11 @@ from agno.media import Image
 from agno.models.response import ModelResponse
 from agno.run import RunContext
 from agno.run.agent import RunContentEvent
+from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.team import Team
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall, ToolResult
+from pydantic import BaseModel
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig
@@ -800,11 +802,20 @@ async def test_shared_task_affine_connection_waits_for_both_job_owners() -> None
 
 
 @pytest.mark.asyncio
-async def test_fast_generator_preserves_sdk_events(tmp_path: Path) -> None:
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("team_event", [False, True])
+async def test_fast_generator_preserves_sdk_events(tmp_path: Path, *, structured: bool, team_event: bool) -> None:
     """A drained fast generator still forwards its supported SDK events once."""
 
-    async def generated() -> AsyncIterator[RunContentEvent | ToolResult | str]:
-        yield RunContentEvent(content="event text")
+    class Answer(BaseModel):
+        value: str
+
+    event_type = TeamRunContentEvent if team_event else RunContentEvent
+    content = Answer(value="saved answer") if structured else "event text"
+    expected = '{"value":"saved answer"}' if structured else "event text"
+
+    async def generated() -> AsyncIterator[RunContentEvent | TeamRunContentEvent | str]:
+        yield event_type(content=content)
         yield "tail"
 
     paths = _runtime_paths(tmp_path)
@@ -829,7 +840,10 @@ async def test_fast_generator_preserves_sdk_events(tmp_path: Path) -> None:
                         stream_events=True,
                     )
                 ]
-        assert sum(isinstance(event, RunContentEvent) and event.content == "event text" for event in events) == 1
+        tool_message = next(message for message in model.seen_messages if message.role == "tool")
+        assert not tool_message.tool_call_error
+        assert tool_message.content == expected + "tail"
+        assert sum(isinstance(event, event_type) and event.content == expected for event in events) == 1
     finally:
         await runtime.shutdown()
         register_background_runtime(paths, None)
