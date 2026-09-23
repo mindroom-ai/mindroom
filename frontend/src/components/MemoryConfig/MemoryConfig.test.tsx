@@ -577,4 +577,51 @@ describe("MemoryConfig", () => {
     );
     expect(mockUpdateMemoryConfig).not.toHaveBeenCalled();
   });
+
+  it("edits embedder options the page does not render through More embedder settings", () => {
+    (useConfigStore as any).mockReturnValue({
+      config: mockConfig,
+      agents: [],
+      rooms: [],
+      diagnostics: [],
+      updateMemoryConfig: mockUpdateMemoryConfig,
+      updateConfigValue: mockUpdateConfigValue,
+      saveConfig: mockSaveConfig,
+      isDirty: false,
+    });
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: {
+        type: "object",
+        properties: {},
+        $defs: {
+          MemoryConfig: { type: "object", properties: {} },
+          EmbedderConfig: {
+            type: "object",
+            properties: {
+              model: { type: "string" },
+              dimensions: {
+                anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }],
+                default: null,
+              },
+            },
+          },
+        },
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+
+    render(<MemoryConfig />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /More embedder settings/ }),
+    );
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Dimensions" }), {
+      target: { value: "768" },
+    });
+
+    expect(mockUpdateConfigValue).toHaveBeenLastCalledWith(
+      ["memory", "embedder", "config", "dimensions"],
+      768,
+    );
+  });
 });

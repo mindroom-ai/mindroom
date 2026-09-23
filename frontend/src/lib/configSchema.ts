@@ -64,7 +64,7 @@ export interface SchemaNode {
   /** Whether an explicit null is a valid value. */
   nullable: boolean;
   description?: string;
-  /** Whether the schema declares a default; absent for default factories. */
+  /** Whether the schema declares a default; absent when the default depends on other fields. */
   hasDefault: boolean;
   defaultValue?: unknown;
   hint: SchemaHint;

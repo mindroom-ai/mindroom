@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/select";
 
 /** RoomConfig keys this editor renders by hand; More settings shows the rest. */
-export const ROOM_EDITOR_FIELDS = ["display_name", "description"] as const;
+const ROOM_EDITOR_FIELDS = ["display_name", "description"] as const;
 
 export function RoomEditor() {
   const {

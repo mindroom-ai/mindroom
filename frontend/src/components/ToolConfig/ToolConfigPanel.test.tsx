@@ -13,6 +13,8 @@ describe("ToolConfigPanel", () => {
   const mockStore = {
     getAgentToolOverrides: vi.fn(),
     updateAgentToolOverrides: vi.fn(),
+    getDefaultToolOverrides: vi.fn(),
+    updateDefaultToolOverrides: vi.fn(),
   };
 
   beforeEach(() => {
@@ -24,7 +26,12 @@ describe("ToolConfigPanel", () => {
   });
 
   it("renders an empty state when no tool is selected", () => {
-    render(<ToolConfigPanel agentId="openclaw" toolName={null} />);
+    render(
+      <ToolConfigPanel
+        target={{ kind: "agent", agentId: "openclaw" }}
+        toolName={null}
+      />,
+    );
 
     expect(
       screen.getByText("Select a checked tool to edit per-agent settings."),
@@ -35,7 +42,7 @@ describe("ToolConfigPanel", () => {
     mockStore.getAgentToolOverrides.mockReturnValue(null);
     render(
       <ToolConfigPanel
-        agentId="openclaw"
+        target={{ kind: "agent", agentId: "openclaw" }}
         toolName="browser"
         toolDisplayName="Browser"
         overrideFields={null}
@@ -44,14 +51,14 @@ describe("ToolConfigPanel", () => {
     );
 
     expect(
-      screen.getByText("No per-agent settings available for this tool."),
+      screen.getByText("No settings available for this tool."),
     ).toBeInTheDocument();
   });
 
   it("renders override fields with toggle controls for string[] fields", () => {
     render(
       <ToolConfigPanel
-        agentId="openclaw"
+        target={{ kind: "agent", agentId: "openclaw" }}
         toolName="shell"
         toolDisplayName="Shell Commands"
         overrideFields={[
@@ -82,7 +89,7 @@ describe("ToolConfigPanel", () => {
   it("commits override updates when toggling and editing string[] fields", () => {
     render(
       <ToolConfigPanel
-        agentId="openclaw"
+        target={{ kind: "agent", agentId: "openclaw" }}
         toolName="shell"
         toolDisplayName="Shell Commands"
         overrideFields={[
@@ -147,7 +154,7 @@ describe("ToolConfigPanel", () => {
 
     render(
       <ToolConfigPanel
-        agentId="openclaw"
+        target={{ kind: "agent", agentId: "openclaw" }}
         toolName="discord"
         toolDisplayName="Discord"
         configFields={[
@@ -181,7 +188,7 @@ describe("ToolConfigPanel", () => {
 
     render(
       <ToolConfigPanel
-        agentId="openclaw"
+        target={{ kind: "agent", agentId: "openclaw" }}
         toolName="discord"
         toolDisplayName="Discord"
         overrideFields={null}
@@ -208,7 +215,7 @@ describe("ToolConfigPanel", () => {
     mockStore.getAgentToolOverrides.mockReturnValue(null);
     render(
       <ToolConfigPanel
-        agentId="openclaw"
+        target={{ kind: "agent", agentId: "openclaw" }}
         toolName="shell"
         toolDisplayName="Shell"
         overrideFields={[
@@ -239,7 +246,7 @@ describe("ToolConfigPanel", () => {
     it("stores defer beside existing overrides", () => {
       render(
         <ToolConfigPanel
-          agentId="openclaw"
+          target={{ kind: "agent", agentId: "openclaw" }}
           toolName="shell"
           overrideFields={shellFields}
         />,
@@ -259,7 +266,12 @@ describe("ToolConfigPanel", () => {
 
     it("offers lazy loading for tools without override fields", () => {
       mockStore.getAgentToolOverrides.mockReturnValue(null);
-      render(<ToolConfigPanel agentId="openclaw" toolName="browser" />);
+      render(
+        <ToolConfigPanel
+          target={{ kind: "agent", agentId: "openclaw" }}
+          toolName="browser"
+        />,
+      );
 
       expect(
         screen.getByRole("checkbox", { name: "Load at session start" }),
@@ -280,7 +292,7 @@ describe("ToolConfigPanel", () => {
       });
       render(
         <ToolConfigPanel
-          agentId="openclaw"
+          target={{ kind: "agent", agentId: "openclaw" }}
           toolName="shell"
           overrideFields={shellFields}
         />,
@@ -303,7 +315,12 @@ describe("ToolConfigPanel", () => {
         defer: true,
         initial: true,
       });
-      render(<ToolConfigPanel agentId="openclaw" toolName="browser" />);
+      render(
+        <ToolConfigPanel
+          target={{ kind: "agent", agentId: "openclaw" }}
+          toolName="browser"
+        />,
+      );
       fireEvent.click(screen.getByRole("checkbox", { name: "Load lazily" }));
 
       expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
@@ -312,5 +329,32 @@ describe("ToolConfigPanel", () => {
         { defer: null, initial: null },
       );
     });
+  });
+
+  it("edits shared default tool overrides without lazy-loading controls", () => {
+    mockStore.getDefaultToolOverrides.mockReturnValue({ bot_token: "abc" });
+    render(
+      <ToolConfigPanel
+        target={{ kind: "defaults" }}
+        toolName="discord"
+        toolDisplayName="Discord"
+        configFields={[
+          { name: "bot_token", label: "Bot Token", type: "password" },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Discord — Default Settings")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: "Load lazily" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Override Bot Token" }),
+    );
+    expect(mockStore.updateDefaultToolOverrides).toHaveBeenLastCalledWith(
+      "discord",
+      { bot_token: null },
+    );
+    expect(mockStore.updateAgentToolOverrides).not.toHaveBeenCalled();
   });
 });

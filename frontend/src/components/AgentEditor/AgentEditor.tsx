@@ -36,13 +36,13 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useTools } from "@/hooks/useTools";
 import { useSkills } from "@/hooks/useSkills";
 import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
-import { ToolConfigPanel } from "./ToolConfigPanel";
+import { ToolConfigPanel } from "@/components/ToolConfig/ToolConfigPanel";
 import { ToolSelectionRow } from "./ToolSelectionRow";
 import { SchemaSection } from "@/components/SchemaForm";
 import { setObjectKey } from "@/lib/configSchema";
 
 /** AgentConfig keys this editor renders by hand; More settings shows the rest. */
-export const AGENT_EDITOR_FIELDS = [
+const AGENT_EDITOR_FIELDS = [
   "display_name",
   "role",
   "tools",
@@ -1258,7 +1258,10 @@ export function AgentEditor() {
                               />
                               {isChecked && isActive && (
                                 <ToolConfigPanel
-                                  agentId={selectedAgent.id}
+                                  target={{
+                                    kind: "agent",
+                                    agentId: selectedAgent.id,
+                                  }}
                                   toolName={tool.name}
                                   toolDisplayName={tool.display_name}
                                   overrideFields={
@@ -1333,7 +1336,10 @@ export function AgentEditor() {
                               />
                               {isChecked && isActive && (
                                 <ToolConfigPanel
-                                  agentId={selectedAgent.id}
+                                  target={{
+                                    kind: "agent",
+                                    agentId: selectedAgent.id,
+                                  }}
                                   toolName={tool.name}
                                   toolDisplayName={tool.display_name}
                                   overrideFields={
@@ -1411,7 +1417,10 @@ export function AgentEditor() {
                               />
                               {isChecked && isActive && (
                                 <ToolConfigPanel
-                                  agentId={selectedAgent.id}
+                                  target={{
+                                    kind: "agent",
+                                    agentId: selectedAgent.id,
+                                  }}
                                   toolName={tool.name}
                                   toolDisplayName={tool.display_name}
                                   overrideFields={

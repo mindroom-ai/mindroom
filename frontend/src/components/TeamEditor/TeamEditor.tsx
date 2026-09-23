@@ -27,7 +27,7 @@ const AGENT_POLICY_UNAVAILABLE_REASON =
   "Agent policy preview is unavailable. Save or refresh to validate team eligibility.";
 
 /** TeamConfig keys this editor renders by hand; More settings shows the rest. */
-export const TEAM_EDITOR_FIELDS = [
+const TEAM_EDITOR_FIELDS = [
   "display_name",
   "role",
   "agents",

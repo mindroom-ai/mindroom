@@ -193,19 +193,25 @@ Connect external services to enable agent capabilities:
 The **Settings** tab edits every top-level configuration root that has no dedicated tab.
 Sections group related roots: response defaults, history and context, tools and workers, router, personal rooms, room defaults, tool approval, prompts, MCP servers, plugins, access and identity, Matrix and runtime, and diagnostics.
 A root or field that no tab or section claims appears under **Other**, so new options are never hidden.
+The **Tools and workers** section also edits per-tool overrides for the default tools every agent inherits.
+Sections with validation errors from the last save are marked **Needs attention**.
 Changes join the same draft as every other tab and are saved with **Save**.
+
+## Features
 
 ### More Settings
 
 Tabs with hand-built editors also show a collapsible **More settings** section listing the fields they do not render themselves.
 The Agents, Teams, Rooms, Memory, Knowledge, Voice, and Models tabs use it.
 
+### Schema-Driven Forms
+
 Settings and More settings forms are generated from the configuration schema that the running backend serves at `/api/config/schema`.
 Each field shows its description and default, entity references such as model or agent names become pickers, and credential-bearing fields are masked.
 Resetting a field removes it from `config.yaml` so the default applies again, and optional blocks are added or removed with their **Configure** checkbox.
-Validation errors from a save appear beside the affected field.
-
-## Features
+Lists keep their order and can repeat values, such as MCP server arguments.
+Validation errors from a save appear beside the affected field, and collapsed sections that contain one open automatically.
+If the schema cannot be loaded, these forms show the error with a **Retry** button.
 
 ### Save Status
 
@@ -237,8 +243,8 @@ The dashboard communicates with the backend API at `/api/`:
 | POST | `/api/config/load` | Fetch current configuration |
 | PUT | `/api/config/save` | Save full configuration |
 | GET | `/api/config/raw` | Fetch the raw `config.yaml` source for recovery editing |
-| GET | `/api/config/schema` | Fetch the configuration JSON schema used by Settings and More settings |
 | PUT | `/api/config/raw` | Replace the entire raw `config.yaml` source during recovery |
+| GET | `/api/config/schema` | Fetch the configuration JSON schema used by Settings and More settings |
 | GET | `/api/config/agents` | List all agents |
 | POST | `/api/config/agents` | Create new agent |
 | PUT | `/api/config/agents/{id}` | Update agent |

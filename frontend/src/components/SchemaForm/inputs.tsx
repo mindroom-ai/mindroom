@@ -3,6 +3,8 @@
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import yaml from "js-yaml";
 import {
+  ArrowDown,
+  ArrowUp,
   ChevronDown,
   ChevronRight,
   Eye,
@@ -12,7 +14,6 @@ import {
   X,
 } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -22,7 +23,7 @@ import type { ReferenceOptions, SchemaNode } from "@/lib/configSchema";
 
 export type SchemaPath = Array<string | number>;
 
-export type Presence = "inline" | "toggle" | "tri";
+type Presence = "inline" | "toggle" | "tri";
 
 export const DEFAULT_OPTION = "__default__";
 export const NONE_OPTION = "__none__";
@@ -30,7 +31,7 @@ const SELECT_CLASS =
   "glass-control h-10 w-full px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50";
 
 // Nullable fields whose default is null only need "set or not"; nullable
-// fields with another default (or a default factory) also need an explicit null.
+// fields with another default, or none reported, also need an explicit null.
 export function presenceMode(node: SchemaNode, required: boolean): Presence {
   if (!node.nullable) {
     return "inline";
@@ -55,7 +56,7 @@ function displayScalar(value: unknown): string {
   return String(value);
 }
 
-export function defaultSummary(node: SchemaNode): string | null {
+function defaultSummary(node: SchemaNode): string | null {
   const value = node.defaultValue;
   if (!node.hasDefault || value == null || typeof value === "object") {
     return null;
@@ -506,36 +507,71 @@ export function StringListEditor({
 }) {
   const [draft, setDraft] = useState("");
   const listId = useId();
+  // Lists such as command arguments are ordered and may repeat values, so
+  // entries are addressed by position; the backend validates uniqueness.
   const add = () => {
     const trimmed = draft.trim();
-    if (trimmed === "" || values.includes(trimmed)) {
+    if (trimmed === "") {
       return;
     }
     onChange([...values, trimmed]);
     setDraft("");
+  };
+  const move = (index: number, offset: number) => {
+    const next = [...values];
+    const [item] = next.splice(index, 1);
+    next.splice(index + offset, 0, item);
+    onChange(next);
   };
   const available = suggestions?.filter((option) => !values.includes(option));
 
   return (
     <div className="space-y-2">
       {values.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {values.map((item) => (
-            <Badge key={item} variant="secondary" className="gap-1 pr-1">
-              <span className="font-mono text-xs">{item}</span>
-              <button
+        <ul className="space-y-1">
+          {values.map((item, index) => (
+            <li
+              key={index}
+              className="flex items-center gap-1 rounded-md border border-border/60 py-0.5 pl-3 pr-1"
+            >
+              <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                {item}
+              </span>
+              <Button
                 type="button"
-                className="rounded-sm p-0.5 hover:bg-muted"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                aria-label={`Move ${item} up`}
+                disabled={index === 0}
+                onClick={() => move(index, -1)}
+              >
+                <ArrowUp className="h-3 w-3" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                aria-label={`Move ${item} down`}
+                disabled={index === values.length - 1}
+                onClick={() => move(index, 1)}
+              >
+                <ArrowDown className="h-3 w-3" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
                 aria-label={`Remove ${item}`}
-                onClick={() =>
-                  onChange(values.filter((value) => value !== item))
-                }
+                onClick={() => onChange(values.filter((_, i) => i !== index))}
               >
                 <X className="h-3 w-3" />
-              </button>
-            </Badge>
+              </Button>
+            </li>
           ))}
-        </div>
+        </ul>
       )}
       <div className="flex items-center gap-2">
         <Input
@@ -623,6 +659,7 @@ export function YamlEditor({
   const [parseError, setParseError] = useState<string | null>(null);
   useEffect(() => {
     setDraft(serialized);
+    setParseError(null);
   }, [serialized]);
 
   return (

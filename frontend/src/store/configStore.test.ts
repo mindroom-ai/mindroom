@@ -6165,6 +6165,27 @@ describe("configStore", () => {
       expect(payload).not.toHaveProperty("defaults");
     });
 
+    it("edits overrides of shared default tools", async () => {
+      await loadBaseConfig();
+      expect(
+        useConfigStore.getState().getDefaultToolOverrides("gmail"),
+      ).toEqual({ label: "support" });
+
+      useConfigStore
+        .getState()
+        .updateDefaultToolOverrides("file", { base_dir: "/srv/files" });
+      useConfigStore
+        .getState()
+        .updateDefaultToolOverrides("gmail", { label: null });
+
+      expect(useConfigStore.getState().dirtyRoots).toEqual(["defaults"]);
+      expect((await savedPayload()).defaults.tools).toEqual([
+        "gmail",
+        { file: { base_dir: "/srv/files" } },
+        "scheduler",
+      ]);
+    });
+
     it("clears only the diagnostics of the edited field", async () => {
       await loadBaseConfig();
       const siblingIssue = {

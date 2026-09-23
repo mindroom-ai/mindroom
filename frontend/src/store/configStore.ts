@@ -41,8 +41,9 @@ export type SaveConfigResult =
 
 type ConfigDiagnosticPath = Array<string | number>;
 
-// Roots the save payload assembles from derived collections instead of copying the draft.
-const COLLECTION_ROOTS = new Set(["agents", "teams", "rooms", "room_models"]);
+// The save payload rebuilds these roots from the draft agent and team
+// collections; every other dirty root is copied from the draft config.
+const COLLECTION_ROOTS = new Set(["agents", "teams"]);
 
 // Schema-driven editors address roots by name, including roots the typed
 // Config interface does not model.
@@ -643,6 +644,11 @@ interface ConfigState {
     toolName: string,
     overrides: ToolOverrides | null,
   ) => void;
+  getDefaultToolOverrides: (toolName: string) => ToolOverrides | null;
+  updateDefaultToolOverrides: (
+    toolName: string,
+    overrides: ToolOverrides | null,
+  ) => void;
   markDirty: () => void;
 }
 
@@ -1061,9 +1067,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         {} as Record<string, Omit<Team, "id">>,
       );
 
-      const roomModels = config.room_models ?? {};
-      const roomsObject = config.rooms ?? {};
-
       const updatedConfig: Config = {
         ...baseConfig,
         ...Object.fromEntries(
@@ -1073,12 +1076,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ),
         ...(dirtyRootSet.has("agents") ? { agents: currentAgentsObject } : {}),
         ...(dirtyRootSet.has("teams") ? { teams: currentTeamsObject } : {}),
-        ...(dirtyRootSet.has("rooms") ? { rooms: roomsObject } : {}),
-        ...(dirtyRootSet.has("room_models")
-          ? {
-              room_models:
-                Object.keys(roomModels).length > 0 ? roomModels : undefined,
-            }
+        // Room model overrides disappear from config.yaml once the last one is removed.
+        ...(dirtyRootSet.has("room_models") &&
+        Object.keys(config.room_models ?? {}).length === 0
+          ? { room_models: undefined }
           : {}),
       };
       const payloadAgentsObject = dirtyRootSet.has("agents")
@@ -2185,6 +2186,30 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     setRememberedRawToolEntries(config, agentId, nextRawEntries);
     set((state) => ({
       ...markDraftDirty(state, {}, [["agents", agentId, "tools"]]),
+    }));
+  },
+
+  getDefaultToolOverrides: (toolName) =>
+    getToolOverridesFromEntries(
+      toolName,
+      getRememberedRawDefaultToolEntries(get().config),
+    ),
+
+  updateDefaultToolOverrides: (toolName, overrides) => {
+    const config = get().config;
+    if (!config) {
+      return;
+    }
+    rawDefaultToolEntriesByConfig.set(
+      config,
+      setToolOverridesInEntries(
+        toolName,
+        overrides,
+        getRememberedRawDefaultToolEntries(config),
+      ),
+    );
+    set((state) => ({
+      ...markDraftDirty(state, {}, [["defaults", "tools"]]),
     }));
   },
 

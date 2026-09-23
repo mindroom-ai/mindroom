@@ -1,3 +1,4 @@
+import type { ConfigValidationIssue } from "@/lib/configValidation";
 import {
   classifySchemaNode,
   objectProperties,
@@ -11,7 +12,7 @@ export interface SettingsEntry {
   keys?: readonly string[];
 }
 
-export interface SettingsSection {
+interface SettingsSection {
   id: string;
   title: string;
   description: string;
@@ -22,7 +23,7 @@ export interface SettingsSection {
  * Roots edited on dedicated dashboard pages.
  * "*" means the page owns the whole root; a key list means only those keys.
  */
-export const PAGE_OWNED_ROOTS: Record<string, "*" | readonly string[]> = {
+const PAGE_OWNED_ROOTS: Record<string, "*" | readonly string[]> = {
   agents: "*",
   teams: "*",
   rooms: "*",
@@ -35,7 +36,7 @@ export const PAGE_OWNED_ROOTS: Record<string, "*" | readonly string[]> = {
   room_defaults: ["admins"],
 };
 
-export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
+const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {
     id: "responses",
     title: "Responses",
@@ -244,4 +245,20 @@ export function resolveSettingsSections(root: JsonSchema): SettingsSection[] {
     });
   }
   return sections;
+}
+
+/** Whether any validation issue falls inside what this section renders. */
+export function sectionHasIssue(
+  section: SettingsSection,
+  issues: ConfigValidationIssue[],
+): boolean {
+  return issues.some(({ loc }) =>
+    section.entries.some(
+      (entry) =>
+        loc[0] === entry.root &&
+        (entry.keys == null ||
+          loc.length === 1 ||
+          entry.keys.includes(String(loc[1]))),
+    ),
+  );
 }

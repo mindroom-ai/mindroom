@@ -48,7 +48,7 @@ const MODEL_PLACEHOLDERS: Record<string, string> = {
 type MemorySettings = MindRoomConfig["memory"];
 
 /** MemoryConfig keys this page renders by hand; More settings shows the rest. */
-export const MEMORY_EDITOR_FIELDS = [
+const MEMORY_EDITOR_FIELDS = [
   "backend",
   "team_reads_member_memory",
   "embedder",

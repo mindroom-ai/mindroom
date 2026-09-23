@@ -28,11 +28,10 @@ import {
   SchemaUnavailable,
 } from "@/components/SchemaForm";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
-import { definitionSchema } from "@/lib/configSchema";
 import { VoiceConfig as VoiceConfigType } from "@/types/config";
 
 /** VoiceConfig keys this page renders by hand; More settings shows the rest. */
-export const VOICE_EDITOR_FIELDS = [
+const VOICE_EDITOR_FIELDS = [
   "enabled",
   "visible_router_echo",
   "stt",
@@ -486,12 +485,13 @@ export function VoiceConfig() {
               onRetry={retrySchema}
             />
           )}
-          {schemaRoot?.$defs?.CallsConfig != null && (
+          {schemaRoot?.properties?.calls != null && (
             <SchemaFields
-              schema={definitionSchema(schemaRoot, "CallsConfig")}
+              schema={schemaRoot.properties.calls}
               root={schemaRoot}
               value={callsConfig}
               path={["calls"]}
+              showOwnError
               onFieldChange={(key, next) =>
                 updateConfigValue(["calls", key], next)
               }

@@ -333,7 +333,7 @@ describe("VoiceConfig", () => {
     vi.mocked(useConfigSchema).mockReturnValue({
       schema: {
         type: "object",
-        properties: {},
+        properties: { calls: { $ref: "#/$defs/CallsConfig" } },
         $defs: {
           CallsConfig: {
             type: "object",
@@ -366,5 +366,42 @@ describe("VoiceConfig", () => {
     await waitFor(() => expect(mockSaveConfig).toHaveBeenCalled());
     // Saving calls must not write the voice form's defaults.
     expect(mockUpdateConfigValue).not.toHaveBeenCalled();
+  });
+
+  it("edits speech-to-text options through More speech-to-text settings", () => {
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: {
+        type: "object",
+        properties: {},
+        $defs: {
+          VoiceConfig: { type: "object", properties: {} },
+          VoiceSTTConfig: {
+            type: "object",
+            properties: {
+              model: { type: "string" },
+              credentials_service: {
+                anyOf: [{ type: "string" }, { type: "null" }],
+                description: "Named speech credential service",
+              },
+            },
+          },
+        },
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+
+    render(<VoiceConfig />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /More speech-to-text settings/ }),
+    );
+    fireEvent.change(screen.getByLabelText("Credentials service"), {
+      target: { value: "speech" },
+    });
+
+    expect(mockUpdateConfigValue).toHaveBeenLastCalledWith(
+      ["voice", "stt", "credentials_service"],
+      "speech",
+    );
   });
 });

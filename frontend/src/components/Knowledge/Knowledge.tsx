@@ -259,7 +259,7 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 /** KnowledgeBaseConfig keys this editor renders by hand; More settings shows the rest. */
-export const KNOWLEDGE_BASE_EDITOR_FIELDS = [
+const KNOWLEDGE_BASE_EDITOR_FIELDS = [
   "mode",
   "description",
   "path",

@@ -113,6 +113,29 @@ describe("Settings", () => {
     });
   });
 
+  it("flags sections that contain validation errors", () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...vi.mocked(useConfigStore)(),
+      diagnostics: [
+        {
+          kind: "validation",
+          issue: {
+            loc: ["router", "model"],
+            msg: "Unknown model",
+            type: "value_error",
+          },
+        },
+      ],
+    } as never);
+    render(<Settings />);
+    expect(
+      screen.getByRole("button", { name: "Router Needs attention" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "Router (needs attention)" }),
+    ).toBeInTheDocument();
+  });
+
   it("saves the draft", async () => {
     render(<Settings />);
     fireEvent.click(screen.getByRole("button", { name: "Save" }));

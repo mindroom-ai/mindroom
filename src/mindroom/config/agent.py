@@ -306,6 +306,7 @@ class AgentConfig(BaseModel):
     room_thread_modes: dict[str, Literal["thread", "room"]] = Field(
         default_factory=dict,
         description="Per-room thread mode overrides keyed by room alias/name or Matrix room ID",
+        json_schema_extra=dashboard_hint(key_reference="room"),
     )
     num_history_runs: int | None = Field(
         default=None,

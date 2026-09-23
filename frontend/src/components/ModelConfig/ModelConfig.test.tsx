@@ -9,6 +9,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ModelConfig } from "./ModelConfig";
 import { useConfigStore } from "@/store/configStore";
+import { useConfigSchema } from "@/hooks/useConfigSchema";
 
 vi.mock("@/store/configStore", () => ({
   useConfigStore: vi.fn(),
@@ -666,6 +667,49 @@ describe("ModelConfig", () => {
         description: "Save was superseded by newer draft edits.",
         variant: "destructive",
       });
+    });
+  });
+
+  it("edits model fields the table does not render through More settings", () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...mockStore,
+      agents: [],
+      rooms: [],
+      diagnostics: [],
+    } as never);
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: {
+        type: "object",
+        properties: {},
+        $defs: {
+          ModelConfig: {
+            type: "object",
+            properties: {
+              provider: { type: "string" },
+              host: {
+                anyOf: [{ type: "string" }, { type: "null" }],
+                default: null,
+                description: "Optional host URL (e.g., for Ollama)",
+              },
+            },
+          },
+        },
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+
+    render(<ModelConfig />);
+    fireEvent.click(screen.getByText("default"));
+    fireEvent.click(
+      screen.getByRole("button", { name: /More settings for default/ }),
+    );
+    fireEvent.change(screen.getByLabelText("Host"), {
+      target: { value: "http://ollama:11434" },
+    });
+
+    expect(mockStore.updateModel).toHaveBeenLastCalledWith("default", {
+      host: "http://ollama:11434",
     });
   });
 });

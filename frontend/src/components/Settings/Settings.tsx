@@ -8,6 +8,7 @@ import {
   SchemaFields,
   SchemaUnavailable,
 } from "@/components/SchemaForm";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -25,11 +26,14 @@ import {
   rootPropertySchema,
   type JsonSchema,
 } from "@/lib/configSchema";
+import { getConfigValidationIssues } from "@/lib/configValidation";
 import { cn } from "@/lib/utils";
 import { readConfigRoot, useConfigStore } from "@/store/configStore";
 
+import { DefaultToolSettings } from "./DefaultToolSettings";
 import {
   resolveSettingsSections,
+  sectionHasIssue,
   type SettingsEntry,
 } from "./settingsSections";
 
@@ -57,6 +61,7 @@ function SettingsEntryView({
         value={value}
         path={[entry.root]}
         include={entry.keys}
+        showOwnError
         onFieldChange={(key, next) => onChange([entry.root, key], next)}
       />
     );
@@ -90,8 +95,14 @@ function SettingsEntryView({
 }
 
 export function Settings() {
-  const { config, isDirty, isLoading, saveConfig, updateConfigValue } =
-    useConfigStore();
+  const {
+    config,
+    diagnostics,
+    isDirty,
+    isLoading,
+    saveConfig,
+    updateConfigValue,
+  } = useConfigStore();
   const { schema: root, error, retry } = useConfigSchema();
   const { tools } = useTools();
   const { toast } = useToast();
@@ -99,6 +110,14 @@ export function Settings() {
     () => (root == null ? [] : resolveSettingsSections(root)),
     [root],
   );
+  const sectionsWithIssues = useMemo(() => {
+    const issues = getConfigValidationIssues(diagnostics);
+    return new Set(
+      sections
+        .filter((section) => sectionHasIssue(section, issues))
+        .map((section) => section.id),
+    );
+  }, [sections, diagnostics]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const active =
     sections.find((section) => section.id === selectedId) ?? sections[0];
@@ -160,7 +179,12 @@ export function Settings() {
                     )}
                     onClick={() => setSelectedId(section.id)}
                   >
-                    {section.title}
+                    <span className="flex items-center justify-between gap-2">
+                      {section.title}
+                      {sectionsWithIssues.has(section.id) && (
+                        <Badge variant="destructive">Needs attention</Badge>
+                      )}
+                    </span>
                   </button>
                 </li>
               ))}
@@ -174,7 +198,9 @@ export function Settings() {
           >
             {sections.map((section) => (
               <option key={section.id} value={section.id}>
-                {section.title}
+                {sectionsWithIssues.has(section.id)
+                  ? `${section.title} (needs attention)`
+                  : section.title}
               </option>
             ))}
           </select>
@@ -200,6 +226,9 @@ export function Settings() {
                       onChange={updateConfigValue}
                     />
                   ))}
+                  {active.id === "tools" && (
+                    <DefaultToolSettings tools={tools} />
+                  )}
                 </div>
               </ReferenceOptionsProvider>
             </CardContent>

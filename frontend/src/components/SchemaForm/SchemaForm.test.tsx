@@ -288,6 +288,65 @@ describe("SchemaFields", () => {
     expect(lastValue()).toEqual({});
   });
 
+  it("keeps ordered lists with repeated values", () => {
+    const { lastValue } = renderFixture({
+      onboarding_rooms: ["--header", "a", "--header", "b"],
+    });
+    const input = screen.getByRole("combobox", {
+      name: "New onboarding rooms entry",
+    });
+    fireEvent.change(input, { target: { value: "--header" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Add onboarding rooms entry" }),
+    );
+    expect(lastValue()).toEqual({
+      onboarding_rooms: ["--header", "a", "--header", "b", "--header"],
+    });
+
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Remove --header" })[1],
+    );
+    expect(lastValue()).toEqual({
+      onboarding_rooms: ["--header", "a", "b", "--header"],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Move b up" }));
+    expect(lastValue()).toEqual({
+      onboarding_rooms: ["--header", "b", "a", "--header"],
+    });
+  });
+
+  it("shows errors reported for a list item itself", () => {
+    renderFixture({ rules: [{ match: "send_*" }] }, [
+      {
+        kind: "validation",
+        issue: {
+          loc: ["fixture", "rules", 0],
+          msg: "must set exactly one of action or script",
+          type: "value_error",
+        },
+      },
+    ]);
+    expect(
+      screen.getByText("must set exactly one of action or script"),
+    ).toBeInTheDocument();
+  });
+
+  it("clears a YAML parse error when the value is reset", () => {
+    renderFixture({ settings: { retries: 3 } });
+    const editor = screen.getByRole("textbox", { name: "Settings YAML" });
+    fireEvent.change(editor, { target: { value: "retries: [" } });
+    fireEvent.blur(editor);
+    expect(
+      screen.getByText(/unexpected end of the stream/i),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset Settings" }));
+    expect(
+      screen.queryByText(/unexpected end of the stream/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows list defaults and keeps an explicitly emptied list", () => {
     const { lastValue } = renderFixture();
     fireEvent.click(screen.getByRole("button", { name: "Remove scheduler" }));

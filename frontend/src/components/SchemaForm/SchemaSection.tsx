@@ -2,8 +2,8 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
-import { definitionSchema, fieldLabel } from "@/lib/configSchema";
-import { getConfigValidationIssues } from "@/lib/configValidation";
+import { fieldLabel } from "@/lib/configSchema";
+import { findConfigValidationIssue } from "@/lib/configValidation";
 import { useConfigStore } from "@/store/configStore";
 
 import { useOpenOnError, type SchemaPath } from "./inputs";
@@ -39,13 +39,9 @@ export function SchemaSection({
     root != null && schema != null
       ? schemaFieldKeys(schema, root, { exclude })
       : [];
-  const hasErrors =
-    keys.length > 0 &&
-    getConfigValidationIssues(diagnostics).some(
-      (issue) =>
-        path.every((segment, index) => issue.loc[index] === segment) &&
-        keys.includes(String(issue.loc[path.length])),
-    );
+  const hasErrors = keys.some(
+    (key) => findConfigValidationIssue(diagnostics, [...path, key]) != null,
+  );
   const [open, setOpen] = useOpenOnError(defaultOpen, hasErrors);
 
   if (error != null) {
@@ -82,7 +78,7 @@ export function SchemaSection({
       {open && (
         <div className="border-t border-border/60 px-4 py-4">
           <SchemaFields
-            schema={definitionSchema(root, definition)}
+            schema={schema}
             root={root}
             value={value}
             path={path}

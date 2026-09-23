@@ -15,8 +15,12 @@ import {
 import { useConfigStore } from "@/store/configStore";
 import type { ToolFieldSchema } from "@/hooks/useTools";
 
+/** Whose tool entry the panel edits: one agent's, or the shared defaults.tools. */
+export type ToolOverrideTarget =
+  { kind: "agent"; agentId: string } | { kind: "defaults" };
+
 interface ToolConfigPanelProps {
-  agentId: string;
+  target: ToolOverrideTarget;
   toolName: string | null;
   toolDisplayName?: string;
   /** Dedicated per-agent override fields (curated, e.g. shell). */
@@ -106,17 +110,27 @@ function lazyFlagPatch(defer: boolean, initial: boolean) {
 }
 
 export function ToolConfigPanel({
-  agentId,
+  target,
   toolName,
   toolDisplayName,
   overrideFields,
   configFields,
 }: ToolConfigPanelProps) {
-  const { getAgentToolOverrides, updateAgentToolOverrides } = useConfigStore();
+  const {
+    getAgentToolOverrides,
+    updateAgentToolOverrides,
+    getDefaultToolOverrides,
+    updateDefaultToolOverrides,
+  } = useConfigStore();
+  // Lazy loading is per agent; defaults.tools rejects defer and initial.
+  const lazyLoading = target.kind === "agent";
   const fields = resolveFields(overrideFields, configFields);
-  const currentOverrides = toolName
-    ? getAgentToolOverrides(agentId, toolName)
-    : null;
+  const currentOverrides =
+    toolName == null
+      ? null
+      : target.kind === "agent"
+        ? getAgentToolOverrides(target.agentId, toolName)
+        : getDefaultToolOverrides(toolName);
   const overrideSignature = JSON.stringify(currentOverrides ?? null);
   const deferEnabled = currentOverrides?.defer === true;
   const lazyId = useId();
@@ -179,13 +193,17 @@ export function ToolConfigPanel({
     nextDraft: DraftValues,
     flags = lazyFlagPatch(deferEnabled, initialEnabled),
   ) => {
-    const patch: Record<string, unknown> = { ...flags };
+    const patch: Record<string, unknown> = lazyLoading ? { ...flags } : {};
     for (const field of fields ?? []) {
       patch[field.name] = nextEnabled[field.name]
         ? normalizePersistedValue(field, nextDraft[field.name] ?? "")
         : null;
     }
-    updateAgentToolOverrides(agentId, toolName, patch);
+    if (target.kind === "agent") {
+      updateAgentToolOverrides(target.agentId, toolName, patch);
+    } else {
+      updateDefaultToolOverrides(toolName, patch);
+    }
   };
 
   const setLazyLoading = (defer: boolean, initial: boolean) =>
@@ -410,54 +428,61 @@ export function ToolConfigPanel({
       <div className="mb-4 flex items-center justify-between gap-3">
         <div>
           <div className="text-sm font-semibold">
-            {title} — Per-Agent Settings
+            {title} — {lazyLoading ? "Per-Agent Settings" : "Default Settings"}
           </div>
           <div className="text-xs text-muted-foreground">
-            Toggle fields to override the tool default for this agent.
+            {lazyLoading
+              ? "Toggle fields to override the tool default for this agent."
+              : "Toggle fields to override the tool default for every agent that includes default tools."}
           </div>
         </div>
         {isCustomized && <Badge variant="secondary">Customized</Badge>}
       </div>
 
-      <div className="mb-4 space-y-2 border-b pb-4">
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id={`${lazyId}-defer`}
-            checked={deferEnabled}
-            onCheckedChange={(checked) =>
-              setLazyLoading(checked === true, initialEnabled)
-            }
-          />
-          <Label htmlFor={`${lazyId}-defer`} className="cursor-pointer text-sm">
-            Load lazily
-          </Label>
+      {lazyLoading && (
+        <div className="mb-4 space-y-2 border-b pb-4">
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id={`${lazyId}-defer`}
+              checked={deferEnabled}
+              onCheckedChange={(checked) =>
+                setLazyLoading(checked === true, initialEnabled)
+              }
+            />
+            <Label
+              htmlFor={`${lazyId}-defer`}
+              className="cursor-pointer text-sm"
+            >
+              Load lazily
+            </Label>
+          </div>
+          <p className="pl-6 text-xs text-muted-foreground">
+            Hide this tool until the agent loads it for the current session.
+          </p>
+          <div className="flex items-center gap-2 pl-6">
+            <Checkbox
+              id={`${lazyId}-initial`}
+              checked={initialEnabled}
+              disabled={!deferEnabled}
+              onCheckedChange={(checked) =>
+                setLazyLoading(deferEnabled, checked === true)
+              }
+            />
+            <Label
+              htmlFor={`${lazyId}-initial`}
+              className={`cursor-pointer text-sm ${
+                deferEnabled ? "" : "text-muted-foreground"
+              }`}
+            >
+              Load at session start
+            </Label>
+          </div>
         </div>
-        <p className="pl-6 text-xs text-muted-foreground">
-          Hide this tool until the agent loads it for the current session.
-        </p>
-        <div className="flex items-center gap-2 pl-6">
-          <Checkbox
-            id={`${lazyId}-initial`}
-            checked={initialEnabled}
-            disabled={!deferEnabled}
-            onCheckedChange={(checked) =>
-              setLazyLoading(deferEnabled, checked === true)
-            }
-          />
-          <Label
-            htmlFor={`${lazyId}-initial`}
-            className={`cursor-pointer text-sm ${
-              deferEnabled ? "" : "text-muted-foreground"
-            }`}
-          >
-            Load at session start
-          </Label>
-        </div>
-      </div>
+      )}
 
       {(fields == null || fields.length === 0) && (
         <p className="text-sm text-muted-foreground">
-          No per-agent settings available for this tool.
+          No settings available for this tool.
         </p>
       )}
 

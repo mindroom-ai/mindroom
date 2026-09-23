@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { JsonSchema } from "@/lib/configSchema";
 
-import { resolveSettingsSections } from "./settingsSections";
+import { resolveSettingsSections, sectionHasIssue } from "./settingsSections";
 
 const objectOf = (...keys: string[]): JsonSchema => ({
   type: "object",
@@ -59,5 +59,24 @@ describe("resolveSettingsSections", () => {
     expect(
       rendered.some((entry) => entry.keys?.includes("admins") ?? false),
     ).toBe(false);
+  });
+
+  it("finds issues inside the keys or roots a section renders", () => {
+    const issue = (...loc: Array<string | number>) => ({
+      loc,
+      msg: "bad",
+      type: "value_error",
+    });
+    expect(
+      sectionHasIssue(byId.responses, [issue("defaults", "markdown")]),
+    ).toBe(true);
+    expect(sectionHasIssue(byId.responses, [issue("defaults", "tools")])).toBe(
+      false,
+    );
+    // Errors on a partly rendered root itself appear in each of its sections.
+    expect(sectionHasIssue(byId.tools, [issue("defaults")])).toBe(true);
+    expect(sectionHasIssue(byId.router, [issue("router", "model", 0)])).toBe(
+      true,
+    );
   });
 });

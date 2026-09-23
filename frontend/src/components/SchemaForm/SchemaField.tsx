@@ -46,9 +46,7 @@ import {
 } from "./inputs";
 import { useReferenceOptions } from "./references";
 
-export type { SchemaPath } from "./inputs";
-
-export interface SchemaFieldsProps {
+interface SchemaFieldsProps {
   schema: JsonSchema;
   root: JsonSchema;
   value: unknown;
@@ -59,9 +57,14 @@ export interface SchemaFieldsProps {
   exclude?: readonly string[];
   /** Restrict and order the rendered keys. */
   include?: readonly string[];
+  /**
+   * Show errors reported for the object itself, such as model validators.
+   * Leave off when a surrounding field already shows them.
+   */
+  showOwnError?: boolean;
 }
 
-export interface SchemaFieldProps {
+interface SchemaFieldProps {
   name: string;
   schema: JsonSchema;
   root: JsonSchema;
@@ -96,7 +99,10 @@ export function SchemaFields({
   path,
   exclude,
   include,
+  showOwnError = false,
 }: SchemaFieldsProps) {
+  const errorForPath = useScopedConfigValidation(path);
+  const ownError = showOwnError ? errorForPath([], true) : undefined;
   const resolved = resolveSchema(schema, root);
   const required = new Set(resolved.required ?? []);
   const record = isPlainObject(value) ? value : {};
@@ -104,6 +110,7 @@ export function SchemaFields({
 
   return (
     <div className="space-y-5">
+      {ownError && <p className="text-xs text-destructive">{ownError}</p>}
       {keys.map((key) => (
         <SchemaField
           key={key}
@@ -483,6 +490,7 @@ function NestedValue({
         root={root}
         value={value}
         path={path}
+        showOwnError
         onFieldChange={(key, next) => onChange(setObjectKey(value, key, next))}
       />
     );

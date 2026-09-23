@@ -2060,4 +2060,65 @@ describe("AgentEditor", () => {
       participation: {},
     });
   });
+
+  it("edits private knowledge chunking through More private knowledge settings", () => {
+    const privateAgent: Agent = {
+      ...mockAgent,
+      private: {
+        per: "user",
+        knowledge: { enabled: true, path: "memory", watch: true },
+      },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [privateAgent],
+      diagnostics: [],
+      agentPoliciesByAgent: makeAgentPolicies({
+        is_private: true,
+        effective_execution_scope: "user",
+        scope_label: "private.per=user",
+        scope_source: "private.per",
+        private_workspace_enabled: true,
+        private_agent_knowledge_enabled: true,
+      }),
+    });
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: {
+        type: "object",
+        properties: {},
+        $defs: {
+          AgentConfig: { type: "object", properties: {} },
+          AgentPrivateKnowledgeConfig: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              chunk_size: { type: "integer", default: 5000, minimum: 128 },
+            },
+          },
+        },
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+
+    render(<AgentEditor />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /More private knowledge settings/ }),
+    );
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Chunk size" }), {
+      target: { value: "2000" },
+    });
+
+    expect(mockStore.updateAgent).toHaveBeenLastCalledWith("test_agent", {
+      private: {
+        per: "user",
+        knowledge: {
+          enabled: true,
+          path: "memory",
+          watch: true,
+          chunk_size: 2000,
+        },
+      },
+    });
+  });
 });
