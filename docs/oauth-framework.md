@@ -24,7 +24,8 @@ Conversation OAuth links use an additional opaque, time-limited, single-use conn
 The token binds the exact provider, Matrix requester, worker target, and credential connection generation.
 Requester-scoped credentials require the browser to authenticate as that requester at authorization and callback, using the same identity check as requester-scoped resets.
 Shared-scope credentials require a dashboard login as well, because the connect link is relayed into the conversation that requested the tool and every room member can read it.
-At authorization and callback, the authenticated browser user must be the requester the shared link was issued for, or must itself pass the agent OAuth connection management check; possession of the link alone authorizes nothing.
+At authorization and callback, the authenticated browser user must itself pass the agent OAuth connection management check, exactly as `POST /connect` already requires for this scope; possession of the link alone authorizes nothing.
+That check runs against the Matrix user the dashboard session resolves to, so a standalone deployment needs `MINDROOM_OWNER_USER_ID` (written by pairing) and a hosted deployment needs a trusted-upstream Matrix identity before any shared connection can be completed, by link or from the dashboard.
 MindRoom rechecks the conversation link requester's agent credential-management permission at authorization and callback, and rejects a link if its credential generation changed after issuance.
 For a non-private agent, this link flow requires an administrator or configured credential manager even when the connection uses requester-only storage; responder access alone is insufficient.
 The requester-private-agent exception still applies to its isolated connection.

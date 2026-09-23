@@ -5294,6 +5294,43 @@ def test_shared_agent_connect_token_allows_independent_credential_manager(tmp_pa
     assert urlparse(authorize_response.headers["location"]).netloc == "auth.example.test"
 
 
+def test_shared_agent_connect_callback_rechecks_browser_user_authority(tmp_path: Path) -> None:
+    """Authority lost between authorize and callback must stop the shared credential write."""
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    payload = _config_payload(worker_scope="shared")
+    payload["administrators"] = ["@alice:example.org", "@bob:example.org"]
+    api_app = _make_test_app(runtime_paths, payload)
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider()
+    connect_token = _shared_connect_token_for_alice(provider, runtime_paths)
+    bob_headers = trusted_upstream_headers(
+        user_id="bob",
+        email="bob@example.com",
+        matrix_user_id="@bob:example.org",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, headers=bob_headers) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=shared"
+                f"&connect_token={connect_token}",
+                follow_redirects=False,
+            )
+            state = _state_from_auth_url(authorize_response.headers["location"])
+            demoted = _config_payload(worker_scope="shared")
+            demoted["administrators"] = ["@alice:example.org"]
+            _publish_config(api_app, runtime_paths, demoted)
+            _use_runtime_auth_settings(api_app)
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 307
+    assert callback_response.status_code == 403
+    assert _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared") is None
+
+
 def test_shared_agent_connect_callback_requires_authenticated_browser(tmp_path: Path) -> None:
     """A shared connect callback must not store credentials for a browser that dropped its login."""
     runtime_paths = _runtime_paths(

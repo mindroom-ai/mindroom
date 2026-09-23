@@ -28,6 +28,7 @@ from mindroom.authorization import is_sender_allowed_for_agent_oauth_connection_
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
+from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.oauth import (
     OAuthClaimValidationError,
     OAuthClientConfigResolution,
@@ -462,12 +463,21 @@ def _verify_shared_connect_browser_user_authorized(
 
     A shared connect link is relayed into the conversation that produced the missing
     credential, so every room member can read it and possession proves nothing about
-    the browser user. The link requester is authorized separately; this holds the
-    authenticated browser user to that same standard, which also covers the requester
-    redeeming their own link.
+    the browser user. The link requester is checked separately as the Matrix sender that
+    produced the link; this is the same authority check against the browser user the
+    dashboard resolves, which is what `POST /connect` already requires for this scope.
     """
     browser_requester_id = _oauth_browser_requester_id(request, agent_name, runtime_paths)
-    if not browser_requester_id or not is_sender_allowed_for_agent_oauth_connection_management(
+    if browser_requester_id is None or try_parse_historical_matrix_user_id(browser_requester_id) is None:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Managing this agent's shared credentials requires a dashboard user that resolves to a Matrix "
+                "user ID. Set MINDROOM_OWNER_USER_ID to your Matrix user ID, or run MindRoom under Matrix "
+                "authentication."
+            ),
+        )
+    if not is_sender_allowed_for_agent_oauth_connection_management(
         browser_requester_id,
         agent_name,
         config,
