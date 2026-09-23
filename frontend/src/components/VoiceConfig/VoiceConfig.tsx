@@ -466,23 +466,30 @@ export function VoiceConfig() {
               onRetry={retrySchema}
             />
           )}
-          {schemaRoot?.properties?.calls != null && (
-            <SchemaFields
-              schema={schemaRoot.properties.calls}
-              root={schemaRoot}
-              value={callsConfig}
-              path={["calls"]}
-              showOwnError
-              onFieldChange={(key, next) =>
-                updateConfigValue(["calls", key], next)
-              }
-            />
+          {schemaRoot == null && schemaError == null && (
+            <p className="text-sm text-muted-foreground">
+              Loading call settings...
+            </p>
           )}
-          <div className="flex justify-end">
-            <Button onClick={handleSaveCalls} disabled={isLoading}>
-              Save Call Settings
-            </Button>
-          </div>
+          {schemaRoot?.properties?.calls != null && (
+            <>
+              <SchemaFields
+                schema={schemaRoot.properties.calls}
+                root={schemaRoot}
+                value={callsConfig}
+                path={["calls"]}
+                showOwnError
+                onFieldChange={(key, next) =>
+                  updateConfigValue(["calls", key], next)
+                }
+              />
+              <div className="flex justify-end">
+                <Button onClick={handleSaveCalls} disabled={isLoading}>
+                  Save Call Settings
+                </Button>
+              </div>
+            </>
+          )}
         </CardContent>
       </Card>
 

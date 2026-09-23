@@ -40,6 +40,7 @@ import {
   YamlEditor,
   helperText,
   inlineLabel,
+  moveItem,
   presenceMode,
   type SchemaPath,
 } from "./inputs";
@@ -530,6 +531,20 @@ function isStringItems(
   return items.kind === "string" || items.kind === "enum";
 }
 
+/**
+ * React keys that follow each item through moves and removals, so per-item
+ * state such as a revealed secret or an open block stays with its item.
+ */
+function useItemKeys(length: number) {
+  const [stored, setStored] = useState<number[]>([]);
+  // Items added here or outside this editor (Reset, reload) get fresh keys.
+  const keys = stored.slice(0, length);
+  for (let next = Math.max(-1, ...stored) + 1; keys.length < length; next++) {
+    keys.push(next);
+  }
+  return [keys, setStored] as const;
+}
+
 function ListEditor({
   label,
   node,
@@ -546,6 +561,7 @@ function ListEditor({
   onChange: (items: unknown[]) => void;
 }) {
   const references = useReferenceOptions();
+  const [itemKeys, setItemKeys] = useItemKeys(value.length);
   if (isStringItems(node, root, value)) {
     return (
       <StringListEditor
@@ -560,16 +576,18 @@ function ListEditor({
   }
   const itemNode = classifySchemaNode(node.items!, root);
   const move = (index: number, offset: number) => {
-    const next = [...value];
-    const [item] = next.splice(index, 1);
-    next.splice(index + offset, 0, item);
-    onChange(next);
+    setItemKeys(moveItem(itemKeys, index, offset));
+    onChange(moveItem(value, index, offset));
+  };
+  const remove = (index: number) => {
+    setItemKeys(itemKeys.filter((_, i) => i !== index));
+    onChange(value.filter((_, i) => i !== index));
   };
   return (
     <div className="space-y-3">
       {value.map((item, index) => (
         <div
-          key={index}
+          key={itemKeys[index]}
           className="space-y-3 rounded-lg border border-border/60 p-3"
         >
           <div className="flex items-center justify-between gap-2">
@@ -600,7 +618,7 @@ function ListEditor({
                 variant="ghost"
                 size="icon"
                 aria-label={`Remove ${label} ${index + 1}`}
-                onClick={() => onChange(value.filter((_, i) => i !== index))}
+                onClick={() => remove(index)}
               >
                 <Trash2 className="h-4 w-4" />
               </Button>

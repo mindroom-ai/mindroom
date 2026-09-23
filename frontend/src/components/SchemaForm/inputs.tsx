@@ -503,6 +503,14 @@ function TextInput({
   );
 }
 
+/** Copy of items with the entry at index shifted by offset positions. */
+export function moveItem<T>(items: T[], index: number, offset: number): T[] {
+  const next = [...items];
+  const [item] = next.splice(index, 1);
+  next.splice(index + offset, 0, item);
+  return next;
+}
+
 export function StringListEditor({
   label,
   values,
@@ -526,12 +534,8 @@ export function StringListEditor({
     onChange([...values, trimmed]);
     setDraft("");
   };
-  const move = (index: number, offset: number) => {
-    const next = [...values];
-    const [item] = next.splice(index, 1);
-    next.splice(index + offset, 0, item);
-    onChange(next);
-  };
+  const move = (index: number, offset: number) =>
+    onChange(moveItem(values, index, offset));
   const available = suggestions?.filter((option) => !values.includes(option));
 
   return (

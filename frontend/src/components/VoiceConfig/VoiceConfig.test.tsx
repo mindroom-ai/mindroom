@@ -328,6 +328,20 @@ describe("VoiceConfig", () => {
     ).toBeDisabled();
   });
 
+  it("shows a loading message on the Voice Calls card until the schema arrives", () => {
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: null,
+      error: null,
+      retry: vi.fn(),
+    });
+
+    render(<VoiceConfig />);
+    expect(screen.getByText("Loading call settings...")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Save Call Settings" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("enables voice calls from the Voice Calls card", async () => {
     mockStoreState.diagnostics = [];
     vi.mocked(useConfigSchema).mockReturnValue({

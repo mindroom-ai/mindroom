@@ -1662,8 +1662,8 @@ export function AgentEditor() {
           helperText={`Select which of this agent's tools to route through worker-scoped execution via the sandbox proxy${
             config?.defaults?.worker_tools != null
               ? ` (default: ${
-                  config.defaults?.worker_tools.length > 0
-                    ? config.defaults?.worker_tools.join(", ")
+                  config.defaults.worker_tools.length > 0
+                    ? config.defaults.worker_tools.join(", ")
                     : "none"
                 })`
               : ""
@@ -1771,17 +1771,17 @@ export function AgentEditor() {
         mutateCompaction={mutateCompaction}
         historyRunsHelperText={`Number of prior conversation runs to include as history context. Leave empty to use default${
           config?.defaults?.num_history_runs != null
-            ? ` (${config.defaults?.num_history_runs})`
+            ? ` (${config.defaults.num_history_runs})`
             : " (all)"
         }.`}
         historyMessagesHelperText={`Max messages from history (mutually exclusive with History Runs). Leave empty to use default${
           config?.defaults?.num_history_messages != null
-            ? ` (${config.defaults?.num_history_messages})`
+            ? ` (${config.defaults.num_history_messages})`
             : " (all)"
         }.`}
         maxToolCallsHelperText={`Max tool call messages replayed from history. Leave empty to use default${
           config?.defaults?.max_tool_calls_from_history != null
-            ? ` (${config.defaults?.max_tool_calls_from_history})`
+            ? ` (${config.defaults.max_tool_calls_from_history})`
             : " (no limit)"
         }.`}
         autoCompactionHelperText="Automatically compact older session history before a run when raw replay exceeds the hard context budget."

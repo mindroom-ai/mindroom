@@ -78,6 +78,19 @@ const ROOT: JsonSchema = {
         },
       },
     },
+    PluginEntryConfig: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        settings: {
+          type: "object",
+          additionalProperties: true,
+          default: {},
+          "x-mindroom": { secret: true },
+        },
+      },
+      required: ["path"],
+    },
     RuleConfig: {
       type: "object",
       properties: { match: { type: "string", description: "Glob" } },
@@ -145,6 +158,10 @@ const ROOT: JsonSchema = {
         rules: {
           type: "array",
           items: { $ref: "#/$defs/RuleConfig" },
+        },
+        plugins: {
+          type: "array",
+          items: { $ref: "#/$defs/PluginEntryConfig" },
         },
         settings: { type: "object", additionalProperties: true },
         extra_kwargs: {
@@ -542,6 +559,36 @@ describe("SchemaFields", () => {
     expect(
       screen.queryByText(/unexpected end of the stream/i),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps a revealed secret with its list item when items move or are removed", () => {
+    renderFixture({
+      plugins: [
+        { path: "a", settings: { token: "AAA-secret" } },
+        { path: "b", settings: { token: "BBB-secret" } },
+      ],
+    });
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Show settings" })[0],
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Move Plugins 1 down" }),
+    );
+    expect(
+      screen.getByDisplayValue("token: AAA-secret", { exact: false }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByDisplayValue("BBB-secret", { exact: false }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove Plugins 2" }));
+    expect(
+      screen.queryByDisplayValue("secret", { exact: false }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Show settings" }),
+    ).toBeInTheDocument();
   });
 
   it("does not mark freeform YAML dirty when it only loses focus", () => {

@@ -477,20 +477,18 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   }}
                 />
               </FieldGroup>
-
-              <SchemaSection
-                title="More compaction settings"
-                definition="CompactionOverrideConfig"
-                value={compactionConfig}
-                path={compactionPath}
-                exclude={COMPACTION_EDITOR_FIELDS}
-                onFieldChange={(key, next) =>
-                  mutateCompaction((current) =>
-                    setObjectKey(current, key, next),
-                  )
-                }
-              />
             </div>
+
+            <SchemaSection
+              title="More compaction settings"
+              definition="CompactionOverrideConfig"
+              value={compactionConfig}
+              path={compactionPath}
+              exclude={COMPACTION_EDITOR_FIELDS}
+              onFieldChange={(key, next) =>
+                mutateCompaction((current) => setObjectKey(current, key, next))
+              }
+            />
           </div>
         </FieldGroup>
       </div>
