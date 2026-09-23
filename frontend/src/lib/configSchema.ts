@@ -28,14 +28,11 @@ export interface JsonSchema {
   items?: JsonSchema;
   anyOf?: JsonSchema[];
   oneOf?: JsonSchema[];
-  discriminator?: { propertyName: string; mapping?: Record<string, string> };
+  discriminator?: { propertyName: string };
   minimum?: number;
   maximum?: number;
   exclusiveMinimum?: number;
   exclusiveMaximum?: number;
-  minLength?: number;
-  maxLength?: number;
-  pattern?: string;
   "x-mindroom"?: SchemaHint;
 }
 
@@ -96,31 +93,11 @@ export function isPlainObject(
 }
 
 export function fieldLabel(key: string): string {
-  const words = key
+  const [first, ...rest] = key
     .split(/[_\s]+/)
     .filter(Boolean)
     .map((word) => ACRONYMS[word.toLowerCase()] ?? word.toLowerCase());
-  if (words.length === 0) {
-    return key;
-  }
-  const [first, ...rest] = words;
   return [first.charAt(0).toUpperCase() + first.slice(1), ...rest].join(" ");
-}
-
-function definitionName(ref: string): string {
-  const prefix = "#/$defs/";
-  if (!ref.startsWith(prefix)) {
-    throw new Error(`Unsupported schema reference: ${ref}`);
-  }
-  return ref.slice(prefix.length);
-}
-
-function definitionSchema(root: JsonSchema, name: string): JsonSchema {
-  const definition = root.$defs?.[name];
-  if (definition == null) {
-    throw new Error(`Unknown schema definition: ${name}`);
-  }
-  return definition;
 }
 
 /** Follow $ref chains, letting the referring schema's metadata win. */
@@ -130,37 +107,18 @@ export function resolveSchema(
 ): JsonSchema {
   let resolved = schema;
   while (resolved.$ref != null) {
+    // Pydantic only emits local "#/$defs/<Name>" references.
     const { $ref, ...outer } = resolved;
-    resolved = { ...definitionSchema(root, definitionName($ref)), ...outer };
+    resolved = { ...root.$defs![$ref.slice("#/$defs/".length)], ...outer };
   }
   return resolved;
-}
-
-export function rootPropertySchema(root: JsonSchema, key: string): JsonSchema {
-  const property = root.properties?.[key];
-  if (property == null) {
-    throw new Error(`Unknown config root: ${key}`);
-  }
-  return property;
 }
 
 export function objectProperties(
   schema: JsonSchema,
   root: JsonSchema,
 ): Array<[string, JsonSchema]> {
-  return Object.entries(resolveSchema(schema, root).properties ?? {});
-}
-
-function isNullSchema(schema: JsonSchema): boolean {
-  return schema.type === "null";
-}
-
-function variantDiscriminatorValue(
-  variant: JsonSchema,
-  discriminator: string,
-): unknown {
-  const tag = variant.properties?.[discriminator];
-  return tag?.const ?? tag?.enum?.[0];
+  return Object.entries(resolveSchema(schema, root).properties!);
 }
 
 function plainVariantLabel(variant: JsonSchema, root: JsonSchema): string {
@@ -190,7 +148,7 @@ export function classifySchemaNode(
   let variants: JsonSchema[] | null = null;
 
   if (outer.anyOf != null) {
-    const branches = outer.anyOf.filter((branch) => !isNullSchema(branch));
+    const branches = outer.anyOf.filter((branch) => branch.type !== "null");
     nullable = branches.length < outer.anyOf.length;
     if (branches.length === 1) {
       resolved = resolveSchema(branches[0], root);
@@ -220,19 +178,14 @@ export function classifySchemaNode(
     }));
     return node;
   }
+  // Pydantic emits oneOf only for discriminated unions, tagged by a const.
   if (resolved.oneOf != null) {
-    const discriminator = resolved.discriminator?.propertyName;
+    const discriminator = resolved.discriminator!.propertyName;
     node.kind = "union";
     node.discriminator = discriminator;
     node.variants = resolved.oneOf.map((branch) => {
       const variant = resolveSchema(branch, root);
-      if (discriminator == null) {
-        return { label: plainVariantLabel(variant, root), schema: variant };
-      }
-      const discriminatorValue = variantDiscriminatorValue(
-        variant,
-        discriminator,
-      );
+      const discriminatorValue = variant.properties![discriminator].const;
       return {
         label: fieldLabel(String(discriminatorValue)),
         schema: variant,
@@ -247,7 +200,7 @@ export function classifySchemaNode(
   }
   if (resolved.enum != null) {
     node.kind = "enum";
-    node.options = resolved.enum.filter((option) => option !== null);
+    node.options = resolved.enum;
     return node;
   }
   switch (resolved.type) {
@@ -344,17 +297,12 @@ export function initialValue(
           ),
         ]),
       );
-    case "union": {
-      const [first] = node.variants;
-      if (first == null) {
-        return undefined;
-      }
+    case "union":
       return initialValue(
-        classifySchemaNode(first.schema, root),
+        classifySchemaNode(node.variants[0].schema, root),
         root,
         references,
       );
-    }
   }
 }
 
@@ -433,29 +381,31 @@ export function hasEmptyDefault(node: SchemaNode): boolean {
   return isPlainObject(value) && Object.keys(value).length === 0;
 }
 
+export type ConfigPath = readonly [string, ...string[]];
+
 /** Copy an object with the value at a key path set, or removed when next is undefined. */
 export function setPathValue<T extends object>(
   value: T | null | undefined,
-  path: readonly string[],
+  path: ConfigPath,
   next: unknown,
 ): T;
 export function setPathValue(
   value: unknown,
-  path: readonly string[],
+  path: ConfigPath,
   next: unknown,
 ): Record<string, unknown>;
 export function setPathValue(
   value: unknown,
-  path: readonly string[],
+  [key, childKey, ...rest]: ConfigPath,
   next: unknown,
 ): Record<string, unknown> {
-  const [key, ...rest] = path;
-  if (key === undefined) {
-    throw new Error("A config path needs at least one key");
-  }
-  if (rest.length === 0) {
+  if (childKey === undefined) {
     return setObjectKey(value, key, next);
   }
   const child = isPlainObject(value) ? value[key] : undefined;
-  return setObjectKey(value, key, setPathValue(child, rest, next));
+  return setObjectKey(
+    value,
+    key,
+    setPathValue(child, [childKey, ...rest], next),
+  );
 }

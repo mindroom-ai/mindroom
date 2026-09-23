@@ -3,8 +3,6 @@ import { createContext, useContext, useMemo, type ReactNode } from "react";
 import type { ReferenceKind, ReferenceOptions } from "@/lib/configSchema";
 import { useConfigStore } from "@/store/configStore";
 
-const REFERENCE_KINDS: ReferenceKind[] = ["model", "agent", "room", "tool"];
-
 const ExtraReferenceOptions = createContext<Partial<ReferenceOptions>>({});
 
 /** Add entity names the draft config does not list, such as the tool catalog. */
@@ -29,17 +27,19 @@ export function useReferenceOptions(): ReferenceOptions {
   const models = config?.models;
 
   return useMemo(() => {
-    const configured: ReferenceOptions = {
-      model: Object.keys(models ?? {}),
-      agent: agents.map((agent) => agent.id),
-      room: rooms.map((room) => room.id),
-      tool: [],
+    const merge = (kind: ReferenceKind, names: string[]) =>
+      [...new Set([...names, ...(extra[kind] ?? [])])].sort();
+    return {
+      model: merge("model", Object.keys(models ?? {})),
+      agent: merge(
+        "agent",
+        agents.map((agent) => agent.id),
+      ),
+      room: merge(
+        "room",
+        rooms.map((room) => room.id),
+      ),
+      tool: merge("tool", []),
     };
-    return Object.fromEntries(
-      REFERENCE_KINDS.map((kind) => [
-        kind,
-        [...new Set([...configured[kind], ...(extra[kind] ?? [])])].sort(),
-      ]),
-    ) as ReferenceOptions;
   }, [models, agents, rooms, extra]);
 }

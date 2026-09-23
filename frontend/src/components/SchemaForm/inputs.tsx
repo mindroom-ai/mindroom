@@ -68,6 +68,11 @@ function defaultSummary(node: SchemaNode): string | null {
   return displayScalar(value);
 }
 
+function defaultPlaceholder(node: SchemaNode): string | undefined {
+  const summary = defaultSummary(node);
+  return summary == null ? undefined : `Default: ${summary}`;
+}
+
 export function helperText(node: SchemaNode): string | undefined {
   const summary = defaultSummary(node);
   const description = node.description?.trim();
@@ -393,8 +398,6 @@ function NumberInput({
   useEffect(() => {
     setDraft((current) => (Number(current) === value ? current : external));
   }, [external, value]);
-  const summary = defaultSummary(node);
-
   return (
     <Input
       id={id}
@@ -402,7 +405,7 @@ function NumberInput({
       inputMode="decimal"
       value={draft}
       disabled={disabled}
-      placeholder={summary == null ? undefined : `Default: ${summary}`}
+      placeholder={defaultPlaceholder(node)}
       // Exclusive bounds have no HTML equivalent; the backend enforces them.
       min={node.schema.minimum}
       max={node.schema.maximum}
@@ -440,8 +443,7 @@ function TextInput({
 }) {
   const [revealed, setRevealed] = useState(false);
   const listId = `${id}-suggestions`;
-  const summary = defaultSummary(node);
-  const placeholder = summary == null ? undefined : `Default: ${summary}`;
+  const placeholder = defaultPlaceholder(node);
 
   if (node.hint.multiline) {
     return (

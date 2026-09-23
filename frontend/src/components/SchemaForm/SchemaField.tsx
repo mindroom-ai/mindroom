@@ -1,7 +1,7 @@
 // Schema-driven config form: SchemaFields renders an object's properties and
 // SchemaField dispatches one property to a widget, recursing into nested
 // objects, collections, and unions.
-import { useId, useMemo, useState } from "react";
+import { useId, useState } from "react";
 import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -21,7 +21,6 @@ import {
   resolveSchema,
   setObjectKey,
   type JsonSchema,
-  type ReferenceOptions,
   type SchemaNode,
 } from "@/lib/configSchema";
 import { cn } from "@/lib/utils";
@@ -364,7 +363,6 @@ function ValueEditor({
   path: SchemaPath;
   onChange: (next: unknown) => void;
 }) {
-  const references = useReferenceOptions();
   switch (node.kind) {
     case "object":
       return (
@@ -444,7 +442,6 @@ function ValueEditor({
           value={value}
           path={path}
           onChange={onChange}
-          references={references}
         />
       );
     case "freeform":
@@ -529,7 +526,7 @@ function isStringItems(
   if (node.hint.reference != null) {
     return true;
   }
-  const items = classifySchemaNode(node.items ?? {}, root);
+  const items = classifySchemaNode(node.items!, root);
   return items.kind === "string" || items.kind === "enum";
 }
 
@@ -561,7 +558,7 @@ function ListEditor({
       />
     );
   }
-  const itemNode = classifySchemaNode(node.items ?? {}, root);
+  const itemNode = classifySchemaNode(node.items!, root);
   const move = (index: number, offset: number) => {
     const next = [...value];
     const [item] = next.splice(index, 1);
@@ -612,7 +609,7 @@ function ListEditor({
           <NestedValue
             name={`${label} ${index + 1}`}
             node={itemNode}
-            schema={node.items ?? {}}
+            schema={node.items!}
             root={root}
             value={item}
             path={[...path, index]}
@@ -670,25 +667,18 @@ function MapEditor({
   const references = useReferenceOptions();
   const [draftKey, setDraftKey] = useState("");
   const keyListId = useId();
-  const valueSchema = node.values ?? {};
+  // Hints on a map describe its values, except the one for its keys.
+  const { key_reference: keyReference, ...valueHint } = node.hint;
+  const valueSchema: JsonSchema = { ...node.values!, "x-mindroom": valueHint };
   const valueNode = classifySchemaNode(valueSchema, root);
   const scalarValues =
     valueNode.kind === "string" ||
     valueNode.kind === "number" ||
     valueNode.kind === "enum" ||
     valueNode.kind === "boolean";
-  // Hints on a map describe its values; the value schema itself carries none.
-  const valueFieldSchema: JsonSchema = {
-    ...valueSchema,
-    "x-mindroom": {
-      ...(node.hint.reference ? { reference: node.hint.reference } : {}),
-      ...(node.hint.secret ? { secret: true } : {}),
-      ...(node.hint.multiline ? { multiline: true } : {}),
-    },
-  };
   const keys = Object.keys(value);
-  const keySuggestions = node.hint.key_reference
-    ? references[node.hint.key_reference].filter((key) => !keys.includes(key))
+  const keySuggestions = keyReference
+    ? references[keyReference].filter((key) => !keys.includes(key))
     : undefined;
   const add = () => {
     const key = draftKey.trim();
@@ -697,11 +687,7 @@ function MapEditor({
     }
     onChange({
       ...value,
-      [key]: initialValue(
-        classifySchemaNode(valueFieldSchema, root),
-        root,
-        references,
-      ),
+      [key]: initialValue(valueNode, root, references),
     });
     setDraftKey("");
   };
@@ -735,7 +721,7 @@ function MapEditor({
           <NestedValue
             name={key}
             node={valueNode}
-            schema={valueFieldSchema}
+            schema={valueSchema}
             root={root}
             value={entry}
             path={[...path, key]}
@@ -787,7 +773,6 @@ function UnionEditor({
   value,
   path,
   onChange,
-  references,
 }: {
   name: string;
   label: string;
@@ -796,36 +781,32 @@ function UnionEditor({
   value: unknown;
   path: SchemaPath;
   onChange: (next: unknown) => void;
-  references: ReferenceOptions;
 }) {
+  const references = useReferenceOptions();
   // Show the schema default until the user picks a variant.
   const effective =
     value === undefined && node.hasDefault ? node.defaultValue : value;
   const index = matchUnionVariant(node, effective, root);
-  const variantNodes = useMemo(
-    () =>
-      node.variants.map((variant) => classifySchemaNode(variant.schema, root)),
-    [node.variants, root],
+  const variantNodes = node.variants.map((variant) =>
+    classifySchemaNode(variant.schema, root),
   );
 
   if (node.discriminator != null) {
     const discriminator = node.discriminator;
     const selected = index >= 0 ? node.variants[index] : null;
+    // Discriminated variants are objects; keep fields both variants define,
+    // such as timeout_seconds.
     const switchVariant = (next: number) => {
       const target = variantNodes[next];
-      const initial = initialValue(target, root, references);
-      if (!isPlainObject(initial) || !isPlainObject(effective)) {
-        onChange(initial);
-        return;
-      }
-      // Keep fields both variants define, such as timeout_seconds.
-      const shared = Object.fromEntries(
-        Object.entries(effective).filter(
-          ([key]) =>
-            key !== discriminator && key in (target.schema.properties ?? {}),
-        ),
+      const shared = Object.entries(
+        isPlainObject(effective) ? effective : {},
+      ).filter(
+        ([key]) => key !== discriminator && key in target.schema.properties!,
       );
-      onChange({ ...initial, ...shared });
+      onChange({
+        ...(initialValue(target, root, references) as Record<string, unknown>),
+        ...Object.fromEntries(shared),
+      });
     };
     return (
       <div className="space-y-4">

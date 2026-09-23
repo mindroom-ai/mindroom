@@ -12,7 +12,11 @@ import {
   normalizeAgentUpdates,
   normalizeTeamUpdates,
 } from "@/types/config";
-import { isPlainObject, setPathValue } from "@/lib/configSchema";
+import {
+  isPlainObject,
+  setPathValue,
+  type ConfigPath,
+} from "@/lib/configSchema";
 import * as configService from "@/services/configService";
 import {
   isConfigConflictDiagnostic,
@@ -634,7 +638,7 @@ interface ConfigState {
   updateModel: (modelId: string, updates: Partial<ModelConfig>) => void;
   deleteModel: (modelId: string) => void;
   /** Set one config value by key path; undefined removes it. Not for agents or teams. */
-  updateConfigValue: (path: string[], value: unknown) => void;
+  updateConfigValue: (path: ConfigPath, value: unknown) => void;
   getAgentToolOverrides: (
     agentId: string,
     toolName: string,
@@ -2172,7 +2176,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return {
         config: nextConfig,
         rooms: deriveRooms(nextConfig, state.agents, state.teams),
-        ...markDraftDirty(state, {}, [path]),
+        ...markDraftDirty(state, {}, [[...path]]),
       };
     });
   },

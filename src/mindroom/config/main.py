@@ -6,6 +6,7 @@ import hashlib
 import re
 from collections import deque
 from dataclasses import dataclass
+from functools import cache
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
@@ -2002,6 +2003,7 @@ class Config(BaseModel):
         return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
 
 
+@cache
 def dashboard_config_schema() -> dict[str, Any]:
     """Return the Config JSON schema with dashboard hints and default-factory values."""
     return Config.model_json_schema(schema_generator=DashboardJsonSchema)

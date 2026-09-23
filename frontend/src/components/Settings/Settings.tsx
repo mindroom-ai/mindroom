@@ -24,7 +24,7 @@ import { useTools } from "@/hooks/useTools";
 import {
   classifySchemaNode,
   fieldLabel,
-  rootPropertySchema,
+  type ConfigPath,
   type JsonSchema,
 } from "@/lib/configSchema";
 import { getConfigValidationIssues } from "@/lib/configValidation";
@@ -49,9 +49,9 @@ function SettingsEntryView({
   root: JsonSchema;
   value: unknown;
   showHeading: boolean;
-  onChange: (path: string[], next: unknown) => void;
+  onChange: (path: ConfigPath, next: unknown) => void;
 }) {
-  const schema = rootPropertySchema(root, entry.root);
+  const schema = root.properties![entry.root];
   const node = classifySchemaNode(schema, root);
   // Plain object roots render their keys directly instead of one nested block.
   if (entry.keys != null || (node.kind === "object" && !node.nullable)) {

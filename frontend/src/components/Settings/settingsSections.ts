@@ -2,7 +2,6 @@ import type { ConfigValidationIssue } from "@/lib/configValidation";
 import {
   classifySchemaNode,
   objectProperties,
-  rootPropertySchema,
   type JsonSchema,
 } from "@/lib/configSchema";
 
@@ -185,7 +184,7 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
 ];
 
 function rootObjectKeys(root: JsonSchema, key: string): string[] | null {
-  const node = classifySchemaNode(rootPropertySchema(root, key), root);
+  const node = classifySchemaNode(root.properties![key], root);
   return node.kind === "object"
     ? objectProperties(node.schema, root).map(([property]) => property)
     : null;
@@ -196,7 +195,7 @@ function rootObjectKeys(root: JsonSchema, key: string): string[] | null {
  * every root or key no page or section claims, so new options are never hidden.
  */
 export function resolveSettingsSections(root: JsonSchema): SettingsSection[] {
-  const rootKeys = Object.keys(root.properties ?? {});
+  const rootKeys = Object.keys(root.properties!);
   const sections = SETTINGS_SECTIONS.map((section) => ({
     ...section,
     entries: section.entries

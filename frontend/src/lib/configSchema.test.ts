@@ -23,7 +23,6 @@ const ROOT: JsonSchema = {
         provider: { const: "llm", type: "string", description: "LLM" },
         model: {
           type: "string",
-          minLength: 1,
           description: "Model alias",
           "x-mindroom": { reference: "model" },
         },
@@ -44,13 +43,7 @@ const ROOT: JsonSchema = {
         { $ref: "#/$defs/LLMJudgmentConfig" },
         { $ref: "#/$defs/TypeSafeJudgmentConfig" },
       ],
-      discriminator: {
-        propertyName: "provider",
-        mapping: {
-          llm: "#/$defs/LLMJudgmentConfig",
-          typesafe: "#/$defs/TypeSafeJudgmentConfig",
-        },
-      },
+      discriminator: { propertyName: "provider" },
     },
     ParticipationConfig: {
       type: "object",
