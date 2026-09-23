@@ -24,6 +24,11 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
+_UNBOUND_DASHBOARD_REQUESTER_HINT = (
+    " This dashboard session has no Matrix requester identity, so it matches no configured administrator or "
+    f"credential manager. Set {_OWNER_MATRIX_USER_ID_ENV} to your Matrix user ID, or run MindRoom under Matrix "
+    "authentication."
+)
 
 
 @dataclass(frozen=True)
@@ -288,9 +293,12 @@ def require_agent_oauth_connection_authorized(
             )
         )
     ):
+        unbound_requester_hint = (
+            "" if try_parse_historical_matrix_user_id(requester_id) else _UNBOUND_DASHBOARD_REQUESTER_HINT
+        )
         raise HTTPException(
             status_code=403,
-            detail=f"Not authorized to manage OAuth connections for agent '{agent_name}'",
+            detail=f"Not authorized to manage OAuth connections for agent '{agent_name}'.{unbound_requester_hint}",
         )
     return execution_identity
 

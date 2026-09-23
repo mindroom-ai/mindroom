@@ -2589,6 +2589,59 @@ def test_shared_browser_reset_rejects_signed_in_user_without_credential_authorit
     assert stored["refresh_token"] == "old-refresh-token"
 
 
+def test_shared_browser_reset_binds_to_signed_matrix_identity(tmp_path: Path) -> None:
+    """Under trusted-upstream auth only the signed-in credential manager may reset a shared connection."""
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(worker_scope="shared", allowed_users=["@alice:example.org"]),
+    )
+    _use_runtime_auth_settings(api_app)
+    provider, target = _general_agent_reset_target(api_app, runtime_paths)
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
+        {
+            "token": "old-access-token",
+            "refresh_token": "old-refresh-token",
+            "client_id": "client-id",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+        worker_scope="shared",
+    )
+    reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
+    origin = {"Origin": "http://localhost:8765"}
+    bob_headers = (
+        trusted_upstream_headers(
+            user_id="bob",
+            email="bob@example.com",
+            matrix_user_id="@bob:example.org",
+        )
+        | origin
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url="http://localhost:8765") as client:
+            bob_confirmation = client.get(reset_url, headers=bob_headers, follow_redirects=False)
+            bob_reset = client.post(reset_url, headers=bob_headers, follow_redirects=False)
+            after_bob = _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared")
+            alice_reset = client.post(
+                reset_url,
+                headers=trusted_upstream_headers() | origin,
+                follow_redirects=False,
+            )
+
+    assert bob_confirmation.status_code == 403
+    assert bob_reset.status_code == 403
+    assert after_bob is not None
+    assert after_bob["refresh_token"] == "old-refresh-token"
+    assert alice_reset.status_code == 303
+    assert "connect_token" not in parse_qs(urlparse(alice_reset.headers["location"]).query)
+    assert _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared") is None
+
+
 def test_shared_browser_reset_consumes_stale_link_without_deleting_replacement(tmp_path: Path) -> None:
     """A stale shared reset capability should be consumed while preserving replacement credentials."""
     runtime_paths = _runtime_paths(
@@ -3026,7 +3079,6 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
         execution_identity=None,
     )
     pending = SimpleNamespace(
-        browser_user_required=True,
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
@@ -3036,7 +3088,6 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
     conflict = OAuthCredentialConflictError("OAuth connection state is stale because this credential changed")
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
-    monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
@@ -3076,7 +3127,6 @@ async def test_callback_hides_provider_controlled_exchange_error(
         execution_identity=None,
     )
     pending = SimpleNamespace(
-        browser_user_required=True,
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
@@ -3086,7 +3136,6 @@ async def test_callback_hides_provider_controlled_exchange_error(
     provider_error = OAuthProviderError("provider-controlled-callback-secret")
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
-    monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
@@ -3776,7 +3825,6 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
         execution_identity=None,
     )
     pending = SimpleNamespace(
-        browser_user_required=True,
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
@@ -3800,7 +3848,6 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
 
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", allow_request)
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
-    monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
@@ -3855,7 +3902,6 @@ async def test_callback_finishes_target_verification_after_state_consumption_bef
         execution_identity=None,
     )
     pending = SimpleNamespace(
-        browser_user_required=True,
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
@@ -3872,7 +3918,6 @@ async def test_callback_finishes_target_verification_after_state_consumption_bef
 
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
-    monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", verify)

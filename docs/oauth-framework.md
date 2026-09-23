@@ -32,6 +32,8 @@ Shared-scope reset links follow the same model: the GET is non-mutating, the con
 Requester-scoped reset links still require the original authenticated browser user.
 Executions without a concrete requester cannot form a conversation capability; their links omit the connect token and use the existing dashboard-authenticated flow.
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` through pairing so dashboard credential management and agent-issued OAuth links resolve to the owner Matrix user instead of the generic dashboard API-key principal.
+Without it, a standalone dashboard principal matches no configured administrator or credential manager, so agent-issued OAuth links for that agent are refused with a 403 that names the variable.
+These checks are only as strong as the deployment's dashboard authentication: a deployment that configures no API key, Supabase project, or trusted upstream serves every dashboard route, including these OAuth links, to any request that reaches it, so it must not be reachable beyond its trusted host.
 `MINDROOM_OWNER_USER_ID` is a single-owner shortcut and is not suitable for a hosted multi-user private-agent deployment.
 Hosted deployments that put MindRoom behind an external access layer should enable trusted upstream auth and configure the exact headers MindRoom may trust.
 When trusted upstream auth is enabled, MindRoom reads the configured stable user ID and optional email headers into `request.scope["auth_user"]`.

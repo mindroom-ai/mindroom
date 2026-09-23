@@ -14,11 +14,7 @@ from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import authenticate_user, login_redirect_for_request, verify_user
-from mindroom.api.credentials_oauth_flows import (
-    consume_pending_oauth_request,
-    issue_pending_oauth_state,
-    pending_oauth_state_requires_browser_user,
-)
+from mindroom.api.credentials_oauth_flows import consume_pending_oauth_request, issue_pending_oauth_state
 from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     resolve_requester_credentials_target,
@@ -385,6 +381,9 @@ def _conversation_connect_context(
         # A shared credential belongs to the agent instead of one dashboard user, so the
         # signed-in visitor must hold credential authority over that agent. The link only
         # names the frozen target; it never carries the issuing requester's authority.
+        # The authority check admits any requester of a private agent, which stays safe
+        # here because `private.per` always resolves to an isolating scope, so a private
+        # agent never owns a shared binding.
         require_agent_oauth_connection_authorized(
             request,
             config=config,
@@ -703,9 +702,8 @@ async def reset_and_authorize(
         if shared_reset:
             consume_browser_oauth_reset_intent(runtime_paths, reset_token)
     except HTTPException as exc:
-        if exc.status_code == 409:
-            return _oauth_browser_error_response(str(exc.detail), status_code=409)
-        raise
+        # This POST comes from the confirmation form, so refusals render like its GET.
+        return _oauth_browser_error_response(str(exc.detail), status_code=exc.status_code)
     except OAuthProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
@@ -879,9 +877,7 @@ async def callback(provider_id: str, request: Request) -> Response:
         raise HTTPException(status_code=400, detail="No OAuth state received")
 
     provider, runtime_paths = _load_provider(request, provider_id)
-    browser_user_required = pending_oauth_state_requires_browser_user(request, provider.id, state)
-    if browser_user_required:
-        await _require_oauth_api_user(request)
+    await _require_oauth_api_user(request)
     try:
         dashboard_flow = await _complete_oauth_callback(
             request,
