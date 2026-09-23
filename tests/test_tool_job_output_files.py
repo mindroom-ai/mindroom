@@ -167,7 +167,8 @@ async def test_job_retrieval_applies_workspace_output_policy(
         assert receipt["path"] == "results/job.txt"
     else:
         assert receipt["auto_saved"] is True
-    assert read_result_payload(await case.runtime.lookup(job_id, owner=case.owner, depth=0)).value == _LARGE_RESULT
+    saved_job = await case.runtime.lookup(job_id, owner=case.owner, depth=0)
+    assert (await read_result_payload(case.runtime, saved_job)).value == _LARGE_RESULT
 
 
 async def test_job_output_path_is_validated_before_claiming_result(output_agent: _OutputAgent) -> None:

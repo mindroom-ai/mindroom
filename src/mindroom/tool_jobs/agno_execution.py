@@ -296,7 +296,7 @@ async def _consume_result(
     call: FunctionCall,
     timer: Timer,
 ) -> ToolCallResult:
-    payload = read_result_payload(job)
+    payload = await read_result_payload(runtime, job)
     timer.elapsed_time = payload.elapsed
     try:
         value = await consume_tool_job(runtime, job, payload, token, function_call=call)

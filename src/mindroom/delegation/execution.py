@@ -1234,7 +1234,9 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             await background.acknowledge_wait(child.delegation_id, waited.token)
                         return True
                     result = (
-                        delegation_result(background_job) if waited.token is not None and not waited.delivery_queued else None
+                        await delegation_result(background, background_job)
+                        if waited.token is not None and not waited.delivery_queued
+                        else None
                     ) or format_job_handle(
                         background_job,
                         subagent_id=child.subagent_id,

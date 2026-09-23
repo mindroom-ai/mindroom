@@ -21,7 +21,7 @@ from mindroom.event_journal import (
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseSources
-from mindroom.tool_jobs.runtime import BackgroundOutcome
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
 from mindroom.turn_record import TurnRecord
 from tests.response_runner_helpers import _bot
 from tests.test_subagent_runtime import _job
@@ -40,7 +40,7 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     approval: bool,
     source_pruned: bool,
 ) -> None:
-    """An old acknowledged value remains available to an unfinished or paused SDK run."""
+    """An old consumed job is deleted only once its turn finished and its conversation has no pending approval."""
     bot = _bot(tmp_path)
     bot.config.background_tool_jobs.enabled = True
     paths = bot.runtime_paths
@@ -121,9 +121,17 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
         assert await principal.create_approval_continuation(continuation) is not None
     try:
         await coordinator._expire_consumed_results()
-        saved = await runtime.lookup("old", owner=owner, depth=0)
-        assert saved.result_expired is (source_completed and not approval)
-        if not saved.result_expired:
-            assert saved.result_payload == {"value": "saved result"}
+        expired = source_completed and not approval
+        directory = paths.storage_root / "tool_jobs"
+        assert ("old" in runtime._entries) is not expired
+        assert {path.name for path in directory.glob("old.*")} == (
+            set() if expired else {"old.json", "old.g0.result.json"}
+        )
+        if expired:
+            with pytest.raises(JobAccessError, match="not available"):
+                await runtime.lookup("old", owner=owner, depth=0)
+        else:
+            saved = await runtime.lookup("old", owner=owner, depth=0)
+            assert await runtime.read_payload(saved) == {"value": "saved result"}
     finally:
         await coordinator.stop()

@@ -1,4 +1,4 @@
-"""Terminal job reads release wait ownership and preserve compact receipts."""
+"""Terminal job reads release wait ownership, and expired jobs stay unavailable."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.control import human_message_signal_context
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
@@ -128,13 +128,11 @@ async def test_completed_wait_releases_signal_and_idle_conversation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("after_projection", [False, True])
-@pytest.mark.parametrize("revoked", [False, True])
-async def test_native_expired_receipt_survives_sdk_wait_and_restart(
+async def test_expired_native_job_stays_unavailable_to_sdk_wait_after_restart(
     delegation_context: ToolRuntimeContext,
     after_projection: bool,
-    revoked: bool,
 ) -> None:
-    """Retrieval checks current grants, not erased task input, even after SDK projection."""
+    """Retrieving a deleted delegation, even through an earlier SDK projection, is unavailable and never reruns it."""
     config, paths = delegation_context.config, delegation_context.runtime_paths
     owner = build_execution_identity_from_runtime_context(delegation_context)
     coordinator = ToolJobRuntimeCoordinator(paths, lambda: config, lambda _: None, AgentReplyMembershipIndex())
@@ -191,16 +189,13 @@ async def test_native_expired_receipt_survives_sdk_wait_and_restart(
                     before=datetime.now(UTC) + timedelta(days=31),
                     source_finished=source_finished,
                 )
-                expired = await runtime.lookup(child.delegation_id, owner=owner, depth=0)
-                assert expired.result_expired
-                assert expired.adapter["child"]["task"] == ""
                 await coordinator.stop()
                 await coordinator.initialize()
                 runtime = coordinator.runtime
                 await runtime.recover()
                 register_background_runtime(paths, runtime)
-                if revoked:
-                    config.agents["leader"].delegate_to.clear()
+                with pytest.raises(JobAccessError, match="not available"):
+                    await runtime.lookup(child.delegation_id, owner=owner, depth=0)
                 response = paused or await actor.arun(
                     "Read the receipt",
                     session_id=owner.session_id,
@@ -217,7 +212,7 @@ async def test_native_expired_receipt_survives_sdk_wait_and_restart(
                 )
         assert response.status is RunStatus.completed
         retrieved = next(tool for tool in response.tools if tool.tool_call_id == "retrieve")
-        assert retrieved.result == ("Tool job is not available in this conversation." if revoked else expired.result)
+        assert retrieved.result == "Tool job is not available in this conversation."
         assert executions == 1
     finally:
         await coordinator.stop()

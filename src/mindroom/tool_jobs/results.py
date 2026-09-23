@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from dataclasses import dataclass, field
@@ -13,7 +14,7 @@ from agno.models.message import Message
 from agno.tools.function import ToolResult
 
 if TYPE_CHECKING:
-    from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload
+    from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload, ToolJobRuntime
 
 _MODELS = {model.__name__: model for model in (ToolResult, Image, Audio, Video, File, Message)}
 _MAX_ENCODED_RESULT_BYTES = 64 * 1024 * 1024
@@ -136,10 +137,10 @@ def _decode_result_payload(envelope: EncodedResultPayload) -> ToolResultPayload:
     return ToolResultPayload(**_decode(envelope["value"]))
 
 
-def read_result_payload(job: BackgroundJob) -> ToolResultPayload:
-    """Read the full result of a snapshot that includes it; an outcome the runtime authored itself has only its summary."""
-    if job.result_payload is not None:
-        return _decode_result_payload(job.result_payload)
+async def read_result_payload(runtime: ToolJobRuntime, job: BackgroundJob) -> ToolResultPayload:
+    """Read a ready job's full result from its payload file; an outcome the runtime authored itself has only its summary."""
+    if job.has_result_payload:
+        return await asyncio.to_thread(_decode_result_payload, await runtime.read_payload(job))
     if job.summary_truncated:
         return ToolResultPayload(value=f"{job.result}\n{_SUMMARY_TRUNCATED_NOTICE}")
     return ToolResultPayload(value=job.result)

@@ -145,7 +145,8 @@ async def test_runtime_written_summary_reports_its_truncation(tmp_path: Path) ->
         await runtime.start("failed", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
         waited = await runtime.wait("failed", owner=_owner(), depth=0)
         await runtime.release_wait("failed", waited.token)
-        assert (waited.job.status, waited.job.result_payload) == ("failed", None)
-        assert read_result_payload(waited.job).value == f"{message[:500]}\n{results._SUMMARY_TRUNCATED_NOTICE}"
+        assert (waited.job.status, waited.job.has_result_payload) == ("failed", False)
+        payload = await read_result_payload(runtime, waited.job)
+        assert payload.value == f"{message[:500]}\n{results._SUMMARY_TRUNCATED_NOTICE}"
     finally:
         await runtime.shutdown()

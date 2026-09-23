@@ -70,9 +70,9 @@ def delegation_outcome(status: Literal["completed", "failed", "cancelled", "deni
     return BackgroundOutcome(status, text, result_payload=encode_result_payload(ToolResultPayload(value=text)))
 
 
-def delegation_result(job: BackgroundJob) -> str | None:
+async def delegation_result(runtime: ToolJobRuntime, job: BackgroundJob) -> str | None:
     """Read a child's full saved text."""
-    return read_result_payload(job).value
+    return (await read_result_payload(runtime, job)).value
 
 
 def _terminal(child: DelegationChild) -> BackgroundOutcome | None:
@@ -229,7 +229,7 @@ async def cancel_retained_delegation(runtime: ToolJobRuntime, child: DelegationC
         return False
     retained = delegation_child(job)
     child.status = retained.status
-    child.result = delegation_result(job)
+    child.result = await delegation_result(runtime, job)
     child.run_id = retained.run_id
     child.model_name = retained.model_name
     return True

@@ -39,7 +39,7 @@ from mindroom.tool_jobs.control import (
     job_checkpoint,
     job_control_context,
 )
-from mindroom.tool_jobs.runtime import BackgroundOutcome, read_job_snapshot
+from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
@@ -100,22 +100,22 @@ async def test_consumed_native_result_releases_live_child_and_discovery_payload(
         child_ref = await start()
         job_id = _child().delegation_id
         waited = await runtime.wait(job_id, owner=_owner(), depth=0)
-        assert delegation_result(waited.job) == delivered
+        assert await delegation_result(runtime, waited.job) == delivered
         await runtime.acknowledge_wait(job_id, waited.token)
         gc.collect()
         assert child_ref() is None
         discovered = await runtime.list_jobs(owner=_owner(), depth=0)
         assert len(json.dumps([asdict(job) for job in discovered])) < 8192
         reread = await runtime.wait(job_id, owner=_owner(), depth=0)
-        assert delegation_result(reread.job) == delivered
+        assert await delegation_result(runtime, reread.job) == delivered
         await runtime.acknowledge_wait(job_id, reread.token)
     finally:
         await runtime.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_native_result_expires_to_a_compact_receipt_after_restart(tmp_path: Path) -> None:
-    """Native metadata cannot bypass the retention boundary or re-enable an expired execution."""
+async def test_native_result_expiry_after_restart_deletes_the_job(tmp_path: Path) -> None:
+    """A recovered native result stays small in discovery and expiry deletes its metadata and payload files."""
     runtime = tool_job_runtime(tmp_path)
     child = _child()
     raw = "native output " * 65536
@@ -130,7 +130,7 @@ async def test_native_result_expires_to_a_compact_receipt_after_restart(tmp_path
     waited = await runtime.wait(child.delegation_id, owner=_owner(), depth=0)
     await runtime.acknowledge_wait(child.delegation_id, waited.token)
     await runtime.shutdown()
-    path = tmp_path / "tool_jobs" / f"{child.delegation_id}.json"
+    directory = tmp_path / "tool_jobs"
     restored = tool_job_runtime(tmp_path)
 
     async def source_finished(_job: background.BackgroundJob) -> bool:
@@ -138,19 +138,16 @@ async def test_native_result_expires_to_a_compact_receipt_after_restart(tmp_path
 
     try:
         await restored.recover()
-        assert delegation_result(await restored.lookup(child.delegation_id, owner=_owner(), depth=0)) == delivered
+        saved = await restored.lookup(child.delegation_id, owner=_owner(), depth=0)
+        assert await delegation_result(restored, saved) == delivered
         discovered = await restored.list_jobs(owner=_owner(), depth=0)
         assert len(json.dumps([asdict(job) for job in discovered])) < 8192
         await restored.expire_consumed(
             before=datetime.now(UTC) + timedelta(days=31),
             source_finished=source_finished,
         )
-        receipt = read_job_snapshot(path)
-        assert receipt.result_expired
-        assert path.stat().st_size < 8192
-        assert raw not in path.read_text()
-        with pytest.raises(ValueError, match="already exists"):
-            await start_delegation(restored, child, owner=_owner(), operation=operation)
+        assert child.delegation_id not in restored._entries
+        assert not list(directory.glob(f"{child.delegation_id}.*"))
     finally:
         await restored.shutdown()
 

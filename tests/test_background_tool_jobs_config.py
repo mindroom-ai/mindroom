@@ -14,6 +14,7 @@ import pytest
 import yaml
 from agno.models.response import ModelResponse
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import create_session_storage
@@ -470,9 +471,9 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
 @pytest.mark.parametrize(
     "unreadable",
     [
-        '{"schema_version": 2, "job_id": "retired"}',
-        '{"schema_version": 3, "job_id": "trunc',
-        '{"schema_version": 3, "job_id": "another"}',
+        '{"schema_version": 3, "job_id": "retired"}',
+        '{"schema_version": 4, "job_id": "trunc',
+        '{"schema_version": 4, "job_id": "another"}',
     ],
 )
 async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unreadable: str) -> None:
@@ -482,11 +483,23 @@ async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unre
     directory.mkdir(parents=True)
     (directory / "retired.json").write_text(unreadable)
     owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
-    saved = BackgroundJob(job_id="saved", owner=owner, tool_name="tool", depth=0, adapter={"source_event_id": "$saved"})
-    (directory / "saved.json").write_text(json.dumps({"schema_version": 3, **asdict(saved)}))
+    saved = BackgroundJob(
+        job_id="saved",
+        owner=owner,
+        tool_name="tool",
+        depth=0,
+        adapter={"source_event_id": "$saved"},
+        status="completed",
+        has_result_payload=True,
+    )
+    (directory / "saved.json").write_text(json.dumps({"schema_version": 4, **asdict(saved)}))
+    # Payload files are not job metadata, so parking neither reads nor warns about them.
+    (directory / "saved.g0.result.json").write_text("{}")
     event = JournalEvent("$saved", "!room:localhost", None, EventKind.MESSAGE, "@user:localhost", 1, {}, 1)
     try:
-        await index_parked_work(paths)
+        with capture_logs() as logs:
+            await index_parked_work(paths)
+        assert [entry["path"] for entry in logs if entry["log_level"] == "warning"] == [str(directory / "retired.json")]
         assert event_is_parked(Config(), paths, "general", event)
     finally:
         clear_parked_work(paths)

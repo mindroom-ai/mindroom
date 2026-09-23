@@ -78,7 +78,8 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
         return BackgroundOutcome("completed", "retained output", result_payload={"artifact": [1, 2]})
 
     def fail_outcome(path: Path, payload: dict[str, object], *, strict_atomic_replace: bool = False) -> None:
-        if payload["status"] == "completed":
+        # Both the payload file and the metadata that references it fail to save.
+        if path.name.endswith(".result.json") or payload["status"] == "completed":
             msg = "outcome storage unavailable"
             raise OSError(msg)
         writer(path, payload, strict_atomic_replace=strict_atomic_replace)
@@ -91,7 +92,8 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
             waited = await asyncio.wait_for(runtime.wait("write-failure", owner=_owner(), depth=0), 2)
             assert waited.job.status == "completed"
             assert waited.job.result == "retained output"
-            assert waited.job.result_payload == {"artifact": [1, 2]}
+            assert await runtime.read_payload(waited.job) == {"artifact": [1, 2]}
+            assert not (tmp_path / "tool_jobs" / "write-failure.g0.result.json").exists()
             assert (tmp_path / "effect.txt").read_text() == "once"
         await runtime.acknowledge_wait("write-failure", waited.token)
         await runtime.shutdown()
@@ -101,7 +103,7 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
             saved = await restored.lookup("write-failure", owner=_owner(), depth=0)
             assert saved.status == "completed"
             assert saved.result == "retained output"
-            assert saved.result_payload == {"artifact": [1, 2]}
+            assert await restored.read_payload(saved) == {"artifact": [1, 2]}
             assert saved.wait_acknowledged
         finally:
             await restored.shutdown()
@@ -150,7 +152,7 @@ async def test_returned_result_survives_stop_during_resource_cleanup(tmp_path: P
         snapshot = json.loads((tmp_path / "tool_jobs" / "returned.json").read_text())
         assert snapshot["status"] == "completed"
         assert snapshot["result"] == "exact result"
-        assert snapshot["result_payload"] == {"retained": [1, 2]}
+        assert json.loads((tmp_path / "tool_jobs" / "returned.g0.result.json").read_text()) == {"retained": [1, 2]}
     finally:
         release.set()
         if stopping is not None:
@@ -171,11 +173,15 @@ async def test_returned_result_survives_cancel_admission_lock(tmp_path: Path, mo
         returned.set()
         return BackgroundOutcome("completed", "exact result")
 
-    async def delayed_publish(entry: runtime_module._Entry, job: runtime_module.BackgroundJob) -> None:
+    async def delayed_publish(
+        entry: runtime_module._Entry,
+        job: runtime_module.BackgroundJob,
+        payload: runtime_module.EncodedResultPayload | None = None,
+    ) -> None:
         if job.status == "cancel_requested":
             saving.set()
             await release.wait()
-        await publish(entry, job)
+        await publish(entry, job, payload)
 
     stopping = None
     try:

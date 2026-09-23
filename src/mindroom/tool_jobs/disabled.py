@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.event_journal import EventKind
 from mindroom.logging_config import get_logger
-from mindroom.tool_jobs.runtime import UnsupportedToolJobSnapshotError, read_job_snapshot
+from mindroom.tool_jobs.runtime import UnsupportedToolJobSnapshotError, read_job_snapshot, saved_job_paths
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 
 if TYPE_CHECKING:
@@ -57,7 +57,7 @@ def _saved_sources(runtime_paths: RuntimePaths) -> _ParkedWork:
         msg = "Tool job storage must not use symlinks."
         raise ValueError(msg)
     parked = _ParkedWork()
-    for path in sorted(root.glob("*.json")):
+    for path in saved_job_paths(root):
         try:
             job = read_job_snapshot(path)
         except (UnsupportedToolJobSnapshotError, ValueError) as error:

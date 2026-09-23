@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from agno.tools.function import Function, FunctionCall
 
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_jobs.runtime import BackgroundJob
+    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -40,6 +40,16 @@ def _job_toolkit(function: Function) -> JobTools | None:
 def is_job_function(function: Function) -> bool:
     """Recognize the reserved implementation, never an unrelated same-named plugin."""
     return _job_toolkit(function) is not None
+
+
+async def _consume_claimed(runtime: ToolJobRuntime, job: BackgroundJob, token: str) -> Any:  # noqa: ANN401 - SDK tool value.
+    """Return a claimed result, releasing the claim if reading its payload fails."""
+    try:
+        payload = await read_result_payload(runtime, job)
+    except BaseException:
+        await runtime.release_wait(job.job_id, token)
+        raise
+    return await consume_tool_job(runtime, job, payload, token)
 
 
 def _summary(job: BackgroundJob) -> dict[str, Any]:
@@ -171,7 +181,7 @@ class JobTools(Toolkit):
             if action == "wait":
                 waited = await runtime.wait(job_id, owner=owner, depth=self._depth, timeout=wait_timeout)
                 if waited.token is not None:
-                    return await consume_tool_job(runtime, waited.job, read_result_payload(waited.job), waited.token)
+                    return await _consume_claimed(runtime, waited.job, waited.token)
                 return json.dumps(_summary(waited.job))
             if action == "cancel":
                 job = await runtime.cancel(job_id, owner=owner, depth=self._depth)

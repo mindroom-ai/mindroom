@@ -37,6 +37,8 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
 
+    from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload
+
 
 @pytest.mark.asyncio
 async def test_job_wait_waits_and_restores_rich_result(tmp_path: Path) -> None:
@@ -400,6 +402,54 @@ async def test_job_wait_can_return_immediately_without_cancelling(tmp_path: Path
             assert await tools.job("wait", "ordinary", wait_timeout=None) == "answer"
     finally:
         gate.set()
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["cancelled", "deleted"])
+async def test_interrupted_payload_read_releases_the_wait_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: str,
+) -> None:
+    """A job wait whose payload read is cancelled or finds the file gone leaves the result claimable."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    register_background_runtime(paths, runtime)
+    reading, release = asyncio.Event(), asyncio.Event()
+    read_payload = runtime.read_payload
+
+    async def gated_read(job: BackgroundJob) -> EncodedResultPayload:
+        reading.set()
+        await release.wait()
+        return await read_payload(job)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved", result_payload=encode_result_payload(ToolResultPayload("saved")))
+
+    tools = JobTools(paths, owner)
+    try:
+        await runtime.start("read", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        monkeypatch.setattr(runtime, "read_payload", gated_read)
+        with tool_runtime_context(context):
+            waiting = asyncio.create_task(tools.job("wait", "read"))
+            await reading.wait()
+            if interruption == "cancelled":
+                waiting.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await waiting
+            else:
+                (tmp_path / "tool_jobs" / "read.g0.result.json").unlink()
+                release.set()
+                assert await waiting == "Tool job is not available in this conversation."
+        retried = await runtime.wait("read", owner=owner, depth=0, timeout=0)
+        assert retried.token is not None
+        await runtime.release_wait("read", retried.token)
+    finally:
+        release.set()
         register_background_runtime(paths, None)
         await runtime.shutdown()
 

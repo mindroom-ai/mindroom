@@ -49,6 +49,7 @@ from mindroom.tool_jobs.resources import (
 )
 from mindroom.tool_jobs.results import (
     ToolResultPayload,
+    _decode_result_payload,
     encode_result_payload,
     encode_tool_result,
     read_result_payload,
@@ -113,7 +114,7 @@ async def test_large_outcome_encoding_leaves_event_loop_free(
         assert encoding_threads[0] != loop_thread
         owner = build_execution_identity_from_runtime_context(context)
         listed = (await runtime.list_jobs(owner=owner, depth=0))[0]
-        payload = read_result_payload(await runtime.lookup(listed.job_id, owner=owner, depth=0))
+        payload = await read_result_payload(runtime, await runtime.lookup(listed.job_id, owner=owner, depth=0))
         if kind == "stream":
             assert payload.value == text * 2
         else:
@@ -192,9 +193,12 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
                 await stopping
                 assert closed.is_set()
                 saved = read_job_snapshot(tmp_path / "tool_jobs" / f"{job_id}.json")
-                assert saved.status == "completed"
-                assert saved.result == "completed before cancellation"
-                assert read_result_payload(saved).state_delta["changed"]["value"] == "encoded state"
+                assert (saved.status, saved.result) == ("completed", "completed before cancellation")
+                # Shutdown has closed the runtime, so decode the saved payload file itself.
+                payload_file = tmp_path / "tool_jobs" / f"{job_id}.g0.result.json"
+                assert _decode_result_payload(json.loads(payload_file.read_text())).state_delta == {
+                    "changed": {"before_present": False, "before": None, "present": True, "value": "encoded state"},
+                }
     finally:
         release.set()
         await runtime.shutdown()
@@ -357,7 +361,9 @@ async def test_streamed_result_saves_its_text_and_media_once(tmp_path: Path) -> 
         job = (await runtime.list_jobs(owner=owner, depth=0))[0]
         assert job.result == text[:500]
         assert job.summary_truncated
-        saved = (tmp_path / "tool_jobs" / f"{job.job_id}.json").read_text()
+        files = sorted((tmp_path / "tool_jobs").glob(f"{job.job_id}.*"))
+        assert [path.name for path in files] == [f"{job.job_id}.g0.result.json", f"{job.job_id}.json"]
+        saved = "".join(path.read_text() for path in files)
         for marker in ("chunk 0060 ", "chunk 0100 ", "chunk 0180 "):
             assert saved.count(marker) == 1
         assert saved.count(base64.b64encode(b"image").decode()) == 1
@@ -392,7 +398,7 @@ async def test_oversized_result_becomes_a_failed_job(tmp_path: Path, monkeypatch
         assert "encoded JSON limit" in call.error
         job = (await runtime.list_jobs(owner=owner, depth=0))[0]
         assert job.status == "failed"
-        assert job.result_payload is None
+        assert not job.has_result_payload
     finally:
         register_background_runtime(paths, None)
         await runtime.shutdown()
@@ -552,7 +558,7 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
             assert closed.is_set()
             assert result.job.status == ("failed" if fails else "completed")
             if not fails:
-                payload = read_result_payload(result.job)
+                payload = await read_result_payload(runtime, result.job)
                 assert isinstance(payload.value, ToolResult)
                 assert payload.value.content == "event textpicture"
                 assert payload.value.images[0].content == b"image"
@@ -1101,7 +1107,7 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
                     value = await consume_tool_job(
                         runtime,
                         waited.job,
-                        read_result_payload(waited.job),
+                        await read_result_payload(runtime, waited.job),
                         waited.token,
                         function_call=call,
                     )
@@ -1237,7 +1243,7 @@ async def test_saved_control_exception_keeps_stop_semantics(tmp_path: Path) -> N
                         await consume_tool_job(
                             runtime,
                             waited.job,
-                            read_result_payload(waited.job),
+                            await read_result_payload(runtime, waited.job),
                             waited.token,
                             function_call=call,
                         )

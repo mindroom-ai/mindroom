@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +23,7 @@ from mindroom.tool_jobs.disabled import clear_parked_work, index_parked_work
 from mindroom.tool_jobs.execution_authority import set_execution_authorizer
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.runtime import (
+    CONSUMED_RESULT_RETENTION,
     BackgroundJob,
     BackgroundOutcome,
     JobAccessError,
@@ -302,7 +303,7 @@ class ToolJobRuntimeCoordinator:
                 logger.exception("Background tool job completion wakeup failed", job_id=job.job_id)
 
     async def _expire_consumed_results(self) -> None:
-        """Retain results for thirty days and as long as response or approval work owns them."""
+        """Keep consumed jobs for the retention period and as long as response or approval work owns them."""
         journal = self._journal
         if journal is None:
             return
@@ -333,7 +334,7 @@ class ToolJobRuntimeCoordinator:
             return finished[key]
 
         await self.runtime.expire_consumed(
-            before=datetime.now(UTC) - timedelta(days=30),
+            before=datetime.now(UTC) - CONSUMED_RESULT_RETENTION,
             source_finished=source_finished,
         )
 

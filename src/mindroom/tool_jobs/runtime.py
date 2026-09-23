@@ -8,7 +8,7 @@ import json
 import re
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 from weakref import WeakValueDictionary
@@ -53,7 +53,11 @@ _TERMINAL = frozenset({"completed", "failed", "cancelled", "denied", "interrupte
 _READY = _TERMINAL | {"awaiting_approval"}
 _UNAVAILABLE = "Tool job is not available in this conversation."
 _JOB_SUMMARY_MAX_CHARS = 500
-_SNAPSHOT_SCHEMA_VERSION = 3
+_SNAPSHOT_SCHEMA_VERSION = 4
+_JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+_PAYLOAD_SUFFIX = ".result.json"
+# Consumed jobs are deleted this long after their last change, once their originating turn has finished.
+CONSUMED_RESULT_RETENTION = timedelta(days=30)
 logger = get_logger(__name__)
 # A ToolResultPayload encoded by `tool_jobs.results`; the runtime stores it without reading it.
 type EncodedResultPayload = dict[str, Any]
@@ -80,7 +84,7 @@ class BackgroundOutcome:
     """Serializable operation outcome; approval semantics remain owned by its adapter.
 
     `result` is the outcome's text, which the job keeps only as a bounded summary.
-    `result_payload` is the adapter's full result.
+    `result_payload` is the adapter's full result, saved in a file of its own for this generation.
     """
 
     status: _OutcomeStatus
@@ -106,11 +110,11 @@ class BackgroundJob:
     # At most _JOB_SUMMARY_MAX_CHARS of the outcome text; an adapter's payload keeps its full result.
     result: str | None = None
     summary_truncated: bool = False
-    result_payload: EncodedResultPayload | None = None
+    # Whether this generation's outcome has a payload file; an outcome the runtime authored has only its summary.
+    has_result_payload: bool = False
     approval_state: dict[str, Any] = field(default_factory=dict)
     generation: int = 0
     wait_acknowledged: bool = False
-    result_expired: bool = False
     user_stop_receipt_order: int | None = None
 
 
@@ -120,21 +124,35 @@ def _updated(job: BackgroundJob, **changes: object) -> BackgroundJob:
 
 
 def _with_outcome(job: BackgroundJob, outcome: BackgroundOutcome) -> BackgroundJob:
-    """Publish an outcome's payload and approval state with only a bounded summary of its text."""
+    """Publish an outcome's status and approval state with only a bounded summary of its text."""
     text = outcome.result
     return _updated(
         job,
         status=outcome.status,
         result=text[:_JOB_SUMMARY_MAX_CHARS] if text is not None else None,
         summary_truncated=text is not None and len(text) > _JOB_SUMMARY_MAX_CHARS,
+        has_result_payload=outcome.result_payload is not None,
         approval_state=outcome.approval_state,
-        result_payload=outcome.result_payload,
     )
+
+
+def _payload_name(job_id: str, generation: int) -> str:
+    return f"{job_id}.g{generation}{_PAYLOAD_SUFFIX}"
+
+
+def _unlink_in_order(*paths: Path) -> None:
+    for path in paths:
+        path.unlink()
+
+
+def saved_job_paths(root: Path) -> list[Path]:
+    """List saved job metadata, leaving out the payload files it references."""
+    return sorted(path for path in root.glob("*.json") if not path.name.endswith(_PAYLOAD_SUFFIX))
 
 
 def read_job_snapshot(path: Path) -> BackgroundJob:
     """Validate one existing snapshot without claiming or changing its execution."""
-    if path.is_symlink() or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", path.stem) is None:
+    if path.is_symlink() or _JOB_ID.fullmatch(path.stem) is None:
         raise JobAccessError(_UNAVAILABLE)
     payload = json.loads(path.read_text())
     version = payload.pop("schema_version")
@@ -183,7 +201,8 @@ class _Entry:
     cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] | None = None
     # False only while memory retains an outcome of work that already ran but could not be saved.
     saved: bool = True
-    cold: bool = False
+    # That unsaved outcome's payload, kept only until a retried save writes its file.
+    unsaved_payload: EncodedResultPayload | None = None
     stopped_outcome: BackgroundOutcome | None = None
     # The one in-flight cancellation drain; every concurrent canceller awaits it.
     drain: asyncio.Task[BackgroundJob] | None = None
@@ -252,10 +271,11 @@ class ToolJobRuntime:
             self._human_signals[key] = signal
         return signal
 
-    def _path(self, job_id: str) -> Path:
-        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", job_id) is None:
+    def _path(self, job_id: str, generation: int | None = None) -> Path:
+        """Locate a job's metadata, or the payload of one of its generations."""
+        if _JOB_ID.fullmatch(job_id) is None:
             raise JobAccessError(_UNAVAILABLE)
-        path = self._root / f"{job_id}.json"
+        path = self._root / (f"{job_id}.json" if generation is None else _payload_name(job_id, generation))
         if path.is_symlink():
             raise JobAccessError(_UNAVAILABLE)
         return path
@@ -298,47 +318,86 @@ class ToolJobRuntime:
             raise JobAccessError(_UNAVAILABLE)
         return entry
 
-    async def _publish(self, entry: _Entry, job: BackgroundJob) -> None:
-        """Durably replace the saved job, then make it current; a failed write leaves memory unchanged."""
+    async def _publish(self, entry: _Entry, job: BackgroundJob, payload: EncodedResultPayload | None = None) -> None:
+        """Durably save the job, then make it current; a failed write leaves memory unchanged.
+
+        A new payload, or the unsaved one this job still references, is written before the metadata that references it.
+        Once the metadata lands, the payload file it replaces is deleted.
+        """
+        if payload is None and job.has_result_payload:
+            payload = entry.unsaved_payload
         path = self._path(job.job_id)
+        payload_path = self._path(job.job_id, job.generation) if payload is not None else None
+        previous = entry.job
+        replaced = (
+            self._path(job.job_id, previous.generation)
+            if previous.has_result_payload and (not job.has_result_payload or job.generation != previous.generation)
+            else None
+        )
 
         def write() -> None:
+            if payload_path is not None:
+                write_json_file_durable(payload_path, payload, strict_atomic_replace=True)
             write_json_file_durable(
                 path,
                 {"schema_version": _SNAPSHOT_SCHEMA_VERSION, **asdict(job)},
                 strict_atomic_replace=True,
             )
+            if replaced is not None:
+                replaced.unlink(missing_ok=True)
 
         async def publish() -> None:
             await asyncio.to_thread(write)
-            entry.job, entry.saved, entry.cold = job, True, False
+            entry.job, entry.saved, entry.unsaved_payload = job, True, None
+            if job.status in _TERMINAL:
+                # A durable terminal outcome ends execution; drop what only running work needed.
+                self._release_control(entry)
+                entry.human_signal, entry.cancel, entry.task = None, None, None
             entry.notify_changed()
             self.changed.set()
 
         # A cancelled caller cannot separate a landed write from its in-memory publication.
         await run_coroutine_until_complete(publish())
 
-    async def _publish_outcome(self, entry: _Entry, job: BackgroundJob) -> None:
+    async def _publish_outcome(self, entry: _Entry, outcome: BackgroundOutcome) -> None:
         """Publish work that already ran; a failed save keeps it for acknowledgement and shutdown to retry."""
+        job = _with_outcome(entry.job, outcome)
         try:
-            await self._publish(entry, job)
+            await self._publish(entry, job, outcome.result_payload)
         except Exception:
-            entry.job, entry.saved = job, False
+            entry.job, entry.saved, entry.unsaved_payload = job, False, outcome.result_payload
             entry.notify_changed()
             self.changed.set()
             raise
+
+    async def read_payload(self, job: BackgroundJob) -> EncodedResultPayload:
+        """Read the payload a snapshot with `has_result_payload` references, from disk and outside the runtime lock.
+
+        An outcome whose save failed is read from memory until a retry writes it.
+        A payload deleted since the snapshot was taken, by a newer generation or by expiry, is unavailable.
+        """
+        self._ensure_open()
+        entry = self._entries.get(job.job_id)
+        unsaved = entry.unsaved_payload if entry is not None and entry.job.generation == job.generation else None
+        if unsaved is not None:
+            return await asyncio.to_thread(lambda: deepcopy(unsaved))
+        path = self._path(job.job_id, job.generation)
+        try:
+            return await asyncio.to_thread(lambda: json.loads(path.read_text()))
+        except FileNotFoundError:
+            raise JobAccessError(_UNAVAILABLE) from None
 
     async def recover(self) -> None:
         """Restore outcomes and approval snapshots, never automatically replay execution."""
         async with self._lock:
             self._ensure_open()
-            for path in await asyncio.to_thread(lambda: sorted(self._root.glob("*.json"))):
+            for path in await asyncio.to_thread(saved_job_paths, self._root):
                 if path.stem in self._entries:
                     continue
                 entry = _Entry(await asyncio.to_thread(read_job_snapshot, path))
                 if entry.job.status not in _READY:
                     outcome = await self._cleanup(entry)
-                    await self._publish(
+                    await self._publish_outcome(
                         entry,
                         self._settled(
                             entry,
@@ -347,9 +406,20 @@ class ToolJobRuntime:
                             outcome=outcome,
                         ),
                     )
-                self._cool(entry)
                 self._entries[entry.job.job_id] = entry
                 self._restore_approval_signal(entry)
+            referenced = {
+                _payload_name(entry.job.job_id, entry.job.generation)
+                for entry in self._entries.values()
+                if entry.job.has_result_payload
+            }
+            # A crash can leave a payload no saved metadata references, such as one whose metadata save never landed.
+            await asyncio.to_thread(self._delete_payloads_except, referenced)
+
+    def _delete_payloads_except(self, referenced: set[str]) -> None:
+        for path in self._root.glob(f"*{_PAYLOAD_SUFFIX}"):
+            if path.name not in referenced:
+                path.unlink()
 
     def _restore_approval_signal(self, entry: _Entry) -> None:
         """Observe future human ingress while a recovered approval awaits reattachment."""
@@ -384,8 +454,6 @@ class ToolJobRuntime:
             self._ensure_accepting()
             if reattach and job_id in self._entries:
                 existing = self._entry(job_id, owner, depth)
-                if existing.job.result_expired:
-                    raise JobAccessError(existing.job.result)
                 if (
                     existing.job.tool_name != tool_name
                     or existing.job.toolkit_name != toolkit_name
@@ -472,7 +540,7 @@ class ToolJobRuntime:
                     entry.stopped_outcome = outcome
                 elif entry.job.status not in _TERMINAL:
                     try:
-                        await self._publish_outcome(entry, _with_outcome(entry.job, outcome))
+                        await self._publish_outcome(entry, outcome)
                     except Exception:
                         logger.exception(
                             "Tool job outcome save failed; retaining it in memory",
@@ -486,7 +554,6 @@ class ToolJobRuntime:
         finally:
             if entry.job.status in _TERMINAL:
                 self._release_control(entry)
-                self._cool(entry)
 
     @staticmethod
     def _release_control(entry: _Entry) -> None:
@@ -506,20 +573,9 @@ class ToolJobRuntime:
             entry = self._entry(job_id, owner, depth)
             return await self._snapshot(entry, include_result=include_result)
 
-    def _cool(self, entry: _Entry) -> None:
-        """Keep only discovery metadata in memory after durable terminal publication."""
-        if entry.saved and entry.job.status in _TERMINAL:
-            entry.job = replace(entry.job, result_payload=None, approval_state={})
-            entry.cold = not entry.job.result_expired
-            self._release_control(entry)
-            entry.human_signal = None
-            entry.cancel = None
-            entry.task = None
-
     async def _snapshot(self, entry: _Entry, *, include_result: bool = True) -> BackgroundJob:
-        if include_result and entry.cold:
-            return await run_blocking_until_complete(read_job_snapshot, self._path(entry.job.job_id))
-        job = entry.job if include_result else replace(entry.job, result_payload=None, approval_state={})
+        """Copy a job's metadata; without its result, the copy also omits a paused generation's approval state."""
+        job = entry.job if include_result else replace(entry.job, approval_state={})
         return await run_blocking_until_complete(deepcopy, job)
 
     async def list_jobs(
@@ -627,10 +683,8 @@ class ToolJobRuntime:
             if token is None or entry.wait_token != token:
                 msg = "Tool job wait claim no longer belongs to this waiter."
                 raise ValueError(msg)
-            job = await self._snapshot(entry) if entry.cold else entry.job
-            await self._publish(entry, _updated(job, wait_acknowledged=True))
+            await self._publish(entry, _updated(entry.job, wait_acknowledged=True))
             entry.wait_token = None
-            self._cool(entry)
 
     async def cancel(
         self,
@@ -658,13 +712,10 @@ class ToolJobRuntime:
             for entry in self._entries.values():
                 if not await matches(await self._snapshot(entry, include_result=False)):
                     continue
-                job = await self._snapshot(entry) if entry.cold else entry.job
-                order = max(job.user_stop_receipt_order or 0, receipt_order)
-                await self._publish(entry, _updated(job, user_stop_receipt_order=order))
+                order = max(entry.job.user_stop_receipt_order or 0, receipt_order)
+                await self._publish(entry, _updated(entry.job, user_stop_receipt_order=order))
                 if entry.job.status not in _TERMINAL:
                     await self._request_cancel(entry)
-                else:
-                    self._cool(entry)
 
     async def is_user_stopped(self, job_id: str) -> bool:
         """Check suppression without confusing a read receipt with explicit user intent."""
@@ -719,7 +770,12 @@ class ToolJobRuntime:
                 requested = _updated(entry.job, status="cancel_requested")
                 if approval:
                     # Cancelling an approval publishes a fresh unconsumed generation that stale claims cannot own.
-                    requested = replace(requested, generation=requested.generation + 1, wait_acknowledged=False)
+                    requested = replace(
+                        requested,
+                        generation=requested.generation + 1,
+                        wait_acknowledged=False,
+                        has_result_payload=False,
+                    )
                 await self._publish(entry, requested)
                 if approval:
                     entry.wait_token = None
@@ -750,10 +806,7 @@ class ToolJobRuntime:
                     )
                 elif not entry.saved:
                     await self._publish(entry, entry.job)
-                self._release_control(entry)
-                snapshot = await self._snapshot(entry)
-                self._cool(entry)
-                return snapshot
+                return await self._snapshot(entry)
         finally:
             # A failed drain leaves the job for the next canceller, recovery, or shutdown to settle.
             entry.drain = None
@@ -779,8 +832,8 @@ class ToolJobRuntime:
         status: Literal["cancelled", "interrupted"],
         reason: str | None,
         outcome: BackgroundOutcome | None = None,
-    ) -> BackgroundJob:
-        """Build retained terminal evidence, consuming the stopped outcome, after owned execution and cleanup settle."""
+    ) -> BackgroundOutcome:
+        """Choose the terminal outcome, consuming the stopped one, after owned execution and cleanup settle."""
         if (
             entry.stopped_outcome is not None
             and entry.stopped_outcome.status in _TERMINAL
@@ -790,7 +843,7 @@ class ToolJobRuntime:
         entry.stopped_outcome = None
         if outcome is None or outcome.status not in _TERMINAL:
             outcome = BackgroundOutcome(status, reason)
-        return _with_outcome(entry.job, outcome)
+        return outcome
 
     async def continue_job(
         self,
@@ -819,6 +872,7 @@ class ToolJobRuntime:
                 status="running",
                 generation=entry.job.generation + 1,
                 wait_acknowledged=False,
+                has_result_payload=False,
             )
             await run_coroutine_until_complete(self._admit(entry, job, operation, wait_token=None))
             return await self._snapshot(entry)
@@ -916,16 +970,15 @@ class ToolJobRuntime:
         before: datetime,
         source_finished: Callable[[BackgroundJob], Awaitable[bool]],
     ) -> None:
-        """Replace old consumed results with receipts after their response ownership settles."""
+        """Delete old consumed jobs whose originating turn has finished, so nothing can run their call again."""
         async with self._lock:
-            if self._closed:
+            if self._closed or self._shutdown_task is not None:
                 return
             candidates = [
                 await self._snapshot(entry, include_result=False)
                 for entry in self._entries.values()
                 if entry.job.status in _TERMINAL
                 and entry.job.wait_acknowledged
-                and not entry.job.result_expired
                 and entry.wait_token is None
                 and entry.saved
                 and datetime.fromisoformat(entry.job.updated_at) < before
@@ -934,31 +987,22 @@ class ToolJobRuntime:
             if not await source_finished(job):
                 continue
             async with self._lock:
-                if self._closed:
+                if self._closed or self._shutdown_task is not None:
                     return
-                entry = self._entries[job.job_id]
-                if entry.wait_token is not None or entry.job.updated_at != job.updated_at or not entry.saved:
+                entry = self._entries.get(job.job_id)
+                if (
+                    entry is None
+                    or entry.wait_token is not None
+                    or entry.job.updated_at != job.updated_at
+                    or not entry.saved
+                ):
                     continue
-                await self._publish(
-                    entry,
-                    replace(
-                        entry.job,
-                        adapter=self._compact_adapter(entry.job.adapter),
-                        result="Tool result expired after 30 days; its execution receipt prevents replay.",
-                        summary_truncated=False,
-                        result_payload=None,
-                        approval_state={},
-                        result_expired=True,
-                    ),
-                )
-
-    @staticmethod
-    def _compact_adapter(adapter: dict[str, Any]) -> dict[str, Any]:
-        """Retain replay and access evidence without the original operation's input."""
-        compact = {key: value for key, value in adapter.items() if key != "arguments"}
-        if "child" in compact:
-            compact["child"] = {**compact["child"], "task": ""}
-        return compact
+                files = [self._path(job.job_id)]
+                if entry.job.has_result_payload:
+                    files.append(self._path(job.job_id, entry.job.generation))
+                del self._entries[job.job_id]
+                # Metadata goes first, so a crash can leave only a payload, which recovery deletes.
+                await run_blocking_until_complete(_unlink_in_order, *files)
 
     async def quiesce(self) -> None:
         """Drain owned execution while response finalizers retain result receipt access."""
