@@ -1231,10 +1231,6 @@ export function AgentEditor() {
                           const isChecked = field.value.includes(tool.name);
                           const hasOverrides = toolHasOverrides(tool.name);
                           const isActive = activeToolName === tool.name;
-                          const hasSettings =
-                            (tool.agent_override_fields?.length ?? 0) > 0 ||
-                            (tool.config_fields?.length ?? 0) > 0;
-                          const showSettings = hasSettings || hasOverrides;
 
                           return (
                             <>
@@ -1245,7 +1241,6 @@ export function AgentEditor() {
                                 isChecked={isChecked}
                                 isActive={isActive}
                                 hasOverrides={hasOverrides}
-                                showSettings={showSettings}
                                 onCheckedChange={(checked) => {
                                   field.onChange(
                                     updateSelectedTools(
@@ -1261,7 +1256,7 @@ export function AgentEditor() {
                                   )
                                 }
                               />
-                              {isChecked && isActive && showSettings && (
+                              {isChecked && isActive && (
                                 <ToolConfigPanel
                                   agentId={selectedAgent.id}
                                   toolName={tool.name}
@@ -1311,10 +1306,6 @@ export function AgentEditor() {
                           const isChecked = field.value.includes(tool.name);
                           const hasOverrides = toolHasOverrides(tool.name);
                           const isActive = activeToolName === tool.name;
-                          const hasSettings =
-                            (tool.agent_override_fields?.length ?? 0) > 0 ||
-                            (tool.config_fields?.length ?? 0) > 0;
-                          const showSettings = hasSettings || hasOverrides;
 
                           return (
                             <>
@@ -1325,7 +1316,6 @@ export function AgentEditor() {
                                 isChecked={isChecked}
                                 isActive={isActive}
                                 hasOverrides={hasOverrides}
-                                showSettings={showSettings}
                                 onCheckedChange={(checked) => {
                                   field.onChange(
                                     updateSelectedTools(
@@ -1341,7 +1331,7 @@ export function AgentEditor() {
                                   )
                                 }
                               />
-                              {isChecked && isActive && showSettings && (
+                              {isChecked && isActive && (
                                 <ToolConfigPanel
                                   agentId={selectedAgent.id}
                                   toolName={tool.name}
@@ -1393,10 +1383,6 @@ export function AgentEditor() {
                             tool.dashboard_configuration_supported === false;
                           const hasOverrides = toolHasOverrides(tool.name);
                           const isActive = activeToolName === tool.name;
-                          const hasSettings =
-                            (tool.agent_override_fields?.length ?? 0) > 0 ||
-                            (tool.config_fields?.length ?? 0) > 0;
-                          const showSettings = hasSettings || hasOverrides;
 
                           return (
                             <>
@@ -1407,7 +1393,6 @@ export function AgentEditor() {
                                 isChecked={isChecked}
                                 isActive={isActive}
                                 hasOverrides={hasOverrides}
-                                showSettings={showSettings}
                                 setupBlocked={setupBlocked}
                                 onCheckedChange={(checked) => {
                                   field.onChange(
@@ -1424,7 +1409,7 @@ export function AgentEditor() {
                                   )
                                 }
                               />
-                              {isChecked && isActive && showSettings && (
+                              {isChecked && isActive && (
                                 <ToolConfigPanel
                                   agentId={selectedAgent.id}
                                   toolName={tool.name}

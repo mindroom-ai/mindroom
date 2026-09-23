@@ -14,7 +14,6 @@ interface ToolSelectionRowProps {
   isChecked: boolean;
   isActive: boolean;
   hasOverrides: boolean;
-  showSettings: boolean;
   setupBlocked?: boolean;
   onCheckedChange: (checked: boolean) => void;
   onToggleSettings: () => void;
@@ -27,15 +26,13 @@ export function ToolSelectionRow({
   isChecked,
   isActive,
   hasOverrides,
-  showSettings,
   setupBlocked = false,
   onCheckedChange,
   onToggleSettings,
 }: ToolSelectionRowProps) {
-  const activeClass =
-    isActive && showSettings
-      ? "bg-blue-50 dark:bg-blue-500/10"
-      : "hover:bg-gray-50 dark:hover:bg-white/5";
+  const activeClass = isActive
+    ? "bg-blue-50 dark:bg-blue-500/10"
+    : "hover:bg-gray-50 dark:hover:bg-white/5";
 
   return (
     <div className={`rounded-lg p-2 transition-colors ${activeClass}`}>
@@ -44,15 +41,13 @@ export function ToolSelectionRow({
           <Checkbox
             id={checkboxId}
             checked={isChecked}
-            aria-label={
-              isChecked && showSettings ? tool.display_name : undefined
-            }
+            aria-label={isChecked ? tool.display_name : undefined}
             onCheckedChange={(checked) => onCheckedChange(checked === true)}
             className="mt-0.5 h-5 w-5 flex-shrink-0 sm:h-4 sm:w-4"
           />
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2">
-              {isChecked && showSettings ? (
+              {isChecked ? (
                 <button
                   type="button"
                   onClick={onToggleSettings}
@@ -98,7 +93,7 @@ export function ToolSelectionRow({
               Setup required
             </Badge>
           )}
-          {isChecked && showSettings && (
+          {isChecked && (
             <Button
               type="button"
               variant={isActive ? "secondary" : "ghost"}

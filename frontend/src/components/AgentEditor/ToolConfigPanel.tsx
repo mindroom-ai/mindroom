@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -95,6 +95,15 @@ function normalizePersistedValue(
 
 type DraftValues = Record<string, string | string[]>;
 type EnabledFields = Record<string, boolean>;
+type LazyFlags = { defer?: true; initial?: true };
+
+// Tool entries keep lazy-loading flags beside the override values.
+function lazyFlags(defer: boolean, initial: boolean): LazyFlags {
+  return {
+    ...(defer ? { defer: true } : {}),
+    ...(defer && initial ? { initial: true } : {}),
+  };
+}
 
 export function ToolConfigPanel({
   agentId,
@@ -109,6 +118,9 @@ export function ToolConfigPanel({
     ? getAgentToolOverrides(agentId, toolName)
     : null;
   const overrideSignature = JSON.stringify(currentOverrides ?? null);
+  const deferEnabled = currentOverrides?.defer === true;
+  const lazyId = useId();
+  const initialEnabled = currentOverrides?.initial === true;
 
   const [draftValues, setDraftValues] = useState<DraftValues>({});
   const [enabledFields, setEnabledFields] = useState<EnabledFields>({});
@@ -148,8 +160,8 @@ export function ToolConfigPanel({
   }, [toolName, fields, overrideSignature]);
 
   const isCustomized = useMemo(
-    () => Object.values(enabledFields).some(Boolean),
-    [enabledFields],
+    () => deferEnabled || Object.values(enabledFields).some(Boolean),
+    [deferEnabled, enabledFields],
   );
 
   if (!toolName) {
@@ -160,36 +172,32 @@ export function ToolConfigPanel({
     );
   }
 
-  if (!fields || fields.length === 0) {
-    return (
-      <div className="rounded-lg border border-dashed px-4 py-3 text-sm text-muted-foreground">
-        No per-agent settings available for this tool.
-      </div>
-    );
-  }
-
   const commitOverrides = (
     nextEnabled: EnabledFields,
     nextDraft: DraftValues,
+    flags: LazyFlags = lazyFlags(deferEnabled, initialEnabled),
   ) => {
-    if (!toolName) return;
-
-    const overrides: Record<string, unknown> = {};
-    let hasAny = false;
-    for (const field of fields) {
+    const overrides: Record<string, unknown> = { ...flags };
+    for (const field of fields ?? []) {
       if (nextEnabled[field.name]) {
         overrides[field.name] = normalizePersistedValue(
           field,
           nextDraft[field.name] ?? "",
         );
-        hasAny = true;
       }
     }
-    updateAgentToolOverrides(agentId, toolName, hasAny ? overrides : null);
+    updateAgentToolOverrides(
+      agentId,
+      toolName,
+      Object.keys(overrides).length > 0 ? overrides : null,
+    );
   };
 
+  const setLazyLoading = (defer: boolean, initial: boolean) =>
+    commitOverrides(enabledFields, draftValues, lazyFlags(defer, initial));
+
   const toggleField = (fieldName: string, checked: boolean) => {
-    const field = fields.find((f) => f.name === fieldName);
+    const field = fields?.find((f) => f.name === fieldName);
     if (!field) return;
 
     const nextEnabled = { ...enabledFields, [fieldName]: checked };
@@ -416,8 +424,50 @@ export function ToolConfigPanel({
         {isCustomized && <Badge variant="secondary">Customized</Badge>}
       </div>
 
+      <div className="mb-4 space-y-2 border-b pb-4">
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id={`${lazyId}-defer`}
+            checked={deferEnabled}
+            onCheckedChange={(checked) =>
+              setLazyLoading(checked === true, initialEnabled)
+            }
+          />
+          <Label htmlFor={`${lazyId}-defer`} className="cursor-pointer text-sm">
+            Load lazily
+          </Label>
+        </div>
+        <p className="pl-6 text-xs text-muted-foreground">
+          Hide this tool until the agent loads it for the current session.
+        </p>
+        <div className="flex items-center gap-2 pl-6">
+          <Checkbox
+            id={`${lazyId}-initial`}
+            checked={initialEnabled}
+            disabled={!deferEnabled}
+            onCheckedChange={(checked) =>
+              setLazyLoading(deferEnabled, checked === true)
+            }
+          />
+          <Label
+            htmlFor={`${lazyId}-initial`}
+            className={`cursor-pointer text-sm ${
+              deferEnabled ? "" : "text-muted-foreground"
+            }`}
+          >
+            Load at session start
+          </Label>
+        </div>
+      </div>
+
+      {(fields == null || fields.length === 0) && (
+        <p className="text-sm text-muted-foreground">
+          No per-agent settings available for this tool.
+        </p>
+      )}
+
       <div className="space-y-4">
-        {fields.map((field) => {
+        {(fields ?? []).map((field) => {
           const isEnabled = enabledFields[field.name] ?? false;
 
           return (

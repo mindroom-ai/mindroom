@@ -222,4 +222,87 @@ describe("ToolConfigPanel", () => {
     expect(screen.getByText("Env Passthrough")).toBeInTheDocument();
     expect(screen.queryByText("Timeout")).not.toBeInTheDocument();
   });
+
+  describe("lazy loading", () => {
+    const shellFields = [
+      {
+        name: "extra_env_passthrough",
+        label: "Extra Env Passthrough",
+        type: "string[]" as const,
+      },
+    ];
+
+    it("stores defer beside existing overrides", () => {
+      render(
+        <ToolConfigPanel
+          agentId="openclaw"
+          toolName="shell"
+          overrideFields={shellFields}
+        />,
+      );
+      fireEvent.click(screen.getByRole("checkbox", { name: "Load lazily" }));
+
+      expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
+        "openclaw",
+        "shell",
+        { defer: true, extra_env_passthrough: ["GITEA_TOKEN"] },
+      );
+    });
+
+    it("offers lazy loading for tools without override fields", () => {
+      mockStore.getAgentToolOverrides.mockReturnValue(null);
+      render(<ToolConfigPanel agentId="openclaw" toolName="browser" />);
+
+      expect(
+        screen.getByRole("checkbox", { name: "Load at session start" }),
+      ).toBeDisabled();
+      fireEvent.click(screen.getByRole("checkbox", { name: "Load lazily" }));
+      expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
+        "openclaw",
+        "browser",
+        { defer: true },
+      );
+    });
+
+    it("keeps lazy flags when an override field is cleared", () => {
+      mockStore.getAgentToolOverrides.mockReturnValue({
+        defer: true,
+        initial: true,
+        extra_env_passthrough: ["GITEA_TOKEN"],
+      });
+      render(
+        <ToolConfigPanel
+          agentId="openclaw"
+          toolName="shell"
+          overrideFields={shellFields}
+        />,
+      );
+      fireEvent.click(
+        screen.getByRole("checkbox", {
+          name: "Override Extra Env Passthrough",
+        }),
+      );
+
+      expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
+        "openclaw",
+        "shell",
+        { defer: true, initial: true },
+      );
+    });
+
+    it("clears initial loading together with defer", () => {
+      mockStore.getAgentToolOverrides.mockReturnValue({
+        defer: true,
+        initial: true,
+      });
+      render(<ToolConfigPanel agentId="openclaw" toolName="browser" />);
+      fireEvent.click(screen.getByRole("checkbox", { name: "Load lazily" }));
+
+      expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
+        "openclaw",
+        "browser",
+        null,
+      );
+    });
+  });
 });
