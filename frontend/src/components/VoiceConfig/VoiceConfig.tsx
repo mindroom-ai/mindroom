@@ -81,7 +81,7 @@ function normalizeSTTConfig(
 }
 
 export function VoiceConfig() {
-  const { config, isLoading, saveConfig, updateVoiceConfig } = useConfigStore();
+  const { config, isLoading, saveConfig, updateConfigRoot } = useConfigStore();
   const { toast } = useToast();
 
   // Initialize local state with default values if voice config doesn't exist
@@ -98,7 +98,7 @@ export function VoiceConfig() {
     const newConfig = { ...voiceConfig, ...updates };
     setVoiceConfig(newConfig);
 
-    updateVoiceConfig(newConfig);
+    updateConfigRoot("voice", newConfig);
   };
 
   const handleSTTChange = (updates: Partial<VoiceConfigType["stt"]>) => {
@@ -136,7 +136,7 @@ export function VoiceConfig() {
   const providerLabel = isCompatibleProvider ? "OpenAI-compatible" : "OpenAI";
 
   const handleSave = async () => {
-    updateVoiceConfig({
+    updateConfigRoot("voice", {
       ...voiceConfig,
       stt: normalizeSTTConfig(voiceConfig.stt),
     });

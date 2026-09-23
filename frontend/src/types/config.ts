@@ -344,7 +344,6 @@ export interface Config {
   room_defaults?: RoomDefaultsConfig; // Defaults for managed Matrix rooms
   room_models?: Record<string, string>; // Room-specific model overrides for teams
   teams?: Record<string, TeamConfig>; // Teams configuration
-  tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
 }
 

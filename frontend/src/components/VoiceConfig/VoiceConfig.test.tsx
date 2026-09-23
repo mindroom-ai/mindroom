@@ -21,7 +21,7 @@ vi.mock("@/components/ui/toaster", () => ({
 
 describe("VoiceConfig", () => {
   const mockSaveConfig = vi.fn();
-  const mockUpdateVoiceConfig = vi.fn();
+  const mockUpdateConfigRoot = vi.fn();
   type MockStoreState = {
     config: Config;
     diagnostics: ConfigDiagnostic[];
@@ -29,7 +29,7 @@ describe("VoiceConfig", () => {
     isDirty: boolean;
     isLoading: boolean;
     saveConfig: () => Promise<SaveConfigResult>;
-    updateVoiceConfig: typeof mockUpdateVoiceConfig;
+    updateConfigRoot: typeof mockUpdateConfigRoot;
   };
   type MockedStoreHook = {
     (): MockStoreState;
@@ -67,7 +67,7 @@ describe("VoiceConfig", () => {
       isDirty: false,
       isLoading: false,
       saveConfig: mockSaveConfig,
-      updateVoiceConfig: mockUpdateVoiceConfig,
+      updateConfigRoot: mockUpdateConfigRoot,
     };
     mockedUseConfigStore.mockReturnValue(mockStoreState);
     mockedUseConfigStore.getState = vi.fn(() => mockStoreState);
@@ -127,7 +127,7 @@ describe("VoiceConfig", () => {
     fireEvent.change(hostInput, { target: { value: "" } });
 
     await waitFor(() => {
-      expect(mockUpdateVoiceConfig).toHaveBeenCalledWith({
+      expect(mockUpdateConfigRoot).toHaveBeenCalledWith("voice", {
         enabled: true,
         visible_router_echo: true,
         stt: {
@@ -161,7 +161,7 @@ describe("VoiceConfig", () => {
 
     await waitFor(() => {
       expect(mockSaveConfig).toHaveBeenCalled();
-      expect(mockUpdateVoiceConfig).toHaveBeenLastCalledWith({
+      expect(mockUpdateConfigRoot).toHaveBeenLastCalledWith("voice", {
         enabled: true,
         visible_router_echo: true,
         stt: {
@@ -290,7 +290,7 @@ describe("VoiceConfig", () => {
     fireEvent.click(visibleRouterEchoToggle);
 
     await waitFor(() => {
-      expect(mockUpdateVoiceConfig).toHaveBeenCalledWith({
+      expect(mockUpdateConfigRoot).toHaveBeenCalledWith("voice", {
         enabled: true,
         visible_router_echo: true,
         stt: {

@@ -2105,7 +2105,9 @@ describe("configStore", () => {
       });
 
       await useConfigStore.getState().loadConfig();
-      useConfigStore.getState().updateToolConfig("gmail", { enabled: true });
+      useConfigStore
+        .getState()
+        .updateConfigRoot("router", { model: "default" });
       useConfigStore
         .getState()
         .updateAgent("test", { tools: ["shell", "browser"] });
@@ -2136,9 +2138,7 @@ describe("configStore", () => {
             tools: [{ shell: { sandbox: "tight" } }, "browser"],
           },
         },
-        tools: {
-          gmail: { enabled: true },
-        },
+        router: { model: "default" },
       });
       expect(useConfigStore.getState().config?.agents.test.tools).toEqual([
         "shell",
@@ -2650,7 +2650,7 @@ describe("configStore", () => {
       (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
 
       const savePromise = useConfigStore.getState().saveConfig();
-      useConfigStore.getState().updateVoiceConfig({
+      useConfigStore.getState().updateConfigRoot("voice", {
         enabled: true,
         visible_router_echo: true,
         stt: {
@@ -6070,6 +6070,102 @@ describe("configStore", () => {
       const state = useConfigStore.getState();
       expect(state.syncStatus).toBe("synced");
       expect(state.isDirty).toBe(false);
+    });
+  });
+
+  describe("updateConfigRoot", () => {
+    const baseConfig = {
+      agents: {
+        helper: {
+          display_name: "Helper",
+          role: "Helps",
+          tools: [],
+          skills: [],
+          instructions: [],
+          rooms: ["lobby"],
+        },
+      },
+      models: { default: { provider: "ollama", id: "test-model" } },
+      defaults: {
+        markdown: true,
+        tools: [{ gmail: { label: "support" } }, "file", "scheduler"],
+      },
+      router: { model: "default" },
+      personal_rooms: { agent: "helper", onboarding_rooms: ["lobby"] },
+      memory: {
+        embedder: {
+          provider: "openai",
+          config: { model: "text-embedding-3-small" },
+        },
+      },
+    };
+
+    async function loadBaseConfig() {
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => structuredClone(baseConfig),
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          agent_policies: { helper: makeAgentPolicy("helper") },
+        }),
+      });
+      await useConfigStore.getState().loadConfig();
+    }
+
+    async function savedPayload() {
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+      await useConfigStore.getState().saveConfig();
+      const saveCall = (global.fetch as any).mock.calls.find(
+        ([url]: [string]) => url === "/api/config/save",
+      );
+      return JSON.parse(saveCall[1].body);
+    }
+
+    it("marks the root dirty and saves its new value", async () => {
+      await loadBaseConfig();
+
+      useConfigStore.getState().updateConfigRoot("router", {
+        model: "default",
+        accept_invites: false,
+      });
+
+      const state = useConfigStore.getState();
+      expect(state.isDirty).toBe(true);
+      expect(state.dirtyRoots).toEqual(["router"]);
+      expect((await savedPayload()).router).toEqual({
+        model: "default",
+        accept_invites: false,
+      });
+    });
+
+    it("removes a root when given undefined", async () => {
+      await loadBaseConfig();
+
+      useConfigStore.getState().updateConfigRoot("personal_rooms", undefined);
+
+      expect(await savedPayload()).not.toHaveProperty("personal_rooms");
+    });
+
+    it("keeps structured default tool entries for retained tools", async () => {
+      await loadBaseConfig();
+      const defaults = useConfigStore.getState().config!.defaults;
+      expect(defaults.tools).toEqual(["gmail", "file", "scheduler"]);
+
+      useConfigStore.getState().updateConfigRoot("defaults", {
+        ...defaults,
+        tools: ["gmail", "scheduler", "shell"],
+      });
+
+      expect((await savedPayload()).defaults.tools).toEqual([
+        { gmail: { label: "support" } },
+        "scheduler",
+        "shell",
+      ]);
     });
   });
 

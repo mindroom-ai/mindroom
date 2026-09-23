@@ -13,7 +13,6 @@ describe("ToolConfigPanel", () => {
   const mockStore = {
     getAgentToolOverrides: vi.fn(),
     updateAgentToolOverrides: vi.fn(),
-    config: { tools: {} },
   };
 
   beforeEach(() => {
@@ -21,7 +20,6 @@ describe("ToolConfigPanel", () => {
     mockStore.getAgentToolOverrides.mockReturnValue({
       extra_env_passthrough: ["GITEA_TOKEN"],
     });
-    mockStore.config = { tools: {} };
     vi.mocked(useConfigStore).mockReturnValue(mockStore as never);
   });
 
@@ -164,7 +162,7 @@ describe("ToolConfigPanel", () => {
     const toggle = screen.getByRole("checkbox", { name: "Override Bot Token" });
     expect(toggle).toBeChecked();
 
-    // Uncheck it to revert to global default
+    // Uncheck it to revert to the tool default
     fireEvent.click(toggle);
 
     expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
@@ -176,8 +174,6 @@ describe("ToolConfigPanel", () => {
 
   it("falls back to configFields when no overrideFields are provided", () => {
     mockStore.getAgentToolOverrides.mockReturnValue(null);
-    mockStore.config = { tools: { discord: { bot_token: "global-token" } } };
-    vi.mocked(useConfigStore).mockReturnValue(mockStore as never);
 
     render(
       <ToolConfigPanel
@@ -191,13 +187,14 @@ describe("ToolConfigPanel", () => {
             label: "Bot Token",
             type: "password",
             description: "Discord bot token",
+            default: "default-token",
           },
         ]}
       />,
     );
 
-    // Should show the field with global default indicator (password masked)
-    expect(screen.getByText("Global: ••••••••")).toBeInTheDocument();
+    // Should show the field with its tool default (password masked)
+    expect(screen.getByText("Default: ••••••••")).toBeInTheDocument();
     // Toggle should be unchecked
     const toggle = screen.getByRole("checkbox", { name: "Override Bot Token" });
     expect(toggle).not.toBeChecked();

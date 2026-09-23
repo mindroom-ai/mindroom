@@ -11,9 +11,8 @@ import {
   getDefaultPrivateConfig,
   normalizeAgentUpdates,
   normalizeTeamUpdates,
-  VoiceConfig,
-  RoomDefaultsConfig,
 } from "@/types/config";
+import { setObjectKey } from "@/lib/configSchema";
 import * as configService from "@/services/configService";
 import {
   isConfigConflictDiagnostic,
@@ -41,6 +40,19 @@ export type SaveConfigResult =
   | { status: "error"; message: string; diagnostics: ConfigDiagnostic[] };
 
 type ConfigDiagnosticPath = Array<string | number>;
+
+// Roots the save payload assembles from derived collections instead of copying the draft.
+const COLLECTION_ROOTS = new Set(["agents", "teams", "rooms", "room_models"]);
+
+// Schema-driven editors address roots by name, including roots the typed
+// Config interface does not model.
+function readConfigRoot(config: Config, root: string): unknown {
+  return (config as unknown as Record<string, unknown>)[root];
+}
+
+function withConfigRoot(config: Config, root: string, value: unknown): Config {
+  return setObjectKey(config, root, value) as unknown as Config;
+}
 
 function validationDiagnostics(
   issues: ConfigValidationIssue[],
@@ -624,9 +636,8 @@ interface ConfigState {
   deleteKnowledgeBase: (baseName: string) => void;
   updateModel: (modelId: string, updates: Partial<ModelConfig>) => void;
   deleteModel: (modelId: string) => void;
-  updateToolConfig: (toolId: string, config: unknown) => void;
-  updateVoiceConfig: (voiceConfig: VoiceConfig) => void;
-  updateRoomDefaults: (roomDefaults: RoomDefaultsConfig) => void;
+  /** Replace one top-level config root; undefined removes it. Not for agents or teams. */
+  updateConfigRoot: (root: string, value: unknown) => void;
   getAgentToolOverrides: (
     agentId: string,
     toolName: string,
@@ -1059,17 +1070,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       const updatedConfig: Config = {
         ...baseConfig,
-        ...(dirtyRootSet.has("defaults") ? { defaults: config.defaults } : {}),
-        ...(dirtyRootSet.has("memory") ? { memory: config.memory } : {}),
-        ...(dirtyRootSet.has("knowledge_bases")
-          ? { knowledge_bases: config.knowledge_bases }
-          : {}),
-        ...(dirtyRootSet.has("models") ? { models: config.models } : {}),
-        ...(dirtyRootSet.has("tools") ? { tools: config.tools } : {}),
-        ...(dirtyRootSet.has("voice") ? { voice: config.voice } : {}),
-        ...(dirtyRootSet.has("room_defaults")
-          ? { room_defaults: config.room_defaults }
-          : {}),
+        ...Object.fromEntries(
+          dirtyRoots
+            .filter((root) => !COLLECTION_ROOTS.has(root))
+            .map((root) => [root, readConfigRoot(config, root)]),
+        ),
         ...(dirtyRootSet.has("agents") ? { agents: currentAgentsObject } : {}),
         ...(dirtyRootSet.has("teams") ? { teams: currentTeamsObject } : {}),
         ...(dirtyRootSet.has("rooms") ? { rooms: roomsObject } : {}),
@@ -1094,7 +1099,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             ]),
           );
       const payloadDefaultTools = dirtyRootSet.has("defaults")
-        ? (currentRawDefaultToolEntries ?? updatedConfig.defaults.tools)
+        ? updatedConfig.defaults.tools &&
+          rebuildToolEntries(
+            updatedConfig.defaults.tools,
+            currentRawDefaultToolEntries,
+          )
         : (baseRawDefaultToolEntries ?? updatedConfig.defaults.tools);
       const payload: configService.ConfigSavePayload = {
         ...updatedConfig,
@@ -1130,7 +1139,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             ]),
           );
       const updatedRawDefaultToolEntries = dirtyRootSet.has("defaults")
-        ? currentRawDefaultToolEntries
+        ? payloadDefaultTools
         : baseRawDefaultToolEntries;
       rememberRawToolEntries(
         updatedConfig,
@@ -2143,51 +2152,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     });
   },
 
-  // Update tool configuration
-  updateToolConfig: (toolId, config) => {
+  updateConfigRoot: (root, value) => {
     set((state) => {
       if (!state.config) return state;
-      const nextConfig = {
-        ...state.config,
-        tools: {
-          ...state.config.tools,
-          [toolId]: config,
-        },
-      };
+      const nextConfig = withConfigRoot(state.config, root, value);
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["tools", toolId]]),
-      };
-    });
-  },
-
-  updateVoiceConfig: (voiceConfig) => {
-    set((state) => {
-      if (!state.config) return state;
-      const nextConfig = {
-        ...state.config,
-        voice: voiceConfig,
-      };
-      preserveRawToolEntries(state.config, nextConfig);
-      return {
-        config: nextConfig,
-        ...markDraftDirty(state, {}, [["voice"]]),
-      };
-    });
-  },
-
-  updateRoomDefaults: (roomDefaults) => {
-    set((state) => {
-      if (!state.config) return state;
-      const nextConfig = {
-        ...state.config,
-        room_defaults: roomDefaults,
-      };
-      preserveRawToolEntries(state.config, nextConfig);
-      return {
-        config: nextConfig,
-        ...markDraftDirty(state, {}, [["room_defaults"]]),
+        rooms: deriveRooms(nextConfig, state.agents, state.teams),
+        ...markDraftDirty(state, {}, [[root]]),
       };
     });
   },

@@ -103,16 +103,12 @@ export function ToolConfigPanel({
   overrideFields,
   configFields,
 }: ToolConfigPanelProps) {
-  const { getAgentToolOverrides, updateAgentToolOverrides, config } =
-    useConfigStore();
+  const { getAgentToolOverrides, updateAgentToolOverrides } = useConfigStore();
   const fields = resolveFields(overrideFields, configFields);
   const currentOverrides = toolName
     ? getAgentToolOverrides(agentId, toolName)
     : null;
   const overrideSignature = JSON.stringify(currentOverrides ?? null);
-  const globalToolConfig = toolName
-    ? ((config?.tools?.[toolName] ?? {}) as Record<string, unknown>)
-    : {};
 
   const [draftValues, setDraftValues] = useState<DraftValues>({});
   const [enabledFields, setEnabledFields] = useState<EnabledFields>({});
@@ -142,11 +138,8 @@ export function ToolConfigPanel({
           currentOverrides[field.name],
         );
       } else {
-        // Pre-fill with global value for when user enables the toggle
-        nextDraft[field.name] = coerceEditValue(
-          field,
-          globalToolConfig[field.name],
-        );
+        // Pre-fill with the tool default for when user enables the toggle
+        nextDraft[field.name] = coerceEditValue(field, field.default);
       }
     }
 
@@ -205,10 +198,10 @@ export function ToolConfigPanel({
       checked &&
       (draftValues[fieldName] === "" || draftValues[fieldName] === undefined)
     ) {
-      // Pre-fill from global default when enabling
+      // Pre-fill from the tool default when enabling
       nextDraft = {
         ...draftValues,
-        [fieldName]: coerceEditValue(field, globalToolConfig[fieldName]),
+        [fieldName]: coerceEditValue(field, field.default),
       };
       setDraftValues(nextDraft);
     }
@@ -226,7 +219,7 @@ export function ToolConfigPanel({
     const isEnabled = enabledFields[field.name] ?? false;
     const draftValue =
       draftValues[field.name] ?? (field.type === "string[]" ? [] : "");
-    const globalValue = globalToolConfig[field.name];
+    const defaultValue = field.default;
     const fieldId = `override-${field.name}`;
 
     if (field.type === "string[]") {
@@ -235,18 +228,18 @@ export function ToolConfigPanel({
           ? draftValue
           : []
         : [];
-      const globalItems = Array.isArray(globalValue) ? globalValue : [];
+      const defaultItems = Array.isArray(defaultValue) ? defaultValue : [];
 
       return (
         <div className="space-y-2">
-          {!isEnabled && globalItems.length > 0 && (
+          {!isEnabled && defaultItems.length > 0 && (
             <div className="text-xs text-muted-foreground italic">
-              Global: {globalItems.join(", ")}
+              Default: {defaultItems.join(", ")}
             </div>
           )}
-          {!isEnabled && globalItems.length === 0 && (
+          {!isEnabled && defaultItems.length === 0 && (
             <div className="text-xs text-muted-foreground italic">
-              No global default
+              No default
             </div>
           )}
           {isEnabled && (
@@ -319,9 +312,9 @@ export function ToolConfigPanel({
             </div>
           ) : (
             <div className="text-xs text-muted-foreground italic">
-              {globalValue != null
-                ? `Global: ${globalValue ? "Enabled" : "Disabled"}`
-                : "No global default"}
+              {defaultValue != null
+                ? `Default: ${defaultValue ? "Enabled" : "Disabled"}`
+                : "No default"}
             </div>
           )}
         </div>
@@ -350,12 +343,12 @@ export function ToolConfigPanel({
             </Select>
           ) : (
             <div className="text-xs text-muted-foreground italic">
-              {globalValue != null
-                ? `Global: ${
-                    field.options.find((o) => o.value === String(globalValue))
-                      ?.label ?? String(globalValue)
+              {defaultValue != null
+                ? `Default: ${
+                    field.options.find((o) => o.value === String(defaultValue))
+                      ?.label ?? String(defaultValue)
                   }`
-                : "No global default"}
+                : "No default"}
             </div>
           )}
         </div>
@@ -396,13 +389,13 @@ export function ToolConfigPanel({
           />
         ) : (
           <div className="text-xs text-muted-foreground italic">
-            {globalValue != null
-              ? `Global: ${
+            {defaultValue != null
+              ? `Default: ${
                   field.type === "password"
                     ? "••••••••"
-                    : coerceDisplayValue(field, globalValue)
+                    : coerceDisplayValue(field, defaultValue)
                 }`
-              : "No global default"}
+              : "No default"}
           </div>
         )}
       </div>
@@ -417,7 +410,7 @@ export function ToolConfigPanel({
             {title} — Per-Agent Settings
           </div>
           <div className="text-xs text-muted-foreground">
-            Toggle fields to override the global default for this agent.
+            Toggle fields to override the tool default for this agent.
           </div>
         </div>
         {isCustomized && <Badge variant="secondary">Customized</Badge>}
