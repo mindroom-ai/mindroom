@@ -353,7 +353,6 @@ function modelEditorFields(provider: string): string[] {
 export function ModelConfig() {
   const {
     config,
-    updateModel,
     updateConfigValue,
     deleteModel,
     saveConfig,
@@ -793,9 +792,7 @@ export function ModelConfig() {
       }
     } else {
       delete nextExtraKwargs.base_url;
-      if (nextModelConfig.api != null) {
-        nextModelConfig.api = null;
-      }
+      delete nextModelConfig.api;
     }
     if (Object.keys(nextExtraKwargs).length > 0) {
       nextModelConfig.extra_kwargs = nextExtraKwargs;
@@ -812,7 +809,8 @@ export function ModelConfig() {
       delete nextModelConfig.host;
     }
 
-    updateModel(targetModelName, nextModelConfig);
+    // Replace the model so fields the row cleared are removed.
+    updateConfigValue(["models", targetModelName], nextModelConfig);
     if (renamed) {
       deleteModel(originalModelName);
     }
@@ -912,7 +910,7 @@ export function ModelConfig() {
       nextModelConfig.context_window = normalizedContextWindow;
     }
 
-    updateModel(modelName, nextModelConfig);
+    updateConfigValue(["models", modelName], nextModelConfig);
 
     await fetchAllKeyStatuses();
     setIsSavingNewRow(false);
@@ -1761,7 +1759,7 @@ export function ModelConfig() {
               path={["models", editingRowId]}
               exclude={modelEditorFields(rowDraft.provider)}
               onFieldChange={(key, next) =>
-                updateModel(editingRowId, { [key]: next })
+                updateConfigValue(["models", editingRowId, key], next)
               }
             />
           )}

@@ -71,7 +71,7 @@ describe("ModelConfig", () => {
       defaults: { markdown: true },
       router: { model: "default" },
     },
-    updateModel: vi.fn(),
+    updateConfigValue: vi.fn(),
     deleteModel: vi.fn(),
     saveConfig: vi.fn().mockResolvedValue({ status: "saved" }),
   };
@@ -177,8 +177,8 @@ describe("ModelConfig", () => {
     fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(mockStore.updateModel).toHaveBeenCalledWith(
-        "anthropic-fast",
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "anthropic-fast"],
         expect.objectContaining({
           provider: "anthropic",
           id: "claude-sonnet-5",
@@ -286,8 +286,8 @@ describe("ModelConfig", () => {
     fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(mockStore.updateModel).toHaveBeenCalledWith(
-        "openai_local",
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "openai_local"],
         expect.objectContaining({
           provider: "openai",
           id: "gpt-5.6-terra",
@@ -310,12 +310,14 @@ describe("ModelConfig", () => {
     fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(mockStore.updateModel).toHaveBeenCalledWith("openai_local", {
-        provider: "anthropic",
-        id: "gpt-5.6-terra",
-        api: null,
-        context_window: 16384,
-      });
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "openai_local"],
+        {
+          provider: "anthropic",
+          id: "gpt-5.6-terra",
+          context_window: 16384,
+        },
+      );
     });
   });
 
@@ -333,8 +335,8 @@ describe("ModelConfig", () => {
     fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(mockStore.updateModel).toHaveBeenCalledWith(
-        "openrouter",
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "openrouter"],
         expect.objectContaining({ provider: "openai" }),
       );
     });
@@ -447,11 +449,14 @@ describe("ModelConfig", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
 
     await waitFor(() => {
-      expect(mockStore.updateModel).toHaveBeenCalledWith("new-model", {
-        provider: "openrouter",
-        id: "openai/gpt-5.6-terra",
-        context_window: 200000,
-      });
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "new-model"],
+        {
+          provider: "openrouter",
+          id: "openai/gpt-5.6-terra",
+          context_window: 200000,
+        },
+      );
     });
   });
 
@@ -478,10 +483,13 @@ describe("ModelConfig", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
 
     await waitFor(() => {
-      expect(mockStore.updateModel).toHaveBeenCalledWith("openai_default", {
-        provider: "openai",
-        id: "gpt-5.6-terra",
-      });
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "openai_default"],
+        {
+          provider: "openai",
+          id: "gpt-5.6-terra",
+        },
+      );
     });
   });
 
@@ -549,11 +557,14 @@ describe("ModelConfig", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
 
     await waitFor(() => {
-      expect(mockStore.updateModel).toHaveBeenCalledWith("openai_compat", {
-        provider: "openai",
-        id: "gpt-5.6-terra",
-        extra_kwargs: { base_url: "http://localhost:9292/v1" },
-      });
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "openai_compat"],
+        {
+          provider: "openai",
+          id: "gpt-5.6-terra",
+          extra_kwargs: { base_url: "http://localhost:9292/v1" },
+        },
+      );
     });
   });
 
@@ -713,9 +724,10 @@ describe("ModelConfig", () => {
       target: { value: "http://ollama:11434" },
     });
 
-    expect(mockStore.updateModel).toHaveBeenLastCalledWith("default", {
-      host: "http://ollama:11434",
-    });
+    expect(mockStore.updateConfigValue).toHaveBeenLastCalledWith(
+      ["models", "default", "host"],
+      "http://ollama:11434",
+    );
   });
 
   it("hides More settings fields that saving the row drops for its provider", () => {
@@ -797,8 +809,8 @@ describe("ModelConfig", () => {
       fireEvent.click(within(row).getByRole("button", { name: "Save" }));
 
       await waitFor(() => {
-        expect(mockStore.updateModel).toHaveBeenCalledWith(
-          "openai_local",
+        expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+          ["models", "openai_local"],
           expect.objectContaining({
             extra_kwargs: {
               base_url: "http://proxy:8080/v1",

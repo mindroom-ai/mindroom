@@ -81,9 +81,10 @@ describe("configStore", () => {
           : useConfigStore.getState().saveRecoveryConfigSource();
       const edit = () =>
         mode === "structured"
-          ? useConfigStore
-              .getState()
-              .updateModel("default", { provider: "test", id: "newer-edit" })
+          ? useConfigStore.getState().updateConfigValue(["models", "default"], {
+              provider: "test",
+              id: "newer-edit",
+            })
           : useConfigStore
               .getState()
               .updateRecoveryConfigSource("agents: {}\n# newer edit\n");
@@ -6398,7 +6399,9 @@ describe("configStore", () => {
         } as never);
         useConfigStore
           .getState()
-          .updateModel("default", { extra_kwargs: { temperature: 0.2 } });
+          .updateConfigValue(["models", "default", "extra_kwargs"], {
+            temperature: 0.2,
+          });
 
         expect(remainingLocs()).toEqual([
           ["agents", "helper", "participation", "debounce_seconds"],
@@ -6450,6 +6453,31 @@ describe("configStore", () => {
       expect(config?.memory).toEqual({ embedder: { provider: "openai" } });
       // The loaded config declares dev, so it stays even without settings.
       expect(config?.rooms).toEqual({ dev: {} });
+    });
+
+    it("replaces the value at its path, dropping keys it omits", async () => {
+      await loadBaseConfig({
+        ...baseConfig,
+        models: {
+          default: {
+            provider: "openai",
+            id: "gpt",
+            display_name: "Local",
+            context_window: 16384,
+            extra_kwargs: { base_url: "http://localhost:9292/v1" },
+          },
+        },
+      });
+
+      useConfigStore.getState().updateConfigValue(["models", "default"], {
+        provider: "anthropic",
+        id: "claude-sonnet-5",
+      });
+
+      expect((await savedPayload()).models.default).toEqual({
+        provider: "anthropic",
+        id: "claude-sonnet-5",
+      });
     });
 
     it("removes a root when given undefined", async () => {

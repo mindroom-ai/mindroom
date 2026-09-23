@@ -6,7 +6,6 @@ import {
   Team,
   Room,
   RoomConfig,
-  ModelConfig,
   KnowledgeBaseConfig,
   getDefaultPrivateConfig,
   normalizeAgentUpdates,
@@ -709,7 +708,6 @@ interface ConfigState {
     baseConfig: KnowledgeBaseConfig,
   ) => void;
   deleteKnowledgeBase: (baseName: string) => void;
-  updateModel: (modelId: string, updates: Partial<ModelConfig>) => void;
   deleteModel: (modelId: string) => void;
   /** Set one config value by key path; undefined removes it. Not for agents or teams. */
   updateConfigValue: (path: ConfigPath, value: unknown) => void;
@@ -2181,31 +2179,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           ["knowledge_bases", baseName],
           ["agents"],
         ]),
-      };
-    });
-  },
-
-  // Update a model configuration
-  updateModel: (modelId, updates) => {
-    set((state) => {
-      if (!state.config) return state;
-      const currentModel = state.config.models[modelId];
-      const nextModel = { ...currentModel, ...updates };
-      const nextConfig = {
-        ...state.config,
-        models: { ...state.config.models, [modelId]: nextModel },
-      };
-      preserveRawToolEntries(state.config, nextConfig);
-      return {
-        config: nextConfig,
-        ...markDraftDirty(state, {}, [["models", modelId]], (issue) =>
-          issueValueChanged(
-            issue,
-            ["models", modelId],
-            currentModel,
-            nextModel,
-          ),
-        ),
       };
     });
   },
