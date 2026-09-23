@@ -20,6 +20,84 @@ from tests.test_background_subagents import _owner
 
 
 @pytest.mark.asyncio
+async def test_final_shutdown_waits_for_receipt_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A replacement owner must never recover before the old owner's last receipt lands."""
+    runtime = ToolJobRuntime(tmp_path)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved answer")
+
+    await runtime.start(JobSpec("receipt", "tool", 0), owner=_owner(), operation=operation)
+    waited = await runtime.wait("receipt", owner=_owner(), depth=0)
+    await runtime.quiesce()
+    original_writer = runtime_module.write_json_file_durable
+    writing, closing = asyncio.Event(), asyncio.Event()
+    release_writer = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def blocked_writer(path: Path, payload: object, *, strict_atomic_replace: bool) -> None:
+        loop.call_soon_threadsafe(writing.set)
+        assert release_writer.wait(30)
+        original_writer(path, payload, strict_atomic_replace=strict_atomic_replace)
+
+    async def close() -> None:
+        closing.set()
+        await runtime.shutdown()
+
+    monkeypatch.setattr(runtime_module, "write_json_file_durable", blocked_writer)
+    acknowledging = asyncio.create_task(runtime.acknowledge_wait("receipt", waited.token))
+    await asyncio.wait_for(writing.wait(), 30)
+    shutdown = asyncio.create_task(close())
+    try:
+        await closing.wait()
+        with pytest.raises(BlockingIOError):
+            ToolJobRuntime(tmp_path)
+        assert not shutdown.done()
+    finally:
+        release_writer.set()
+        await asyncio.gather(acknowledging, shutdown)
+    restored = ToolJobRuntime(tmp_path)
+    try:
+        await restored.recover()
+        assert await restored.pending_outcomes() == []
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_quiescence_fences_control_but_retains_receipts_and_storage(tmp_path: Path) -> None:
+    """No new execution or cleanup races a shutdown drain; finalizers may still acknowledge."""
+    runtime = ToolJobRuntime(tmp_path)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval", "approval required")
+
+    try:
+        job = await runtime.start(JobSpec("paused", "tool", 0), owner=_owner(), operation=operation)
+        waited = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        await runtime.quiesce()
+        with pytest.raises(BlockingIOError):
+            ToolJobRuntime(tmp_path)
+        with pytest.raises(runtime_module.JobAccessError, match="shutting down"):
+            await runtime.start(JobSpec("new", "tool", 0), owner=_owner(), operation=operation)
+        with pytest.raises(runtime_module.JobAccessError, match="shutting down"):
+            await runtime.continue_job("paused", owner=_owner(), depth=0, expected_generation=0, operation=operation)
+        with pytest.raises(runtime_module.JobAccessError, match="shutting down"):
+            await runtime.cancel("paused", owner=_owner(), depth=0)
+        await runtime.acknowledge_wait(job.job_id, waited.token)
+        assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).wait_acknowledged
+    finally:
+        await runtime.shutdown()
+    restored = ToolJobRuntime(tmp_path)
+    try:
+        await restored.recover()
+        assert await restored.pending_outcomes() == []
+        assert (await restored.lookup(job.job_id, owner=_owner(), depth=0)).status == "awaiting_approval"
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("acknowledged", [False, True])
 async def test_consumed_payload_is_loaded_on_demand_without_startup_rewrites(
     tmp_path: Path,

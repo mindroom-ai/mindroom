@@ -588,6 +588,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
                 assert requirement.tool_execution.tool_args == {"wait_timeout": None}
                 requirement.confirm()
             response = await agent.acontinue_run(run_response=response)
+        await runtime.quiesce()
         return response
 
     try:
@@ -609,6 +610,8 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
             saved = await restored.lookup(jobs[0].job_id, owner=owner, depth=0)
             assert saved.adapter["source_event_id"] == "$original-request"
             assert saved.owner == owner
+            assert saved.wait_acknowledged is not save_fails
+            assert len(await restored.pending_outcomes()) == int(save_fails)
             assert decode_tool_result(saved.adapter["arguments"]) == {"wait_timeout": None}
         finally:
             await restored.shutdown()

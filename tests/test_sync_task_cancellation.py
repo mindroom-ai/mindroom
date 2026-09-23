@@ -81,6 +81,7 @@ from mindroom.runtime_shutdown import (
     ShutdownBudget,
     shutdown_intent_for_entity,
 )
+from mindroom.tool_jobs.runtime import ToolJobRuntime
 from tests.bot_helpers import make_test_agent_bot
 
 if TYPE_CHECKING:
@@ -4195,18 +4196,23 @@ async def test_orchestrator_deferred_stop_keeps_journal_open_for_resistant_owner
         )
         orchestrator.agent_bots = {"agent1": bot}
         orchestrator._open_journal = journal
+        jobs = orchestrator._tool_job_runtime.runtime
         stopping = asyncio.create_task(orchestrator.stop())
         await finalizer_entered.wait()
-        await asyncio.sleep(0.02)
 
         assert not stopping.done()
         journal.close.assert_not_awaited()
+        assert orchestrator._tool_job_runtime.runtime is jobs
+        with pytest.raises(BlockingIOError):
+            ToolJobRuntime(orchestrator.storage_path)
 
         release_owner.set()
         await stopping
 
     journal.close.assert_awaited_once()
     assert orchestrator._open_journal is None
+    restarted = ToolJobRuntime(orchestrator.storage_path)
+    await restarted.shutdown()
 
 
 @pytest.mark.asyncio
@@ -4306,6 +4312,7 @@ async def test_orchestrator_retains_shared_journal_for_generic_failure_until_res
         )
         orchestrator.agent_bots = {"agent1": bot}
         orchestrator._open_journal = journal
+        jobs = orchestrator._tool_job_runtime.runtime
 
         with pytest.raises(RuntimeError, match="preparation failed before response drain") as raised:
             await orchestrator.stop()
@@ -4313,11 +4320,16 @@ async def test_orchestrator_retains_shared_journal_for_generic_failure_until_res
         assert raised.value is preparation_failure
         journal.close.assert_not_awaited()
         assert orchestrator._open_journal is journal
+        assert orchestrator._tool_job_runtime.runtime is jobs
+        with pytest.raises(BlockingIOError):
+            ToolJobRuntime(orchestrator.storage_path)
 
         await orchestrator.stop()
 
     journal.close.assert_awaited_once()
     assert orchestrator._open_journal is None
+    restarted = ToolJobRuntime(orchestrator.storage_path)
+    await restarted.shutdown()
 
 
 @pytest.mark.asyncio

@@ -2482,7 +2482,7 @@ class _MultiAgentOrchestrator:
         except Exception:
             logger.exception("Background script runtime shutdown failed")
         try:
-            await _run_shutdown_step("tool_job_runtime", self._tool_job_runtime.stop())
+            await _run_shutdown_step("tool_job_execution", self._tool_job_runtime.quiesce())
         except Exception:
             logger.exception("Background tool job runtime shutdown failed")
         await _run_shutdown_step("approval_runtime", shutdown_approval_runtime())
@@ -2575,6 +2575,11 @@ class _MultiAgentOrchestrator:
         # Last, because every bot borrows it: closing it earlier would pull the
         # store out from under a bot still draining its outbox.
         journal_failures: list[BaseException] = []
+        if pending_response_owner_count == 0 and not callback_cleanup_pending:
+            try:
+                await _run_shutdown_step("tool_job_runtime", self._tool_job_runtime.stop())
+            except Exception:
+                logger.exception("Background tool job runtime shutdown failed")
         if self._open_journal is not None and pending_response_owner_count == 0 and not callback_cleanup_pending:
             journal, self._open_journal = self._open_journal, None
             close_results, cancellation = await _run_shutdown_step(

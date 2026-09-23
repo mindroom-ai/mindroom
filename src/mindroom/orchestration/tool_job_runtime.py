@@ -244,18 +244,26 @@ class ToolJobRuntimeCoordinator:
             self._task = asyncio.create_task(self._run(), name="tool_job_completion_worker")
         self.runtime.changed.set()
 
-    async def stop(self) -> None:
-        """Withdraw admission and stop wakeups before cancelling owned child work."""
-        register_background_runtime(self.runtime_paths, None)
-        set_execution_authorizer(self.runtime_paths, None)
+    async def quiesce(self) -> None:
+        """Stop wakeups and execution while live response owners finish their receipts."""
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        if self._runtime is not None:
+            await self._runtime.quiesce()
+
+    async def stop(self) -> None:
+        """Release the service after response finalization has stopped using its receipts."""
         try:
-            if self._runtime is not None:
-                await self._runtime.shutdown()
+            try:
+                await self.quiesce()
+            finally:
+                if self._runtime is not None:
+                    await self._runtime.shutdown()
         finally:
+            register_background_runtime(self.runtime_paths, None)
+            set_execution_authorizer(self.runtime_paths, None)
             self._runtime = None
             release_background_tool_jobs(self.runtime_paths)
             clear_parked_work(self.runtime_paths)

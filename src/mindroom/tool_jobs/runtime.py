@@ -256,6 +256,12 @@ class ToolJobRuntime:
             msg = "Tool job runtime is closed."
             raise JobAccessError(msg)
 
+    def _ensure_accepting(self) -> None:
+        self._ensure_open()
+        if self._shutdown_task is not None:
+            msg = "Tool job runtime is shutting down."
+            raise JobAccessError(msg)
+
     def has_job(self, job_id: str) -> bool:
         """Recognize accepted ownership; access still requires an authorized lookup."""
         return job_id in self._entries
@@ -364,7 +370,7 @@ class ToolJobRuntime:
     ) -> BackgroundJob:
         """Durably accept exact operation ownership before spawning execution."""
         async with self._lock:
-            self._ensure_open()
+            self._ensure_accepting()
             if reattach and spec.job_id in self._entries:
                 existing = self._entry(spec.job_id, owner, spec.depth)
                 if existing.job.result_expired:
@@ -478,7 +484,7 @@ class ToolJobRuntime:
                 if entry.stopping:
                     entry.stopped_outcome = outcome
                 elif entry.job.status not in _TERMINAL:
-                    entry.job.status = "interrupted" if self._closed else "cancelled"
+                    entry.job.status = "interrupted" if self._shutdown_task is not None else "cancelled"
                     await self._persist(entry)
             raise
         finally:
@@ -649,6 +655,7 @@ class ToolJobRuntime:
     ) -> BackgroundJob:
         """Request cancellation; retain ownership until execution and cleanup have settled."""
         async with self._lock:
+            self._ensure_accepting()
             entry = self._entry(job_id, owner, depth)
             task = self._cancellation_task(entry)
         if await_completion:
@@ -677,7 +684,7 @@ class ToolJobRuntime:
         """Persist explicit Stop independently of result consumption, then request owned cleanup."""
         cancellations = []
         async with self._lock:
-            self._ensure_open()
+            self._ensure_accepting()
             for entry in self._entries.values():
                 if not await matches(await self._snapshot(entry, include_result=False)):
                     continue
@@ -717,7 +724,7 @@ class ToolJobRuntime:
     ) -> BackgroundJob | None:
         """Settle retained adapter ownership during internal cleanup after authority revocation."""
         async with self._lock:
-            if self._closed:
+            if self._closed or self._shutdown_task is not None:
                 return None
             entry = self._entries.get(job_id)
             if entry is None or not matches(await self._snapshot(entry)):
@@ -728,7 +735,7 @@ class ToolJobRuntime:
     async def cancel_revoked(self) -> None:
         """Withdraw execution when current grants disappear, retaining owned cleanup."""
         async with self._lock:
-            self._ensure_open()
+            self._ensure_accepting()
             cancellations = [
                 (entry, self._cancellation_task(entry))
                 for entry in self._entries.values()
@@ -842,6 +849,7 @@ class ToolJobRuntime:
     ) -> BackgroundJob:
         """Continue the same job after its native approval has been resolved."""
         async with self._lock:
+            self._ensure_accepting()
             entry = self._entry(job_id, owner, depth)
             if (
                 entry.job.status != "awaiting_approval"
@@ -1002,39 +1010,52 @@ class ToolJobRuntime:
             compact["child"] = {**compact["child"], "task": ""}
         return compact
 
-    async def shutdown(self) -> None:
-        """Settle owned work as interrupted and release the process liveness lease."""
+    async def quiesce(self) -> None:
+        """Drain owned execution while response finalizers retain result receipt access."""
         if self._shutdown_task is None:
-            self._closed = True
             self.changed.set()
             self._shutdown_task = asyncio.create_task(self._shutdown())
         await wait_for_future_until_complete(self._shutdown_task)
+
+    async def shutdown(self) -> None:
+        """Close storage after execution and all remaining response owners have drained."""
+        try:
+            await self.quiesce()
+        finally:
+            await run_coroutine_until_complete(self._close())
+
+    async def _close(self) -> None:
+        """Serialize lease release after every admitted receipt write."""
+        async with self._lock:
+            self._closed = True
+            self.changed.set()
+            self._lease.close()
 
     async def _shutdown(self) -> None:  # noqa: C901 - Drain execution and retry unsaved outcomes before releasing storage.
         tasks = []
         cancellations = []
         failures = []
-        try:
-            async with self._lock:
-                for entry in self._entries.values():
-                    if entry.job.status not in _READY:
-                        entry.stopping = True
-                        entry.control.cancel()
-                    self._release_control(entry)
-                    cancellation = entry.cancel_task
-                    cancellation_is_live = cancellation is not None and not cancellation.done()
-                    if cancellation_is_live:
-                        cancellations.append(cancellation)
-                    task = entry.task
-                    if task is not None and not task.done():
-                        if not cancellation_is_live:
-                            task.cancel()
-                        tasks.append(task)
-            await asyncio.gather(*tasks, *cancellations, return_exceptions=True)
+        async with self._lock:
             for entry in self._entries.values():
-                settling = entry.job.status not in _READY
+                if entry.job.status not in _READY:
+                    entry.stopping = True
+                    entry.control.cancel()
+                self._release_control(entry)
+                cancellation = entry.cancel_task
+                cancellation_is_live = cancellation is not None and not cancellation.done()
+                if cancellation_is_live:
+                    cancellations.append(cancellation)
+                task = entry.task
+                if task is not None and not task.done():
+                    if not cancellation_is_live:
+                        task.cancel()
+                    tasks.append(task)
+        await asyncio.gather(*tasks, *cancellations, return_exceptions=True)
+        for entry in self._entries.values():
+            settling = entry.job.status not in _READY
+            outcome = await self._cleanup(entry) if settling else None
+            async with self._lock:
                 if settling:
-                    outcome = await self._cleanup(entry)
                     self._settle_stopped(
                         entry,
                         status="interrupted",
@@ -1046,8 +1067,6 @@ class ToolJobRuntime:
                         await self._persist(entry, update_timestamp=settling)
                 except Exception as error:
                     failures.append(error)
-        finally:
-            self._lease.close()
         if failures:
             msg = "Tool job shutdown persistence failed"
             raise ExceptionGroup(msg, failures)
