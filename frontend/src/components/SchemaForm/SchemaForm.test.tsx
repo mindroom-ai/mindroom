@@ -149,6 +149,10 @@ const ROOT: JsonSchema = {
           default: null,
           "x-mindroom": { reference: "model", clears_inherited: true },
         },
+        pkce_code_challenge_method: {
+          anyOf: [{ const: "S256", type: "string" }, { type: "null" }],
+          default: "S256",
+        },
         temperature: {
           anyOf: [{ type: "number" }, { type: "null" }],
           default: 0.2,
@@ -560,6 +564,21 @@ describe("SchemaFields", () => {
     );
     // A realtime model ID is not a configured model name.
     expect(lastValue()).toEqual({ call_profile: { backend: "cascaded" } });
+  });
+
+  it("edits a nullable constant as a choice of it or none", () => {
+    const { lastValue } = renderFixture();
+    const select = screen.getByRole("combobox", {
+      name: "PKCE code challenge method",
+    });
+    expect(
+      within(select)
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["Default (S256)", "None", "S256"]);
+
+    fireEvent.change(select, { target: { value: "__none__" } });
+    expect(lastValue()).toEqual({ pkce_code_challenge_method: null });
   });
 
   it("prompts for a missing required choice instead of preselecting one", () => {

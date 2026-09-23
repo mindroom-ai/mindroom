@@ -125,6 +125,7 @@ export function ToolConfigPanel({
   // Lazy loading is per agent; defaults.tools rejects defer and initial.
   const lazyLoading = target.kind === "agent";
   const fields = resolveFields(overrideFields, configFields);
+  const hasFields = fields != null && fields.length > 0;
   const currentOverrides =
     toolName == null
       ? null
@@ -433,11 +434,13 @@ export function ToolConfigPanel({
               ? "Per-Agent Settings"
               : "Default Settings"}
           </div>
-          <div className="text-xs text-muted-foreground">
-            {target.kind === "agent"
-              ? "Toggle fields to override the tool default for this agent."
-              : "Toggle fields to override the tool default for every agent that includes default tools."}
-          </div>
+          {hasFields && (
+            <div className="text-xs text-muted-foreground">
+              {target.kind === "agent"
+                ? "Toggle fields to override the tool default for this agent."
+                : "Toggle fields to override the tool default for every agent that includes default tools."}
+            </div>
+          )}
         </div>
         {isCustomized && <Badge variant="secondary">Customized</Badge>}
       </div>
@@ -483,9 +486,11 @@ export function ToolConfigPanel({
         </div>
       )}
 
-      {(fields == null || fields.length === 0) && (
+      {!hasFields && (
         <p className="text-sm text-muted-foreground">
-          No settings available for this tool.
+          {lazyLoading
+            ? "This tool has no other settings."
+            : "No settings available for this tool."}
         </p>
       )}
 

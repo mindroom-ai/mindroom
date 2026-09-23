@@ -78,19 +78,13 @@ export interface SchemaNode {
 const ACRONYMS: Record<string, string> = {
   api: "API",
   cwd: "CWD",
-  http: "HTTP",
   id: "ID",
   lfs: "LFS",
   livekit: "LiveKit",
   llm: "LLM",
   mcp: "MCP",
   mindroom: "MindRoom",
-  oauth: "OAuth",
-  openai: "OpenAI",
   pkce: "PKCE",
-  s256: "S256",
-  sqlite: "SQLite",
-  sse: "SSE",
   stt: "STT",
   ttl: "TTL",
   tts: "TTS",
@@ -207,7 +201,13 @@ export function classifySchemaNode(
     return node;
   }
   if (Object.prototype.hasOwnProperty.call(resolved, "const")) {
-    node.kind = "const";
+    // A nullable constant, such as a PKCE method, is a choice of it or null.
+    if (node.nullable) {
+      node.kind = "enum";
+      node.options = [resolved.const];
+    } else {
+      node.kind = "const";
+    }
     return node;
   }
   if (resolved.enum != null) {

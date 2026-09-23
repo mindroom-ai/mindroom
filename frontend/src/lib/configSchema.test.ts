@@ -157,6 +157,20 @@ describe("classifySchemaNode", () => {
     expect(nullableEnum.kind).toBe("enum");
     expect(nullableEnum.nullable).toBe(true);
 
+    // A nullable constant is a one-option choice, unlike a union tag.
+    const nullableConst = classifySchemaNode(
+      {
+        anyOf: [{ const: "S256", type: "string" }, { type: "null" }],
+        default: "S256",
+      },
+      ROOT,
+    );
+    expect(nullableConst.kind).toBe("enum");
+    expect(nullableConst.options).toEqual(["S256"]);
+    expect(
+      classifySchemaNode({ const: "llm", type: "string" }, ROOT).kind,
+    ).toBe("const");
+
     const nullableList = classifySchemaNode(
       {
         anyOf: [{ type: "array", items: { type: "string" } }, { type: "null" }],
@@ -283,7 +297,9 @@ describe("fieldLabel", () => {
     expect(fieldLabel("database_url_env")).toBe("Database URL env");
     expect(fieldLabel("mcp_servers")).toBe("MCP servers");
     expect(fieldLabel("mindroom_user")).toBe("MindRoom user");
-    expect(fieldLabel("streamable_http")).toBe("Streamable HTTP");
+    expect(fieldLabel("pkce_code_challenge_method")).toBe(
+      "PKCE code challenge method",
+    );
   });
 });
 

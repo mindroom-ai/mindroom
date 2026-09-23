@@ -38,7 +38,7 @@ describe("ToolConfigPanel", () => {
     ).toBeInTheDocument();
   });
 
-  it('renders "no settings available" when tool has neither override fields nor config fields', () => {
+  it("offers only lazy loading when a tool has neither override fields nor config fields", () => {
     mockStore.getAgentToolOverrides.mockReturnValue(null);
     render(
       <ToolConfigPanel
@@ -50,9 +50,11 @@ describe("ToolConfigPanel", () => {
       />,
     );
 
+    expect(screen.getByLabelText("Load lazily")).toBeInTheDocument();
     expect(
-      screen.getByText("No settings available for this tool."),
+      screen.getByText("This tool has no other settings."),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/Toggle fields/)).not.toBeInTheDocument();
   });
 
   it("renders override fields with toggle controls for string[] fields", () => {
