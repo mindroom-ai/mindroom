@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -10,28 +11,37 @@ import pytest
 from agno.agent import Agent
 from agno.models.response import ModelResponse
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import create_session_storage
 from mindroom.custom_tools.job import JobTools
-from mindroom.event_journal import DeliveryStage
+from mindroom.delegation.execution import drive_delegations
+from mindroom.delegation.state import DelegationChild
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
+from mindroom.handled_turns import TurnRecordCodec
+from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.completion import completion_event
 from mindroom.tool_jobs.consumption import set_consumption_storage
+from mindroom.tool_jobs.disabled import event_is_parked
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
+from mindroom.turn_record import TurnRecord
 from tests.conftest import unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
 from tests.response_runner_helpers import _bot, _target
-from tests.tool_job_helpers import start_job, tool_job_runtime
+from tests.tool_job_helpers import start_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from agno.db.base import BaseDb
 
     from mindroom.bot import AgentBot
+    from mindroom.tool_jobs.runtime import ToolJobRuntime
 
 
 def _reader(bot: AgentBot, owner: ToolExecutionIdentity, storage: BaseDb, answer: str) -> Agent:
@@ -61,10 +71,23 @@ async def _read_saved_job(bot: AgentBot, owner: ToolExecutionIdentity, source: s
         membership_turn_id=source,
     )
 
+    async def unexpected_child(_child: DelegationChild, **_kwargs: object) -> str:
+        msg = "Reading a saved result must not replay its child."
+        raise AssertionError(msg)
+
     @owned_tool_execution
     async def run() -> None:
         set_consumption_storage(storage_factory)
         result = await agent.arun("Read the result.", session_id=owner.session_id, user_id=owner.requester_id)
+        result = await drive_delegations(
+            agent,
+            result,
+            agent_name="general",
+            run_child=unexpected_child,
+            config=bot.config,
+            runtime_paths=bot.runtime_paths,
+            execution_identity=owner,
+        )
         assert result.tools[0].result == "saved output"
 
     try:
@@ -137,12 +160,41 @@ def _completion_bot(tmp_path: Path) -> tuple[AgentBot, ToolExecutionIdentity]:
     return bot, owner
 
 
+async def _start(
+    runtime: ToolJobRuntime,
+    owner: ToolExecutionIdentity,
+    operation: Callable[[], Awaitable[BackgroundOutcome]],
+    *,
+    native: bool,
+) -> None:
+    """Accept generic work or a native child with its exact execution scope."""
+    if not native:
+        await start_job(runtime, "recover-me", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        return
+    child = DelegationChild(
+        delegation_id="recover-me",
+        parent_tool_call_id="launch",
+        caller_agent_name="general",
+        child_agent_name="general",
+        task="Produce the saved result.",
+        session_id="child-session",
+        run_id="child-run",
+        model_name="default",
+        depth=1,
+        execution_identity=serialize_tool_execution_identity(replace(owner, session_id="child-session")),
+        status="completed",
+    )
+    await start_delegation_job(runtime, child, owner=owner, operation=operation)
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("visible", [False, True])
 @pytest.mark.parametrize("read_state", ["own", "reread", "other", "revoked", "settled", "stopped"])
 async def test_consumed_completion_recovers_only_its_unfinished_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    native: bool,
     visible: bool,
     read_state: str,
 ) -> None:
@@ -162,7 +214,7 @@ async def test_consumed_completion_recovers_only_its_unfinished_response(
         return True
 
     try:
-        await start_job(runtime, "recover-me", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        await _start(runtime, owner, operation, native=native)
         waited = await runtime.wait("recover-me", owner=owner, depth=0)
         await runtime.release_wait("recover-me", waited.claim)
         event = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
@@ -202,3 +254,70 @@ async def test_consumed_completion_recovers_only_its_unfinished_response(
         assert executions == ["executed"]
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("grouped", [False, True])
+async def test_disabled_startup_parks_consuming_followup_and_its_group(
+    tmp_path: Path,
+    grouped: bool,
+) -> None:
+    """Disabling jobs cannot replay a pending consumer through ordinary execution."""
+    bot, owner = _completion_bot(tmp_path)
+    runtime = tool_job_runtime(bot.runtime_paths.storage_root)
+    pin_background_tool_jobs(bot.config, bot.runtime_paths)
+    register_background_runtime(bot.runtime_paths, runtime)
+    coordinator = ToolJobRuntimeCoordinator(
+        bot.runtime_paths,
+        lambda: bot.config,
+        lambda _: bot,
+        AgentReplyMembershipIndex(),
+    )
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved output")
+
+    store = bot.journal_principal()
+    try:
+        await start_job(
+            runtime,
+            "recover-me",
+            tool_name="tool",
+            depth=0,
+            source_event_id="$original",
+            adapter={},
+            owner=owner,
+            operation=operation,
+        )
+        for source in ("$original", "$followup", "$grouped", "$unrelated"):
+            await store.admit(
+                InboundEvent(
+                    source,
+                    owner.room_id,
+                    owner.resolved_thread_id,
+                    EventKind.MESSAGE,
+                    EventClass.ACTIONABLE,
+                    owner.requester_id,
+                    1,
+                    {"content": {"body": "Read the earlier result."}},
+                ),
+            )
+        if grouped:
+            record = TurnRecord.create(("$followup", "$grouped"), anchor_event_id="$followup", completed=False)
+            await bot._journal_store.turn_records("general").upsert(
+                index_event_ids=record.indexed_event_ids,
+                anchor_event_id="$followup",
+                record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
+            )
+        await _read_saved_job(bot, owner, "$followup")
+        await runtime.shutdown()
+        bot.config.background_tool_jobs.enabled = False
+        await coordinator.initialize(bot._journal_store)
+        for source, parked in (("$original", True), ("$followup", True), ("$grouped", grouped), ("$unrelated", False)):
+            event = await store.load_event(source)
+            assert event is not None
+            assert event_is_parked(bot.config, bot.runtime_paths, "general", event) is parked
+            assert await store.is_pending(source)
+    finally:
+        await runtime.shutdown()
+        await coordinator.stop()

@@ -1141,6 +1141,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 # Persist the child before execution, with startup covered by cleanup.
                 await persist(state)
             if background is not None:
+                context = get_tool_runtime_context()
+                source_event_id = context.membership_turn_id if context is not None else None
                 if not fresh and background_job is None:
                     background_job = await background.lookup(
                         child.delegation_id,
@@ -1229,7 +1231,11 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         _pending_child(state, child, child_outcome, job_generation=background_job.generation)
                         await persist(state)
                         if waited.claim is not None:
-                            await background.acknowledge_wait(child.delegation_id, waited.claim)
+                            await background.acknowledge_wait(
+                                child.delegation_id,
+                                waited.claim,
+                                source_event_id=source_event_id,
+                            )
                         return True
                     result = (
                         await delegation_result(background, background_job)
@@ -1250,7 +1256,11 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     )
                     await persist(state)
                     if waited.claim is not None:
-                        await background.acknowledge_wait(child.delegation_id, waited.claim)
+                        await background.acknowledge_wait(
+                            child.delegation_id,
+                            waited.claim,
+                            source_event_id=source_event_id,
+                        )
                 finally:
                     await background.release_wait(child.delegation_id, waited.claim)
                 return False

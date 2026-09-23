@@ -67,8 +67,10 @@ def _saved_sources(runtime_paths: RuntimePaths) -> ParkedWork:
                 error=str(error),
             )
             continue
-        if job.source_event_id is not None:
-            parked.sources.add((job.owner.recipient, job.source_event_id))
+        # A reply that consumed a parked outcome must not replay through ordinary execution either.
+        for source in (job.source_event_id, job.consuming_source):
+            if source is not None:
+                parked.sources.add((job.owner.recipient, source))
     return parked
 
 
