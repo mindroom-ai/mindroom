@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
     from agno.run.messages import RunMessages
     from agno.run.team import TeamRunOutput
+    from pydantic import BaseModel
 
 _SUPPORTED_VERSION = "3.0.9"
 _PATCHED = False
@@ -156,9 +157,11 @@ def _with_metered_messages(
         messages: list[Message],
         assistant_message: Message,
         stream_data: MessageData,
-        *args: object,
+        response_format: dict[str, Any] | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         run_response: RunOutput | TeamRunOutput | None = None,
-        **kwargs: object,
+        compress_tool_results: bool = False,
     ) -> Iterator[ModelResponse]:
         request = _ModelRequest(model, messages, assistant_message, stream_data, run_response)
         _begin_request(request)
@@ -168,9 +171,11 @@ def _with_metered_messages(
                 messages,
                 assistant_message,
                 stream_data,
-                *args,
+                response_format=response_format,
+                tools=tools,
+                tool_choice=tool_choice,
                 run_response=run_response,
-                **kwargs,
+                compress_tool_results=compress_tool_results,
             )
         except BaseException:
             if _finish_request(request):
@@ -190,9 +195,11 @@ def _with_metered_messages_async(
         messages: list[Message],
         assistant_message: Message,
         stream_data: MessageData,
-        *args: object,
+        response_format: dict[str, Any] | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         run_response: RunOutput | TeamRunOutput | None = None,
-        **kwargs: object,
+        compress_tool_results: bool = False,
     ) -> AsyncIterator[ModelResponse]:
         request = _ModelRequest(model, messages, assistant_message, stream_data, run_response)
         _begin_request(request)
@@ -202,9 +209,11 @@ def _with_metered_messages_async(
                 messages,
                 assistant_message,
                 stream_data,
-                *args,
+                response_format=response_format,
+                tools=tools,
+                tool_choice=tool_choice,
                 run_response=run_response,
-                **kwargs,
+                compress_tool_results=compress_tool_results,
             ):
                 yield response
         except BaseException:

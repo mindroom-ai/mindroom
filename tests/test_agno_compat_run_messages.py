@@ -12,6 +12,7 @@ from agno.agent import _run as agent_run
 from agno.db.base import SessionType
 from agno.exceptions import ModelProviderError, RunCancelledException
 from agno.metrics import MessageMetrics, RunMetrics
+from agno.models.base import MessageData
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
@@ -158,6 +159,37 @@ class _InterruptedModel(RecordingModel):
 
     async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
         yield self.invoke()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.asyncio
+async def test_positional_stream_options_keep_cancellation_usage(tmp_path: Path, *, asynchronous: bool) -> None:
+    """Agno's positional options must preserve the run owning the interrupted request."""
+    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    model = _InterruptedModel(
+        id="test-model",
+        provider="test-provider",
+        responses=[
+            ModelResponse(content="Ready", response_usage=MessageMetrics(input_tokens=7, total_tokens=7)),
+        ],
+    )
+    messages = [Message(role="user", content="Check status")]
+    assistant = Message(role="assistant")
+    run = RunOutput(metrics=RunMetrics())
+    options = (messages, assistant, MessageData(), None, None, "auto", run, True)
+    stream = model.aprocess_response_stream(*options) if asynchronous else model.process_response_stream(*options)
+    try:
+        event = await anext(stream) if asynchronous else next(stream)
+        assert event.content == "Ready"
+        agent_run._handle_run_cancellation(run, RunCancelledException("Cancelled"), RunMessages(messages=messages))
+        assert run.metrics.total_tokens == 7
+        assert [request["metrics"]["total_tokens"] for request in project_usage(run.to_dict())["requests"]] == [7]
+    finally:
+        if asynchronous:
+            await stream.aclose()
+        else:
+            stream.close()
+        storage.close()
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
