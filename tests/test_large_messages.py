@@ -307,7 +307,6 @@ def test_oversized_nonterminal_streaming_edit_rate_limit_prunes_expired_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Oversized streaming-edit rate state should not retain old streams forever."""
-    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
     body = "x" * 40000
     interval = max(5.0, calculate_event_size(_oversized_edit_content("$old", body)) / 4096)
     monotonic_values = iter([100.0, 100.0 + interval])
@@ -333,7 +332,6 @@ def test_oversized_nonterminal_streaming_edit_rate_limit_prunes_expired_entries(
 
 def test_oversized_nonterminal_streaming_edit_interval_grows_with_size(monkeypatch: pytest.MonkeyPatch) -> None:
     """Large in-progress edits upload sidecars at a bounded average byte rate."""
-    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
     edit = _oversized_edit_content("$big", "x" * 1_000_000)
     expected_interval = calculate_event_size(edit) / 4096
     assert expected_interval > 200
@@ -354,7 +352,6 @@ def test_oversized_nonterminal_streaming_edit_interval_grows_with_size(monkeypat
     assert not allowed()
     now["value"] = 1000.0 + expected_interval + 0.001
     assert allowed()
-    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
 
 
 def test__create_preview() -> None:

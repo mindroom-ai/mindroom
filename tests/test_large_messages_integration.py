@@ -22,7 +22,6 @@ from mindroom.constants import (
 from mindroom.matrix.client import edit_message_result, send_message_result
 from mindroom.matrix.large_messages import (
     _NORMAL_MESSAGE_LIMIT,
-    _oversized_nonterminal_streaming_edit_next_allowed_at,
     prepare_large_message,
 )
 from mindroom.message_target import MessageTarget
@@ -335,7 +334,6 @@ async def test_streaming_edit_grows_over_limit() -> None:
 @pytest.mark.asyncio
 async def test_streaming_multiple_edits_with_growth(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test streaming with multiple edits as message grows."""
-    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
     # The size-proportional term is exercised directly by the large_messages
     # unit tests; here it is pinned negligible so this growth scenario keeps
     # exercising the flat 5s floor rather than needing exact size arithmetic.

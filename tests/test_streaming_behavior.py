@@ -40,7 +40,6 @@ from mindroom.history.interrupted_replay import (
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_next_allowed_at
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
@@ -90,7 +89,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator
 
     from mindroom.bot import AgentBot
 
@@ -263,14 +262,6 @@ def mock_calculator_agent() -> AgentMatrixUser:
         display_name="CalculatorAgent",
         user_id="@mindroom_calculator:localhost",
     )
-
-
-@pytest.fixture
-def reset_oversized_nonterminal_rate_limit() -> Iterator[None]:
-    """Reset oversized nonterminal sidecar edit rate-limit state around a test."""
-    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
-    yield
-    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
 
 
 class TestStreamingBehavior:
@@ -603,10 +594,7 @@ class TestStreamingBehavior:
         assert content["m.relates_to"]["event_id"] == "$stream_123"
 
     @pytest.mark.asyncio
-    async def test_oversized_nonterminal_sidecar_edits_are_rate_limited(
-        self,
-        reset_oversized_nonterminal_rate_limit: None,  # noqa: ARG002
-    ) -> None:
+    async def test_oversized_nonterminal_sidecar_edits_are_rate_limited(self) -> None:
         """Oversized in-progress edits should not burst sidecar uploads while final still sends."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
@@ -663,10 +651,7 @@ class TestStreamingBehavior:
             assert mock_edit.await_count == 3
 
     @pytest.mark.asyncio
-    async def test_rate_limited_oversized_nonterminal_edit_resolves_capture_completion(
-        self,
-        reset_oversized_nonterminal_rate_limit: None,  # noqa: ARG002
-    ) -> None:
+    async def test_rate_limited_oversized_nonterminal_edit_resolves_capture_completion(self) -> None:
         """Skipping an oversized in-progress edit should still unblock capture waiters."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
