@@ -30,6 +30,7 @@ from uuid import uuid4
 from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
+from agno.run.team import TeamRunOutput
 
 from mindroom import ai_runtime
 from mindroom.ai_turn_state import AITurnState
@@ -41,13 +42,19 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
+    is_silent_schedule_no_report_response,
 )
 from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.helper_usage import helper_usage_context
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
+from mindroom.tool_jobs.completion import join_conversation_jobs, report_background_wait
+from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
+from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.wait_timeout import run_uses_managed_waits
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
+from mindroom.tool_system.events import BackgroundWaitChunk, append_stream_text, tool_marker_text
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -55,7 +62,6 @@ if TYPE_CHECKING:
 
     from agno.run.agent import RunOutput, RunPausedEvent
     from agno.run.team import RunPausedEvent as TeamRunPausedEvent
-    from agno.run.team import TeamRunOutput
 
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.history.session_context import ScopeSessionContext
@@ -302,6 +308,9 @@ class ResponseTurnContext:
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     allow_no_report_response: bool = False
+    background_tool_jobs: bool = False
+    tool_job_agent_names: tuple[str, ...] | None = None
+    initial_presentation: StreamingPresentation | None = None
     participation: ParticipationGate | None = None
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
@@ -332,6 +341,9 @@ class TurnRunState:
     unseen_event_ids: list[str] = field(default_factory=list)
     standalone_replay_persisted: bool = False
     empty_response_retried: bool = False
+    attempted_job_outcomes: set[tuple[str, int]] = field(default_factory=set)
+    prior_response_text: str = ""
+    prior_response_tools: tuple[ToolTraceEntry, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -407,6 +419,7 @@ class PausedAttempt:
     response_presentation_state: dict[str, object] = field(default_factory=dict)
     approval_agent_name: str | None = None
     delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
+    requires_background_tool_jobs: bool = False
     continuation_count: int = 0
 
 
@@ -462,6 +475,7 @@ def paused_attempt_from_response(
     if response.status != RunStatus.paused:
         return None
     delegation = DelegationState.from_metadata(response.metadata)
+    requires_background_tool_jobs = _run_uses_background_tool_jobs(response)
     if delegation.pending_tools:
         if delegation.pending_child_id is not None:
             toolkit_owners = {
@@ -475,6 +489,7 @@ def paused_attempt_from_response(
             requirements=[RunRequirement.from_dict(requirement) for requirement in delegation.pending_requirements],
             session_id=response.session_id or fallback_session_id,
             run_id=response.run_id or fallback_run_id,
+            requires_background_tool_jobs=requires_background_tool_jobs,
         )
         return (
             replace(
@@ -491,6 +506,7 @@ def paused_attempt_from_response(
         requirements=response.requirements or (),
         session_id=response.session_id or fallback_session_id,
         run_id=response.run_id or fallback_run_id,
+        requires_background_tool_jobs=requires_background_tool_jobs,
     )
 
 
@@ -518,6 +534,7 @@ def _paused_attempt(
     toolkit_owners: dict[tuple[str, str], str | None],
     session_id: str | None,
     run_id: str | None,
+    requires_background_tool_jobs: bool = False,
 ) -> PausedAttempt | None:
     """Build one restartable pause from Agno's common pause fields."""
     if any(_has_unsupported_approval_requirement(requirement) for requirement in requirements):
@@ -572,6 +589,16 @@ def _paused_attempt(
             None,
         ),
         toolkit_owners=toolkit_owners,
+        requires_background_tool_jobs=requires_background_tool_jobs,
+    )
+
+
+def _run_uses_background_tool_jobs(response: RunOutput | TeamRunOutput) -> bool:
+    """Classify exact feature ownership while the paused SDK run is available."""
+    if run_uses_managed_waits(response.metadata, response.run_id):
+        return True
+    return isinstance(response, TeamRunOutput) and any(
+        _run_uses_background_tool_jobs(member) for member in response.member_responses
     )
 
 
@@ -681,8 +708,12 @@ def _reset_turn_state_for_dynamic_continuation(
     turn_recorder: TurnRecorder | None,
     run_metadata: dict[str, Any] | None,
     completed_tools_for_turn: list[ToolTraceEntry],
+    prior_assistant_text: str = "",
 ) -> AITurnState:
-    turn_state = AITurnState(prior_completed_tools=completed_tools_for_turn)
+    turn_state = AITurnState(
+        prior_completed_tools=completed_tools_for_turn,
+        prior_assistant_text=prior_assistant_text,
+    )
     turn_state.sync_partial(
         turn_recorder,
         run_metadata=run_metadata,
@@ -740,7 +771,7 @@ def _persist_excluded_attempt_replay(
         StandaloneReplaySnapshot(
             session_id=resolution.session_id or ctx.session_id,
             run_id=resolution.run_id or str(uuid4()),
-            partial_text=resolution.partial_text,
+            partial_text=run.turn_state.assistant_text_for(resolution.partial_text),
             completed_tools=run.turn_state.completed_tools_for(resolution.completed_tools),
             interrupted_tools=list(resolution.interrupted_tools),
             run_metadata=run_metadata,
@@ -788,7 +819,7 @@ def _record_turn_excluded_fallback(
         StandaloneReplaySnapshot(
             session_id=ctx.session_id,
             run_id=(snapshot.attempt_run_id or ctx.run_id) or str(uuid4()),
-            partial_text=snapshot.assistant_text,
+            partial_text=run.turn_state.assistant_text_for(snapshot.assistant_text),
             completed_tools=run.turn_state.completed_tools_for(snapshot.completed_tools),
             interrupted_tools=list(snapshot.interrupted_tools),
             run_metadata=_interrupted_run_metadata(ctx, sinks, run),
@@ -841,9 +872,15 @@ def _advance_turn_continuation(
     next_prompt: str | None,
     active_model_name: str | None,
     apply_model_to_team_members: bool,
+    preserve_response: bool = False,
 ) -> DynamicContinuationRunState:
     """Close the spent attempt entity and prepare run state for one more continuation."""
     completed_tools_for_turn = run.turn_state.completed_tools_for(resolution.completed_tools)
+    prior_assistant_text = run.turn_state.prior_assistant_text
+    if preserve_response:
+        prior_assistant_text = run.turn_state.assistant_text_for(resolution.replayable_text)
+        run.prior_response_text = append_stream_text(run.prior_response_text, resolution.response_text, separate=True)
+        run.prior_response_tools += resolution.completed_tools
     release_attempt_entity(run.scope_context)
     advanced = continuation.advance(
         continuation_prompt=next_prompt or continuation.original_prompt,
@@ -855,8 +892,34 @@ def _advance_turn_continuation(
         turn_recorder=sinks.turn_recorder,
         run_metadata=run.run_metadata,
         completed_tools_for_turn=completed_tools_for_turn,
+        prior_assistant_text=prior_assistant_text,
     )
     return advanced
+
+
+def _advance_job_continuation(
+    ctx: ResponseTurnContext,
+    adapter: BlockingTurnAdapter | StreamingTurnAdapter[Any],
+    sinks: TurnSinks,
+    run: TurnRunState,
+    resolution: CompletedAttempt,
+    continuation: DynamicContinuationRunState,
+    prompt: str,
+) -> DynamicContinuationRunState:
+    """Retain model selection and substantive prose while retrieving ready job results."""
+    if ctx.allow_no_report_response and is_silent_schedule_no_report_response(resolution.replayable_text):
+        resolution = replace(resolution, replayable_text="", response_text=tool_marker_text(resolution.response_text))
+    return _advance_turn_continuation(
+        sinks,
+        adapter.release_attempt_entity,
+        run,
+        resolution,
+        continuation,
+        next_prompt=prompt,
+        active_model_name=continuation.active_model_name,
+        apply_model_to_team_members=continuation.apply_model_to_team_members,
+        preserve_response=True,
+    )
 
 
 def _enter_scope_context(
@@ -902,6 +965,7 @@ async def _open_scope_off_event_loop(
         await run_blocking_until_complete(manager.__exit__, None, None, None)
 
 
+@partial(owned_tool_execution, enabled=lambda ctx, *_args, **_kwargs: ctx.background_tool_jobs)
 async def run_blocking_response_turn(
     ctx: ResponseTurnContext,
     adapter: BlockingTurnAdapter,
@@ -914,13 +978,15 @@ async def run_blocking_response_turn(
     try:
         async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
             run.scope_context = scope_context
+            set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
             for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
                 try:
                     with helper_usage_context(scope_context):
                         resolution = await adapter.run_attempt(run, continuation)
-                    settled = _settle_blocking_attempt(
+                    await finalize_consumption()
+                    settled = await _settle_blocking_attempt(
                         ctx,
                         adapter,
                         sinks,
@@ -932,6 +998,7 @@ async def run_blocking_response_turn(
                 finally:
                     if adapter.finalize_attempt is not None:
                         await adapter.finalize_attempt(run.scope_context)
+                    await finalize_consumption()
                 if isinstance(settled, str):
                     return settled
                 continuation = settled
@@ -975,7 +1042,7 @@ async def run_blocking_response_turn(
         if adapter.unexpected_error_text is None:
             raise
         logger.exception("Response turn failed", entity=ctx.entity_label)
-        return adapter.unexpected_error_text(e)
+        return append_stream_text(run.prior_response_text, adapter.unexpected_error_text(e), separate=True)
     finally:
         adapter.close_runtime_dbs(run.scope_context)
 
@@ -1015,7 +1082,7 @@ def _settle_skipped_attempt(
         sinks.turn_recorder.mark_skipped()
 
 
-def _settle_blocking_attempt(
+async def _settle_blocking_attempt(
     ctx: ResponseTurnContext,
     adapter: BlockingTurnAdapter,
     sinks: TurnSinks,
@@ -1057,7 +1124,29 @@ def _settle_blocking_attempt(
             )
         if resolution.original_status is RunStatus.cancelled:
             raise build_cancelled_error(resolution.reason)
-        return resolution.response_text
+        return append_stream_text(run.prior_response_text, resolution.response_text, separate=True)
+    return await _settle_joined_blocking_attempt(
+        ctx,
+        adapter,
+        sinks,
+        run,
+        resolution,
+        continuation,
+        continuation_count=continuation_count,
+    )
+
+
+async def _settle_joined_blocking_attempt(
+    ctx: ResponseTurnContext,
+    adapter: BlockingTurnAdapter,
+    sinks: TurnSinks,
+    run: TurnRunState,
+    resolution: CompletedAttempt,
+    continuation: DynamicContinuationRunState,
+    *,
+    continuation_count: int,
+) -> str | DynamicContinuationRunState:
+    """Publish top-level completion only after the ready-result continuation decision."""
     settle = _settle_completed_attempt(
         ctx,
         sinks,
@@ -1070,6 +1159,43 @@ def _settle_blocking_attempt(
     )
     if settle.keep_going:
         return settle.continuation
+    response_text = append_stream_text(run.prior_response_text, settle.response_text, separate=True)
+    run.turn_state.sync_partial(
+        sinks.turn_recorder,
+        run_metadata=run.run_metadata,
+        assistant_text=settle.recorded_text,
+        completed_tools=settle.recorded_tools,
+        interrupted_tools=(),
+    )
+    joined_continuation = None
+    if continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
+        async for joined in join_conversation_jobs(run.attempted_job_outcomes, agent_names=ctx.tool_job_agent_names):
+            if isinstance(joined, BackgroundWaitChunk):
+                initial = ctx.initial_presentation
+                visible_text = (
+                    append_stream_text(initial.response_text, response_text, separate=True)
+                    if initial is not None
+                    else response_text
+                )
+                await report_background_wait(
+                    StreamingPresentation(
+                        response_text=visible_text,
+                        tool_trace=initial.tool_trace if initial is not None else (),
+                    ),
+                    joined.content,
+                )
+            else:
+                joined_continuation = _advance_job_continuation(
+                    ctx,
+                    adapter,
+                    sinks,
+                    run,
+                    resolution,
+                    continuation,
+                    joined.prompt,
+                )
+    if joined_continuation is not None:
+        return joined_continuation
     _publish_run_metadata(sinks, resolution.metadata_content)
     run.turn_state.record_completed(
         sinks.turn_recorder,
@@ -1079,7 +1205,7 @@ def _settle_blocking_attempt(
     )
     if sinks.on_completed is not None:
         sinks.on_completed(resolution)
-    return settle.response_text
+    return response_text
 
 
 def _publish_run_metadata(sinks: TurnSinks, metadata_content: dict[str, Any] | None) -> None:
@@ -1193,11 +1319,20 @@ def _settle_completed_attempt(
         if not resolution.has_visible_content:
             recorded_text = decision.limit_message
             response_text = decision.limit_message
-    elif ctx.allow_no_report_response and not resolution.replayable_text.strip():
+    elif ctx.allow_no_report_response and (
+        not resolution.replayable_text.strip()
+        or (
+            ctx.background_tool_jobs
+            and run.turn_state.prior_assistant_text
+            and is_silent_schedule_no_report_response(resolution.replayable_text)
+        )
+    ):
         # Tool presentation and team fallback chrome are not semantic prose.
         # The tool records remain part of the completed turn, but quiet
         # delivery has no final assistant body to publish.
-        response_text = ""
+        response_text = tool_marker_text(response_text) if ctx.background_tool_jobs else ""
+        if ctx.background_tool_jobs:
+            recorded_text = ""
     return _CompletionSettle(
         keep_going=False,
         continuation=continuation,
@@ -1207,6 +1342,7 @@ def _settle_completed_attempt(
     )
 
 
+@partial(owned_tool_execution, enabled=lambda ctx, *_args, **_kwargs: ctx.background_tool_jobs)
 async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     ctx: ResponseTurnContext,
     adapter: StreamingTurnAdapter[ChunkT],
@@ -1214,12 +1350,13 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     *,
     continuation: DynamicContinuationRunState,
     resumed_attempt: ResumedAttempt | None = None,
-) -> AsyncGenerator[ChunkT, None]:
+) -> AsyncGenerator[ChunkT | BackgroundWaitChunk, None]:
     """Run one streaming response turn, yielding the attempt chunks as they arrive."""
     run = TurnRunState()
     try:
         async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
             run.scope_context = scope_context
+            set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
             initial_count = resumed_attempt.continuation_count if resumed_attempt is not None else 0
@@ -1242,6 +1379,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                                     resolution = item.resolution
                                     continue
                                 yield item
+                    await finalize_consumption()
                     if resolution is None:
                         _raise_missing_stream_resolution(ctx.entity_label)
                     if isinstance(resolution, SkippedAttempt):
@@ -1300,6 +1438,24 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     keep_going = settle.keep_going
                     if settle.response_text:
                         yield adapter.make_text_chunk(settle.response_text)
+                    if not keep_going and continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
+                        async for joined in join_conversation_jobs(
+                            run.attempted_job_outcomes,
+                            agent_names=ctx.tool_job_agent_names,
+                        ):
+                            if isinstance(joined, BackgroundWaitChunk):
+                                yield joined
+                            else:
+                                continuation = _advance_job_continuation(
+                                    ctx,
+                                    adapter,
+                                    sinks,
+                                    run,
+                                    resolution,
+                                    continuation,
+                                    joined.prompt,
+                                )
+                                keep_going = True
                     if not keep_going:
                         _publish_run_metadata(sinks, resolution.metadata_content)
                         run.turn_state.record_completed(
@@ -1313,6 +1469,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                 finally:
                     if adapter.finalize_attempt is not None:
                         await adapter.finalize_attempt(run.scope_context)
+                    await finalize_consumption()
                 if not keep_going:
                     return
             _raise_continuation_budget_exhausted()

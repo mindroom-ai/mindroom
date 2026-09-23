@@ -32,6 +32,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    STREAM_VISIBLE_BODY_KEY,
 )
 from mindroom.matrix import message_builder
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -45,7 +46,7 @@ from mindroom.streaming import (
     send_streaming_response,
 )
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
+from mindroom.tool_system.events import _TOOL_TRACE_KEY, BackgroundWaitChunk, StructuredStreamChunk, ToolTraceEntry
 from tests.conftest import (
     bind_runtime_paths,
     make_matrix_client_mock,
@@ -383,6 +384,43 @@ async def test_stream_driver_publishes_only_visible_text_to_progress_callback(co
     assert "I found the file" in visible[0]
     assert "read_file" in visible[0]
     assert "private path" not in "\n".join(visible)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish", ["completed", "released", "cancelled"])
+@pytest.mark.parametrize("prefix", ["", "Independent answer."])
+async def test_background_wait_is_transient_active_progress(config: Config, finish: str, prefix: str) -> None:
+    """Waiting is visible and interruptible, but never saved or reported as answer prose."""
+    gateway = _FakeGateway()
+    visible: list[str] = []
+
+    async def stream() -> AsyncIterator[object]:
+        yield prefix
+        yield BackgroundWaitChunk("⏳ Waiting for background work…")
+        waiting = gateway.ops[-1].content
+        assert "Waiting for background work" in waiting["body"]
+        assert waiting["msgtype"] == "m.notice"
+        assert waiting[STREAM_STATUS_KEY] in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
+        assert "Waiting" not in waiting[STREAM_VISIBLE_BODY_KEY]
+        if finish == "released":
+            yield BackgroundWaitChunk(None)
+            assert "Waiting" not in gateway.ops[-1].content["body"]
+        if finish == "cancelled":
+            raise asyncio.CancelledError(USER_STOP_CANCEL_MSG)
+        yield " Continuation answer."
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+    ):
+        if finish == "cancelled":
+            with pytest.raises(StreamingDeliveryError, match=USER_STOP_CANCEL_MSG):
+                await asyncio.wait_for(_run_stream(config, stream(), visible_progress_callback=visible.append), 30)
+        else:
+            await asyncio.wait_for(_run_stream(config, stream(), visible_progress_callback=visible.append), 30)
+    assert "Waiting" not in gateway.ops[-1].content["body"]
+    assert "Waiting" not in "\n".join(visible)
+    assert prefix in gateway.ops[-1].content["body"]
 
 
 @pytest.mark.asyncio

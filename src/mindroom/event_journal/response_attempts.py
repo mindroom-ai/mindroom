@@ -211,6 +211,24 @@ def register_response_attempt(
         bind_response_target(transaction, principal_id, driving, response_event_id)
 
 
+def response_receipt_order_before_stop(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    response_event_id: str,
+    stop_receipt_order: int,
+) -> int | None:
+    """Bound cancellation to the clicked response's latest admitted attempt, including edits."""
+    row = transaction.fetchone(
+        """SELECT MAX(selected_receipt_order) AS receipt_order FROM response_attempts
+        WHERE principal_id = ? AND room_id = ? AND response_event_id = ?
+          AND selected_receipt_order <= ? AND (edit_receipt_order IS NULL OR edit_receipt_order <= ?)""",
+        (principal_id, room_id, response_event_id, stop_receipt_order, stop_receipt_order),
+    )
+    return None if row is None or row["receipt_order"] is None else int(row["receipt_order"])
+
+
 def edited_attempt_sources_before_stop(
     transaction: Transaction,
     principal_id: str,

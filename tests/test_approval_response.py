@@ -216,6 +216,41 @@ async def test_agent_continuation_defers_terminal_only_content() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("completion_source", ["stream", "terminal", "snapshot"])
+async def test_agent_approval_completion_preserves_recovered_same_name_trace(completion_source: str) -> None:
+    """Reconciliation must never give a new call's result to a recovered public trace slot."""
+    prefix = "Before restart.\n\n🔧 `inspect` [1] ⏳\n\n"
+    already_completed = completion_source == "snapshot"
+    presentation = CollectedStreamPresentation(
+        show_tool_calls=True,
+        response_text=prefix + "Before approval.\n\n🔧 `inspect` [2]" + ("" if already_completed else " ⏳"),
+        tool_trace=[
+            ToolTraceEntry(type="tool_call_started", tool_name="inspect"),
+            ToolTraceEntry(
+                type="tool_call_completed" if already_completed else "tool_call_started",
+                tool_name="inspect",
+                tool_call_id="current-call",
+                result_preview="current result" if already_completed else None,
+            ),
+        ],
+    )
+    tool = ToolExecution(tool_call_id="current-call", tool_name="inspect", result="current result")
+
+    async def events() -> AsyncIterator[object]:
+        if completion_source == "stream":
+            yield ToolCallCompletedEvent(tool=tool)
+        yield RunOutput(run_id="current-run", session_id="session-1", status=RunStatus.completed, tools=[tool])
+
+    await _collect_agent_continuation(events(), presentation)
+
+    assert presentation.final_text().startswith(prefix)
+    assert presentation.tool_trace[0] == ToolTraceEntry(type="tool_call_started", tool_name="inspect")
+    assert presentation.tool_trace[1].type == "tool_call_completed"
+    assert presentation.tool_trace[1].result_preview == "current result"
+    assert "🔧 `inspect` [2] ⏳" not in presentation.final_text()
+
+
+@pytest.mark.asyncio
 async def test_agent_chained_pause_anchors_a_terminal_only_pending_tool() -> None:
     """A paused final output supplies the pending anchor when Agno emitted no tool-start event."""
     tool = ToolExecution(

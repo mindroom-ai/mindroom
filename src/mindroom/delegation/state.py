@@ -69,6 +69,7 @@ class DelegationState:
     pending_requirements: list[dict[str, Any]] = field(default_factory=list)
     pending_agent_name: str | None = None
     pending_child_id: str | None = None
+    pending_job_generation: int | None = None
     storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,6 +102,7 @@ class DelegationState:
             pending_requirements=list(snapshot.get("pending_requirements", [])),
             pending_agent_name=snapshot.get("pending_agent_name"),
             pending_child_id=snapshot.get("pending_child_id"),
+            pending_job_generation=snapshot.get("pending_job_generation"),
             storage_bindings=dict(snapshot.get("storage_bindings", {})),
         )
 
@@ -111,6 +113,7 @@ class DelegationState:
         self.pending_requirements = []
         self.pending_agent_name = None
         self.pending_child_id = None
+        self.pending_job_generation = None
 
 
 class ChildResponseRunner(Protocol):

@@ -40,6 +40,7 @@ MindRoom's architecture consists of several key components working together.
 - [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) - The inbound turn pipeline and its module boundaries
 - [Migration and Compatibility Boundaries](https://docs.mindroom.chat/architecture/migrations/) - Current owners for historical formats, dependency migrations, and retained compatibility
 - [Matrix Event-Journal Security](https://docs.mindroom.chat/architecture/matrix-event-journal-security/) - Which decrypted plaintext is durable, who owns it, and what removes it
+- [Background Tool Jobs](https://docs.mindroom.chat/dev/background-tool-jobs/) - Execution ownership, waiting, Stop, and recovery
 - [Matrix Event-Journal Contracts](https://docs.mindroom.chat/dev/matrix-event-journal-contracts/) - What the journal guarantees, and the homeserver behaviour you would otherwise rediscover by debugging
 
 ## Key Internal Modules

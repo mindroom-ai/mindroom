@@ -16,6 +16,7 @@ from agno.tools.sleep import SleepTools
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
+from mindroom.ai import ai_response
 from mindroom.approval_execution import _collect_agent_continuation, _settle_agent_continuation
 from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.config.main import Config
@@ -29,6 +30,7 @@ from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
     PausedAttempt,
+    ResponsePausedForApproval,
     ResumedAttempt,
     paused_attempt_from_response,
 )
@@ -36,7 +38,7 @@ from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry, serialize_tool_trace
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
-from tests.conftest import bind_runtime_paths, unwrap_extracted_collaborator
+from tests.conftest import bind_runtime_paths, make_turn_context, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot
 
 if TYPE_CHECKING:
@@ -96,6 +98,51 @@ class _ScriptedModel(SyntheticModel):
         **kwargs: object,
     ) -> AsyncIterator[ModelResponse]:
         yield await self.ainvoke(messages, tools=tools, **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [False, True])
+async def test_disabled_dynamic_load_does_not_seed_discarded_tools_into_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    show_tool_calls: bool,
+) -> None:
+    """A rebuilt ordinary call keeps its own visible numbering when background jobs are off."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "defaults": {"tools": [], "learning": False},
+                "memory": {"backend": "none"},
+                "agents": {"general": {"display_name": "General", "tools": [{"calculator": {"defer": True}}]}},
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+                "tool_approval": {"rules": [{"match": "add", "action": "require_approval"}]},
+            },
+        ),
+        paths,
+    )
+    responses = [_call("load_tool", "loader", tool_name="calculator"), _call("add", "sum", a=2, b=3)]
+    monkeypatch.setattr(
+        "mindroom.agents._load_agent_model_instance",
+        lambda *_args, **_kwargs: _ScriptedModel(id="synthetic", responses=responses),
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await ai_response(
+            make_turn_context("general", session_id="load-approval"),
+            prompt="Add two and three.",
+            config=config,
+            runtime_paths=paths,
+            show_tool_calls=show_tool_calls,
+            supports_native_tool_approval=True,
+        )
+    paused = raised.value.paused
+    assert not responses
+    assert [entry.tool_name for entry in paused.tools] == ["add"]
+    assert [entry.tool_name for entry in paused.tool_trace] == ["add"]
+    assert "load_tool" not in paused.response_text
+    if show_tool_calls:
+        assert "`add` [1]" in paused.response_text
 
 
 @pytest.mark.asyncio

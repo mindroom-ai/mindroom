@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import platform
@@ -25,6 +26,8 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_functio
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agno.skills.skill import Skill
     from agno.tools.function import Function
 
@@ -166,6 +169,17 @@ class _MindroomSkills(Skills):
 
     def _is_script_execution_blocked(self, skill_name: str) -> bool:
         return skill_name in self._script_execution_blocked_skill_names
+
+
+def skill_access_origin(entrypoint: Callable[..., object] | None, skill_name: object) -> dict[str, object]:
+    """Describe the configured or workspace source of a bound skill access call."""
+    skills = entrypoint.__self__ if inspect.ismethod(entrypoint) else None
+    if not isinstance(skills, _MindroomSkills):
+        return {}
+    return {
+        "skill_name": skill_name,
+        "workspace_skill": isinstance(skill_name, str) and skills._is_script_execution_blocked(skill_name),
+    }
 
 
 def build_agent_skills(

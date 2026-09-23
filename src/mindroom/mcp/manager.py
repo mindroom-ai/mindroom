@@ -68,6 +68,7 @@ from mindroom.oauth.service import (
     OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
+from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
@@ -1475,9 +1476,11 @@ class MCPServerManager:
         filtered_tools: list[MCPDiscoveredTool] = []
         function_names: set[str] = set()
         for tool in discovered_tools:
-            if exclude_tools and tool.name in exclude_tools:
-                continue
-            if include_tools and tool.name not in include_tools:
+            if not tool_name_allowed(
+                tool.name,
+                include=include_tools or None,
+                exclude=exclude_tools or None,
+            ):
                 continue
             try:
                 function_name = validate_mcp_function_name(
@@ -1739,7 +1742,11 @@ class MCPServerManager:
             sorted(
                 tool.remote_name
                 for tool in catalog.tools
-                if (not included or tool.remote_name in included) and (not excluded or tool.remote_name not in excluded)
+                if tool_name_allowed(
+                    tool.remote_name,
+                    include=included or None,
+                    exclude=excluded or None,
+                )
             ),
         )
         if remote_tool_name not in available_tools:

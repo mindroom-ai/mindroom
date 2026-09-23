@@ -46,6 +46,13 @@ class ToolTraceEntry:
     scope_key: str | None = field(default=None, compare=False)
 
 
+@dataclass(frozen=True, slots=True)
+class BackgroundWaitChunk:
+    """Set transient wait progress, or clear it with None, without changing the answer."""
+
+    content: str | None
+
+
 @dataclass(slots=True)
 class StructuredStreamChunk:
     """Streaming chunk that carries fully-rendered content plus structured metadata."""
@@ -519,6 +526,11 @@ def _tool_marker_line(tool_name: str, tool_index: int | None, *, pending: bool) 
 def is_visible_tool_marker_line(line: str) -> bool:
     """Return whether one plain-text line is a Matrix-visible tool marker."""
     return _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) is not None
+
+
+def tool_marker_text(text: str) -> str:
+    """Retain ordered display anchors when an attempt's quiet prose is suppressed."""
+    return "\n\n".join(line.strip() for line in text.splitlines() if is_visible_tool_marker_line(line))
 
 
 def _line_ending(line: str) -> str:

@@ -2882,17 +2882,21 @@ class TestUserIdPassthrough:
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
-            async for _chunk in stream_agent_response(
-                make_turn_context("general", session_id="session1"),
-                prompt="test",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
-                turn_recorder=recorder,
-            ):
-                pass
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    make_turn_context("general", session_id="session1"),
+                    prompt="test",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    turn_recorder=recorder,
+                )
+            ]
 
         assert recorder.outcome == "completed"
         assert recorder.assistant_text == "hello from final event"
+
+        assert not any(isinstance(chunk, RunContentEvent) for chunk in chunks)
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_final_event_overwrites_partial_text_in_turn_recorder(

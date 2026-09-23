@@ -165,6 +165,7 @@ class ApprovalContinuation:
     request_body: str = ""
     transport_sender_id: str | None = None
     source_kind: str = "message"
+    requires_background_tool_jobs: bool = False
     attachment_ids: tuple[str, ...] = ()
     mentioned_agents: tuple[str, ...] = ()
     hook_source: str | None = None
@@ -210,6 +211,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "request_body": continuation.request_body,
         "transport_sender_id": continuation.transport_sender_id,
         "source_kind": continuation.source_kind,
+        "requires_background_tool_jobs": continuation.requires_background_tool_jobs,
         "attachment_ids": list(continuation.attachment_ids),
         "mentioned_agents": list(continuation.mentioned_agents),
         "hook_source": continuation.hook_source,
@@ -353,6 +355,7 @@ def _from_rows(
         request_body=cast("str", stored.get("request_body", "")),
         transport_sender_id=cast("str | None", stored.get("transport_sender_id")),
         source_kind=cast("str", stored.get("source_kind", "message")),
+        requires_background_tool_jobs=stored.get("requires_background_tool_jobs", False) is True,
         attachment_ids=tuple(cast("list[str]", stored.get("attachment_ids", []))),
         mentioned_agents=tuple(cast("list[str]", stored.get("mentioned_agents", []))),
         hook_source=cast("str | None", stored.get("hook_source")),
@@ -675,6 +678,7 @@ def advance(
     response_tool_trace: tuple[dict[str, object], ...] | None = None,
     response_presentation_state: dict[str, object] | None = None,
     delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
+    requires_background_tool_jobs: bool = False,
     continuation_count: int | None = None,
 ) -> ApprovalContinuation | None:
     """Replace one claimed generation with the next exact Agno pause."""
@@ -702,6 +706,7 @@ def advance(
         delegation_storage_bindings=(
             current.delegation_storage_bindings if delegation_storage_bindings is None else delegation_storage_bindings
         ),
+        requires_background_tool_jobs=current.requires_background_tool_jobs or requires_background_tool_jobs,
         state=state,
         runtime_generation=publication_owner,
         failure_reason=None,

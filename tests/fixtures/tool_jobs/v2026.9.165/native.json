@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "job_id": "native",
+  "owner": {
+    "channel": "matrix",
+    "agent_name": "parent",
+    "requester_id": "@alice:test",
+    "room_id": "!room:test",
+    "thread_id": "$root",
+    "resolved_thread_id": "$root",
+    "session_id": "parent-session",
+    "tenant_id": null,
+    "account_id": null,
+    "transport_agent_name": null
+  },
+  "tool_name": "delegate",
+  "depth": 0,
+  "kind": "delegation",
+  "toolkit_name": null,
+  "adapter": {
+    "child": {
+      "delegation_id": "native",
+      "parent_tool_call_id": "call",
+      "caller_agent_name": "parent",
+      "child_agent_name": "child",
+      "task": "research",
+      "session_id": "child-session",
+      "run_id": "run",
+      "model_name": "default",
+      "depth": 1,
+      "execution_identity": {},
+      "subagent_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "previous_delegation_id": null,
+      "parent_requirement_id": "",
+      "storage_bindings": {},
+      "record_locator": {},
+      "status": "completed",
+      "result": "finished child result"
+    }
+  },
+  "created_at": "2026-09-01T00:00:00+00:00",
+  "updated_at": "2026-09-01T00:00:00+00:00",
+  "status": "running",
+  "result": null,
+  "result_payload": null,
+  "approval_state": {},
+  "generation": 0,
+  "human_paused": false,
+  "deliveries": [],
+  "wait_acknowledged": false
+}

@@ -33,11 +33,10 @@ from mindroom.teams import TeamMode, _attach_team_pause_presentation, continue_p
 from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
 from tests.conftest import unwrap_extracted_collaborator
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
 from tests.response_runner_helpers import _bot, _noop_typing
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_execution import DelegationModel, _call
 
 if TYPE_CHECKING:
     from pathlib import Path

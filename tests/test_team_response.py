@@ -7,6 +7,7 @@ import inspect
 import tempfile
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,6 +17,7 @@ from agno.agent import Agent as AgnoAgent
 from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
+from agno.models.openai import OpenAIChat
 from agno.models.response import ToolExecution
 from agno.run.agent import RunContentEvent as AgentRunContentEvent
 from agno.run.agent import RunOutput
@@ -75,6 +77,7 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     apply_exact_approval_decisions,
 )
+from mindroom.streaming import StreamingPresentation
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -97,6 +100,7 @@ from mindroom.teams import (
     team_response_stream,
 )
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
     bind_runtime_paths,
@@ -115,6 +119,120 @@ if TYPE_CHECKING:
 _TEST_MODEL = "openai:gpt-6-astra"
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
+
+
+def test_team_recovered_prefix_survives_tool_reordering_and_approval_restore() -> None:
+    """Recovered public traces stay frozen while new approval calls retain exact slots."""
+    prefix = StreamingPresentation(
+        response_text="Before restart.\n\n🔧 `inspect` [1] ⏳",
+        tool_trace=(ToolTraceEntry(type="tool_call_started", tool_name="inspect"),),
+    )
+    presentation = _TeamStreamPresentation.new(
+        ["first", "second"],
+        ["First", "Second"],
+        show_tool_calls=True,
+        initial_presentation=prefix,
+    )
+    presentation.append_member("second", "Recovered member work.")
+    presentation.start_member_tool("second", ToolExecution(tool_call_id="second-call", tool_name="inspect_second"))
+    presentation.start_member_tool("first", ToolExecution(tool_call_id="first-call", tool_name="inspect_first"))
+
+    assert presentation.render_body().startswith(prefix.response_text + "\n\n")
+    assert [entry.tool_name for entry in presentation.tool_trace] == ["inspect", "inspect_first", "inspect_second"]
+    assert "🔧 `inspect_first` [2] ⏳" in presentation.render_body()
+    assert "🔧 `inspect_second` [3] ⏳" in presentation.render_body()
+    assert [tool.tool_call_id for tool in presentation.tool_tracker.pending_tools] == ["second-call", "first-call"]
+
+    restored = _TeamStreamPresentation.restore(
+        config_names=["first", "second"],
+        show_tool_calls=True,
+        state=presentation.to_state(),
+        tool_trace=presentation.tool_trace,
+        prior_response_text=presentation.render_body(),
+    )
+    restored.complete_member_tool(
+        "second",
+        ToolExecution(tool_call_id="second-call", tool_name="inspect_second", result="done"),
+    )
+    restored.append_consensus("Recovered consensus.")
+
+    assert restored.render_body().startswith(prefix.response_text + "\n\n")
+    assert "🔧 `inspect_second` [3]\n" in restored.render_body()
+    assert [tool.tool_call_id for tool in restored.tool_tracker.pending_tools] == ["first-call"]
+    assert restored.tool_trace[0].type == "tool_call_started"
+    assert restored.tool_trace[2].type == "tool_call_completed"
+    assert prefix.tool_trace[0].type == "tool_call_started"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_team_response_retains_recovered_prefix(streaming: bool) -> None:
+    """Both team output paths retain delivered prose; each progressive replacement keeps its trace."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+    prefix = StreamingPresentation(
+        response_text="Before restart.\n\n🔧 `inspect` [1] ⏳",
+        tool_trace=(ToolTraceEntry(type="tool_call_started", tool_name="inspect"),),
+    )
+    context = replace(make_turn_context(session_id=None), initial_presentation=prefix)
+    member = _make_test_agent("GeneralAgent")
+    team = _make_test_team()
+    tool = ToolExecution(tool_call_id="new-call", tool_name="inspect", tool_args={})
+    completed_tool = ToolExecution(tool_call_id="new-call", tool_name="inspect", tool_args={}, result="new result")
+
+    async def stream_events(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield TeamRunContentEvent(content="Recovered work.")
+        yield TeamToolCallStartedEvent(tool=tool)
+        yield TeamToolCallCompletedEvent(tool=completed_tool)
+        yield TeamRunContentEvent(content=" Done.")
+
+    team.arun = (
+        MagicMock(side_effect=stream_events)
+        if streaming
+        else AsyncMock(return_value=TeamRunOutput(content="Recovered work. Done.", status=RunStatus.completed))
+    )
+    with (
+        patch("mindroom.teams.create_agent", return_value=member),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=team),
+    ):
+        if streaming:
+            chunks = [
+                chunk
+                async for chunk in team_response_stream(
+                    agent_ids=[fixture_entity_matrix_id("general", config.get_domain(runtime_paths), runtime_paths)],
+                    message="Continue.",
+                    orchestrator=orchestrator,
+                    execution_identity=None,
+                    ctx=context,
+                    turn_recorder=_team_turn_recorder("Continue."),
+                )
+            ]
+            documents = [chunk for chunk in chunks if isinstance(chunk, StructuredStreamChunk)]
+            assert documents
+            assert all(document.content.startswith(prefix.response_text + "\n\n") for document in documents)
+            assert all(document.tool_trace and document.tool_trace[0] == prefix.tool_trace[0] for document in documents)
+            assert documents[-1].tool_trace is not None
+            assert documents[-1].tool_trace[1].type == "tool_call_completed"
+            assert "🔧 `inspect` [2]" in documents[-1].content
+            assert "Done." in documents[-1].content
+        else:
+            response = await team_response(
+                agent_names=["general"],
+                mode=TeamMode.COORDINATE,
+                message="Continue.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=context,
+                turn_recorder=_team_turn_recorder("Continue."),
+            )
+            assert response.startswith(prefix.response_text + "\n\n")
+            assert "Recovered work. Done." in response
 
 
 def test_team_stream_presentation_keeps_duplicate_labels_in_distinct_member_slots() -> None:
@@ -138,6 +256,80 @@ def test_team_stream_presentation_keeps_duplicate_labels_in_distinct_member_slot
     }
     assert presentation.tool_trace[0].scope_key == "agent:member-b"
     assert presentation.render_body().count("**Same**:") == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("outcome", ["error_output", "exception", "terminal", "empty"])
+async def test_team_recovery_retains_prefix_on_terminal_outputs(streaming: bool, outcome: str) -> None:
+    """Errors and terminal-only SDK output cannot replace prior prose or lose its public trace."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+    prefix = StreamingPresentation(
+        response_text="Before restart.\n\n🔧 `inspect` [1] ⏳",
+        tool_trace=(ToolTraceEntry(type="tool_call_started", tool_name="inspect"),),
+    )
+    context = replace(make_turn_context(session_id=None), initial_presentation=prefix)
+    team = _make_test_team()
+    response = TeamRunOutput(
+        content=None if outcome == "empty" else "Recovered terminal." if outcome == "terminal" else "provider failed",
+        status=RunStatus.completed if outcome in {"terminal", "empty"} else RunStatus.error,
+    )
+
+    async def stream_events(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        if outcome == "exception":
+            msg = "provider failed"
+            raise RuntimeError(msg)
+        yield TeamRunErrorEvent(content="provider failed") if outcome == "error_output" else response
+
+    team.arun = (
+        MagicMock(side_effect=stream_events)
+        if streaming
+        else AsyncMock(side_effect=RuntimeError("provider failed"))
+        if outcome == "exception"
+        else AsyncMock(return_value=response)
+    )
+    with (
+        patch("mindroom.teams.create_agent", return_value=_make_test_agent("GeneralAgent")),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=team),
+    ):
+        if streaming:
+            chunks = [
+                chunk
+                async for chunk in team_response_stream(
+                    agent_ids=[fixture_entity_matrix_id("general", config.get_domain(runtime_paths), runtime_paths)],
+                    message="Continue.",
+                    orchestrator=orchestrator,
+                    execution_identity=None,
+                    ctx=context,
+                    turn_recorder=_team_turn_recorder("Continue."),
+                )
+            ]
+            assert chunks
+            assert isinstance(chunks[-1], StructuredStreamChunk)
+            assert chunks[-1].tool_trace == list(prefix.tool_trace)
+            text = chunks[-1].content
+        else:
+            text = await team_response(
+                agent_names=["general"],
+                mode=TeamMode.COORDINATE,
+                message="Continue.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=context,
+                turn_recorder=_team_turn_recorder("Continue."),
+            )
+    assert text.startswith(prefix.response_text + "\n\n")
+    assert text.count("Before restart.") == 1
+    assert len(text) > len(prefix.response_text) + 2
+    if outcome == "terminal":
+        assert "Recovered terminal." in text
 
 
 def test_team_pause_reindexes_interleaved_member_tools_to_document_order() -> None:
@@ -440,7 +632,8 @@ async def test_team_continuation_completes_terminal_only_member_tool_in_its_slot
     assert "🔧 `inspect` [1]" in presentation.per_member["general"]
 
 
-def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
+@pytest.mark.parametrize("recovered", [False, True])
+def test_blocking_team_pause_uses_the_structured_member_slot(recovered: bool) -> None:
     """A blocking pause must reach approval with its pending marker already anchored."""
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", requires_confirmation=True)
     requirement = RunRequirement(tool_execution=tool)
@@ -451,6 +644,14 @@ def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
         tools=[tool],
         member_responses=[RunOutput(agent_id="general", agent_name="GeneralAgent", content="Member answer.")],
         status=RunStatus.paused,
+    )
+    prefix = (
+        StreamingPresentation(
+            response_text="Before restart.\n\n🔧 `inspect` [1] ⏳",
+            tool_trace=(ToolTraceEntry(type="tool_call_started", tool_name="inspect"),),
+        )
+        if recovered
+        else None
     )
 
     paused = _attach_team_pause_presentation(
@@ -465,8 +666,10 @@ def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
         config_names=["general"],
         display_names=["GeneralAgent"],
         show_tool_calls=True,
+        initial_presentation=prefix,
     )
 
+    require_ordered_pause_presentation(paused, show_tool_calls=True)
     restored = _TeamStreamPresentation.restore(
         config_names=["general"],
         show_tool_calls=True,
@@ -475,9 +678,12 @@ def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
         prior_response_text=paused.response_text,
     )
     assert "Member answer." in restored.per_member["general"]
-    assert "🔧 `inspect` [1] ⏳" in restored.per_member["general"]
+    assert f"🔧 `inspect` [{2 if recovered else 1}] ⏳" in restored.per_member["general"]
     assert restored.consensus == "Consensus before approval."
-    assert restored.tool_trace[0].tool_call_id == "call-1"
+    assert restored.tool_trace[-1].tool_call_id == "call-1"
+    assert [tool.tool_call_id for tool in restored.tool_tracker.pending_tools] == ["call-1"]
+    if prefix is not None:
+        assert restored.render_body().startswith(prefix.response_text + "\n\n")
 
 
 def test_blocking_team_pause_renders_a_marker_only_member_tool_on_its_own_line() -> None:
@@ -4463,7 +4669,7 @@ def test_materialized_private_ad_hoc_team_uses_opened_scope_id() -> None:
             config=config,
             execution_identity=identity,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=_TEST_MODEL),
+        patch("mindroom.model_loading.get_model_instance", return_value=OpenAIChat(id="gpt-6-astra")),
     ):
         assert scope_context is not None
         team = build_materialized_team_instance(
@@ -4511,7 +4717,7 @@ async def test_private_ad_hoc_team_second_turn_replays_first_scoped_run() -> Non
             execution_identity=identity,
             create_session_if_missing=True,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=_TEST_MODEL),
+        patch("mindroom.model_loading.get_model_instance", return_value=OpenAIChat(id="gpt-6-astra")),
     ):
         assert scope_context is not None
         assert scope_context.session is not None
@@ -4551,7 +4757,7 @@ async def test_private_ad_hoc_team_second_turn_replays_first_scoped_run() -> Non
             config=config,
             execution_identity=identity,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=_TEST_MODEL),
+        patch("mindroom.model_loading.get_model_instance", return_value=OpenAIChat(id="gpt-6-astra")),
     ):
         assert scope_context is not None
         second_team = build_materialized_team_instance(

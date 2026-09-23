@@ -6689,6 +6689,30 @@ class TestApprovalContinuations:
         }
         assert restored.show_tool_calls is False
 
+    async def test_absent_background_job_marker_defaults_false(self, alice: PrincipalStore) -> None:
+        """An ordinary approval written before the marker remains ordinary."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+
+        def remove_marker(transaction: object) -> None:
+            row = transaction.fetchone(  # type: ignore[attr-defined]
+                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+                ("approval-1",),
+            )
+            context = json.loads(str(row["context_json"]))
+            context.pop("requires_background_tool_jobs", None)
+            transaction.execute(  # type: ignore[attr-defined]
+                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
+                (json.dumps(context), "approval-1"),
+            )
+
+        await alice._backend.write(remove_marker)
+
+        restored = await alice.approval_continuation("approval-1")
+
+        assert restored is not None
+        assert restored.requires_background_tool_jobs is False
+
     @pytest.mark.parametrize("current_policy", [False, True])
     async def test_claim_freezes_current_visibility_for_a_legacy_continuation(
         self,
@@ -6870,6 +6894,7 @@ class TestApprovalContinuations:
             run_id="run-2",
             session_id="session-1",
             calls=calls,
+            requires_background_tool_jobs=True,
             response_text="Before.\n\n🔧 `write_file` [2] ⏳",
             response_tool_trace=(
                 {
@@ -6887,10 +6912,34 @@ class TestApprovalContinuations:
         assert advanced.generation == 1
         assert advanced.run_id == "run-2"
         assert advanced.runtime_generation == "runtime-a"
+        assert advanced.requires_background_tool_jobs is True
         assert advanced.calls == calls
         assert advanced.response_text.endswith("🔧 `write_file` [2] ⏳")
         assert advanced.response_tool_trace[-1]["tool_call_id"] == "call-2"
         assert advanced.response_presentation_state == {"kind": "team", "consensus": "Before."}
+
+    async def test_chained_generation_never_downgrades_background_job_ownership(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An ordinary later pause cannot erase feature ownership from an earlier generation."""
+        await self.admit_sources(alice)
+        continuation = replace(self.continuation(), requires_background_tool_jobs=True)
+        await alice.create_approval_continuation(continuation)
+        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+
+        advanced = await alice.advance_approval_continuation(
+            "approval-1",
+            claimant_generation=claimed.generation,
+            run_id="run-2",
+            session_id="session-1",
+            calls=(),
+            requires_background_tool_jobs=False,
+        )
+
+        assert advanced is not None
+        assert advanced.requires_background_tool_jobs is True
 
     async def test_automatically_decided_chained_generation_stays_fenced_until_activation(
         self,

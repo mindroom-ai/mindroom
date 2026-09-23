@@ -18,6 +18,7 @@ from mindroom.mcp.function_surface import (
 from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -82,8 +83,11 @@ def _catalog_function_names_for_tool_config(
     return {
         tool.function_name
         for tool in catalog.tools
-        if (not exclude_tools or tool.remote_name not in exclude_tools)
-        and (not include_tools or tool.remote_name in include_tools)
+        if tool_name_allowed(
+            tool.remote_name,
+            include=include_tools or None,
+            exclude=exclude_tools or None,
+        )
     }
 
 

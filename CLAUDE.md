@@ -242,6 +242,30 @@ Matrix sync callback
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
 | `thread_export/workspace_sync.py` | Always-on debounced runner that keeps `<workspace>/thread_exports/` current through the live bots' clients and journal principals |
 | `background_tasks.py` | Background task management for non-blocking operations |
+| `tool_jobs/runtime.py` | Accepted execution ownership, durable outcomes, scoped discovery, and result claims |
+| `tool_jobs/settings.py` | Startup-pinned feature and toolkit exclusion settings |
+| `tool_jobs/disabled.py` | Passive preservation of saved sources and approvals while the feature is off |
+| `tool_jobs/agno_compat_execution.py` | SDK schema and exact tool-dispatch bindings |
+| `tool_jobs/agno_compat_resources.py` | SDK toolkit connection and cleanup lifetime bindings |
+| `tool_jobs/agno_compat_functions.py` | Private SDK actor/context access and dispatch classification |
+| `tool_jobs/agno_execution.py` | Approved SDK call execution and result capture |
+| `tool_jobs/consumption.py` | Exact durable acknowledgement after the SDK saves a consumed result |
+| `tool_jobs/execution_scope.py` | Response execution envelopes |
+| `tool_jobs/resources.py` | Retained resource cleanup ownership |
+| `tool_jobs/authorization.py` | Current local grants using shared construction and knowledge policy |
+| `tool_jobs/execution_authority.py` | Application-entry authority checks |
+| `tool_jobs/provenance.py` | Exact callable and MCP provenance |
+| `tool_jobs/control.py` | Human-follow-up wait signals and cancellation checkpoints |
+| `tool_jobs/wait_timeout.py` | Reserved wait metadata, validation, and saved per-call wait modes |
+| `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
+| `tool_jobs/completion.py` | Internal completion admission and transient waiting presentation |
+| `tool_jobs/user_stop.py` | Conversation Stop ordering and restoration of durable cancellation intent |
+| `tool_jobs/legacy_tool_jobs.py` | Pure normalization of released job evidence and pre-digest constructor settings |
+| `tool_job_completion.py` | Immutable job-generation references for internal completion events |
+| `tool_system/construction.py` | Selected toolkit factory and digested constructor identity |
+| `tool_system/filters.py` | Shared include/exclude function policy |
+| `custom_tools/job.py` | Reserved job discovery/control tool and native delegation-wait projection |
+| `orchestration/tool_job_runtime.py` | Managed job lifecycle and retrying internal completion wakeups |
 | `desktop/session.py` | Owns the desktop device's durable NIO session and storage binding |
 | `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |

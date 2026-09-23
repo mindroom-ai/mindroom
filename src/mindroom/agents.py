@@ -18,8 +18,10 @@ from mindroom import agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
 from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
+from mindroom.agent_policy import is_learning_enabled
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.custom_tools.job import JobTools
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
 from mindroom.hooks import HookRegistry
@@ -34,11 +36,15 @@ from mindroom.runtime_resolution import (
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
+from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ensure_tool_registry_loaded,
     get_tool_by_name,
 )
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
@@ -609,6 +615,8 @@ def _agent_tool_output_file_policy(
 def _wrap_direct_agent_toolkit_for_output_files(
     toolkit: Toolkit,
     *,
+    tool_name: str,
+    tool_config_overrides: dict[str, object] | None,
     agent_runtime: ResolvedAgentRuntime,
     runtime_paths: constants.RuntimePaths,
     tool_output_auto_save_threshold_bytes: int,
@@ -619,7 +627,10 @@ def _wrap_direct_agent_toolkit_for_output_files(
         runtime_paths,
         tool_output_auto_save_threshold_bytes,
     )
-    return wrap_toolkit_for_output_files(toolkit, policy)
+    return bind_toolkit_construction(
+        wrap_toolkit_for_output_files(toolkit, policy),
+        ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
+    )
 
 
 @timed("system_prompt_assembly.agent_create.model_instance")
@@ -695,6 +706,8 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             ),
+            tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
@@ -729,6 +742,8 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
             ),
+            tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
@@ -739,6 +754,8 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
 
         return _wrap_direct_agent_toolkit_for_output_files(
             SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths),
+            tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
@@ -754,6 +771,8 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             ),
+            tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
@@ -764,6 +783,8 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
 
         return _wrap_direct_agent_toolkit_for_output_files(
             DynamicWorkflowTools(),
+            tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
@@ -774,6 +795,8 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
 
         return _wrap_direct_agent_toolkit_for_output_files(
             ReportPublishingTools(),
+            tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
@@ -816,6 +839,8 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 stop_after_tool_call=dynamic_tool_continuation,
                 hidden_tool_names=hidden_tool_names,
             ),
+            tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
@@ -959,12 +984,6 @@ def _registry_tool_routes_through_worker(
     )
 
 
-def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) -> bool:
-    """Check if learning is enabled for an agent, falling back to defaults."""
-    learning = agent_config.learning if agent_config.learning is not None else defaults.learning
-    return learning is not False
-
-
 def _context_hidden_toolkits(execution_identity: ToolExecutionIdentity | None) -> frozenset[str]:
     if execution_identity is None or execution_identity.room_id is not None:
         return frozenset()
@@ -990,7 +1009,7 @@ def _resolve_agent_learning(
     learning_storage: BaseDb | None = None,
 ) -> bool | LearningMachine:
     """Resolve Agent.learning setting from MindRoom agent configuration."""
-    if not _is_learning_enabled(agent_config, defaults):
+    if not is_learning_enabled(agent_config, defaults):
         return False
 
     learning_mode = agent_config.learning_mode or defaults.learning_mode
@@ -1193,11 +1212,16 @@ def _build_agent_tool_hook_bridge(
     )
 
 
-def _prune_toolkit_functions(
-    toolkit: Toolkit,
+def _prepare_toolkit_functions(
+    toolkit: Toolkit | None,
     tool_function_filter: Callable[[Function], bool] | None,
+    *,
+    tool_name: str,
 ) -> Toolkit | None:
-    """Apply the final function policy and discard toolkits with no callable surface."""
+    """Reject reserved collisions, apply channel policy, and drop empty toolkits."""
+    if toolkit is None:
+        return None
+    _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
     if tool_function_filter is not None:
         toolkit.functions = {
             name: function for name, function in toolkit.functions.items() if tool_function_filter(function)
@@ -1359,6 +1383,7 @@ def _load_agent_skills(
 
 @timed("system_prompt_assembly.agent_create.agent_init")
 def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
+    output_file_policy = cast("ToolOutputFilePolicy | None", agent_kwargs.pop("tool_output_file_policy", None))
     knowledge_sources = cast(
         "tuple[KnowledgeSourceDescription, ...]",
         agent_kwargs.pop("knowledge_sources", ()),
@@ -1371,17 +1396,12 @@ def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
     agent = Agent(**agent_kwargs)
     agent.knowledge_sources = knowledge_sources
     agent.tool_function_filter = tool_function_filter
+    agent.tool_output_file_policy = output_file_policy
     return agent
 
 
 def _agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
-
-
-def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
-    """Attach the configured toolkit identity to its executable functions."""
-    for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = authored_name
 
 
 def _assemble_agent_toolkits(
@@ -1489,9 +1509,7 @@ def _assemble_agent_toolkits(
                     refresh_scheduler=refresh_scheduler,
                     dynamic_tool_continuation=dynamic_tool_continuation,
                 )
-            if toolkit:
-                _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
-                toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
+            toolkit = _prepare_toolkit_functions(toolkit, tool_function_filter, tool_name=tool_name)
             toolkit = apply_tool_approval_capability(
                 toolkit,
                 config,
@@ -1500,7 +1518,10 @@ def _assemble_agent_toolkits(
             )
             if toolkit:
                 toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
-                _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
+                bind_toolkit_authority(
+                    toolkit,
+                    authored_name=tool_entry.authored_name or tool_name,
+                )
                 tools.append(toolkit)
                 target_names = (
                     worker_routed_tool_names
@@ -1531,6 +1552,26 @@ def _assemble_agent_toolkits(
                 agent=agent_name,
                 error=str(exc),
             )
+    controls = JobTools.build(
+        tools,
+        runtime_paths,
+        replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
+        depth=delegation_depth,
+        enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
+        output_file_policy=_agent_tool_output_file_policy(
+            agent_runtime,
+            runtime_paths,
+            config.defaults.tool_output_auto_save_threshold_bytes,
+        ),
+    )
+    controls = apply_tool_approval_capability(
+        controls,
+        config,
+        supports_native_tool_approval=supports_native_tool_approval,
+        registered_tool_name="job",
+    )
+    if controls is not None:
+        tools.append(prepend_tool_hook_bridge(controls, tool_hook_bridge))
     return _AgentToolAssembly(
         tools=tools,
         loaded_tools=loaded_tools,
@@ -1840,7 +1881,7 @@ def create_agent(
             subdir="learning",
             session_table=f"{agent_name}_learning_sessions",
         )
-        if persist_runtime_state and _is_learning_enabled(agent_config, defaults)
+        if persist_runtime_state and is_learning_enabled(agent_config, defaults)
         else None
     )
 
@@ -1944,6 +1985,11 @@ def create_agent(
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
+        tool_output_file_policy=_agent_tool_output_file_policy(
+            agent_runtime,
+            runtime_paths,
+            config.defaults.tool_output_auto_save_threshold_bytes,
+        ),
         tool_function_filter=tool_function_filter,
         search_knowledge=knowledge_enabled,
         add_history_to_context=persist_runtime_state,
@@ -1958,6 +2004,9 @@ def create_agent(
     )
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
+    if background_tool_jobs_enabled(config, runtime_paths):
+        bind_actor_authority(agent, authority_snapshot(config, agent_name))
+        install_tool_job_execution(model, agent.fallback_config, depth=delegation_depth)
 
     logger.info(
         "Created agent",

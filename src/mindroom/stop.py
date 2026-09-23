@@ -301,6 +301,16 @@ class StopManager:
             **self._log_target(tracked.target),
         )
 
+    def request_task_stop(self, task: asyncio.Task[None]) -> None:
+        """Stop owned work once, retaining tracked-message cleanup when it already has a reply."""
+        if task.done() or task.cancelling():
+            return
+        for message_id, tracked in self.tracked_messages.items():
+            if tracked.task is task:
+                self._request_stop(message_id)
+                return
+        request_task_cancel(task, cancel_source="user_stop")
+
     def request_stop_if(self, message_id: str, should_stop: Callable[[], bool]) -> bool:
         """Atomically validate current intent and request cancellation without yielding."""
         if not should_stop():

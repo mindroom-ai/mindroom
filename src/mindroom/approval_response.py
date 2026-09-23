@@ -29,7 +29,9 @@ from mindroom.tool_approval import (
     resolve_tool_approval_approver,
 )
 from mindroom.tool_approval_grants import grant_operation
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.events import serialize_tool_trace, tool_markers_match_trace
+from mindroom.turn_origin import TurnIntent
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
 
@@ -180,6 +182,12 @@ def continuation_target(
     reply_to_event_id: str | None = None,
 ) -> MessageTarget:
     """Return the canonical Matrix conversation target for one continuation."""
+    if (
+        continuation.origin is not None
+        and continuation.origin.intent is TurnIntent.TOOL_JOB_COMPLETION
+        and reply_to_event_id in continuation.source_event_ids
+    ):
+        reply_to_event_id = None
     return MessageTarget(
         room_id=continuation.room_id,
         source_thread_id=continuation.thread_id,
@@ -354,6 +362,12 @@ class ApprovalResponseCoordinator:
         if continuation.state == "ready":
             self.retry_sources(continuation.room_id, continuation.source_event_ids)
 
+    def requires_background_jobs(self, paused: PausedAttempt, calls: tuple[ApprovalCall, ...]) -> bool:
+        """Recognize managed execution or native job ownership in a new pause."""
+        return (
+            paused.requires_background_tool_jobs and background_tool_jobs_enabled(self.config(), self.runtime_paths)
+        ) or any(call.toolkit_name == "job" for call in calls)
+
     async def advance_pause(
         self,
         current: ApprovalContinuation,
@@ -380,6 +394,7 @@ class ApprovalResponseCoordinator:
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
+            requires_background_tool_jobs=self.requires_background_jobs(paused, plan.calls),
             runtime_model_name=paused.runtime_model_name,
             continuation_count=max(current.continuation_count, paused.continuation_count),
             response_text=paused.response_text,

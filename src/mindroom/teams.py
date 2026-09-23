@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agno.agent import Agent
@@ -116,6 +117,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
+from mindroom.streaming import StreamingPresentation
 from mindroom.system_prompt import render_date_context
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -125,7 +127,14 @@ from mindroom.team_exact_members import (
 )
 from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.timing import emit_timing_event
+from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.agno_compat_functions import managed_team_session_state
+from mindroom.tool_jobs.completion import join_approval_jobs
+from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
+from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.events import (
+    BackgroundWaitChunk,
     StreamingToolTracker,
     StructuredStreamChunk,
     ToolTraceEntry,
@@ -194,7 +203,7 @@ def _team_request_log_context(
 # Message length limits for team context and logging
 _MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
 _MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
-_TeamStreamChunk = str | StructuredStreamChunk
+_TeamStreamChunk = str | StructuredStreamChunk | BackgroundWaitChunk
 _NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
 _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
     max_messages=30,
@@ -259,6 +268,26 @@ def _format_team_header(agent_names: list[str]) -> str:
 
     """
     return f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
+
+
+def _prepend_team_response_prefix(text: str, initial_presentation: StreamingPresentation | None) -> str:
+    """Keep delivered text before any recovered response or terminal notice."""
+    if initial_presentation is None:
+        return text
+    return append_stream_text(initial_presentation.response_text, text, separate=True)
+
+
+def _prefix_team_stream_chunk(
+    chunk: _TeamStreamChunk,
+    initial_presentation: StreamingPresentation | None,
+) -> _TeamStreamChunk:
+    """Carry recovered metadata with replacement text; structured documents already include it."""
+    if initial_presentation is None or not isinstance(chunk, str):
+        return chunk
+    return StructuredStreamChunk(
+        content=_prepend_team_response_prefix(chunk, initial_presentation),
+        tool_trace=list(deepcopy(initial_presentation.tool_trace)),
+    )
 
 
 def _format_member_contribution(agent_name: str, content: str, indent: int = 0) -> str:
@@ -368,12 +397,15 @@ class _TeamStreamPresentation:
     per_member: dict[str, str]
     consensus: str = ""
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
+    prefix_response_text: str = ""
+    prefix_tool_count: int = 0
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
     separate_next_scopes: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Restore pending tool identity from the durable trace."""
-        self.tool_tracker.restore_pending(self.tool_trace)
+        self.tool_tracker.restore_pending(self.tool_trace[self.prefix_tool_count :])
+        self.tool_tracker.sync_visible_indices(self.tool_trace)
         self.separate_next_scopes = {
             pending.scope_key
             for pending in self.tool_tracker.pending_tools
@@ -392,6 +424,7 @@ class _TeamStreamPresentation:
         display_names: Sequence[str],
         *,
         show_tool_calls: bool,
+        initial_presentation: StreamingPresentation | None = None,
     ) -> _TeamStreamPresentation:
         """Create an empty presentation for a new team run."""
         frozen_config_names = list(config_names)
@@ -411,6 +444,9 @@ class _TeamStreamPresentation:
             display_names_by_id=dict(zip(ids, names, strict=True)),
             show_tool_calls=show_tool_calls,
             per_member=dict.fromkeys(ids, ""),
+            prefix_response_text=initial_presentation.response_text if initial_presentation is not None else "",
+            prefix_tool_count=len(initial_presentation.tool_trace) if initial_presentation is not None else 0,
+            tool_trace=list(deepcopy(initial_presentation.tool_trace)) if initial_presentation is not None else [],
         )
 
     @classmethod
@@ -469,13 +505,20 @@ class _TeamStreamPresentation:
             msg = "Team continuation presentation snapshot is invalid"
             raise RuntimeError(msg)
         valid_tool_scopes = {"team", *(f"agent:{member_id}" for member_id in restored_ids)}
-        if any(entry.scope_key not in valid_tool_scopes for entry in tool_trace):
+        consensus = state.get("consensus")
+        prefix_response_text = state.get("prefix_response_text", "")
+        prefix_tool_count = state.get("prefix_tool_count", 0)
+        if (
+            not isinstance(consensus, str)
+            or not isinstance(prefix_response_text, str)
+            or type(prefix_tool_count) is not int
+            or not 0 <= prefix_tool_count <= len(tool_trace)
+        ):
+            msg = "Team continuation presentation snapshot is invalid"
+            raise RuntimeError(msg)
+        if any(entry.scope_key not in valid_tool_scopes for entry in tool_trace[prefix_tool_count:]):
             msg = "Team continuation durable tool scope is not a frozen presentation slot"
             raise RuntimeError(msg)
-        consensus = state.get("consensus")
-        if not isinstance(consensus, str):
-            msg = "Team continuation presentation snapshot is invalid"
-            raise RuntimeError(msg)  # noqa: TRY004
         restored_separators = _restore_hidden_team_separators(
             state,
             valid_tool_scopes=valid_tool_scopes,
@@ -491,6 +534,8 @@ class _TeamStreamPresentation:
             per_member=per_member,
             consensus=consensus,
             tool_trace=list(deepcopy(tool_trace)),
+            prefix_response_text=prefix_response_text,
+            prefix_tool_count=prefix_tool_count,
         )
         restored.separate_next_scopes.update(restored_separators)
         if restored.render_body() != prior_response_text:
@@ -514,6 +559,9 @@ class _TeamStreamPresentation:
             ],
             "consensus": self.consensus,
         }
+        if self.prefix_response_text or self.prefix_tool_count:
+            state["prefix_response_text"] = self.prefix_response_text
+            state["prefix_tool_count"] = self.prefix_tool_count
         if not self.show_tool_calls and self.separate_next_scopes:
             document_scopes = [*(f"agent:{member_id}" for member_id in self.member_ids), "team"]
             state["separate_next_scopes"] = [scope for scope in document_scopes if scope in self.separate_next_scopes]
@@ -579,7 +627,10 @@ class _TeamStreamPresentation:
             "team": len(self.member_ids),
         }
         old_indices = {id(trace_entry): index for index, trace_entry in enumerate(self.tool_trace, start=1)}
-        self.tool_trace.sort(key=lambda trace_entry: scope_order[trace_entry.scope_key or "team"])
+        self.tool_trace[self.prefix_tool_count :] = sorted(
+            self.tool_trace[self.prefix_tool_count :],
+            key=lambda trace_entry: scope_order[trace_entry.scope_key or "team"],
+        )
         index_map = {
             old_indices[id(trace_entry)]: new_index for new_index, trace_entry in enumerate(self.tool_trace, start=1)
         }
@@ -646,7 +697,12 @@ class _TeamStreamPresentation:
             per_member=self.per_member,
             consensus=self.consensus,
         )
-        return _format_team_header(self.display_names) + "\n\n".join(parts) if parts else ""
+        body = "\n\n".join(parts)
+        if body and not self.prefix_response_text:
+            body = _format_team_header(self.display_names) + body
+        elif self.prefix_response_text:
+            body = body.lstrip("\n")
+        return append_stream_text(self.prefix_response_text, body, separate=True)
 
 
 def _blocking_team_member_scope(
@@ -772,9 +828,15 @@ def _attach_team_pause_presentation(
     config_names: Sequence[str],
     display_names: Sequence[str],
     show_tool_calls: bool,
+    initial_presentation: StreamingPresentation | None = None,
 ) -> PausedAttempt:
     """Render a blocking team pause into the same document used by continuation."""
-    presentation = _TeamStreamPresentation.new(config_names, display_names, show_tool_calls=show_tool_calls)
+    presentation = _TeamStreamPresentation.new(
+        config_names,
+        display_names,
+        show_tool_calls=show_tool_calls,
+        initial_presentation=initial_presentation,
+    )
     scoped_tools: dict[tuple[str, str], ToolExecution] = {}
     _append_team_output_text(presentation, response, top_level=True)
     _collect_blocking_team_tools(presentation, response, scoped_tools)
@@ -847,9 +909,12 @@ def _format_terminal_team_response(
     response: TeamRunOutput | RunOutput,
     *,
     team_display_names: list[str],
+    include_header: bool = True,
 ) -> str:
     """Render the final user-visible text for one terminal team fallback output."""
-    return _format_team_header(team_display_names) + _team_response_text(response)
+    header = _format_team_header(team_display_names) if include_header else ""
+    body = _team_response_text(response)
+    return header + (body if include_header else body.lstrip("\n"))
 
 
 def _register_team_notice_storage(
@@ -2299,6 +2364,8 @@ def _create_team_instance(
         agent.add_session_summary_to_context = False
 
     install_message_builder_patch()
+    if background_tool_jobs_enabled(config, runtime_paths):
+        install_tool_job_execution(model)
     team_members: list[Agent | Team] = [*agents]
     team = Team(
         members=team_members,
@@ -2609,7 +2676,50 @@ def _approval_history_scope(
     return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
-async def continue_paused_team_run(
+async def _retrieve_team_job_results(
+    previous: TeamRunOutput,
+    prompt: str,
+    *,
+    team: Team,
+    presentation: _TeamStreamPresentation,
+    session_id: str,
+    user_id: str,
+    configured_team_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    members: ResolvedExactTeamMembers,
+) -> TeamRunOutput:
+    """Retrieve ready results through the reconstructed team's ordinary native stream."""
+    events = drive_delegation_stream(
+        team,
+        team.arun(
+            prompt,
+            session_id=session_id,
+            user_id=user_id,
+            metadata=deepcopy(previous.metadata),
+            session_state=managed_team_session_state(),
+            stream=True,
+            stream_events=True,
+            yield_run_output=True,
+        ),
+        run_child=run_delegated_child_response,
+        agent_name=configured_team_name,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        member_config_names=_delegation_member_names(members),
+    )
+    return await _collect_team_continuation(events, presentation)
+
+
+@partial(
+    owned_tool_execution,
+    enabled=lambda *, config, runtime_paths, **_kwargs: background_tool_jobs_enabled(config, runtime_paths),
+)
+async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cleanup boundaries.
     *,
     member_names: tuple[str, ...],
     mode: TeamMode,
@@ -2658,6 +2768,7 @@ async def continue_paused_team_run(
         if scope is None:
             msg = "Paused team history is no longer available"
             raise RuntimeError(msg)
+        set_consumption_storage(scope.storage_factory)
         session = scope.session
         persisted = session.get_run(run_id) if isinstance(session, TeamSession) else None
         if not isinstance(persisted, TeamRunOutput) or persisted.status != RunStatus.paused:
@@ -2755,6 +2866,29 @@ async def continue_paused_team_run(
                 continuation_stream,
                 presentation,
             )
+
+            continued = await join_approval_jobs(
+                continued,
+                agent_names=member_names,
+                is_complete=lambda result: result.status == RunStatus.completed,
+                continue_response=partial(
+                    _retrieve_team_job_results,
+                    team=team,
+                    presentation=presentation,
+                    session_id=session_id,
+                    user_id=user_id,
+                    configured_team_name=configured_team_name,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    execution_identity=execution_identity,
+                    refresh_scheduler=refresh_scheduler,
+                    members=members,
+                ),
+                presentation=lambda: StreamingPresentation(
+                    response_text=presentation.render_body(),
+                    tool_trace=tuple(deepcopy(presentation.tool_trace)) if show_tool_calls else (),
+                ),
+            )
         paused = paused_attempt_from_response(
             continued,
             fallback_session_id=session_id,
@@ -2786,17 +2920,20 @@ async def continue_paused_team_run(
             ),
         )
     finally:
-        with stack:
-            _register_team_notice_storage(
-                scope_context=scope,
-                session_id=session_id,
-                entity_name=configured_team_name,
-            )
-            close_team_runtime_state_dbs(
-                agents=members.agents if members is not None else [],
-                team_db=cast("BaseDb | None", team.db) if team is not None else None,
-                shared_scope_storage=scope.storage if scope is not None else None,
-            )
+        try:
+            await finalize_consumption()
+        finally:
+            with stack:
+                _register_team_notice_storage(
+                    scope_context=scope,
+                    session_id=session_id,
+                    entity_name=configured_team_name,
+                )
+                close_team_runtime_state_dbs(
+                    agents=members.agents if members is not None else [],
+                    team_db=cast("BaseDb | None", team.db) if team is not None else None,
+                    shared_scope_storage=scope.storage if scope is not None else None,
+                )
 
 
 async def prepare_materialized_team_execution(
@@ -2959,7 +3096,7 @@ async def team_response(  # noqa: C901, PLR0915
             active_model_names=active_member_model_names,
         )
     except ValueError as exc:
-        return str(exc)
+        return _prepend_team_response_prefix(str(exc), ctx.initial_presentation)
     agents = team_members.agents
 
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
@@ -2967,6 +3104,8 @@ async def team_response(  # noqa: C901, PLR0915
     ctx = replace(
         ctx,
         entity_label=team_name,
+        tool_job_agent_names=tuple(requested_agent_names),
+        background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
         transient_enrichment_items=append_knowledge_availability_enrichment(
             ctx.transient_enrichment_items,
             unavailable_bases,
@@ -3077,6 +3216,7 @@ async def team_response(  # noqa: C901, PLR0915
                     run_id=current_run_id,
                     user_id=user_id,
                     metadata=run_metadata,
+                    session_state=managed_team_session_state(),
                 )
 
         attempt_run_id = continuation_state.active_run_id
@@ -3137,6 +3277,15 @@ async def team_response(  # noqa: C901, PLR0915
                 toolkit_owners=toolkit_owners_for_agents(attempt_agents),
             )
             if paused_attempt is not None:
+                initial_presentation = ctx.initial_presentation
+                if run.attempted_job_outcomes:
+                    initial_presentation = StreamingPresentation(
+                        response_text=_prepend_team_response_prefix(run.prior_response_text, initial_presentation),
+                        tool_trace=(
+                            *(initial_presentation.tool_trace if initial_presentation is not None else ()),
+                            *run.prior_response_tools,
+                        ),
+                    )
                 return replace(
                     _attach_team_pause_presentation(
                         paused_attempt,
@@ -3144,6 +3293,7 @@ async def team_response(  # noqa: C901, PLR0915
                         config_names=attempt_members.requested_agent_names,
                         display_names=attempt_members.display_names,
                         show_tool_calls=show_tool_calls,
+                        initial_presentation=initial_presentation,
                     ),
                     runtime_model_name=prepared_execution.runtime_model_name,
                     team_member_model_names=tuple(sorted(holder.member_model_names.items())),
@@ -3225,7 +3375,11 @@ async def team_response(  # noqa: C901, PLR0915
                     and is_silent_schedule_no_report_response(raw_response_text)
                     and not _has_visible_team_member_output(response)
                 )
-                else _format_terminal_team_response(response, team_display_names=team_members.display_names)
+                else _format_terminal_team_response(
+                    response,
+                    team_display_names=team_members.display_names,
+                    include_header=not (run.prior_response_text or ctx.initial_presentation),
+                )
             )
         else:
             response_text = _format_team_header(team_members.display_names) + team_response_text
@@ -3282,7 +3436,7 @@ async def team_response(  # noqa: C901, PLR0915
         unexpected_error_text=lambda e: get_user_friendly_error_message(e, team_name),
         discard_empty_run=discard_team_empty_run,
     )
-    return await run_blocking_response_turn(
+    response_text = await run_blocking_response_turn(
         ctx,
         adapter,
         TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
@@ -3294,6 +3448,7 @@ async def team_response(  # noqa: C901, PLR0915
             run_id=ctx.run_id,
         ),
     )
+    return _prepend_team_response_prefix(response_text, ctx.initial_presentation)
 
 
 async def _team_response_stream_raw(
@@ -3341,6 +3496,7 @@ async def _team_response_stream_raw(
             run_id=run_id,
             user_id=user_id,
             metadata=metadata,
+            session_state=managed_team_session_state(),
         )
     except Exception as e:
         logger.exception("team_streaming_failed", agents=team_members.display_names)
@@ -3426,7 +3582,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             active_model_names=active_member_model_names,
         )
     except ValueError as exc:
-        yield str(exc)
+        yield _prefix_team_stream_chunk(str(exc), ctx.initial_presentation)
         return
     agent_names = team_members.display_names
     display_names = team_members.display_names
@@ -3434,6 +3590,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
     ctx = replace(
         ctx,
         entity_label=team_label,
+        tool_job_agent_names=tuple(requested_agent_names),
+        background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
         transient_enrichment_items=append_knowledge_availability_enrichment(
             ctx.transient_enrichment_items,
             unavailable_bases,
@@ -3445,12 +3603,18 @@ async def team_response_stream(  # noqa: C901, PLR0915
         team_members=team_members,
         member_model_names=team_members.model_names,
     )
+    previous_presentation = ctx.initial_presentation
+    attempt_prefix = ctx.initial_presentation
 
     async def _run_team_stream_attempt(  # noqa: C901, PLR0911, PLR0912, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[_TeamStreamChunk | AttemptResolved, None]:
         """Stream one team attempt, ending with its ``AttemptResolved`` sentinel."""
+        nonlocal attempt_prefix
+        # Background joins continue the already-published document. A fresh
+        # tracker owns this attempt while the prior trace remains a frozen prefix.
+        attempt_prefix = previous_presentation if run.attempted_job_outcomes else ctx.initial_presentation
         if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
             holder.member_model_names = dict.fromkeys(
                 requested_agent_names,
@@ -3526,6 +3690,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             attempt_config_names,
             attempt_display_names,
             show_tool_calls=show_tool_calls,
+            initial_presentation=attempt_prefix,
         )
         attempt_member_ids = presentation.member_ids
         attempt_display_names_by_id = presentation.display_names_by_id
@@ -3742,6 +3907,26 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         ),
                     )
                     return
+                replayable_text = response_text if event_has_visible else ""
+                if emitted_output and (ctx.background_tool_jobs or ctx.initial_presentation is not None):
+                    # The aggregate terminal output must not replace the live
+                    # document with a prose-only rendering that drops its trace.
+                    _append_team_output_text(
+                        presentation,
+                        event,
+                        top_level=True,
+                        skip_scopes={
+                            *(f"agent:{member}" for member, text in canonical_per_member.items() if text),
+                            *({"team"} if canonical_consensus else ()),
+                        },
+                    )
+                    _complete_terminal_team_tools(presentation, event)
+                    yield StructuredStreamChunk(
+                        content=presentation.render_body(),
+                        tool_trace=presentation.tool_trace.copy(),
+                        presentation_state=presentation.to_state(),
+                    )
+                    response_text = ""
                 # The driver emits response_text only after settling the
                 # attempt: a pre-settle yield would leak the fallback
                 # placeholder before an empty-run retry, or stale
@@ -3749,7 +3934,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 yield AttemptResolved(
                     CompletedAttempt(
                         response_text=response_text,
-                        replayable_text=response_text if event_has_visible else "",
+                        replayable_text=replayable_text,
                         has_visible_content=event_has_visible,
                         is_empty=(
                             event.status == RunStatus.completed and not event_tool_executions and not event_has_visible
@@ -3892,8 +4077,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     completed_tool_executions.append(event.tool)
                 presentation.complete_tool("team", event.tool)
             elif isinstance(event, TeamRunCompletedEvent):
-                # Real Agno team streams never yield a terminal run output;
-                # this event is the stream's usage/identity source instead.
+                # Record usage and identity even for providers that omit the
+                # aggregate terminal output after their stream events.
                 if event.team_id in (None, "", bound_team_id):
                     completed_run_event = event
                     holder.attempt_run_id = event.run_id or attempt_run_id
@@ -4029,7 +4214,15 @@ async def team_response_stream(  # noqa: C901, PLR0915
     # its cleanup does not wait for event-loop async-generator finalization.
     async with aclosing(response_stream) as closing_stream:
         async for chunk in closing_stream:
-            yield chunk
+            published = _prefix_team_stream_chunk(chunk, attempt_prefix)
+            if isinstance(published, StructuredStreamChunk):
+                previous_presentation = StreamingPresentation(
+                    response_text=published.content,
+                    tool_trace=tuple(deepcopy(published.tool_trace or ())),
+                )
+            elif isinstance(published, str):
+                previous_presentation = StreamingPresentation(response_text=published)
+            yield published
 
 
 __all__ = [

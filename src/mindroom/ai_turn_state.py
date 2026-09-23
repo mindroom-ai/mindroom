@@ -20,12 +20,17 @@ class AITurnState:
 
     prior_completed_tools: Sequence[ToolTraceEntry] = ()
     assistant_text: str = ""
+    prior_assistant_text: str = ""
     completed_tools: list[ToolTraceEntry] = field(default_factory=list, init=False)
     interrupted_tools: list[ToolTraceEntry] = field(default_factory=list, init=False)
 
     def completed_tools_for(self, attempt_completed_tools: Sequence[ToolTraceEntry]) -> list[ToolTraceEntry]:
         """Return the top-level completed tool trace for one attempt."""
         return [*self.prior_completed_tools, *attempt_completed_tools]
+
+    def assistant_text_for(self, attempt_text: str) -> str:
+        """Keep completed background-join prose before the current attempt."""
+        return "\n\n".join(text for text in (self.prior_assistant_text, attempt_text) if text)
 
     def sync_partial(
         self,
@@ -37,7 +42,7 @@ class AITurnState:
         interrupted_tools: Sequence[ToolTraceEntry],
     ) -> None:
         """Refresh the live top-level turn state without deciding an outcome."""
-        self.assistant_text = assistant_text
+        self.assistant_text = self.assistant_text_for(assistant_text)
         self.completed_tools = self.completed_tools_for(completed_tools)
         self.interrupted_tools = list(interrupted_tools)
         if recorder is None:
@@ -58,7 +63,7 @@ class AITurnState:
         completed_tools: Sequence[ToolTraceEntry],
     ) -> None:
         """Record a completed top-level turn when a recorder is present."""
-        self.assistant_text = assistant_text
+        self.assistant_text = self.assistant_text_for(assistant_text)
         self.completed_tools = self.completed_tools_for(completed_tools)
         self.interrupted_tools = []
         if recorder is None:
@@ -80,7 +85,7 @@ class AITurnState:
         original_status: RunStatus = RunStatus.cancelled,
     ) -> None:
         """Record an interrupted top-level turn when a recorder is present."""
-        self.assistant_text = assistant_text
+        self.assistant_text = self.assistant_text_for(assistant_text)
         self.completed_tools = self.completed_tools_for(completed_tools)
         self.interrupted_tools = list(interrupted_tools)
         if recorder is None:

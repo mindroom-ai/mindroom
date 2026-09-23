@@ -32,7 +32,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.hooks import HookRegistry, HookRegistryState
 from mindroom.journal_dispatch import JournalDispatcher
@@ -81,6 +81,7 @@ from mindroom.runtime_shutdown import (
     ShutdownBudget,
     shutdown_intent_for_entity,
 )
+from mindroom.tool_jobs.runtime import ToolJobRuntime
 from tests.bot_helpers import make_test_agent_bot
 
 if TYPE_CHECKING:
@@ -2627,7 +2628,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         mock_create_bot.return_value = mock_bot
 
         # Create config with one agent
-        config = MagicMock(spec=Config)
+        config = MagicMock(spec=Config, background_tool_jobs=BackgroundToolJobsConfig(enabled=False))
         config.agents = {"test_agent": MagicMock()}
         _configure_mock_access(config)
         config.teams = {}
@@ -2679,7 +2680,11 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     """A hot-reload restart of the first sync task generation must not end the service."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
-    config = MagicMock(spec=Config, source_fingerprint=None)
+    config = MagicMock(
+        spec=Config,
+        source_fingerprint=None,
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
+    )
     config.agents = {"general": MagicMock()}
     _configure_mock_access(config)
     config.teams = {}
@@ -2751,7 +2756,11 @@ async def test_start_runtime_ingests_before_membership_setup_but_defers_semantic
     """Owned joins need ingestion while semantic work waits for published grants."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
-    config = MagicMock(spec=Config, source_fingerprint=None)
+    config = MagicMock(
+        spec=Config,
+        source_fingerprint=None,
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
+    )
     config.agents = {"general": MagicMock()}
     _configure_mock_access(config, members_of_rooms={"general": ["grant"]})
     config.teams = {}
@@ -2862,7 +2871,11 @@ def _orchestrator_with_membership_startup_bots(
     """Build the narrow startup runtime used by publication-ordering tests."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.0)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    config = MagicMock(spec=Config, source_fingerprint=None)
+    config = MagicMock(
+        spec=Config,
+        source_fingerprint=None,
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
+    )
     config.agents = {"general": MagicMock()}
     _configure_mock_access(config, members_of_rooms={"general": ["grant"]})
     config.teams = {}
@@ -2888,12 +2901,14 @@ def _orchestrator_with_membership_startup_bots(
 
 
 @pytest.mark.asyncio
-async def test_startup_membership_publication_serializes_config_reload(
+async def test_startup_membership_publication_serializes_config_reload(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A reload must not share or prematurely reopen startup admission ownership."""
     orchestrator, router_bot, general_bot = _orchestrator_with_membership_startup_bots(tmp_path, monkeypatch)
+    # Normal initialization completes the passive scan before runtime startup.
+    await orchestrator._tool_job_runtime.initialize()
 
     setup_started = asyncio.Event()
     setup_can_finish = asyncio.Event()
@@ -4181,18 +4196,23 @@ async def test_orchestrator_deferred_stop_keeps_journal_open_for_resistant_owner
         )
         orchestrator.agent_bots = {"agent1": bot}
         orchestrator._open_journal = journal
+        jobs = orchestrator._tool_job_runtime.runtime
         stopping = asyncio.create_task(orchestrator.stop())
         await finalizer_entered.wait()
-        await asyncio.sleep(0.02)
 
         assert not stopping.done()
         journal.close.assert_not_awaited()
+        assert orchestrator._tool_job_runtime.runtime is jobs
+        with pytest.raises(BlockingIOError):
+            ToolJobRuntime(orchestrator.storage_path)
 
         release_owner.set()
         await stopping
 
     journal.close.assert_awaited_once()
     assert orchestrator._open_journal is None
+    restarted = ToolJobRuntime(orchestrator.storage_path)
+    await restarted.shutdown()
 
 
 @pytest.mark.asyncio
@@ -4292,6 +4312,7 @@ async def test_orchestrator_retains_shared_journal_for_generic_failure_until_res
         )
         orchestrator.agent_bots = {"agent1": bot}
         orchestrator._open_journal = journal
+        jobs = orchestrator._tool_job_runtime.runtime
 
         with pytest.raises(RuntimeError, match="preparation failed before response drain") as raised:
             await orchestrator.stop()
@@ -4299,11 +4320,16 @@ async def test_orchestrator_retains_shared_journal_for_generic_failure_until_res
         assert raised.value is preparation_failure
         journal.close.assert_not_awaited()
         assert orchestrator._open_journal is journal
+        assert orchestrator._tool_job_runtime.runtime is jobs
+        with pytest.raises(BlockingIOError):
+            ToolJobRuntime(orchestrator.storage_path)
 
         await orchestrator.stop()
 
     journal.close.assert_awaited_once()
     assert orchestrator._open_journal is None
+    restarted = ToolJobRuntime(orchestrator.storage_path)
+    await restarted.shutdown()
 
 
 @pytest.mark.asyncio

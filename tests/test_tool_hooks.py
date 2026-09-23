@@ -42,6 +42,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.session_ids import create_session_id
+from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -1679,6 +1680,42 @@ async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> 
         "Adjust your approach — try a different tool or different arguments."
     )
     assert after_seen == [(True, result, None)]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_before_hook_is_reported_as_blocked(tmp_path: Path) -> None:
+    """A cancelled admission pairs its hooks without claiming the tool body failed."""
+    control = JobControl()
+    after_seen: list[tuple[bool, BaseException | None]] = []
+    calls = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(_ctx: ToolBeforeCallContext) -> None:
+        control.cancel()
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        after_seen.append((ctx.blocked, ctx.error))
+
+    async def body() -> str:
+        calls.append("executed")
+        return "result"
+
+    bridge = build_tool_hook_bridge(
+        HookRegistry.from_plugins([_plugin("cancel-admission", [before, after])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+    )
+    with (
+        tool_runtime_context(_tool_runtime_context(tmp_path)),
+        job_control_context(control),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await bridge("body", body, {})
+    assert calls == []
+    assert len(after_seen) == 1
+    assert after_seen[0][0]
+    assert isinstance(after_seen[0][1], asyncio.CancelledError)
 
 
 @pytest.mark.asyncio

@@ -20,24 +20,30 @@ from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import sessions
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.state import DelegationState
+from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.delegation_helpers import (
+    DelegationModel,
+    _call,
+    _delegate_runtime_context,
+    _runtime_paths,
+    _saved_approval_calls,
+)
 from tests.identity_helpers import entity_ids
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_execution import DelegationModel, _call, _saved_approval_calls
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("execution", ["direct", "native", "team"])
+@pytest.mark.parametrize("execution", ["direct", "native", "team", "excluded"])
 @pytest.mark.parametrize("model", [None, "alternate"])
 async def test_followup_reuses_child_history_after_parent_reconstruction(  # noqa: PLR0915
     tmp_path: Path,
@@ -48,6 +54,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
     """A new parent/toolkit can continue the same child and obtain a separate audit turn."""
     native = execution != "direct"
     config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=execution == "excluded", exclude_toolkits=["delegate"]),
         agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"], tools=["calculator"])},
         defaults=DefaultsConfig(tools=[], learning=False),
         models={
@@ -123,6 +130,8 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
             "runtime_paths": paths,
             "execution_identity": identity,
         }
+        runtime = ToolJobRuntime(tmp_path) if execution == "excluded" else None
+        register_background_runtime(paths, runtime)
         try:
             response = await parent.arun("Work", session_id=identity.session_id, user_id=identity.requester_id)
             response = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
@@ -158,11 +167,16 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
                 )
             assert pause_count == (2 if name == "continue_subagent" else 0)
             assert response.status == RunStatus.completed
+            if runtime is not None:
+                assert await runtime.list_jobs(owner=identity, depth=0) == []
             if execution == "team":
                 child = DelegationState.from_metadata(response.metadata).children[0]
                 return f"{child.result}\nSubagent ID: {child.subagent_id}"
             return next(str(tool.result) for tool in response.tools or () if tool.tool_name == name)
         finally:
+            if runtime is not None:
+                await runtime.shutdown()
+            register_background_runtime(paths, None)
             storage.close()
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):

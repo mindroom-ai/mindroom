@@ -1077,6 +1077,35 @@ You can also validate a specific file directly:
 mindroom config validate --path /path/to/config.yaml
 ```
 
+## Background Tool Jobs
+
+Generic background tool jobs are experimental and disabled by default.
+Enable them for the whole instance with this root option:
+
+```yaml
+background_tool_jobs:
+  enabled: true
+  exclude_toolkits: [shell]
+```
+
+Restart MindRoom after changing either setting.
+Hot reload saves the requested value and reports that a restart is required; other configuration changes can still take effect.
+When enabled, managed Matrix tools gain a shared `wait_timeout` argument and one `job` tool for listing, inspecting, waiting for, or cancelling accepted work.
+Ordinary calls still wait by default, and a human follow-up can release the wait while work continues.
+The default `exclude_toolkits: [shell]` keeps shell tools on their native `timeout` and shell handle controls.
+The list matches registered toolkit names, including custom/plugin toolkits, and excludes all their functions from generic waiting and execution.
+For example, use `[shell, my_plugin_toolkit]` to exclude both; an explicit list replaces the default, and `[]` excludes nothing.
+Use toolkit names from `agents.*.tools`, not plugin package names or individual function names.
+Previously accepted jobs and approvals keep their existing execution owner when exclusions change.
+See [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) for the complete waiting and result behavior.
+
+With the option off, tools and delegation use their ordinary execution paths without these generic job controls.
+Existing shell-specific background commands remain available.
+If an earlier enabled run left unfinished jobs or related approvals, those sources stay parked while the feature is disabled.
+Their saved outcomes remain on disk, and their original tools are not replayed.
+Re-enable the option and restart to recover that work; abandoned local execution is reported as interrupted.
+Recovery still checks current permissions and room membership, so an approval invalidated by an agent leaving a room cannot authorize a later tool call.
+
 ## Adaptive Agent Participation
 
 By default, threads with multiple human participants require explicit agent mentions.
@@ -3065,8 +3094,15 @@ Pass a configured alias from `models:` as `model` to choose a different model fo
 An explicit model takes precedence over thread and room choices; omitted or `None` keeps normal model selection.
 Unknown model aliases are rejected before execution.
 The selected model is retained for follow-ups, approval continuations, and restarts without changing the parent or agent configuration.
-The caller waits for the child to execute the task, then receives its answer, stable subagent ID, and an audit reference as the tool result.
-Use `continue_subagent` with that ID for a follow-up in the same child session after its previous turn returns.
+Fast calls return the child's answer, stable subagent ID, and an audit reference as the tool result.
+Calls wait for the child by default.
+Enable the instance-wide root option `background_tool_jobs.enabled: true` and restart to use generic background execution; it is disabled by default.
+Unless `delegate` is listed in `background_tool_jobs.exclude_toolkits`, managed Matrix calls wait until completion or human input, and the shared `wait_timeout` option accepts zero for immediate background execution or positive seconds to bound the wait.
+Human input then releases the wait while the child keeps working; it does not automatically pause the child.
+Use `job(action="list")` to rediscover jobs and `job(action="wait", job_id=...)` to retrieve a turn's result; see [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs).
+The accepted `action` values are `list`, `inspect`, `wait`, and `cancel`; every action except `list` requires `job_id`.
+The `wait` action accepts the same optional `wait_timeout` budget.
+Use `continue_subagent` with the reusable subagent ID for a follow-up in the same child session after its previous turn returns.
 The ID stays scoped to the original caller, requester, and conversation across parent turns and restarts.
 Follow-ups recheck current permissions, preserve nesting depth, and create separate audit records.
 The task must include relevant context, constraints, and expected output, because the child does not inherit the conversation.
@@ -3106,7 +3142,7 @@ agents:
 - Targets must reference existing agent names in the config
 - An agent may delegate to itself only when its own name appears in `delegate_to`
 - Recursive delegation is supported (agent A delegates to B, B delegates to C) up to a maximum depth of 3
-- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel
+- Detached managed jobs may overlap; each accepted job owns its execution and exact result independently
 
 ## Naming Rules
 
@@ -11577,7 +11613,10 @@ Use `run_subagent` below when you need a fresh child's result before continuing.
 ## [`delegate`]
 
 `delegate` exposes `run_subagent` to start a configured agent with fresh conversation context and `continue_subagent` to send follow-ups in that child session.
-Both return the child's response inline.
+Calls wait for the child's response by default.
+With the instance-wide `background_tool_jobs.enabled: true` option, managed Matrix calls wait until completion or a human follow-up, and expose the shared waiting controls below, unless `delegate` is excluded.
+In that mode, set `wait_timeout=0` to return a job handle immediately, or a positive number of seconds to bound waiting while work continues.
+OpenAI-compatible calls without a managed completion channel retain synchronous behavior.
 When the caller has a workspace, both calls also accept the standard `mindroom_output_path` argument to save its result and return a file receipt.
 Automatic saving of large tool results uses the same configured policy as other tools, including after a child approval resumes.
 
@@ -11592,7 +11631,7 @@ Fresh execution still uses the target agent's configured workspace, memory, requ
 Set `model` to an alias from `models:` to override the child's model without changing its agent identity.
 The override takes precedence over thread and room model choices; omitting `model` or passing `None` uses normal model selection.
 Unknown model aliases are rejected before the child starts, with available aliases included in the error.
-The caller waits for the child to finish and receives its answer, stable `Subagent ID`, and an audit reference.
+When the child finishes within the foreground wait, the caller receives its answer, stable `Subagent ID`, and an audit reference.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.
 Omitting `agent_name` or passing `None` selects the caller itself, subject to the same allowlist.
@@ -11609,10 +11648,132 @@ The stable ID remains usable across parent turns and restarts, within the same c
 Follow-ups preserve the child session, selected model, and nesting depth, recheck current permissions, and require the original storage scope.
 The model choice also survives approval pauses and restarts.
 Each turn gets a fresh audit record linked by `subagent_id` and `previous_delegation_id`; earlier records remain intact.
-Calls wait for a result and do not queue messages into a running child or one awaiting approval.
+Calls do not queue messages into a running child or one awaiting approval.
 Finish that child's current turn before sending another message.
 After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is marked interrupted without replaying its tools, while a saved approval remains pending.
 Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions/`; editable workspace receipts do not grant continuation authority.
+
+### Background jobs
+
+This experimental feature requires the root configuration option `background_tool_jobs.enabled: true` and a restart.
+It is disabled by default for the whole instance.
+When disabled, tools use their ordinary execution paths without the generic `wait_timeout` argument or `job` management function.
+This does not disable shell tools' own background commands.
+Changes to either `enabled` or `exclude_toolkits` during hot reload take effect only after a restart.
+Previously accepted job sources and related approvals stay parked while disabled; their saved outcomes remain available after re-enabling and restarting, without replaying the original tool calls.
+
+Managed foreground application tools share one execution owner per accepted call and expose an optional `wait_timeout` argument.
+Tool names and application arguments remain unchanged; the runtime consumes `wait_timeout` before invoking the application callable.
+This waiting budget is separate from a tool's own execution or network timeout.
+The name `wait_timeout` is reserved on managed tools.
+If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
+Tools that stop the current model step, including model switching and dynamic tool loading, stay inline so the continuation receives their actual control result.
+Their schemas omit `wait_timeout`, and numeric waiting budgets are rejected before execution.
+
+Exclude complete toolkits in YAML when they should retain native execution:
+
+```yaml
+background_tool_jobs:
+  enabled: true
+  exclude_toolkits: [shell, my_plugin_toolkit]
+```
+
+The default list is `[shell]`; an explicit list replaces it, and `[]` excludes nothing.
+Names identify registered toolkits, including custom/plugin toolkits; plugin package names and individual function names do not match.
+Every function in an excluded toolkit keeps its native arguments and current permission checks, including when loaded through a preset.
+The generic runtime adds no `wait_timeout`, creates no job, and does not release these calls on human input.
+A tool's own argument named `wait_timeout` remains its native argument.
+Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and approval continuations retain their accepted execution owner.
+
+With the default shell exclusion, use the native `timeout` to release a shell wait, then poll or stop its `shell:...` handle with the shell controls.
+Shell handles do not appear in `job(action="list")` or trigger generic completion delivery, and cannot be controlled with `job`.
+
+| `wait_timeout` | Behavior |
+| --- | --- |
+| Omitted or `null` | Wait until completion or a human follow-up. |
+| `0` | Return a job handle immediately while execution continues. |
+| Positive finite seconds | Return the result if ready, otherwise return a handle when the waiting budget expires. |
+
+Negative, nonnumeric, boolean, and nonfinite waiting budgets are rejected before execution.
+A human follow-up releases the foreground wait without pausing or cancelling the accepted work.
+The same execution continues across subsequent parent turns, and its result remains discoverable if compaction loses the handle.
+
+Pressing **Stop** cancels the reply and requests cancellation of this agent's outstanding managed jobs in the same conversation, including jobs from earlier follow-ups.
+It also stops automatic replies and further managed work originating from those jobs; a restart does not resume them.
+Jobs belonging to other requesters, conversations, agents, or newer human turns remain unaffected.
+An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
+Saved results remain available for explicit inspection or retrieval.
+Toolkits excluded from managed jobs, including shell by default, retain their own cancellation controls.
+
+The automatically added `job(action, job_id=None, limit=20, offset=0, wait_timeout=None, mindroom_output_path=None)` function manages ordinary tools and native delegation.
+The management function never backgrounds itself.
+Enabling background jobs reserves the function name `job`; custom and plugin tools must use another function name.
+
+| Action | Behavior |
+| --- | --- |
+| `list` | Discover accessible jobs, active first, with bounded pagination and retained terminal outcomes. |
+| `inspect` | Read an exact job's status and saved summary without consuming it. |
+| `wait` | Retrieve the original result, including supported structured data and media, using the same optional waiting budget. |
+| `cancel` | Request cancellation and wait for owned execution and cleanup to settle. |
+
+Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
+Cancellation does not undo external side effects or forcibly stop arbitrary Python threads.
+Cleanup exceptions reported to the job runtime are retained as failures.
+SDK toolkit disconnects retain Agno's existing best-effort behavior: logged teardown errors do not change the job outcome.
+
+For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
+Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
+Non-MCP constructor settings are part of the accepted tool identity, stored as a digest: changing those authored settings blocks retained calls and result access until they match again.
+Include/exclude filters remain checked per function.
+Native delegation also rechecks the saved caller and child storage bindings; changing either storage scope blocks discovery, controls, and completion delivery.
+Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.
+The accepted output path survives approval recovery and is revalidated before resumed execution; retrieving a completed result only reads its saved receipt.
+Run IDs do not define ownership, so `job(action="list")` can rediscover handles after compaction, later turns, and runtime restart.
+For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result, while `inspect` saves its bounded summary.
+Large supported results use the same configured automatic file-saving policy as other tools; this also covers SDK-generated knowledge search.
+Redirecting a stored result does not rerun the original tool or change its saved output.
+A team must route management through the member that started the job; a leader cannot read another member's jobs directly.
+Still-authorized deferred tools remain discoverable without loading them or connecting to remote services.
+Removing a toolkit, changing its execution scope or provenance, or excluding a function revokes access.
+Remote service availability alone does not revoke access to a saved result.
+
+Native child approvals retain the existing persisted parent-child continuation and approval cards.
+After delegation detaches, `job(action="wait", job_id=...)` presents a pending approval through that same continuation.
+Human messages do not grant approval, and current execution authority is rechecked before a retained callable runs.
+Nested managed tools remain part of their accepted outer job rather than starting independent jobs.
+Their schemas omit the shared waiting option, and supplying a non-null nested waiting budget is rejected.
+Provider-hosted internal tools cannot be individually detached by the application-tool boundary.
+Unmanaged API execution keeps its existing synchronous lifetime and approval restrictions.
+
+After the agent finishes independent work, the runtime waits for outstanding jobs without repeated model polling.
+Streaming and non-streaming responses show waiting progress, and a human message can release the wait immediately.
+Resuming an approved tool follows the same waiting behavior.
+Ready outcomes or approval boundaries cause one internal continuation using the native result-retrieval tool.
+A result that finishes while text is streaming waits for the response boundary; it does not start a competing response.
+Result continuations retain previously delivered prose and tool traces in the final response.
+Idle completion work uses an internal event-journal source and the existing serialized conversation runner, without sending a synthetic completion message to Matrix.
+Runtime updates retain requester authorization but are identified separately from human input.
+Silent scheduled work retains its quiet delivery policy and run receipts across later completions and restarts.
+Automatic joins keep quiet and ordinary results separate.
+As with ordinary silent schedules, `NO_REPLY` suppresses the final message; findings, failures, and other final reports can still be sent.
+
+A result is consumed only after exact persisted parent tool-result evidence is verified.
+Inspecting, listing, or scheduling internal completion work does not consume it.
+Consumed results, errors, and acknowledged cancellation do not cause another completion response.
+If the model does not retrieve a ready result, the outcome stays discoverable without an unlimited continuation loop.
+Completed outcomes survive restart; abandoned local execution becomes interrupted and is never restarted automatically.
+Reading an already consumed result returns its original output without reapplying session-state changes.
+Consumed results remain available for 30 days after their last acknowledged read.
+Hourly cleanup replaces older results with execution receipts only after the originating turn has finished and the conversation has no pending approval continuation.
+Active jobs, unread results, and approval-owned results remain available; missing source-completion evidence also prevents expiry.
+An expired result reports its expiry, and its retained receipt prevents the original tool call from executing again.
+Receipts retain invocation identity and authorization metadata, so their storage still grows with execution history.
+Retained plugin jobs require the same plugin installation path and current grants; moving the plugin directory invalidates that recorded callable provenance.
+
+Each durable result envelope has a 64 MiB encoded JSON limit, including base64 expansion, its artifacts, and structural overhead.
+A job record can contain several envelopes for its result, state updates, events, and replay data, so this is not a limit on total job storage.
+A result that exceeds this limit becomes a failed job with a size-limit error.
+Artifact files are read within the remaining budget; the configured large-output policy can save eligible text to a file before result encoding.
 
 Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.
 The folder date is the delegation's start date in UTC, so approval continuations keep the same location across midnight and restarts.
@@ -11674,9 +11835,9 @@ continue_subagent(
 
 - `Config.validate_delegate_to()` accepts explicit self-delegation and rejects unknown target agents at config-load time.
 - Recursive delegation is supported, but only up to a maximum depth of 3.
-- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel.
+- Native Matrix delegation handles foreground waits sequentially; children that continue in the background can overlap with later delegated jobs.
 - Use `continue_subagent` for another answer from an existing child; use [matrix_message](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) for a conversation visible in Matrix.
-- Use [`delegate`] when you need a synchronous specialist answer inside the current run.
+- Use [`delegate`] for a specialist task that returns its answer inline or through a managed background job.
 
 ## [`dynamic_workflow`]
 
@@ -19084,6 +19245,7 @@ MindRoom's architecture consists of several key components working together.
 - [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) - The inbound turn pipeline and its module boundaries
 - [Migration and Compatibility Boundaries](https://docs.mindroom.chat/architecture/migrations/) - Current owners for historical formats, dependency migrations, and retained compatibility
 - [Matrix Event-Journal Security](https://docs.mindroom.chat/architecture/matrix-event-journal-security/) - Which decrypted plaintext is durable, who owns it, and what removes it
+- [Background Tool Jobs](https://docs.mindroom.chat/dev/background-tool-jobs/) - Execution ownership, waiting, Stop, and recovery
 - [Matrix Event-Journal Contracts](https://docs.mindroom.chat/dev/matrix-event-journal-contracts/) - What the journal guarantees, and the homeserver behaviour you would otherwise rediscover by debugging
 
 ## Key Internal Modules
@@ -19798,14 +19960,45 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 `run_subagent` starts a separate child conversation; `continue_subagent` starts another turn in that same conversation.
 The child uses the normal agent response envelope, so its history, tools, and model behavior follow the existing runtime.
 Native Matrix approval pauses retain the parent wait and exact child run rather than keeping a Python call alive.
+Managed application calls and native delegation share a durable tool-job owner that retains execution after the foreground wait ends.
+Job IDs identify exact tool calls or delegation turns, while subagent IDs retain child conversations.
+Generic background execution is enabled only by the root `background_tool_jobs.enabled: true` option, which defaults to false.
+The enabled flag and `exclude_toolkits` list (default `[shell]`) are pinned together at startup.
+Registered toolkit exclusions govern schema projection and admission, including native delegation; saved approvals retain their accepted owner.
+Disabled instances bypass the generic execution adapters, resource ownership, schemas, and completion worker.
+Sources belonging to previously accepted jobs or their pending approvals remain parked before journal dispatch while disabled, preserving recovery without side-effect replay.
+Completed jobs in enabled instances admit nonprojected internal event-journal sources carrying the original requester and exact recipient into the existing response owner.
+Completion does not send Matrix messages back through ingress.
+Foreground waits and automatic joining share durable parent-result readback, while the response lifecycle lock serializes internal completions with human turns.
+The runtime waits outside the model and supplies one ready-result continuation at a response boundary.
+Human input releases waits without pausing execution.
+Config reload retains active jobs while controls and result admission check current authorization.
+Shutdown cancels owned work; recovery retains terminal outcomes and marks abandoned execution interrupted without replay.
+Accepted jobs retain their original source identity so a still-pending request recovers stored outcomes instead of repeating its tool calls.
+Internal completion defers to that original source while it remains pending, preventing duplicate result responses.
 
-The runtime lives in the `src/mindroom/delegation/` package, with explicit imports between its modules.
+Generic ownership lives in `src/mindroom/tool_jobs/`; native child execution and approval semantics stay in `src/mindroom/delegation/`.
 
 | Module | Owns |
 | --- | --- |
 | `custom_tools/delegate.py` | Agent-facing tool schemas and direct invocation |
 | `ai.py` | `run_delegated_child_response`, supplied as a typed callback to the native driver |
 | `delegation/execution.py` | Parent waits, approval gates, child approval projection, and parent continuation |
+| `delegation/background.py` | Native child adapter for the shared job owner |
+| `tool_jobs/__init__.py` | Package boundary for generic managed tool execution |
+| `tool_jobs/runtime.py` | Managed execution, persisted outcomes, scoped discovery, interruptible waits and durable result claims |
+| `tool_jobs/settings.py` / `tool_jobs/disabled.py` | Startup-pinned opt-in and passive parking of saved sources and approvals while disabled |
+| `tool_jobs/agno_compat_execution.py` / `tool_jobs/agno_compat_resources.py` | SDK schema, dispatch, and toolkit connection-lifetime bindings |
+| `tool_jobs/agno_execution.py` / `tool_jobs/consumption.py` | Original SDK result capture and exact durable consumption |
+| `tool_jobs/execution_scope.py` / `tool_jobs/resources.py` | Response execution envelopes and shared connection/cleanup lifetime across foreground handoff |
+| `tool_jobs/authorization.py` / `tool_jobs/execution_authority.py` / `tool_jobs/provenance.py` | Current local grants, checks at application entry, and exact callable provenance |
+| `tool_jobs/results.py` | Non-executable serialization of durable tool values, media, and SDK artifacts |
+| `custom_tools/job.py` | One reserved management schema and exact native wait projection |
+| `tool_jobs/completion.py` | Internal completion sources, admission and automatic joining at response boundaries |
+| `tool_job_completion.py` | Immutable exact job/generation reference carried by response ownership |
+| `tool_jobs/control.py` | Human-follow-up wait signals and explicit cancellation checkpoints |
+| `tool_jobs/wait_timeout.py` | Validation and separation of framework waiting metadata from application arguments |
+| `orchestration/tool_job_runtime.py` | Job service lifecycle and internal completion wakeups |
 | `delegation/lifecycle.py` | Child preparation, attempt identity, outcome transitions, and publication to storage and audit |
 | `delegation/recovery.py` | Abandoned-turn reconciliation and recursive cancellation from retained Agno runs |
 | `delegation/sessions.py` | Scoped handle reads, atomic reservations, snapshots, and liveness locks |
@@ -19943,6 +20136,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | Nio first takes durable ownership of a pre-durable crypto store. | Nio's file lease and account/device checks protect keys and trust while only retired recovery rows are cleared. |
 | [`src/mindroom/script_runs/legacy_recovery.py`][script-legacy-recovery] and [`src/mindroom/workers/backends/kubernetes.py`][kubernetes-worker-backend] | Script-runtime startup encounters an unversioned recovery signature or a v2 digest from before the optional seccomp or RuntimeClass fields. | Only an exact recomputation permits migration; pre-seccomp workers require an unset current seccomp policy, an unset RuntimeClass retains the pre-RuntimeClass digest bytes, and the current store owns atomic signature replacement and rejects concurrent revocation or signature changes. |
 | [`src/mindroom/desktop/legacy_command_journal.py`][desktop-legacy-journal] | The desktop SQLite journal finds JSON v1 receipts during its one-time import. | Historical validation stays isolated; the journal retains file permissions, atomic import, replay tombstones, response delivery state, sequence maxima, and admission capacity. |
+| `src/mindroom/tool_jobs/legacy_tool_jobs.py` | Managed runtime recovery finds schema-1 tool-job snapshots. | Preserve exact outcomes, separate notification and consumption facts, and digest saved constructor settings. The runtime retains validation, exclusive ownership, and atomic publication; missing authority or source identity is never reconstructed. |
 
 ## Python provenance and regression coverage
 
@@ -19954,6 +20148,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 
 | Boundary owners | Behavioral evidence |
 | --- | --- |
+| `tool_jobs/legacy_tool_jobs.py` | `tests/test_legacy_tool_jobs.py` uses frozen v2026.9.165 shapes to verify exact-generation notification, unread results, child-only outcomes, abandoned holds, repeat recovery and constructor evidence. `tests/test_tool_job_retention.py` protects unread results and pending approvals while expiring consumed historical results. |
 | [`mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | [Gateway OAuth][gateway-oauth-tests], [capacity][gateway-capacity-tests], [lifecycle][gateway-lifecycle-tests], and [account][gateway-account-tests] tests exercise the staged schema upgrades and released token cutoff. |
 | `legacy_usage_storage.py` | `tests/test_legacy_usage_storage.py` covers mixed schemas, current-row precedence, unknown dates, interruption rollback and retry, dormant stores, symlink isolation, and both startup entry points. |
 | [`legacy_session_storage.py`][legacy-session] | [Run-storage tests][agent-runs-tests] use a frozen Agno 2 fixture for merge, deletion, descendant, malformed-data, and transaction behavior; [usage tests][usage-tests] cover import precedence and available usage. |
@@ -20299,6 +20494,9 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | --- | --- | --- |
 | ModelsLab polls a local artifact UUID and discards completed URLs and wait outcomes. | Poll the provider job ID, accept numeric ETAs, retain completed outputs, and distinguish retryable status failures from terminal rejection. | `tools/agno_compat_modelslabs.py`; `tests/test_modelslabs_tool.py`. |
 | MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, and leaves temporary audio after encoding failures. | Use a portable font default, forward styles, preserve complete glyph bounds, advance wrapped words, and clean owned audio files on every exit; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; regressions in `tests/test_moviepy_video_tools.py`, `tests/test_moviepy_caption_layout.py`, and `tests/test_moviepy_caption_output.py`. |
+| Application tools lack a public accepted-execution owner, framework waiting metadata, and per-call native wait projection. | Add ownership around approved FunctionCalls, provider-schema metadata hooks, and argument-sensitive external requirements. | `tool_jobs/agno_compat_execution.py`; ordinary calls preserve SDK hooks, caches and rich results. |
+| Agent and Team cleanup closes connectable resources when detached work still owns them. | Add shared resource leases with task-affine async teardown. | `tool_jobs/agno_compat_resources.py`; physical connections close after the final execution owner releases them. |
+| Team run outputs omit tool-mutated session state without an explicit input seed. | Persist the initialized run context in team outputs without requiring callers to seed it. | `teams.py` seeds state only inside managed execution scopes; `tests/test_tool_job_turn_integration.py` covers stored receipts and ordinary SDK output. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | Concise PubMed output drops title/year when the abstract is short or absent. | Keep identifying metadata independent of summary truncation. | `tools/pubmed.py`; real parsing/formatting tests cover short, absent, and long abstracts in both output modes. |
@@ -20360,6 +20558,8 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners keep the newest four marked viewed images within a 10 MiB aggregate limit, disclose omissions without changing stored artifacts, and charge provider visual estimates or a conservative fallback in replay planning. |
 | `tool_system/agno_compat_tool_hooks.py` | Private FunctionCall sync/async hook-chain adaptation. | `tool_system/tool_hooks.py` owns deferred-result handling, synchronous execution, approvals, dispatch, and cancellation. |
 | `tool_system/agno_compat_function_schema.py` | Per-Function schema processor binding and rebinding after copies. | `tool_system/output_files.py` retains schema transformation, workspace/path rules, execution, and receipts. |
+| `tool_jobs/agno_compat_execution.py` | Approved FunctionCall driver binding, provider-schema projection, exact-call native requirements, saved wait-metadata binding before agent/team tool preparation, and per-call completion ownership for nested SDK dispatch inside an accepted job. | `tool_jobs/agno_execution.py`, `wait_timeout.py`, and `runtime.py` own admission, accepted wait semantics, execution, result claims, and cancellation; internal SDK model calls keep their existing owner and inherited authority. |
+| `tool_jobs/agno_compat_resources.py` | Agent/Team resource connection and teardown binding. | `tool_jobs/resources.py` retains shared leases and closes resources after their final execution owner releases them. |
 | `agno_compat_openai_chat.py` | OpenAI Chat parser repairs, retained terminal metadata, and cache-write usage preservation. | `openai_models.py` retains provider classes and canonical history/replay policy. |
 | `agno_compat_openai_responses.py` | Responses SDK stream ownership, completion, response-ID publication, native failure normalization, retry protection, continuation adaptation, and preservation of terminal usage across failures and retries. | `openai_models.py` retains request configuration and native/portable replay policy; `provider_stream_retry.py` owns retry limits and delays. |
 | `agno_compat_openai_responses_items.py` | Capture of provider output items lost by Agno parsing. | `openai_response_replay.py` retains canonical filtering, output ordering, and replay selection. |
