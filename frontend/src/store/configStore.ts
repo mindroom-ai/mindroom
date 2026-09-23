@@ -50,10 +50,6 @@ export function readConfigRoot(config: Config, root: string): unknown {
   return (config as unknown as Record<string, unknown>)[root];
 }
 
-function withConfigRoot(config: Config, root: string, value: unknown): Config {
-  return setObjectKey(config, root, value);
-}
-
 function validationDiagnostics(
   issues: ConfigValidationIssue[],
   options: { blocking: boolean },
@@ -1098,20 +1094,23 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
               },
             ]),
           );
+      const defaultTools = updatedConfig.defaults?.tools;
       const payloadDefaultTools = dirtyRootSet.has("defaults")
-        ? updatedConfig.defaults.tools &&
-          rebuildToolEntries(
-            updatedConfig.defaults.tools,
-            currentRawDefaultToolEntries,
-          )
-        : (baseRawDefaultToolEntries ?? updatedConfig.defaults.tools);
+        ? defaultTools &&
+          rebuildToolEntries(defaultTools, currentRawDefaultToolEntries)
+        : (baseRawDefaultToolEntries ?? defaultTools);
+      // Authored configs may omit defaults entirely.
       const payload: configService.ConfigSavePayload = {
         ...updatedConfig,
         agents: payloadAgentsObject,
-        defaults: {
-          ...updatedConfig.defaults,
-          tools: payloadDefaultTools,
-        },
+        ...(updatedConfig.defaults == null
+          ? {}
+          : {
+              defaults: {
+                ...updatedConfig.defaults,
+                tools: payloadDefaultTools,
+              },
+            }),
       };
 
       const { generation } = await configService.saveConfig(
@@ -1533,9 +1532,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   // Create a new agent
   createAgent: (agentData) => {
     const id = agentData.display_name.toLowerCase().replace(/\s+/g, "_");
-    const defaultLearning = get().config?.defaults.learning ?? true;
+    const defaultLearning = get().config?.defaults?.learning ?? true;
     const defaultLearningMode =
-      get().config?.defaults.learning_mode ?? "always";
+      get().config?.defaults?.learning_mode ?? "always";
     const newAgent: Agent = {
       id,
       ...agentData,
@@ -2155,7 +2154,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateConfigRoot: (root, value) => {
     set((state) => {
       if (!state.config) return state;
-      const nextConfig = withConfigRoot(state.config, root, value);
+      const nextConfig = setObjectKey(state.config, root, value);
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,

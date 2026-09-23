@@ -547,7 +547,7 @@ describe("configStore", () => {
       const state = useConfigStore.getState();
       expect(state.agents[0].tools).toEqual(["calculator", "shell"]);
       expect(state.config?.agents.test.tools).toEqual(["calculator", "shell"]);
-      expect(state.config?.defaults.tools).toEqual(["gmail", "file"]);
+      expect(state.config?.defaults?.tools).toEqual(["gmail", "file"]);
     });
 
     it("should apply global learning defaults when agent settings are omitted", async () => {
@@ -2144,7 +2144,7 @@ describe("configStore", () => {
         "shell",
         "browser",
       ]);
-      expect(useConfigStore.getState().config?.defaults.tools).toEqual([
+      expect(useConfigStore.getState().config?.defaults?.tools).toEqual([
         "gmail",
         "file",
       ]);
@@ -6143,6 +6143,26 @@ describe("configStore", () => {
       });
     });
 
+    it("saves configs that omit the defaults root", async () => {
+      const { defaults: _defaults, ...withoutDefaults } = baseConfig;
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => structuredClone(withoutDefaults),
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          agent_policies: { helper: makeAgentPolicy("helper") },
+        }),
+      });
+      await useConfigStore.getState().loadConfig();
+      useConfigStore.getState().updateConfigRoot("router", { model: "fast" });
+
+      const payload = await savedPayload();
+      expect(payload.router).toEqual({ model: "fast" });
+      expect(payload).not.toHaveProperty("defaults");
+    });
+
     it("removes a root when given undefined", async () => {
       await loadBaseConfig();
 
@@ -6153,7 +6173,7 @@ describe("configStore", () => {
 
     it("keeps structured default tool entries for retained tools", async () => {
       await loadBaseConfig();
-      const defaults = useConfigStore.getState().config!.defaults;
+      const defaults = useConfigStore.getState().config!.defaults!;
       expect(defaults.tools).toEqual(["gmail", "file", "scheduler"]);
 
       useConfigStore.getState().updateConfigRoot("defaults", {

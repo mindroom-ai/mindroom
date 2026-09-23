@@ -325,16 +325,16 @@ function renderTableValue<TContext>(
   return renderer;
 }
 
-/** ModelConfig keys this page renders by hand; More settings shows the rest. */
+/**
+ * ModelConfig keys this page renders by hand; More settings shows the rest.
+ * API keys stay out of config.yaml: the page stores them as credentials.
+ */
 export const MODEL_EDITOR_FIELDS = [
   "provider",
   "id",
   "display_name",
   "icon",
-  "api",
-  "host",
   "api_key",
-  "extra_kwargs",
   "context_window",
 ] as const;
 

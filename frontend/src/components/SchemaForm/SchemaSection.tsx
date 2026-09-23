@@ -1,11 +1,13 @@
-import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
 import { definitionSchema, fieldLabel } from "@/lib/configSchema";
+import { getConfigValidationIssues } from "@/lib/configValidation";
+import { useConfigStore } from "@/store/configStore";
 
-import { SchemaFields, schemaFieldKeys, type SchemaPath } from "./SchemaField";
+import { useOpenOnError, type SchemaPath } from "./inputs";
+import { SchemaFields, schemaFieldKeys } from "./SchemaField";
 
 export interface SchemaSectionProps {
   title: string;
@@ -30,7 +32,20 @@ export function SchemaSection({
   defaultOpen = false,
 }: SchemaSectionProps) {
   const { schema: root, error } = useConfigSchema();
-  const [open, setOpen] = useState(defaultOpen);
+  const { diagnostics } = useConfigStore();
+  const schema = root?.$defs?.[definition];
+  const keys =
+    root != null && schema != null
+      ? schemaFieldKeys(schema, root, { exclude })
+      : [];
+  const hasErrors =
+    keys.length > 0 &&
+    getConfigValidationIssues(diagnostics).some(
+      (issue) =>
+        path.every((segment, index) => issue.loc[index] === segment) &&
+        keys.includes(String(issue.loc[path.length])),
+    );
+  const [open, setOpen] = useOpenOnError(defaultOpen, hasErrors);
 
   if (error != null) {
     return (
@@ -40,13 +55,7 @@ export function SchemaSection({
     );
   }
   // A backend without this definition has no fields to add here.
-  if (root?.$defs?.[definition] == null) {
-    return null;
-  }
-
-  const schema = definitionSchema(root, definition);
-  const keys = schemaFieldKeys(schema, root, { exclude });
-  if (keys.length === 0) {
+  if (root == null || schema == null || keys.length === 0) {
     return null;
   }
   const Icon = open ? ChevronDown : ChevronRight;
@@ -64,6 +73,7 @@ export function SchemaSection({
           <span className="flex items-center gap-2 text-sm font-semibold">
             {title}
             <Badge variant="secondary">{keys.length}</Badge>
+            {hasErrors && <Badge variant="destructive">Needs attention</Badge>}
           </span>
           {!open && (
             <span className="mt-1 block truncate text-xs text-muted-foreground">
@@ -75,7 +85,7 @@ export function SchemaSection({
       {open && (
         <div className="border-t border-border/60 px-4 py-4">
           <SchemaFields
-            schema={schema}
+            schema={definitionSchema(root, definition)}
             root={root}
             value={value}
             path={path}

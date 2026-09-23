@@ -171,6 +171,23 @@ export function VoiceConfig() {
     });
   };
 
+  // Saves the draft as is; unlike handleSave it must not write voice defaults.
+  const handleSaveCalls = async () => {
+    const result = await saveConfig();
+    if (
+      showSaveFailureToastIfNeeded(result, {
+        staleMessage: "Save was superseded by newer call configuration edits.",
+        fallbackMessage: "Failed to save call configuration.",
+      })
+    ) {
+      return;
+    }
+    toast({
+      title: "Call Settings Saved",
+      description: "Your voice call settings have been updated successfully.",
+    });
+  };
+
   return (
     <div className="space-y-6">
       {/* Main Voice Settings */}
@@ -414,20 +431,29 @@ export function VoiceConfig() {
           <SchemaSection
             title="More speech-to-text settings"
             definition="VoiceSTTConfig"
-            value={voiceConfig.stt}
+            value={config?.voice?.stt}
             path={["voice", "stt"]}
             exclude={STT_EDITOR_FIELDS}
-            onFieldChange={(key, next) => handleSTTChange({ [key]: next })}
+            onFieldChange={(key, next) =>
+              updateConfigRoot(
+                "voice",
+                setObjectKey(
+                  config?.voice,
+                  "stt",
+                  setObjectKey(config?.voice?.stt, key, next),
+                ),
+              )
+            }
           />
 
           <SchemaSection
             title="More settings"
             definition="VoiceConfig"
-            value={voiceConfig}
+            value={config?.voice}
             path={["voice"]}
             exclude={VOICE_EDITOR_FIELDS}
             onFieldChange={(key, next) =>
-              handleVoiceConfigChange({ [key]: next })
+              updateConfigRoot("voice", setObjectKey(config?.voice, key, next))
             }
           />
 
@@ -469,7 +495,7 @@ export function VoiceConfig() {
             />
           )}
           <div className="flex justify-end">
-            <Button onClick={handleSave} disabled={isLoading}>
+            <Button onClick={handleSaveCalls} disabled={isLoading}>
               Save Call Settings
             </Button>
           </div>

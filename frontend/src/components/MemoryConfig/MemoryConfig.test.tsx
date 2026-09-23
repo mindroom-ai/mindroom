@@ -24,6 +24,7 @@ describe("MemoryConfig", () => {
   };
 
   const mockUpdateMemoryConfig = vi.fn();
+  const mockUpdateConfigRoot = vi.fn();
   const mockSaveConfig = vi.fn();
 
   beforeEach(() => {
@@ -527,6 +528,7 @@ describe("MemoryConfig", () => {
       config: mockConfig,
       diagnostics: [],
       updateMemoryConfig: mockUpdateMemoryConfig,
+      updateConfigRoot: mockUpdateConfigRoot,
       saveConfig: mockSaveConfig,
       isDirty: false,
     });
@@ -565,8 +567,11 @@ describe("MemoryConfig", () => {
     fireEvent.click(screen.getByRole("button", { name: /^More settings/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: "Configure LLM" }));
 
-    expect(mockUpdateMemoryConfig).toHaveBeenLastCalledWith(
-      expect.objectContaining({ llm: {} }),
-    );
+    // Only the edited key is written; untouched memory defaults stay unset.
+    expect(mockUpdateConfigRoot).toHaveBeenLastCalledWith("memory", {
+      ...mockConfig.memory,
+      llm: {},
+    });
+    expect(mockUpdateMemoryConfig).not.toHaveBeenCalled();
   });
 });

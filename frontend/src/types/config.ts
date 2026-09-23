@@ -318,7 +318,7 @@ export interface Config {
   knowledge_bases?: Record<string, KnowledgeBaseConfig>;
   models: Record<string, ModelConfig>;
   agents: Record<string, Omit<Agent, "id">>;
-  defaults: {
+  defaults?: {
     markdown: boolean;
     learning?: boolean;
     learning_mode?: LearningMode;

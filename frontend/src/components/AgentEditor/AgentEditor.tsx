@@ -102,12 +102,12 @@ export function AgentEditor() {
 
   const [activeToolName, setActiveToolName] = useState<string | null>(null);
   const selectedAgent = agents.find((a) => a.id === selectedAgentId);
-  const defaultLearning = config?.defaults.learning ?? true;
-  const defaultLearningMode = config?.defaults.learning_mode ?? "always";
-  const defaultShowToolCalls = config?.defaults.show_tool_calls ?? true;
-  const defaultMarkdown = config?.defaults.markdown ?? true;
+  const defaultLearning = config?.defaults?.learning ?? true;
+  const defaultLearningMode = config?.defaults?.learning_mode ?? "always";
+  const defaultShowToolCalls = config?.defaults?.show_tool_calls ?? true;
+  const defaultMarkdown = config?.defaults?.markdown ?? true;
   const defaultCompressToolResults =
-    config?.defaults.compress_tool_results ?? false;
+    config?.defaults?.compress_tool_results ?? false;
   const globalMemoryBackend = config?.memory?.backend ?? "mem0";
   const knowledgeBaseNames = useMemo(
     () => Object.keys(config?.knowledge_bases || {}).sort(),
@@ -1651,10 +1651,10 @@ export function AgentEditor() {
         <FieldGroup
           label="Worker Tools"
           helperText={`Select which of this agent's tools to route through worker-scoped execution via the sandbox proxy${
-            config?.defaults.worker_tools != null
+            config?.defaults?.worker_tools != null
               ? ` (default: ${
-                  config.defaults.worker_tools.length > 0
-                    ? config.defaults.worker_tools.join(", ")
+                  config.defaults?.worker_tools.length > 0
+                    ? config.defaults?.worker_tools.join(", ")
                     : "none"
                 })`
               : ""
@@ -1667,15 +1667,15 @@ export function AgentEditor() {
               <div className="space-y-1 max-h-48 overflow-y-auto border rounded-lg p-2">
                 {effectiveTools.map((toolName) => {
                   const effective =
-                    field.value ?? config?.defaults.worker_tools ?? [];
+                    field.value ?? config?.defaults?.worker_tools ?? [];
                   const isChecked = effective.includes(toolName);
                   const isInherited =
                     field.value == null &&
-                    config?.defaults.worker_tools != null;
+                    config?.defaults?.worker_tools != null;
                   const toggle = () => {
                     // On first interaction when inheriting, seed from defaults
                     const current =
-                      field.value ?? config?.defaults.worker_tools ?? [];
+                      field.value ?? config?.defaults?.worker_tools ?? [];
                     const updated = isChecked
                       ? current.filter((t) => t !== toolName)
                       : [...current, toolName];
@@ -1728,7 +1728,7 @@ export function AgentEditor() {
               <Checkbox
                 id="allow_self_config"
                 checked={
-                  field.value ?? config?.defaults.allow_self_config ?? false
+                  field.value ?? config?.defaults?.allow_self_config ?? false
                 }
                 onCheckedChange={(checked) => {
                   const value = checked === true;
@@ -1760,24 +1760,24 @@ export function AgentEditor() {
         updateCompaction={updateCompaction}
         mutateCompaction={mutateCompaction}
         historyRunsHelperText={`Number of prior conversation runs to include as history context. Leave empty to use default${
-          config?.defaults.num_history_runs != null
-            ? ` (${config.defaults.num_history_runs})`
+          config?.defaults?.num_history_runs != null
+            ? ` (${config.defaults?.num_history_runs})`
             : " (all)"
         }.`}
         historyMessagesHelperText={`Max messages from history (mutually exclusive with History Runs). Leave empty to use default${
-          config?.defaults.num_history_messages != null
-            ? ` (${config.defaults.num_history_messages})`
+          config?.defaults?.num_history_messages != null
+            ? ` (${config.defaults?.num_history_messages})`
             : " (all)"
         }.`}
         maxToolCallsHelperText={`Max tool call messages replayed from history. Leave empty to use default${
-          config?.defaults.max_tool_calls_from_history != null
-            ? ` (${config.defaults.max_tool_calls_from_history})`
+          config?.defaults?.max_tool_calls_from_history != null
+            ? ` (${config.defaults?.max_tool_calls_from_history})`
             : " (no limit)"
         }.`}
         autoCompactionHelperText="Automatically compact older session history before a run when raw replay exceeds the hard context budget."
         thresholdTokensHelperText="Soft replay budget in tokens. Crossing it records planning metadata; destructive compaction waits for the hard budget."
         compactionModelPlaceholder={
-          config?.defaults.compaction?.model ?? "Default: agent model"
+          config?.defaults?.compaction?.model ?? "Default: agent model"
         }
         numHistoryRunsError={numHistoryRunsError}
         numHistoryMessagesError={numHistoryMessagesError}

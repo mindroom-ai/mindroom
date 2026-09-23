@@ -39,8 +39,15 @@ const ROOT: JsonSchema = {
       properties: {
         provider: { const: "typesafe", type: "string" },
         threshold: { type: "number", default: 0.8 },
+        timeout_seconds: { type: "number", default: 1.5 },
       },
       required: ["provider"],
+    },
+    StreamingConfig: {
+      type: "object",
+      properties: {
+        update_interval: { type: "number", default: 5 },
+      },
     },
     JudgmentConfig: {
       oneOf: [
@@ -140,6 +147,15 @@ const ROOT: JsonSchema = {
           items: { $ref: "#/$defs/RuleConfig" },
         },
         settings: { type: "object", additionalProperties: true },
+        welcome: {
+          type: "string",
+          default: "Welcome!",
+          "x-mindroom": { multiline: true },
+        },
+        streaming: {
+          $ref: "#/$defs/StreamingConfig",
+          description: "Streaming timing",
+        },
       },
     },
   },
@@ -391,6 +407,92 @@ describe("SchemaFields", () => {
     ).toBeInTheDocument();
   });
 
+  it("stores an explicit empty string when the default is not empty", () => {
+    const { lastValue } = renderFixture({ welcome: "Hi" });
+    fireEvent.change(screen.getByLabelText("Welcome"), {
+      target: { value: "" },
+    });
+    expect(lastValue()).toEqual({ welcome: "" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset Welcome" }));
+    expect(lastValue()).toEqual({});
+  });
+
+  it("renames map keys in place", () => {
+    const { lastValue } = renderFixture({
+      room_models: { lobby: "default", dev: "sonnet" },
+    });
+    const rename = screen.getByRole("textbox", { name: "Rename lobby" });
+    fireEvent.change(rename, { target: { value: "dev" } });
+    fireEvent.blur(rename);
+    // Taken keys are rejected.
+    expect(lastValue()).toBeUndefined();
+
+    fireEvent.change(rename, { target: { value: "hall" } });
+    fireEvent.blur(rename);
+    expect(lastValue()).toEqual({
+      room_models: { hall: "default", dev: "sonnet" },
+    });
+  });
+
+  it("keeps fields both variants define when switching union variants", () => {
+    const { lastValue } = renderFixture({
+      participation: {
+        judgment: { provider: "llm", model: "sonnet", timeout_seconds: 9 },
+      },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Judgment type" }), {
+      target: { value: "1" },
+    });
+    expect(lastValue()).toEqual({
+      participation: { judgment: { provider: "typesafe", timeout_seconds: 9 } },
+    });
+  });
+
+  it("does not mark freeform YAML dirty when it only loses focus", () => {
+    const { onValue } = renderFixture({ settings: { retries: 3 } });
+    const editor = screen.getByRole("textbox", { name: "Settings YAML" });
+    fireEvent.focus(editor);
+    fireEvent.blur(editor);
+    expect(onValue).not.toHaveBeenCalled();
+  });
+
+  it("shows discriminated-union errors reported under the tag value", () => {
+    renderFixture(
+      { participation: { judgment: { provider: "llm", model: "gone" } } },
+      [
+        {
+          kind: "validation",
+          issue: {
+            loc: ["fixture", "participation", "judgment", "llm", "model"],
+            msg: "Unknown model alias",
+            type: "value_error",
+          },
+        },
+      ],
+    );
+    expect(screen.getByText("Unknown model alias")).toBeInTheDocument();
+  });
+
+  it("opens collapsed blocks that contain a validation error", () => {
+    renderFixture({}, [
+      {
+        kind: "validation",
+        issue: {
+          loc: ["fixture", "streaming", "update_interval"],
+          msg: "Input should be greater than 0",
+          type: "greater_than",
+        },
+      },
+    ]);
+    expect(
+      screen.getByRole("button", { name: /Streaming/, expanded: true }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Input should be greater than 0"),
+    ).toBeInTheDocument();
+  });
+
   it("shows validation errors at the matching path", () => {
     renderFixture({}, [
       {
@@ -439,6 +541,31 @@ describe("SchemaSection", () => {
     fireEvent.click(toggle);
     expect(
       screen.getByRole("spinbutton", { name: "Debounce seconds" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens and flags the section when a rendered field has an error", () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      config: { models: {}, agents: {} },
+      diagnostics: [
+        {
+          kind: "validation",
+          issue: {
+            loc: ["participation", "debounce_seconds"],
+            msg: "Input should be less than or equal to 30",
+            type: "less_than_equal",
+          },
+        },
+      ],
+    } as never);
+    renderSection(["judgment"]);
+
+    expect(
+      screen.getByRole("button", { name: /More settings/ }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Needs attention")).toBeInTheDocument();
+    expect(
+      screen.getByText("Input should be less than or equal to 30"),
     ).toBeInTheDocument();
   });
 

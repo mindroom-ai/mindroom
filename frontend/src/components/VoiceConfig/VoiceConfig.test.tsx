@@ -324,7 +324,7 @@ describe("VoiceConfig", () => {
     ).toBeDisabled();
   });
 
-  it("enables voice calls from the Voice Calls card", () => {
+  it("enables voice calls from the Voice Calls card", async () => {
     mockStoreState.diagnostics = [];
     vi.mocked(useConfigSchema).mockReturnValue({
       schema: {
@@ -354,5 +354,11 @@ describe("VoiceConfig", () => {
     expect(mockUpdateConfigRoot).toHaveBeenCalledWith("calls", {
       enabled: true,
     });
+
+    mockUpdateConfigRoot.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Save Call Settings" }));
+    await waitFor(() => expect(mockSaveConfig).toHaveBeenCalled());
+    // Saving calls must not write the voice form's defaults.
+    expect(mockUpdateConfigRoot).not.toHaveBeenCalled();
   });
 });

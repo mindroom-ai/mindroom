@@ -1,24 +1,14 @@
-import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
-import yaml from "js-yaml";
-import {
-  ArrowDown,
-  ArrowUp,
-  ChevronDown,
-  ChevronRight,
-  Eye,
-  EyeOff,
-  Plus,
-  RotateCcw,
-  Trash2,
-  X,
-} from "lucide-react";
+// Schema-driven config form: SchemaFields renders an object's properties and
+// SchemaField dispatches one property to a widget, recursing into nested
+// objects, collections, and unions.
+import { useId, useMemo, useState } from "react";
+import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
 import {
   classifySchemaNode,
@@ -31,19 +21,32 @@ import {
   resolveSchema,
   setObjectKey,
   type JsonSchema,
-  type ReferenceKind,
+  type ReferenceOptions,
   type SchemaNode,
 } from "@/lib/configSchema";
 import { cn } from "@/lib/utils";
 
+import {
+  DEFAULT_OPTION,
+  FieldChrome,
+  MapKeyInput,
+  NativeSelect,
+  NestedBlock,
+  NONE_OPTION,
+  ObjectDisclosure,
+  ResetButton,
+  ScalarInput,
+  StringListEditor,
+  Suggestions,
+  YamlEditor,
+  helperText,
+  inlineLabel,
+  presenceMode,
+  type SchemaPath,
+} from "./inputs";
 import { useReferenceOptions } from "./references";
 
-export type SchemaPath = Array<string | number>;
-
-const DEFAULT_OPTION = "__default__";
-const NONE_OPTION = "__none__";
-const SELECT_CLASS =
-  "glass-control h-10 w-full px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50";
+export type { SchemaPath } from "./inputs";
 
 export interface SchemaFieldsProps {
   schema: JsonSchema;
@@ -117,144 +120,6 @@ export function SchemaFields({
   );
 }
 
-type Presence = "inline" | "toggle" | "tri";
-
-// Nullable fields whose default is null only need "set or not"; nullable
-// fields with another default (or a default factory) also need an explicit null.
-function presenceMode(node: SchemaNode, required: boolean): Presence {
-  if (!node.nullable) {
-    return "inline";
-  }
-  if (!required && node.hasDefault && node.defaultValue === null) {
-    return "toggle";
-  }
-  return "tri";
-}
-
-/** Lowercase a label for use mid-sentence, keeping leading acronyms. */
-function inlineLabel(label: string): string {
-  return /^[A-Z]{2}/.test(label)
-    ? label
-    : label.charAt(0).toLowerCase() + label.slice(1);
-}
-
-function displayScalar(value: unknown): string {
-  if (typeof value === "boolean") {
-    return value ? "on" : "off";
-  }
-  return String(value);
-}
-
-function defaultSummary(node: SchemaNode): string | null {
-  const value = node.defaultValue;
-  if (!node.hasDefault || value == null || typeof value === "object") {
-    return null;
-  }
-  if (typeof value === "string" && value === "") {
-    return null;
-  }
-  return displayScalar(value);
-}
-
-function helperText(node: SchemaNode): string | undefined {
-  const summary = defaultSummary(node);
-  const description = node.description?.trim();
-  if (summary == null) {
-    return description || undefined;
-  }
-  if (!description) {
-    return `Default: ${summary}`;
-  }
-  const separator = /[.!?]$/.test(description) ? " " : ". ";
-  return `${description}${separator}Default: ${summary}`;
-}
-
-function ResetButton({
-  label,
-  onReset,
-}: {
-  label: string;
-  onReset: () => void;
-}) {
-  return (
-    <Button
-      type="button"
-      variant="ghost"
-      size="sm"
-      className="h-7 px-2 text-xs text-muted-foreground"
-      aria-label={`Reset ${label}`}
-      onClick={onReset}
-    >
-      <RotateCcw className="mr-1 h-3 w-3" />
-      Reset
-    </Button>
-  );
-}
-
-function NativeSelect({
-  id,
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  id?: string;
-  label: string;
-  value: string;
-  options: Array<{ value: string; label: string }>;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <select
-      id={id}
-      aria-label={label}
-      className={SELECT_CLASS}
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-    >
-      {options.map((option) => (
-        <option key={option.value} value={option.value}>
-          {option.label}
-        </option>
-      ))}
-    </select>
-  );
-}
-
-function FieldChrome({
-  label,
-  htmlFor,
-  helper,
-  error,
-  actions,
-  children,
-}: {
-  label: string;
-  htmlFor?: string;
-  helper?: string;
-  error?: string;
-  actions?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <div className="space-y-2">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
-          <Label htmlFor={htmlFor} className="text-sm font-medium">
-            {label}
-          </Label>
-          {helper && (
-            <p className="mt-1 text-xs text-muted-foreground">{helper}</p>
-          )}
-        </div>
-        {actions}
-      </div>
-      {children}
-      {error && <p className="text-xs text-destructive">{error}</p>}
-    </div>
-  );
-}
-
 export function SchemaField({
   name,
   schema,
@@ -268,7 +133,13 @@ export function SchemaField({
   const node = classifySchemaNode(schema, root);
   const references = useReferenceOptions();
   const errorForPath = useScopedConfigValidation(path);
-  const error = errorForPath([], true);
+  // Plain-union errors carry a branch name in their location, so match any
+  // error under the field; discriminated unions render tagged paths below.
+  const error = errorForPath(
+    [],
+    !(node.kind === "union" && node.discriminator == null),
+  );
+  const hasNestedError = errorForPath([], false) !== undefined;
   const id = useId();
   const label = labelOverride ?? fieldLabel(name);
   const presence = presenceMode(node, required);
@@ -397,6 +268,7 @@ export function SchemaField({
           label={label}
           helper={node.description}
           error={error}
+          hasNestedError={hasNestedError}
           actions={reset}
           defaultOpen={isPlainObject(value) && Object.keys(value).length > 0}
         >
@@ -465,309 +337,6 @@ export function SchemaField({
       {presenceControl}
       {enabled && <NestedBlock>{editor}</NestedBlock>}
     </FieldChrome>
-  );
-}
-
-function NestedBlock({ children }: { children: ReactNode }) {
-  return (
-    <div className="border-l-2 border-border/60 pl-4 pt-1">{children}</div>
-  );
-}
-
-function ObjectDisclosure({
-  label,
-  helper,
-  error,
-  actions,
-  defaultOpen,
-  children,
-}: {
-  label: string;
-  helper?: string;
-  error?: string;
-  actions?: ReactNode;
-  defaultOpen: boolean;
-  children: ReactNode;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  const Icon = open ? ChevronDown : ChevronRight;
-  return (
-    <div className="space-y-2">
-      <div className="flex items-start justify-between gap-2">
-        <button
-          type="button"
-          className="flex min-w-0 flex-1 items-start gap-1 text-left"
-          aria-expanded={open}
-          onClick={() => setOpen((current) => !current)}
-        >
-          <Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-          <span className="min-w-0">
-            <span className="block text-sm font-medium">{label}</span>
-            {helper && (
-              <span className="mt-1 block text-xs text-muted-foreground">
-                {helper}
-              </span>
-            )}
-          </span>
-        </button>
-        {actions}
-      </div>
-      {open && <NestedBlock>{children}</NestedBlock>}
-      {error && <p className="text-xs text-destructive">{error}</p>}
-    </div>
-  );
-}
-
-function ScalarInput({
-  id,
-  label,
-  node,
-  value,
-  required,
-  presence,
-  references,
-  onChange,
-}: {
-  id: string;
-  label: string;
-  node: SchemaNode;
-  value: unknown;
-  required: boolean;
-  presence: Presence;
-  references: Record<ReferenceKind, string[]>;
-  onChange: (next: unknown) => void;
-}) {
-  const reference = node.hint.reference;
-  const selectOptions =
-    node.kind === "enum"
-      ? node.options.map(String)
-      : node.kind === "string" &&
-          (reference === "model" || reference === "agent")
-        ? references[reference]
-        : null;
-
-  if (selectOptions != null) {
-    const summary = defaultSummary(node);
-    const current =
-      value === undefined
-        ? DEFAULT_OPTION
-        : value === null
-          ? NONE_OPTION
-          : String(value);
-    const values =
-      selectOptions.includes(current) ||
-      current === DEFAULT_OPTION ||
-      current === NONE_OPTION
-        ? selectOptions
-        : [current, ...selectOptions];
-    const options = [
-      ...(required
-        ? []
-        : [
-            {
-              value: DEFAULT_OPTION,
-              label: summary ? `Default (${summary})` : "Not set",
-            },
-          ]),
-      ...(presence === "tri" ? [{ value: NONE_OPTION, label: "None" }] : []),
-      ...values.map((option) => ({ value: option, label: option })),
-    ];
-    return (
-      <NativeSelect
-        id={id}
-        label={label}
-        value={current}
-        options={options}
-        onChange={(next) => {
-          if (next === DEFAULT_OPTION) {
-            onChange(undefined);
-          } else if (next === NONE_OPTION) {
-            onChange(null);
-          } else {
-            onChange(
-              node.options.find((option) => String(option) === next) ?? next,
-            );
-          }
-        }}
-      />
-    );
-  }
-
-  const isNull = value === null;
-  const control =
-    node.kind === "number" ? (
-      <NumberInput
-        id={id}
-        node={node}
-        value={typeof value === "number" ? value : undefined}
-        disabled={isNull}
-        onChange={(next) => onChange(next)}
-      />
-    ) : (
-      <TextInput
-        id={id}
-        node={node}
-        value={typeof value === "string" ? value : ""}
-        disabled={isNull}
-        suggestions={
-          reference === "room" || reference === "tool"
-            ? references[reference]
-            : undefined
-        }
-        onChange={(text) =>
-          onChange(text === "" && !required ? undefined : text)
-        }
-      />
-    );
-
-  if (presence !== "tri") {
-    return control;
-  }
-  return (
-    <div className="space-y-2">
-      {control}
-      <div className="flex items-center gap-2">
-        <Checkbox
-          id={`${id}-none`}
-          checked={isNull}
-          onCheckedChange={(next) => onChange(next === true ? null : undefined)}
-        />
-        <Label htmlFor={`${id}-none`} className="cursor-pointer text-xs">
-          Set to none
-        </Label>
-      </div>
-    </div>
-  );
-}
-
-function NumberInput({
-  id,
-  node,
-  value,
-  disabled,
-  onChange,
-}: {
-  id: string;
-  node: SchemaNode;
-  value: number | undefined;
-  disabled: boolean;
-  onChange: (next: number | undefined) => void;
-}) {
-  const external = value === undefined ? "" : String(value);
-  const [draft, setDraft] = useState(external);
-  useEffect(() => {
-    setDraft((current) => (Number(current) === value ? current : external));
-  }, [external, value]);
-  const summary = defaultSummary(node);
-
-  return (
-    <Input
-      id={id}
-      type="number"
-      inputMode="decimal"
-      value={draft}
-      disabled={disabled}
-      placeholder={summary == null ? undefined : `Default: ${summary}`}
-      min={node.schema.minimum ?? node.schema.exclusiveMinimum}
-      max={node.schema.maximum ?? node.schema.exclusiveMaximum}
-      step={node.integer ? 1 : "any"}
-      onChange={(event) => {
-        const text = event.target.value;
-        setDraft(text);
-        if (text.trim() === "") {
-          onChange(undefined);
-          return;
-        }
-        const parsed = Number(text);
-        if (!Number.isNaN(parsed)) {
-          onChange(parsed);
-        }
-      }}
-    />
-  );
-}
-
-function TextInput({
-  id,
-  node,
-  value,
-  disabled,
-  suggestions,
-  onChange,
-}: {
-  id: string;
-  node: SchemaNode;
-  value: string;
-  disabled: boolean;
-  suggestions?: string[];
-  onChange: (text: string) => void;
-}) {
-  const [revealed, setRevealed] = useState(false);
-  const listId = `${id}-suggestions`;
-  const summary = defaultSummary(node);
-  const placeholder = summary == null ? undefined : `Default: ${summary}`;
-
-  if (node.hint.multiline) {
-    return (
-      <Textarea
-        id={id}
-        value={value}
-        disabled={disabled}
-        placeholder={placeholder}
-        rows={4}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    );
-  }
-  if (node.hint.secret) {
-    return (
-      <div className="flex items-center gap-2">
-        <Input
-          id={id}
-          type={revealed ? "text" : "password"}
-          autoComplete="off"
-          value={value}
-          disabled={disabled}
-          onChange={(event) => onChange(event.target.value)}
-        />
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          aria-label={revealed ? "Hide value" : "Show value"}
-          onClick={() => setRevealed((current) => !current)}
-        >
-          {revealed ? (
-            <EyeOff className="h-4 w-4" />
-          ) : (
-            <Eye className="h-4 w-4" />
-          )}
-        </Button>
-      </div>
-    );
-  }
-  return (
-    <>
-      <Input
-        id={id}
-        value={value}
-        disabled={disabled}
-        placeholder={placeholder}
-        list={suggestions ? listId : undefined}
-        onChange={(event) => onChange(event.target.value)}
-      />
-      {suggestions && <Suggestions id={listId} options={suggestions} />}
-    </>
-  );
-}
-
-function Suggestions({ id, options }: { id: string; options: string[] }) {
-  return (
-    <datalist id={id}>
-      {options.map((option) => (
-        <option key={option} value={option} />
-      ))}
-    </datalist>
   );
 }
 
@@ -889,7 +458,59 @@ function ValueEditor({
   }
 }
 
-function isStringItems(node: SchemaNode, root: JsonSchema): boolean {
+/** Render an item or map value: objects inline, anything else as a labeled field. */
+function NestedValue({
+  name,
+  node,
+  schema,
+  root,
+  value,
+  path,
+  onChange,
+}: {
+  name: string;
+  node: SchemaNode;
+  schema: JsonSchema;
+  root: JsonSchema;
+  value: unknown;
+  path: SchemaPath;
+  onChange: (next: unknown) => void;
+}) {
+  if (node.kind === "object") {
+    return (
+      <SchemaFields
+        schema={node.schema}
+        root={root}
+        value={value}
+        path={path}
+        onFieldChange={(key, next) => onChange(setObjectKey(value, key, next))}
+      />
+    );
+  }
+  return (
+    <SchemaField
+      name={name}
+      label={name}
+      schema={schema}
+      root={root}
+      value={value}
+      path={path}
+      required
+      onChange={onChange}
+    />
+  );
+}
+
+// Reference-hinted lists hold names; the store normalizes structured tool
+// entries in defaults.tools to names before they reach the form.
+function isStringItems(
+  node: SchemaNode,
+  root: JsonSchema,
+  value: unknown[],
+): boolean {
+  if (!value.every((item) => typeof item === "string")) {
+    return false;
+  }
   if (node.hint.reference != null) {
     return true;
   }
@@ -913,11 +534,11 @@ function ListEditor({
   onChange: (items: unknown[]) => void;
 }) {
   const references = useReferenceOptions();
-  if (isStringItems(node, root)) {
+  if (isStringItems(node, root, value)) {
     return (
       <StringListEditor
         label={label}
-        values={value.map(String)}
+        values={value as string[]}
         suggestions={
           node.hint.reference ? references[node.hint.reference] : undefined
         }
@@ -1003,119 +624,16 @@ function ListEditor({
   );
 }
 
-/** Render an item or map value: objects inline, anything else as a labeled field. */
-function NestedValue({
-  name,
-  node,
-  schema,
-  root,
-  value,
-  path,
-  onChange,
-}: {
-  name: string;
-  node: SchemaNode;
-  schema: JsonSchema;
-  root: JsonSchema;
-  value: unknown;
-  path: SchemaPath;
-  onChange: (next: unknown) => void;
-}) {
-  if (node.kind === "object") {
-    return (
-      <SchemaFields
-        schema={node.schema}
-        root={root}
-        value={value}
-        path={path}
-        onFieldChange={(key, next) => onChange(setObjectKey(value, key, next))}
-      />
-    );
-  }
-  return (
-    <SchemaField
-      name={name}
-      label={name}
-      schema={schema}
-      root={root}
-      value={value}
-      path={path}
-      required
-      onChange={onChange}
-    />
-  );
-}
-
-function StringListEditor({
-  label,
-  values,
-  suggestions,
-  onChange,
-}: {
-  label: string;
-  values: string[];
-  suggestions?: string[];
-  onChange: (values: string[]) => void;
-}) {
-  const [draft, setDraft] = useState("");
-  const listId = useId();
-  const add = () => {
-    const trimmed = draft.trim();
-    if (trimmed === "" || values.includes(trimmed)) {
-      return;
-    }
-    onChange([...values, trimmed]);
-    setDraft("");
-  };
-  const available = suggestions?.filter((option) => !values.includes(option));
-
-  return (
-    <div className="space-y-2">
-      {values.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {values.map((item) => (
-            <Badge key={item} variant="secondary" className="gap-1 pr-1">
-              <span className="font-mono text-xs">{item}</span>
-              <button
-                type="button"
-                className="rounded-sm p-0.5 hover:bg-muted"
-                aria-label={`Remove ${item}`}
-                onClick={() =>
-                  onChange(values.filter((value) => value !== item))
-                }
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </Badge>
-          ))}
-        </div>
-      )}
-      <div className="flex items-center gap-2">
-        <Input
-          aria-label={`New ${inlineLabel(label)} entry`}
-          value={draft}
-          list={available ? listId : undefined}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              add();
-            }
-          }}
-        />
-        {available && <Suggestions id={listId} options={available} />}
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          aria-label={`Add ${inlineLabel(label)} entry`}
-          disabled={draft.trim() === ""}
-          onClick={add}
-        >
-          <Plus className="h-4 w-4" />
-        </Button>
-      </div>
-    </div>
+function renameKey(
+  entries: Record<string, unknown>,
+  from: string,
+  to: string,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(entries).map(([key, entry]) => [
+      key === from ? to : key,
+      entry,
+    ]),
   );
 }
 
@@ -1153,12 +671,13 @@ function MapEditor({
       ...(node.hint.multiline ? { multiline: true } : {}),
     },
   };
+  const keys = Object.keys(value);
   const keySuggestions = node.hint.key_reference
-    ? references[node.hint.key_reference].filter((key) => !(key in value))
+    ? references[node.hint.key_reference].filter((key) => !keys.includes(key))
     : undefined;
   const add = () => {
     const key = draftKey.trim();
-    if (key === "" || key in value) {
+    if (key === "" || keys.includes(key)) {
       return;
     }
     onChange({
@@ -1183,7 +702,11 @@ function MapEditor({
           )}
         >
           <div className="flex items-center justify-between gap-2">
-            <span className="font-mono text-sm">{key}</span>
+            <MapKeyInput
+              entryKey={key}
+              taken={keys}
+              onRename={(next) => onChange(renameKey(value, key, next))}
+            />
             <Button
               type="button"
               variant="ghost"
@@ -1231,7 +754,7 @@ function MapEditor({
           variant="outline"
           size="sm"
           aria-label={`Add ${inlineLabel(label)} key`}
-          disabled={draftKey.trim() === "" || draftKey.trim() in value}
+          disabled={draftKey.trim() === "" || keys.includes(draftKey.trim())}
           onClick={add}
         >
           <Plus className="h-4 w-4" />
@@ -1258,7 +781,7 @@ function UnionEditor({
   value: unknown;
   path: SchemaPath;
   onChange: (next: unknown) => void;
-  references: Record<ReferenceKind, string[]>;
+  references: ReferenceOptions;
 }) {
   // Show the schema default until the user picks a variant.
   const effective =
@@ -1273,6 +796,22 @@ function UnionEditor({
   if (node.discriminator != null) {
     const discriminator = node.discriminator;
     const selected = index >= 0 ? node.variants[index] : null;
+    const switchVariant = (next: number) => {
+      const target = variantNodes[next];
+      const initial = initialValue(target, root, references);
+      if (!isPlainObject(initial) || !isPlainObject(effective)) {
+        onChange(initial);
+        return;
+      }
+      // Keep fields both variants define, such as timeout_seconds.
+      const shared = Object.fromEntries(
+        Object.entries(effective).filter(
+          ([key]) =>
+            key !== discriminator && key in (target.schema.properties ?? {}),
+        ),
+      );
+      onChange({ ...initial, ...shared });
+    };
     return (
       <div className="space-y-4">
         <NativeSelect
@@ -1285,9 +824,7 @@ function UnionEditor({
               label: variant.label,
             })),
           ]}
-          onChange={(next) =>
-            onChange(initialValue(variantNodes[Number(next)], root, references))
-          }
+          onChange={(next) => switchVariant(Number(next))}
         />
         {selected?.schema.description && (
           <p className="text-xs text-muted-foreground">
@@ -1299,7 +836,8 @@ function UnionEditor({
             schema={selected.schema}
             root={root}
             value={effective}
-            path={path}
+            // Pydantic reports discriminated-union errors under the tag value.
+            path={[...path, String(selected.discriminatorValue)]}
             exclude={[discriminator]}
             onFieldChange={(key, next) =>
               onChange(setObjectKey(effective, key, next))
@@ -1365,53 +903,6 @@ function UnionEditor({
           onChange={onChange}
         />
       )}
-    </div>
-  );
-}
-
-function dumpYaml(value: unknown): string {
-  return value === undefined ? "" : yaml.dump(value);
-}
-
-function YamlEditor({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: unknown;
-  onChange: (next: unknown) => void;
-}) {
-  const serialized = useMemo(() => dumpYaml(value), [value]);
-  const [draft, setDraft] = useState(serialized);
-  const [parseError, setParseError] = useState<string | null>(null);
-  useEffect(() => {
-    setDraft(serialized);
-  }, [serialized]);
-
-  return (
-    <div className="space-y-1">
-      <Textarea
-        aria-label={`${label} YAML`}
-        className="font-mono text-xs"
-        rows={Math.min(12, Math.max(3, draft.split("\n").length))}
-        value={draft}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={() => {
-          try {
-            onChange(draft.trim() === "" ? undefined : yaml.load(draft));
-            setParseError(null);
-          } catch (error) {
-            setParseError(
-              error instanceof Error ? error.message : "Invalid YAML",
-            );
-          }
-        }}
-      />
-      <p className="text-xs text-muted-foreground">
-        Free-form YAML, applied when the field loses focus.
-      </p>
-      {parseError && <p className="text-xs text-destructive">{parseError}</p>}
     </div>
   );
 }

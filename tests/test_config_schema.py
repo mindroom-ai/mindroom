@@ -106,6 +106,7 @@ def test_secret_fields_are_annotated() -> None:
     assert defs["ModelConfig"]["properties"]["api_key"][HINT_KEY] == {"secret": True}
     assert defs["EventJournalConfig"]["properties"]["database_url"][HINT_KEY] == {"secret": True}
     assert defs["MCPServerConfig"]["properties"]["headers"][HINT_KEY] == {"secret": True}
+    assert defs["KnowledgeGitConfig"]["properties"]["repo_url"][HINT_KEY] == {"secret": True}
 
 
 def test_dashboard_schema_reports_default_factory_values() -> None:

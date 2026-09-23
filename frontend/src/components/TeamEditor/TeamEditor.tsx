@@ -303,24 +303,24 @@ export function TeamEditor() {
         updateCompaction={updateCompaction}
         mutateCompaction={mutateCompaction}
         historyRunsHelperText={`Number of prior team-scoped runs to include as replay. Leave empty to use default${
-          config?.defaults.num_history_runs != null
-            ? ` (${config.defaults.num_history_runs})`
+          config?.defaults?.num_history_runs != null
+            ? ` (${config.defaults?.num_history_runs})`
             : " (all)"
         }.`}
         historyMessagesHelperText={`Max replay messages from team-scoped history. Leave empty to use default${
-          config?.defaults.num_history_messages != null
-            ? ` (${config.defaults.num_history_messages})`
+          config?.defaults?.num_history_messages != null
+            ? ` (${config.defaults?.num_history_messages})`
             : " (all)"
         }.`}
         maxToolCallsHelperText={`Max tool call messages replayed from team history. Leave empty to use default${
-          config?.defaults.max_tool_calls_from_history != null
-            ? ` (${config.defaults.max_tool_calls_from_history})`
+          config?.defaults?.max_tool_calls_from_history != null
+            ? ` (${config.defaults?.max_tool_calls_from_history})`
             : " (no limit)"
         }.`}
         autoCompactionHelperText="Automatically compact older team-scoped history before the next run when raw replay exceeds the hard context budget."
         thresholdTokensHelperText="Soft replay budget in tokens. Crossing it records planning metadata; destructive compaction waits for the hard budget."
         compactionModelPlaceholder={
-          config?.defaults.compaction?.model ?? "Default: team run model"
+          config?.defaults?.compaction?.model ?? "Default: team run model"
         }
         numHistoryRunsError={numHistoryRunsError}
         numHistoryMessagesError={numHistoryMessagesError}

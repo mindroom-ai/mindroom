@@ -156,6 +156,7 @@ function mockStore(
 describe("Knowledge", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(useConfigSchema).mockReturnValue({ schema: null, error: null });
   });
 
   it("edits knowledge base filters through More settings", async () => {
