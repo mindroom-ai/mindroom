@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from uuid import uuid4
@@ -179,6 +179,7 @@ def _approval_interruption_cancel_source(reason: str) -> Literal["sync_restart",
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
+    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
     import nio
@@ -202,7 +203,7 @@ if TYPE_CHECKING:
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.stop import StopManager
-    from mindroom.streaming import StreamInputChunk
+    from mindroom.streaming import ProgressPublisher, StreamInputChunk
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -1472,12 +1473,37 @@ class ResponseRunner:
     ) -> tuple[FinalDeliveryOutcome, ApprovalContinuation]:
         """Run and classify one claimed continuation for either lifecycle entry path."""
         tool_trace: list[ToolTraceEntry] = []
-        result = await self._continue_entity_call(
-            claimed,
-            request=request,
-            target=target,
-            tool_trace_collector=tool_trace,
+        identity = self._response_identity(
+            request,
+            response_kind="team" if claimed.entity_kind == "team" else "ai",
         )
+        # Streaming requesters watch the resumed work in the reply it continues.
+        # Progress closes before any terminal edit, which stays owned below.
+        progress_scope: AbstractAsyncContextManager[ProgressPublisher | None] = (
+            self.deps.delivery_gateway.stream_progress(
+                target=target,
+                event_id=claimed.response_event_id,
+                identity=identity,
+                show_tool_calls=claimed.show_tool_calls,
+                extra_content=_merge_response_extra_content(None, claimed.attachment_ids),
+                visible_progress_callback=self._lifecycle_coordinator.visible_progress_callback(target),
+            )
+            if await should_use_streaming(
+                self._client(),
+                claimed.room_id,
+                requester_user_id=claimed.requester_id,
+                enable_streaming=self.deps.runtime.enable_streaming,
+            )
+            else nullcontext()
+        )
+        async with progress_scope as progress:
+            result = await self._continue_entity_call(
+                claimed,
+                request=request,
+                target=target,
+                tool_trace_collector=tool_trace,
+                progress=progress,
+            )
         if isinstance(result, CompletedApprovalRun):
             current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
             show_tool_calls = claimed.show_tool_calls
@@ -1489,10 +1515,7 @@ class ResponseRunner:
                         existing_event_id=claimed.response_event_id,
                         existing_event_is_placeholder=False,
                         response_text=result.response_text,
-                        identity=self._response_identity(
-                            request,
-                            response_kind="team" if claimed.entity_kind == "team" else "ai",
-                        ),
+                        identity=identity,
                         tool_trace=visible_tool_trace if show_tool_calls else None,
                         extra_content=_merge_response_extra_content(
                             {**result.metadata_content, STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
@@ -2000,6 +2023,7 @@ class ResponseRunner:
         request: ResponseRequest,
         target: MessageTarget,
         tool_trace_collector: list[ToolTraceEntry],
+        progress: ProgressPublisher | None,
     ) -> CompletedApprovalRun | PausedAttempt:
         execution_identity = parse_tool_execution_identity_payload(
             continuation.execution_identity,
@@ -2056,6 +2080,7 @@ class ResponseRunner:
                         prior_presentation_state=continuation.response_presentation_state or None,
                         show_tool_calls=continuation.show_tool_calls,
                         tool_trace_collector=tool_trace_collector,
+                        progress=progress,
                     )
 
                 async with _response_typing_indicator(
@@ -2083,6 +2108,7 @@ class ResponseRunner:
                         continuation.response_event_id,
                         run_id,
                     ),
+                    progress=progress,
                 )
         return response_text
 

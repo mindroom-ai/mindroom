@@ -95,12 +95,14 @@ from mindroom.streaming import (
     current_task_is_process_shutdown,
     interactive_response_for_visible_body,
     send_streaming_response,
+    stream_progress_edits,
     strip_matching_visible_tool_markers,
 )
 from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+    from contextlib import AbstractAsyncContextManager
 
     import structlog
 
@@ -115,7 +117,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.response_delivery_recovery import ResponseDeliveryRecovery
-    from mindroom.streaming import StreamInputChunk
+    from mindroom.streaming import ProgressPublisher, StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -2095,6 +2097,32 @@ class DeliveryGateway:
             interactive_creator_agent=self.deps.agent_name,
             interactive_source_event_id=delivery_turn_id,
             allow_new_terminal_message=request.allow_new_terminal_message,
+        )
+
+    def stream_progress(
+        self,
+        *,
+        target: MessageTarget,
+        event_id: str,
+        identity: ResponseIdentity,
+        show_tool_calls: bool,
+        extra_content: dict[str, Any] | None = None,
+        visible_progress_callback: Callable[[str], None] | None = None,
+    ) -> AbstractAsyncContextManager[ProgressPublisher]:
+        """Stream live progress into an existing reply whose terminal delivery the caller owns."""
+        return stream_progress_edits(
+            self._client(),
+            target,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            event_id=event_id,
+            show_tool_calls=show_tool_calls,
+            extra_content=extra_content,
+            visible_progress_callback=visible_progress_callback,
+            transport_is_current=self._stream_transport_gate(
+                identity.response_envelope.source_event_id,
+                target.room_id,
+            ),
         )
 
     def _stream_transport_gate(

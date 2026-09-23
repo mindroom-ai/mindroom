@@ -12,6 +12,7 @@ import asyncio
 import json
 from contextlib import suppress
 from dataclasses import replace
+from itertools import count
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -47,9 +48,11 @@ from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
+    STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
 )
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import (
@@ -117,9 +120,9 @@ from mindroom.teams import _TeamStreamPresentation
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
-from mindroom.tool_system.events import ToolTraceEntry, format_tool_started_event
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnTrust
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_record import EditPreparation, canonicalize_turn_record
@@ -152,6 +155,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.judgment.state import JudgmentRequest
     from mindroom.response_lifecycle import _QueuedMessageState
+    from mindroom.streaming import ProgressPublisher
 
 
 def _preparation(target: MessageTarget, envelope: MessageEnvelope) -> ResponsePayloadPreparation:
@@ -3521,6 +3525,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
             denial_reasons={tool_call_id: reason},
             tool_trace_collector=tool_trace,
             typing_log_context={},
+            progress=None,
         )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -3645,6 +3650,7 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
             denial_reasons=denial_reasons,
             tool_trace_collector=[],
             typing_log_context={},
+            progress=None,
         )
 
     agent.acontinue_run.assert_not_awaited()
@@ -3712,6 +3718,7 @@ async def test_agent_continuation_closes_runtime_when_notice_hook_setup_fails(tm
             denial_reasons={},
             tool_trace_collector=[],
             typing_log_context={},
+            progress=None,
         )
 
     close_runtime.assert_called_once_with(agent, shared_scope_storage=storage)
@@ -3795,6 +3802,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
             denial_reasons={},
             tool_trace_collector=[],
             typing_log_context={},
+            progress=None,
         )
 
 
@@ -4559,6 +4567,236 @@ async def test_completed_approval_continuation_delivers_canonical_ordered_body_u
     final_request = deliver_final.await_args.args[0]
     assert final_request.response_text == ordered_body
     assert final_request.tool_trace == trace
+
+
+async def _claim_streamable_approval(
+    runner: ResponseRunner,
+    *,
+    requester_online: bool,
+    entity_kind: Literal["agent", "team"] = "agent",
+) -> ApprovalContinuation:
+    """Claim one ready agent or team continuation whose requester is online or away."""
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    client = runner._client()
+    client.get_presence.return_value.presence = "online" if requester_online else "offline"
+    sent = count(1)
+    client.room_send.side_effect = lambda **_kwargs: nio.RoomSendResponse(
+        event_id=f"$sent-{next(sent)}",
+        room_id="!room:localhost",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-streamed",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind=entity_kind,
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        sources=ResponseSources(("$source",), ("$source",)),
+        calls=(),
+        state="ready",
+        show_tool_calls=True,
+        runtime_model_name="default",
+        team_member_names=("general",) if entity_kind == "team" else (),
+        team_mode="coordinate" if entity_kind == "team" else None,
+        execution_identity=serialize_tool_execution_identity(
+            runner.deps.tool_runtime.build_execution_identity(
+                target=_target(thread_id="$thread", reply_to_event_id="$source"),
+                user_id="@user:localhost",
+            ),
+        ),
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    return claimed
+
+
+def _approval_reply_edits(client: AsyncClient) -> list[tuple[str, str]]:
+    """Return each edit of the continued reply as its stream status and visible body."""
+    edits: list[tuple[str, str]] = []
+    for call in client.room_send.call_args_list:
+        content = call.kwargs["content"]
+        if content.get("m.relates_to", {}).get("event_id") == "$waiting" and "m.new_content" in content:
+            edits.append((content["m.new_content"][STREAM_STATUS_KEY], content["m.new_content"]["body"]))
+    return edits
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requester_online", [True, False])
+async def test_approval_continuation_streams_into_its_reply_only_for_streaming_requesters(
+    tmp_path: Path,
+    *,
+    requester_online: bool,
+) -> None:
+    """An online requester watches resumed work in the reply; an away requester gets only the final edit."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    claimed = await _claim_streamable_approval(runner, requester_online=requester_online)
+    completed = ToolTraceEntry(type="tool_call_completed", tool_name="inspect", tool_call_id="call-1")
+    body = "Checking.\n\n🔧 `inspect` [1]\n\nThe report is clean."
+
+    async def continue_call(
+        _continuation: ApprovalContinuation,
+        *,
+        tool_trace_collector: list[ToolTraceEntry],
+        progress: ProgressPublisher | None,
+        **_kwargs: object,
+    ) -> CompletedApprovalRun:
+        assert (progress is not None) is requester_online
+        if progress is not None:
+            await progress(StructuredStreamChunk(content=body, tool_trace=[completed]))
+        tool_trace_collector.append(completed)
+        return CompletedApprovalRun(response_text=body, metadata_content={})
+
+    with patch.object(runner, "_continue_entity_call", new=continue_call):
+        outcome = await runner._run_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert outcome.terminal_status == "completed"
+    progress_edits = [(STREAM_STATUS_STREAMING, body)] if requester_online else []
+    assert _approval_reply_edits(runner._client()) == [*progress_edits, (STREAM_STATUS_COMPLETED, body)]
+
+
+@pytest.mark.asyncio
+async def test_team_approval_continuation_streams_into_its_reply(tmp_path: Path) -> None:
+    """A resumed team run edits the same reply live before its durable final edit."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    claimed = await _claim_streamable_approval(runner, requester_online=True, entity_kind="team")
+    body = "🤝 **Team Response** (General):\n\n**General**: The report is clean."
+
+    async def continue_team(*, progress: ProgressPublisher | None, **_kwargs: object) -> CompletedApprovalRun:
+        assert progress is not None
+        await progress(StructuredStreamChunk(content=body))
+        return CompletedApprovalRun(response_text=body, metadata_content={})
+
+    with (
+        patch("mindroom.response_runner.continue_paused_team_run", new=continue_team),
+        patch("mindroom.response_runner.typing_indicator", _noop_typing),
+    ):
+        outcome = await runner._run_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert outcome.terminal_status == "completed"
+    assert _approval_reply_edits(runner._client()) == [(STREAM_STATUS_STREAMING, body), (STREAM_STATUS_COMPLETED, body)]
+
+
+@pytest.mark.asyncio
+async def test_streamed_approval_continuation_that_pauses_again_ends_on_its_new_approval(tmp_path: Path) -> None:
+    """Live progress yields to the next approval, leaving the reply approval-pending."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    claimed = await _claim_streamable_approval(runner, requester_online=True)
+    gated = _ordered_pause(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(
+                ToolExecution(
+                    tool_call_id="call-2",
+                    tool_name="publish_report",
+                    tool_args={},
+                    requires_confirmation=True,
+                ),
+            ),
+            toolkit_owners={("general", "publish_report"): "reports"},
+        ),
+    )
+    paused = replace(gated, response_text=f"Checked the report.\n\n{gated.response_text}")
+
+    async def continue_call(
+        _continuation: ApprovalContinuation,
+        *,
+        progress: ProgressPublisher | None,
+        **_kwargs: object,
+    ) -> PausedAttempt:
+        assert progress is not None
+        await progress(StructuredStreamChunk(content="Checked the report."))
+        return paused
+
+    async def publish_cards(continuation: ApprovalContinuation, *_args: object, **_kwargs: object) -> None:
+        activated = await runner.deps.approval_store.activate_approval_continuation(
+            continuation.approval_id,
+            expected_generation=continuation.generation,
+        )
+        assert activated is not None
+
+    with (
+        patch.object(runner, "_continue_entity_call", new=continue_call),
+        patch.object(runner._approval_responses, "_publish_cards", new=publish_cards),
+    ):
+        outcome = await runner._run_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert outcome.terminal_status == "suspended"
+    assert _approval_reply_edits(runner._client()) == [
+        (STREAM_STATUS_STREAMING, "Checked the report."),
+        (STREAM_STATUS_APPROVAL_PENDING, paused.response_text),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled(tmp_path: Path) -> None:
+    """A stop during live progress ends progress before the reply settles as cancelled."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    claimed = await _claim_streamable_approval(runner, requester_online=True)
+    client = runner._client()
+    progress_edited = asyncio.Event()
+    send = client.room_send.side_effect
+
+    def record_send(**kwargs: object) -> nio.RoomSendResponse:
+        if "m.new_content" in cast("dict[str, object]", kwargs["content"]):
+            progress_edited.set()
+        return send(**kwargs)
+
+    client.room_send.side_effect = record_send
+
+    async def continue_call(
+        _continuation: ApprovalContinuation,
+        *,
+        progress: ProgressPublisher | None,
+        **_kwargs: object,
+    ) -> CompletedApprovalRun:
+        assert progress is not None
+        await progress(StructuredStreamChunk(content="Checking the report."))
+        await asyncio.get_running_loop().create_future()
+        msg = "The stopped continuation kept running"
+        raise AssertionError(msg)
+
+    with (
+        patch.object(runner, "_continue_entity_call", new=continue_call),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
+        ),
+    ):
+        lifecycle = asyncio.create_task(
+            runner._run_claimed_approval_lifecycle(
+                claimed,
+                target=_target(thread_id="$thread", reply_to_event_id="$source"),
+            ),
+        )
+        async with asyncio.timeout(5):
+            await progress_edited.wait()
+        request_task_cancel(runner.deps.stop_manager.tracked_messages["$waiting"].task, cancel_source="user_stop")
+        outcome = await lifecycle
+
+    assert outcome.terminal_status == "cancelled"
+    assert _approval_reply_edits(client) == [
+        (STREAM_STATUS_STREAMING, "Checking the report."),
+        (STREAM_STATUS_COMPLETED, "**[Response cancelled by user]**"),
+    ]
+    assert await runner.deps.approval_store.approval_continuation(claimed.approval_id) is None
 
 
 @pytest.mark.asyncio
@@ -5414,6 +5652,7 @@ async def test_continuation_rejects_missing_persisted_execution_identity(tmp_pat
             request=_plain_request(_target()),
             target=_target(),
             tool_trace_collector=[],
+            progress=None,
         )
 
 
@@ -5467,6 +5706,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
             request=_plain_request(target, source_event_id="$source"),
             target=target,
             tool_trace_collector=[],
+            progress=None,
         )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -5625,6 +5865,8 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
     )
     observed: list[str | None] = []
     model_messages: list[tuple[str, object]] = []
+    progress = AsyncMock()
+    forwarded_progress: list[object] = []
 
     def build_dispatch_context(
         *_args: object,
@@ -5634,7 +5876,8 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         observed.append(correlation_id)
         return ToolDispatchContext(execution_identity=identity)
 
-    async def continue_run(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
+    async def continue_run(*_args: object, **kwargs: object) -> CompletedApprovalRun:
+        forwarded_progress.append(kwargs["progress"])
         model = RecordingModel(id="approval-receipt", provider="fake")
         approval_receipt.install_approval_receipt_hooks(model, None)
         await model.aresponse(
@@ -5659,9 +5902,11 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
             request=request,
             target=request.response_envelope.target,
             tool_trace_collector=[],
+            progress=progress,
         )
 
     assert observed == ["correlation-original"]
+    assert forwarded_progress == [progress]
     assert model_messages == [
         (
             "system",
@@ -8699,3 +8944,72 @@ async def test_mid_turn_empty_history_only_allows_a_proven_new_thread(
         await runner._prepare_request_after_lock(request)
         assert await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),)) is finish
     assert len(evaluated) == int(finish)
+
+
+@pytest.mark.asyncio
+async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlement(tmp_path: Path) -> None:
+    """A stop during progress shutdown ends the in-flight edit before the reply settles as cancelled."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    claimed = await _claim_streamable_approval(runner, requester_online=True)
+    client = runner._client()
+    send = client.room_send.side_effect
+    progress_started = asyncio.Event()
+    settlement_started = asyncio.Event()
+    exiting = asyncio.Event()
+    in_flight: list[str] = []
+    landed: list[str] = []
+
+    async def slow_progress_send(**kwargs: object) -> nio.RoomSendResponse:
+        new_content = cast("dict[str, Any]", kwargs["content"]).get("m.new_content")
+        if new_content is None:
+            return send(**kwargs)
+        status = new_content[STREAM_STATUS_KEY]
+        in_flight.append(status)
+        try:
+            if status == STREAM_STATUS_STREAMING:
+                progress_started.set()
+                await settlement_started.wait()
+            else:
+                settlement_started.set()
+            landed.append(status)
+            return send(**kwargs)
+        finally:
+            in_flight.remove(status)
+
+    client.room_send.side_effect = slow_progress_send
+
+    async def continue_call(
+        _continuation: ApprovalContinuation,
+        *,
+        progress: ProgressPublisher | None,
+        **_kwargs: object,
+    ) -> CompletedApprovalRun:
+        assert progress is not None
+        await progress(StructuredStreamChunk(content="Checking the report."))
+        await progress_started.wait()
+        exiting.set()
+        return CompletedApprovalRun(response_text="The report is clean.", metadata_content={})
+
+    with (
+        patch.object(runner, "_continue_entity_call", new=continue_call),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
+        ),
+    ):
+        lifecycle = asyncio.create_task(
+            runner._run_claimed_approval_lifecycle(
+                claimed,
+                target=_target(thread_id="$thread", reply_to_event_id="$source"),
+            ),
+        )
+        async with asyncio.timeout(5):
+            await exiting.wait()
+        request_task_cancel(runner.deps.stop_manager.tracked_messages["$waiting"].task, cancel_source="user_stop")
+        async with asyncio.timeout(5):
+            outcome = await lifecycle
+        assert in_flight == []
+
+    assert outcome.terminal_status == "cancelled"
+    assert landed == [STREAM_STATUS_COMPLETED]
+    assert _approval_reply_edits(client)[-1] == (STREAM_STATUS_COMPLETED, "**[Response cancelled by user]**")

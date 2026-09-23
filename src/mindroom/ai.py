@@ -511,8 +511,12 @@ async def collect_streamed_response_content(
     response_stream: AsyncIterator[AIStreamChunk],
     *,
     presentation: CollectedStreamPresentation,
+    on_update: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[str, list[ToolTraceEntry]]:
-    """Collect a stream into its presentation owner, retaining pending text and tool state."""
+    """Collect a stream into its presentation owner, retaining pending text and tool state.
+
+    ``on_update`` runs after each chunk has been applied to ``presentation``.
+    """
     try:
         async for chunk in response_stream:
             if isinstance(chunk, str):
@@ -526,6 +530,8 @@ async def collect_streamed_response_content(
                 presentation.start_tool(chunk.tool)
             elif isinstance(chunk, ToolCallCompletedEvent):
                 presentation.complete_tool(chunk.tool)
+            if on_update is not None:
+                await on_update()
     except ResponsePausedForApproval as error:
         error.capture_collected_presentation(
             response_text=presentation.final_text().rstrip(),

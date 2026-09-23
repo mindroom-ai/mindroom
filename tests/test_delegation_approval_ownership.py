@@ -209,6 +209,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
                         prior_presentation_state=paused.response_presentation_state,
                         prior_response_text=paused.response_text,
                         prior_tool_trace=paused.tool_trace,
+                        progress=None,
                     )
                 else:
                     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
@@ -241,6 +242,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
                         denial_reasons=reasons,
                         tool_trace_collector=[],
                         typing_log_context={},
+                        progress=None,
                     )
             assert isinstance(result, CompletedApprovalRun)
             assert executed == ([(2, 3)] if decision in {"approve", "approve_gate"} else [])
