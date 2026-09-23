@@ -6177,7 +6177,10 @@ describe("configStore", () => {
     });
 
     it("clears only the diagnostics of the edited field", async () => {
-      await loadBaseConfig();
+      await loadBaseConfig({
+        ...baseConfig,
+        defaults: { ...baseConfig.defaults, max_preload_chars: 0 },
+      });
       const siblingIssue = {
         kind: "validation" as const,
         issue: {
@@ -6208,6 +6211,131 @@ describe("configStore", () => {
       expect(state.config?.defaults?.markdown).toBe(false);
       expect(state.dirtyRoots).toEqual(["defaults"]);
       expect(state.diagnostics).toEqual([siblingIssue]);
+    });
+
+    describe("validation issues of unchanged values", () => {
+      const issue = (loc: Array<string | number>, type = "value_error") => ({
+        kind: "validation" as const,
+        issue: { loc, msg: "Invalid", type },
+      });
+      const remainingLocs = () =>
+        useConfigStore
+          .getState()
+          .diagnostics.flatMap((diagnostic) =>
+            diagnostic.kind === "validation" ? [diagnostic.issue.loc] : [],
+          );
+
+      it("keep the errors of other list items", async () => {
+        await loadBaseConfig({
+          ...baseConfig,
+          plugins: [{ path: "" }, { path: "" }],
+        });
+        useConfigStore.setState({
+          diagnostics: [
+            issue(["plugins", 0, "path"]),
+            issue(["plugins", 1, "path"]),
+          ],
+        });
+
+        useConfigStore
+          .getState()
+          .updateConfigValue(["plugins"], [{ path: "a" }, { path: "" }]);
+
+        expect(remainingLocs()).toEqual([["plugins", 1, "path"]]);
+      });
+
+      it("keep a missing field error until the field is added", async () => {
+        await loadBaseConfig({ ...baseConfig, plugins: [{ enabled: true }] });
+        useConfigStore.setState({
+          diagnostics: [issue(["plugins", 0, "path"], "missing")],
+        });
+
+        useConfigStore
+          .getState()
+          .updateConfigValue(["plugins"], [{ enabled: false }]);
+        expect(remainingLocs()).toEqual([["plugins", 0, "path"]]);
+
+        useConfigStore
+          .getState()
+          .updateConfigValue(["plugins"], [{ enabled: false, path: "a" }]);
+        expect(remainingLocs()).toEqual([]);
+      });
+
+      it("match union errors reported under their tag value", async () => {
+        await loadBaseConfig({
+          ...baseConfig,
+          router: {
+            model: "default",
+            judgment: { provider: "llm", model: "gone" },
+          },
+        });
+        useConfigStore.setState({
+          diagnostics: [issue(["router", "judgment", "llm", "model"])],
+        });
+
+        useConfigStore
+          .getState()
+          .updateConfigValue(["router", "accept_invites"], false);
+        expect(remainingLocs()).toEqual([
+          ["router", "judgment", "llm", "model"],
+        ]);
+
+        useConfigStore.getState().updateConfigValue(["router", "judgment"], {
+          provider: "llm",
+          model: "default",
+        });
+        expect(remainingLocs()).toEqual([]);
+      });
+
+      it("keep sibling errors when a whole entity is replaced", async () => {
+        await loadBaseConfig({
+          ...baseConfig,
+          rooms: { lobby: { join_policy: "bogus", encrypted: false } },
+        });
+        useConfigStore.setState({
+          diagnostics: [issue(["rooms", "lobby", "join_policy"])],
+        });
+
+        useConfigStore.getState().updateConfigValue(["rooms", "lobby"], {
+          join_policy: "bogus",
+          encrypted: true,
+        });
+
+        expect(remainingLocs()).toEqual([["rooms", "lobby", "join_policy"]]);
+      });
+
+      it("keep nested agent and model errors the edit did not touch", async () => {
+        await loadBaseConfig({
+          ...baseConfig,
+          agents: {
+            helper: {
+              ...baseConfig.agents.helper,
+              participation: { debounce_seconds: -1 },
+            },
+          },
+          models: {
+            default: { provider: "openai", id: "test-model", api: "bogus" },
+          },
+        });
+        useConfigStore.setState({
+          diagnostics: [
+            issue(["agents", "helper", "participation", "debounce_seconds"]),
+            issue(["models", "default", "api"]),
+          ],
+        });
+
+        useConfigStore.getState().updateAgent("helper", {
+          participation: { debounce_seconds: -1, instructions: "Be brief" },
+        } as never);
+        useConfigStore
+          .getState()
+          .updateModel("default", { extra_kwargs: { temperature: 0.2 } });
+
+        expect(remainingLocs()).toEqual([
+          ["agents", "helper", "participation", "debounce_seconds"],
+          ["models", "default", "api"],
+        ]);
+      });
     });
 
     it("drops a root once its last key is reset", async () => {

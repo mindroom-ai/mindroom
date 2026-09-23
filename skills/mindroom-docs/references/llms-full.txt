@@ -797,6 +797,7 @@ Each field shows its description and default, entity references such as model or
 Resetting a field removes it from `config.yaml` so the default applies again, and optional blocks are added or removed with their **Configure** checkbox.
 Lists keep their order and can repeat values, such as MCP server arguments.
 Validation errors from a save appear beside the affected field, and collapsed sections that contain one open automatically.
+Changing a value clears only the errors reported for it; errors on values you have not changed stay visible until the next save.
 If the schema cannot be loaded, these forms show the error with a **Retry** button.
 
 ### Save Status
