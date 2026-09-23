@@ -104,16 +104,21 @@ class PersonalRoomService:
             raise _PolicyChangedError
         return settings
 
-    def _requester_admin_allowed(self, record: PersonalRoomRecord) -> bool:
-        settings = self._current_settings(record.user_id, record.source_room_id)
+    def _requester_admin_allowed(self, record: PersonalRoomRecord, source_room_id: str) -> bool:
+        settings = self._current_settings(record.user_id, source_room_id)
         return settings is not None and settings.requester_admin
 
-    def _avatar_write_allowed(self, record: PersonalRoomRecord, choice: tuple[str | None, bool]) -> bool:
-        settings = self._current_settings(record.user_id, record.source_room_id)
+    def _avatar_write_allowed(
+        self,
+        record: PersonalRoomRecord,
+        source_room_id: str,
+        choice: tuple[str | None, bool],
+    ) -> bool:
+        settings = self._current_settings(record.user_id, source_room_id)
         return settings is not None and (settings.avatar, settings.avatar_from_requester) == choice
 
-    def _welcome_write_allowed(self, record: PersonalRoomRecord, *, human_joined: bool) -> bool:
-        if self._current_settings(record.user_id, record.source_room_id) is None:
+    def _welcome_write_allowed(self, record: PersonalRoomRecord, source_room_id: str, *, human_joined: bool) -> bool:
+        if self._current_settings(record.user_id, source_room_id) is None:
             return False
         assert record.room_id is not None
         assert record.welcome_content is not None
@@ -164,7 +169,7 @@ class PersonalRoomService:
                     )
                     await run_blocking_until_complete(write_personal_room, path, record)
                 if record.room_id is None:
-                    record.room_id = await self._resolve_or_create(record)
+                    record.room_id = await self._resolve_or_create(record, source_room_id)
                     await run_blocking_until_complete(write_personal_room, path, record)
                 human_joined = await self._reconcile_membership(
                     record,
@@ -175,7 +180,7 @@ class PersonalRoomService:
                 )
                 if human_joined is None:
                     return record.room_id
-                await self._finish(record, path, human_joined=human_joined)
+                await self._finish(record, path, source_room_id, human_joined=human_joined)
                 settings = self._require_current_settings(user_id, source_room_id)
                 if source_room_id == record.source_room_id:
                     await self._confirm(record, path, settings, source_client)
@@ -206,7 +211,7 @@ class PersonalRoomService:
         owner_membership = roster.get(record.user_id)
         if await self._observe_owner_membership(record, path, owner_membership, allow_reinvite):
             return None
-        await self._invite_owner_if_needed(record, owner_membership)
+        await self._invite_owner_if_needed(record, owner_membership, source_room_id)
         roster = await self._validate_room(record)
         owner_membership = roster.get(record.user_id)
         if await self._observe_owner_membership(record, path, owner_membership, False):
@@ -215,15 +220,21 @@ class PersonalRoomService:
             record,
             path,
             source_client,
+            source_room_id,
             initial_owner_membership,
             owner_membership,
         )
 
-    async def _invite_owner_if_needed(self, record: PersonalRoomRecord, owner_membership: str | None) -> None:
+    async def _invite_owner_if_needed(
+        self,
+        record: PersonalRoomRecord,
+        owner_membership: str | None,
+        source_room_id: str,
+    ) -> None:
         """Invite only an absent owner or one with explicit re-invite authority."""
         if owner_membership in {"join", "invite"}:
             return
-        self._require_current_settings(record.user_id, record.source_room_id)
+        self._require_current_settings(record.user_id, source_room_id)
         assert record.room_id is not None
         if not await invite_to_room(self._client(), record.room_id, record.user_id):
             msg = "Personal-room invite failed"
@@ -249,13 +260,14 @@ class PersonalRoomService:
         record: PersonalRoomRecord,
         path: Path,
         source_client: nio.AsyncClient,
+        source_room_id: str,
         initial_owner_membership: str | None,
         current_owner_membership: str | None,
     ) -> bool:
         """Retry only an initial create's join while the original roster permits it."""
         if not record.initial_join_pending:
             return current_owner_membership == "join"
-        settings = self._require_current_settings(record.user_id, record.source_room_id)
+        settings = self._require_current_settings(record.user_id, source_room_id)
         if (
             initial_owner_membership in {None, "invite"}
             and current_owner_membership == "invite"
@@ -275,7 +287,7 @@ class PersonalRoomService:
     def _ownership(self, user_id: str) -> dict[str, str]:
         return {"user_id": user_id, "agent_user_id": self._client().user_id}
 
-    async def _resolve_or_create(self, record: PersonalRoomRecord) -> str:
+    async def _resolve_or_create(self, record: PersonalRoomRecord, source_room_id: str) -> str:
         client = self._client()
         response = await client.room_resolve_alias(record.alias)
         if isinstance(response, nio.RoomResolveAliasResponse):
@@ -285,7 +297,7 @@ class PersonalRoomService:
         if not isinstance(response, nio.RoomResolveAliasError) or response.status_code != "M_NOT_FOUND":
             msg = "Personal-room alias lookup failed"
             raise RuntimeError(msg)
-        settings = self._require_current_settings(record.user_id, record.source_room_id)
+        settings = self._require_current_settings(record.user_id, source_room_id)
         values = self._template_values(record)
         room_id = await create_room(
             client,
@@ -379,11 +391,12 @@ class PersonalRoomService:
         self,
         record: PersonalRoomRecord,
         path: Path,
+        source_room_id: str,
         *,
         human_joined: bool,
     ) -> None:
         assert record.room_id is not None
-        settings = self._current_settings(record.user_id, record.source_room_id)
+        settings = self._current_settings(record.user_id, source_room_id)
         if settings is None:
             return
         client = self._client()
@@ -392,18 +405,18 @@ class PersonalRoomService:
                 client,
                 record.room_id,
                 [record.user_id],
-                write_allowed=lambda: self._requester_admin_allowed(record),
+                write_allowed=lambda: self._requester_admin_allowed(record, source_room_id),
             )
-            if not granted and self._requester_admin_allowed(record):
+            if not granted and self._requester_admin_allowed(record, source_room_id):
                 msg = "Personal-room admin grant failed"
                 raise RuntimeError(msg)
-        settings = self._current_settings(record.user_id, record.source_room_id)
+        settings = self._current_settings(record.user_id, source_room_id)
         if settings is None:
             return
         if (settings.avatar is not None or settings.avatar_from_requester) and not record.avatar_done:
             choice = (settings.avatar, settings.avatar_from_requester)
-            await self._set_avatar(record)
-            if not self._avatar_write_allowed(record, choice):
+            await self._set_avatar(record, source_room_id)
+            if not self._avatar_write_allowed(record, source_room_id, choice):
                 return
             record.avatar_done = True
             await run_blocking_until_complete(write_personal_room, path, record)
@@ -429,7 +442,7 @@ class PersonalRoomService:
             record.welcome_content = content
             record.welcome_device_id = client.device_id
             await run_blocking_until_complete(write_personal_room, path, record)
-        if not self._welcome_write_allowed(record, human_joined=human_joined):
+        if not self._welcome_write_allowed(record, source_room_id, human_joined=human_joined):
             return
         if record.welcome_device_id != client.device_id or not client.device_id:
             msg = "Personal-room pending welcome belongs to a different Matrix device"
@@ -439,10 +452,10 @@ class PersonalRoomService:
             record.room_id,
             record.welcome_content,
             transaction_id=f"personal-welcome-{personal_room_digest(record.room_id)}",
-            write_allowed=lambda: self._welcome_write_allowed(record, human_joined=human_joined),
+            write_allowed=lambda: self._welcome_write_allowed(record, source_room_id, human_joined=human_joined),
         )
         if delivered is None:
-            if not self._welcome_write_allowed(record, human_joined=human_joined):
+            if not self._welcome_write_allowed(record, source_room_id, human_joined=human_joined):
                 return
             msg = "Personal-room welcome delivery failed"
             raise RuntimeError(msg)
@@ -453,6 +466,7 @@ class PersonalRoomService:
     async def _set_avatar(  # noqa: C901 - recheck policy between Matrix reads and writes
         self,
         record: PersonalRoomRecord,
+        source_room_id: str,
     ) -> None:
         assert record.room_id is not None
         client = self._client()
@@ -463,7 +477,7 @@ class PersonalRoomService:
         elif not isinstance(current, nio.RoomGetStateEventError) or current.status_code != "M_NOT_FOUND":
             msg = "Personal-room avatar state unavailable"
             raise RuntimeError(msg)
-        settings = self._current_settings(record.user_id, record.source_room_id)
+        settings = self._current_settings(record.user_id, source_room_id)
         if settings is None:
             return
         if settings.avatar is None and not settings.avatar_from_requester:
@@ -474,7 +488,7 @@ class PersonalRoomService:
                 client,
                 record.room_id,
                 resolve_config_relative_path(settings.avatar, self.runtime_paths),
-                write_allowed=lambda: self._avatar_write_allowed(record, choice),
+                write_allowed=lambda: self._avatar_write_allowed(record, source_room_id, choice),
             )
         else:
             profile = await client.get_profile(record.user_id)
@@ -483,12 +497,12 @@ class PersonalRoomService:
                 raise RuntimeError(msg)
             if not profile.avatar_url:
                 return
-            if not self._avatar_write_allowed(record, choice):
+            if not self._avatar_write_allowed(record, source_room_id, choice):
                 return
             response = await client.room_put_state(record.room_id, "m.room.avatar", {"url": profile.avatar_url})
             success = isinstance(response, nio.RoomPutStateResponse)
         if not success:
-            if not self._avatar_write_allowed(record, choice):
+            if not self._avatar_write_allowed(record, source_room_id, choice):
                 return
             msg = "Personal-room avatar update failed"
             raise RuntimeError(msg)
@@ -543,4 +557,4 @@ class PersonalRoomService:
                 return
             roster = await self._validate_room(record)
             await self._observe_owner_membership(record, path, roster.get(user_id), False)
-            await self._finish(record, path, human_joined=roster.get(user_id) == "join")
+            await self._finish(record, path, record.source_room_id, human_joined=roster.get(user_id) == "join")

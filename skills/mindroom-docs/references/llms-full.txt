@@ -2207,7 +2207,8 @@ Commands are optional, exact messages in those rooms, and onboard only their aut
 Existing agent access rules still apply; agent and service accounts are excluded.
 `backfill: true` also reconciles current eligible members at startup and configuration reload.
 `auto_join_requester: true` requires a source Matrix account authorized to use the homeserver's Synapse-compatible admin join API.
-It enrolls only the requester of a newly created room. A failed initial join can retry after restart, but a requester who has already joined, left, or been banned is never force joined again.
+It enrolls only the requester of a newly created room.
+A failed initial join can retry after restart, but a requester who has already joined, left, or been banned is never force joined again.
 Existing and imported rooms do not gain automatic joining when this setting is enabled later.
 Restart reconciliation and backfill preserve a requester who left or was banned from a personal room.
 A fresh leave-to-join event in the onboarding room may re-invite a departed requester to a newly created personal room; it never overrides a ban or re-invites someone to an imported room.
