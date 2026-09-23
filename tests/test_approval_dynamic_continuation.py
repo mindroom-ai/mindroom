@@ -33,7 +33,12 @@ from mindroom.response_turn import (
     paused_attempt_from_response,
 )
 from mindroom.synthetic_model import SyntheticModel
-from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry, serialize_tool_trace
+from mindroom.tool_system.events import (
+    CollectedStreamPresentation,
+    StructuredStreamChunk,
+    ToolTraceEntry,
+    serialize_tool_trace,
+)
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
 from tests.conftest import bind_runtime_paths, unwrap_extracted_collaborator
@@ -541,3 +546,129 @@ async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: st
     assert presentation.final_text() == ""
     assert collected.terminal_content == "Final parent answer."
     assert collected.tool_executions == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["finish", "pause"])
+async def test_approved_run_streams_progress_from_its_saved_presentation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    """Live progress resumes the saved reply, settles the approved tool, then follows the new work."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MATRIX_HOMESERVER": "https://matrix.example.org", "MINDROOM_NAMESPACE": ""},
+    )
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "defaults": {"tools": [], "learning": False},
+                "agents": {"general": {"display_name": "General", "tools": ["calculator"]}},
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+                "tool_approval": {
+                    "default": "auto_approve",
+                    "rules": [
+                        {"match": "add", "action": "require_approval"},
+                        {"match": "multiply", "action": "require_approval"},
+                    ],
+                },
+            },
+        ),
+        paths,
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="progress-session",
+    )
+    responses: list[ModelResponse | RuntimeError] = [
+        _call("add", "approved", a=2, b=3),
+        *(
+            [_call("multiply", "gated", a=5, b=2)]
+            if outcome == "pause"
+            else [_call("subtract", "second", a=5, b=1), ModelResponse(content="Both results are ready.")]
+        ),
+    ]
+    monkeypatch.setattr(
+        "mindroom.agents._load_agent_model_instance",
+        lambda *_args, **_kwargs: _ScriptedModel(id="synthetic", responses=responses),
+    )
+    storage = create_session_storage("general", config, paths, identity)
+    actor = create_agent(
+        "general",
+        config,
+        paths,
+        identity,
+        session_id=identity.session_id,
+        history_storage=storage,
+        dynamic_tool_continuation=True,
+        supports_native_tool_approval=True,
+    )
+    try:
+        paused = await actor.arun(
+            "Add, then keep going.",
+            session_id=identity.session_id,
+            user_id=identity.requester_id,
+        )
+        assert paused.status == RunStatus.paused
+    finally:
+        close_agent_runtime_state_dbs(actor, shared_scope_storage=storage)
+        storage.close()
+    saved = CollectedStreamPresentation(show_tool_calls=True, response_text="Adding first.")
+    saved.start_tool((paused.tools or [])[0])
+    continuation = ApprovalContinuation(
+        approval_id="approval-progress",
+        run_id=paused.run_id,
+        session_id=identity.session_id,
+        entity_kind="agent",
+        entity_name="general",
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+        response_event_id="$waiting",
+        sources=ResponseSources(("$source",), ("$source",)),
+        state="claimed",
+        calls=(ApprovalCall("approved", "add", "general", 2**62, toolkit_name="calculator"),),
+        request_body="Add, then keep going.",
+        response_text=saved.response_text,
+        response_tool_trace=serialize_tool_trace(saved.tool_trace, include_internal=True),
+        show_tool_calls=True,
+    )
+    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
+    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    published: list[StructuredStreamChunk] = []
+
+    async def progress(chunk: StructuredStreamChunk) -> None:
+        published.append(chunk)
+
+    result = await execution.continue_run(
+        continuation,
+        execution_identity=identity,
+        tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        decisions={"approved": True},
+        denial_reasons={"approved": None},
+        tool_trace_collector=[],
+        typing_log_context={},
+        progress=progress,
+    )
+
+    contents = [chunk.content for chunk in published]
+    assert contents[0] == saved.response_text
+    resumed = [content for content in contents if content != saved.response_text]
+    assert resumed[0] == "Adding first.\n\n🔧 `add` [1]\n\n"
+    assert all("🔧 `add` [1] ⏳" not in content for content in resumed)
+    if outcome == "pause":
+        assert isinstance(result, PausedAttempt)
+        assert resumed == ["Adding first.\n\n🔧 `add` [1]\n\n"]
+        assert "🔧 `multiply` [2] ⏳" in result.response_text
+        return
+    assert isinstance(result, CompletedApprovalRun)
+    assert "🔧 `subtract` [2] ⏳" in resumed[1]
+    assert contents[-1] == result.response_text
+    assert result.response_text.endswith("Both results are ready.")

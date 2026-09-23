@@ -51,7 +51,7 @@ from mindroom.response_turn import (
     apply_local_approval_decisions,
     paused_attempt_from_response,
 )
-from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace
+from mindroom.tool_system.events import CollectedStreamPresentation, StructuredStreamChunk, deserialize_tool_trace
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeModelBinding,
     runtime_context_from_dispatch_context,
@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalContinuation
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
+    from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolDispatchContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -87,9 +88,21 @@ class _CollectedAgentContinuation:
     has_visible_content: bool
 
 
+async def _publish_presentation(
+    progress: ProgressPublisher | None,
+    presentation: CollectedStreamPresentation,
+) -> None:
+    """Show the continuation's current ordered presentation in the reply it resumes."""
+    if progress is not None:
+        await progress(
+            StructuredStreamChunk(content=presentation.response_text, tool_trace=presentation.tool_trace),
+        )
+
+
 async def _collect_agent_continuation(  # noqa: C901
     events: AsyncIterator[object],
     presentation: CollectedStreamPresentation,
+    progress: ProgressPublisher | None = None,
 ) -> _CollectedAgentContinuation:
     """Collect ordered events while leaving terminal fallback text for lifecycle settlement."""
     response: RunOutput | None = None
@@ -97,6 +110,7 @@ async def _collect_agent_continuation(  # noqa: C901
     terminal_content: str | None = None
     saw_content_delta = False
     current_tools: list[ToolExecution] = []
+    await _publish_presentation(progress, presentation)
     async for event in events:
         if isinstance(event, RunOutput):
             response = event
@@ -106,14 +120,17 @@ async def _collect_agent_continuation(  # noqa: C901
         elif isinstance(event, RunContentEvent):
             presentation.append_text(event.content)
             saw_content_delta = saw_content_delta or bool(event.content)
+            await _publish_presentation(progress, presentation)
         elif isinstance(event, RunCompletedEvent) and event.content is not None:
             terminal_content = str(event.content)
         elif isinstance(event, ToolCallStartedEvent):
             presentation.start_tool(event.tool)
+            await _publish_presentation(progress, presentation)
         elif isinstance(event, ToolCallCompletedEvent):
             presentation.complete_tool(event.tool)
             if event.tool is not None and event.parent_run_id is None:
                 current_tools.append(event.tool)
+            await _publish_presentation(progress, presentation)
     if error_event is not None and (response is None or response.status == RunStatus.error):
         raise RuntimeError(run_error_event_text(error_event))
     if response is None:
@@ -166,6 +183,7 @@ async def _continue_persisted_agent(
     tool_trace_collector: list[ToolTraceEntry],
     run_id_callback: Callable[[str], None] | None,
     tool_dispatch: ToolDispatchContext,
+    progress: ProgressPublisher | None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Resume a persisted agent with event streaming so presentation order is retained."""
 
@@ -206,7 +224,7 @@ async def _continue_persisted_agent(
         tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
         track_hidden_tools=True,
     )
-    collected = await _collect_agent_continuation(events, presentation)
+    collected = await _collect_agent_continuation(events, presentation, progress)
     response = collected.response
     paused = paused_attempt_from_response(
         response,
@@ -264,6 +282,7 @@ async def _continue_persisted_agent(
         tool_trace_collector=tool_trace_collector,
         run_id_callback=run_id_callback,
         tool_dispatch=tool_dispatch,
+        progress=progress,
     )
 
 
@@ -282,6 +301,7 @@ async def _settle_agent_continuation(
     tool_trace_collector: list[ToolTraceEntry],
     run_id_callback: Callable[[str], None] | None,
     tool_dispatch: ToolDispatchContext,
+    progress: ProgressPublisher | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Settle resumed work and any fresh attempts through the shared response driver."""
     ctx = ResponseTurnContext(
@@ -321,6 +341,7 @@ async def _settle_agent_continuation(
         response_text, tool_trace = await collect_streamed_response_content(
             stream,
             presentation=presentation,
+            on_update=partial(_publish_presentation, progress, presentation),
         )
     except ResponsePausedForApproval as error:
         if error.presentation is None:
@@ -359,8 +380,13 @@ class AgentApprovalExecution:
         tool_trace_collector: list[ToolTraceEntry],
         typing_log_context: Mapping[str, object],
         run_id_callback: Callable[[str], None] | None = None,
+        progress: ProgressPublisher | None = None,
     ) -> CompletedApprovalRun | PausedAttempt:
-        """Apply exact decisions and continue the matching persisted Agno run."""
+        """Apply exact decisions and continue the matching persisted Agno run.
+
+        ``progress``, when given, shows the resumed presentation live in the
+        reply being continued; the terminal delivery stays with the caller.
+        """
         config = self.config()
         if continuation.entity_name not in config.agents:
             msg = f"Agent {continuation.entity_name!r} is no longer configured"
@@ -475,6 +501,7 @@ class AgentApprovalExecution:
                                 tool_trace_collector=tool_trace_collector,
                                 run_id_callback=run_id_callback,
                                 tool_dispatch=tool_dispatch,
+                                progress=progress,
                             ),
                         ),
                     )

@@ -155,6 +155,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_turn import EmptyRunDiscard, TurnRunState
     from mindroom.runtime_protocols import OrchestratorRuntime
+    from mindroom.streaming import ProgressPublisher
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -2445,14 +2446,27 @@ def _apply_team_continuation_event(event: object, presentation: _TeamStreamPrese
         presentation.complete_tool("team", event.tool)
 
 
+async def _publish_team_presentation(
+    progress: ProgressPublisher | None,
+    presentation: _TeamStreamPresentation,
+) -> None:
+    """Show the team continuation's current document in the reply it resumes."""
+    if progress is not None:
+        await progress(
+            StructuredStreamChunk(content=presentation.render_body(), tool_trace=presentation.tool_trace),
+        )
+
+
 async def _collect_team_continuation(
     events: AsyncIterator[object],
     presentation: _TeamStreamPresentation,
+    progress: ProgressPublisher | None = None,
 ) -> TeamRunOutput:
     """Collect one team continuation stream and return its terminal run output."""
     response: TeamRunOutput | None = None
     error_event: TeamRunErrorEvent | None = None
     content_delta_scopes: set[str] = set()
+    await _publish_team_presentation(progress, presentation)
     async for event in events:
         if isinstance(event, TeamRunOutput):
             response = event
@@ -2466,6 +2480,7 @@ async def _collect_team_continuation(
             elif isinstance(event, TeamRunContentEvent) and event.content:
                 content_delta_scopes.add("team")
             _apply_team_continuation_event(event, presentation)
+            await _publish_team_presentation(progress, presentation)
     if error_event is not None and (response is None or response.status == RunStatus.error):
         raise RuntimeError(run_error_event_text(error_event, entity_label="Team"))
     if response is None:
@@ -2632,8 +2647,13 @@ async def continue_paused_team_run(
     prior_presentation_state: Mapping[str, object] | None = None,
     show_tool_calls: bool = True,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
+    progress: ProgressPublisher | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
-    """Rebuild a team and continue its exact persisted paused run."""
+    """Rebuild a team and continue its exact persisted paused run.
+
+    ``progress``, when given, shows the resumed document live in the reply
+    being continued; the terminal delivery stays with the caller.
+    """
     stack = ExitStack()
     scope: ScopeSessionContext | None = None
     team: Team | None = None
@@ -2754,6 +2774,7 @@ async def continue_paused_team_run(
             continued = await _collect_team_continuation(
                 continuation_stream,
                 presentation,
+                progress,
             )
         paused = paused_attempt_from_response(
             continued,

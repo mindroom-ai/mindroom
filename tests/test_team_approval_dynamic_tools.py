@@ -111,6 +111,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
         team_mode="coordinate",
     )
     continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
+    progress = AsyncMock()
     with (
         patch.object(
             runner.deps.tool_runtime,
@@ -125,8 +126,10 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
             request=_plain_request(target, source_event_id="$source"),
             target=target,
             tool_trace_collector=[],
+            progress=progress,
         )
     assert isinstance(result, CompletedApprovalRun)
+    assert continued.await_args.kwargs["progress"] is progress
     assert continued.await_args.kwargs["approval_calls"] == calls
     assert continued.await_args.kwargs["member_names"] == ("alpha", "beta")
     assert continued.await_args.kwargs["decisions"] == dict.fromkeys((call.tool_call_id for call in calls), True)
