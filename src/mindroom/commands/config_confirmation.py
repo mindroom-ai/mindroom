@@ -303,6 +303,9 @@ async def _is_bot_authored_event(
     if not isinstance(response, nio.RoomGetEventResponse):
         msg = f"Failed to read config confirmation preview event {event_id}: {response}"
         raise RuntimeError(msg)  # noqa: TRY004
+    if response.event.event_id != event_id:
+        msg = f"Matrix returned the wrong config confirmation preview for {event_id}"
+        raise RuntimeError(msg)
     return client.user_id is not None and response.event.sender == client.user_id
 
 

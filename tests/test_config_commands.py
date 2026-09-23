@@ -1240,7 +1240,7 @@ def _pending_config_state_event(
     pending_change: config_confirmation._PendingConfigChange,
     *,
     state_key: str,
-    sender: str,
+    sender: str | None,
 ) -> dict[str, object]:
     """Return one raw room-state event carrying a pending config change."""
     return {
@@ -1327,6 +1327,55 @@ async def test_resolve_pending_change_rejects_state_written_by_another_member(
 
     assert resolved is None
     assert config_confirmation._get_pending_change(event_id) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_pending_change_fails_closed_without_a_bot_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client with no Matrix identity cannot prove provenance, so nothing is honoured."""
+    event_id = "$preview"
+    room_id = "!room:example.org"
+    pending_change = config_confirmation._PendingConfigChange(
+        room_id=room_id,
+        thread_id=None,
+        config_path="administrators.0",
+        old_value=None,
+        new_value="@attacker:evil.example",
+        requester="@admin:example.org",
+    )
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = None
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content=pending_change.to_dict(),
+        event_type=config_confirmation._PENDING_CONFIG_EVENT_TYPE,
+        state_key=event_id,
+        room_id=room_id,
+    )
+    client.room_get_state.return_value = nio.RoomGetStateResponse(
+        events=[_pending_config_state_event(pending_change, state_key=event_id, sender=None)],
+        room_id=room_id,
+    )
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {})
+
+    assert await config_confirmation._resolve_pending_change(client, room_id, event_id) is None
+    assert config_confirmation._get_pending_change(event_id) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_pending_change_stays_inside_the_room_that_owns_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cached preview must not answer a reaction raised in a different room."""
+    event_id = "$preview"
+    pending_change = _pending_config_change(room_id="!owner:example.org")
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {event_id: pending_change})
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@router:example.org"
+
+    assert await config_confirmation._resolve_pending_change(client, "!owner:example.org", event_id) == pending_change
+    assert await config_confirmation._resolve_pending_change(client, "!elsewhere:example.org", event_id) is None
+    client.room_get_state_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
