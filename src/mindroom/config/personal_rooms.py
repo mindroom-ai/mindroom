@@ -33,6 +33,10 @@ class PersonalRoomsConfig(BaseModel):
         description="Send the welcome through trusted hook dispatch after the human joins",
     )
     backfill: bool = Field(default=False, description="On startup, reconcile existing eligible onboarding-room members")
+    auto_join_requester: bool = Field(
+        default=False,
+        description="Join the requester automatically only during initial creation of a personal room",
+    )
     requester_admin: bool = Field(default=False, description="Grant the human Matrix room admin capability")
     avatar: str | None = Field(default=None, description="Optional room avatar file, relative to the configuration")
     avatar_from_requester: bool = Field(

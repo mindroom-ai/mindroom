@@ -92,7 +92,12 @@ async def test_commands_require_exact_self_request_in_onboarding_room(coordinati
     assert not await lifecycle.handle_command(nio.MatrixRoom("!other:localhost", room.own_user_id), command())
     assert await lifecycle.handle_command(room, command("  !personal  "))
     coordination.lookup.assert_called_with("helper")
-    coordination.owner.ensure.assert_awaited_once_with("@alice:localhost", room.room_id, lifecycle.runtime.client)
+    coordination.owner.ensure.assert_awaited_once_with(
+        "@alice:localhost",
+        room.room_id,
+        lifecycle.runtime.client,
+        reinvite_departed_owner=False,
+    )
     coordination.owner.ensure.reset_mock()
     coordination.requester.side_effect = None
     coordination.requester.return_value = "@bob:localhost"
@@ -155,8 +160,15 @@ async def test_live_membership_leaves_unknown_baseline_to_durable_gate(
     if previous is not None:
         source["unsigned"] = {"prev_content": {"membership": previous}}
     await coordination.lifecycle.member_event(room, nio.RoomMemberEvent.from_dict(source))
-    assert coordination.local.member_joined.await_count == (previous != "join")
+    coordination.local.owner_membership_event.assert_awaited_once_with(room.room_id, "@alice:localhost", "join")
     assert coordination.owner.ensure.await_count == (previous == "leave")
+    if previous == "leave":
+        coordination.owner.ensure.assert_awaited_once_with(
+            "@alice:localhost",
+            room.room_id,
+            coordination.lifecycle.runtime.client,
+            reinvite_departed_owner=True,
+        )
     join = RoomMemberJoin(room.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", previous)
     await coordination.lifecycle.baseline_join(join)
     assert coordination.owner.ensure.await_count == (previous != "join")
@@ -230,7 +242,12 @@ async def test_corrupt_record_does_not_block_other_record(coordination: Coordina
     await lifecycle.reconcile()
     await lifecycle.reconcile()
     assert coordination.owner.ensure.await_count == 2
-    coordination.owner.ensure.assert_awaited_with("@bob:localhost", "!lobby:localhost", lifecycle.runtime.client)
+    coordination.owner.ensure.assert_awaited_with(
+        "@bob:localhost",
+        "!lobby:localhost",
+        lifecycle.runtime.client,
+        reinvite_departed_owner=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -275,7 +292,12 @@ async def test_reload_during_backfill_keeps_new_onboarding_room_pending(
     coordination.owner.ensure.assert_not_awaited()
     await lifecycle.reconcile()
     assert membership_reads == ["!lobby:localhost", "!new:localhost"]
-    coordination.owner.ensure.assert_awaited_once_with("@alice:localhost", "!new:localhost", lifecycle.runtime.client)
+    coordination.owner.ensure.assert_awaited_once_with(
+        "@alice:localhost",
+        "!new:localhost",
+        lifecycle.runtime.client,
+        reinvite_departed_owner=False,
+    )
 
 
 @pytest.mark.asyncio

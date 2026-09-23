@@ -1120,6 +1120,7 @@ personal_rooms:
   welcome_dispatch: false
   confirmation: ""
   backfill: false
+  auto_join_requester: false
   requester_admin: false
   # avatar: avatars/personal.png
   avatar_from_requester: false
@@ -1140,6 +1141,7 @@ When enabled, its fields are:
 | `welcome_dispatch` | boolean | `false` | Dispatch the welcome to the selected agent after the human joins; otherwise send a notice. |
 | `confirmation` | string | `""` | Optional once-only notice template in the original onboarding room, up to 10,000 characters. |
 | `backfill` | boolean | `false` | Also reconcile current eligible onboarding-room members on startup and config reload. |
+| `auto_join_requester` | boolean | `false` | Use the homeserver admin API to join the requester during initial creation of a new personal room. |
 | `requester_admin` | boolean | `false` | Grant the human Matrix room administration. |
 | `avatar` | string or `null` | `null` | Room avatar file, relative to the configuration; fills only an empty avatar. |
 | `avatar_from_requester` | boolean | `false` | Copy the human's profile avatar into an empty room avatar when no avatar file is configured. |
@@ -1149,6 +1151,13 @@ Trigger rooms must already be configured.
 Commands are optional, exact messages in those rooms, and onboard only their authenticated human sender.
 Existing agent access rules still apply; agent and service accounts are excluded.
 `backfill: true` also reconciles current eligible members at startup and configuration reload.
+`auto_join_requester: true` requires a source Matrix account authorized to use the homeserver's Synapse-compatible admin join API.
+It enrolls only the requester of a newly created room.
+A failed initial join can retry after restart, but a requester who has already joined, left, or been banned is never force joined again.
+Existing and imported rooms do not gain automatic joining when this setting is enabled later.
+Restart reconciliation and backfill preserve a requester who left or was banned from a personal room.
+A fresh leave-to-join event in the onboarding room may re-invite a departed requester to a newly created personal room; it never overrides a ban or re-invites someone to an imported room.
+If room creation succeeds but its local room-ID receipt is lost, alias recovery conservatively skips automatic joining because it cannot prove the room was newly created by that attempt.
 
 Templates support `{user}` (full Matrix user ID), `{room}` (room alias), and `{agent}` (display name).
 Aliases combine the prefix, the first 20 lowercase SHA256 hex characters of the full user ID, and the installation namespace.
@@ -1178,19 +1187,21 @@ Use `personal_room_record_path(runtime_paths, agent_name, user_id)` and `write_p
 The storage location is `agents/<agent>/personal_rooms/<full-sha256-user-id>.json` under the runtime storage root.
 These files are trusted operator state, never user-submitted input.
 
-A minimal seed looks like this:
+For a private room with shared history and one already permitted guest, a seed looks like this:
 
 ```json
 {
-  "user_id": "@alice:example.org",
-  "alias": "#personal-alice:example.org",
-  "source_room_id": "!lobby:example.org",
-  "room_id": "!existing:example.org",
+  "user_id": "@alice:example.test",
+  "alias": "#personal-alice:example.test",
+  "source_room_id": "!lobby:example.test",
+  "room_id": "!existing:example.test",
   "welcome_completed": true,
   "adoption": {
-    "creator_user_id": "@router:example.org",
-    "agent_user_id": "@helper:example.org",
-    "router_user_id": "@router:example.org"
+    "creator_user_id": "@router:example.test",
+    "agent_user_id": "@helper:example.test",
+    "router_user_id": "@router:example.test",
+    "expected_history_visibility": "shared",
+    "additional_user_ids": ["@guest:example.test"]
   }
 }
 ```
@@ -1199,10 +1210,16 @@ The filename must bind the exact full requester ID, and adoption requires an exa
 `creator_user_id` must match the immutable create-event sender, and `agent_user_id` must match the selected agent's authenticated Matrix identity.
 An optional `router_user_id` permits only this installation's persisted router account to remain in the room.
 Before import, arrange an agent-authored `org.mindroom.personal_room` state event with empty state key and exactly `{"user_id": "<requester>", "agent_user_id": "<agent>"}` as content.
-The target agent must already be joined with room admin power, the directory visibility must be private, the join rule must be invite-only, and history visibility must be `invited`.
-No other joined, invited, or knocking member is permitted beyond the requester, agent, and explicitly seeded router.
+The target agent must already be joined with room admin power, the directory visibility must be private, and the join rule must be invite-only.
+`expected_history_visibility` must exactly match the room's current `invited`, `joined`, or `shared` history policy; `world_readable` is never accepted.
+If omitted, it defaults to `invited`.
+`additional_user_ids` lists concrete Matrix IDs for existing participants who may be joined, invited, or knocking; it defaults to an empty list.
+No other joined, invited, or knocking member is permitted beyond the requester, agent, explicitly seeded router, and these additional users.
+The list is a permission attestation only: it does not invite or rejoin anyone, grant room admin power, or retain a router during cleanup.
+Only `router_user_id` grants the separate router retention contract.
 Normal authorization and current onboarding-room membership still apply when reconciling the seed.
-The service verifies these conditions before inviting or sending; it does not rewrite existing room identity, name, topic, or history.
+The service verifies these conditions before inviting or sending; changed history or membership fails reconciliation.
+It does not rewrite existing room identity, name, topic, or history.
 Explicitly seeded router membership is retained during ordinary cleanup, including after onboarding is disabled.
 
 Set `welcome_completed: true` only when onboarding history is already complete; no historical event ID needs to be invented.
