@@ -265,17 +265,19 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status", "stored_error", "expected_error"),
+    ("status", "value", "stored_error", "expected_result"),
     [
-        ("failed", "controlled HTTP 500 failure", True),
-        ("completed", None, False),
+        ("failed", None, "controlled HTTP 500 failure", "controlled HTTP 500 failure"),
+        ("failed", ToolResult(content="rich failure"), None, "rich failure"),
+        ("completed", None, None, "None"),
     ],
 )
 async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
     tmp_path: Path,
     status: Literal["completed", "failed"],
+    value: ToolResult | None,
     stored_error: str | None,
-    expected_error: bool,
+    expected_result: str,
 ) -> None:
     """The reserved Agno control retains failure state while consuming exact saved evidence."""
     paths = _runtime_paths(tmp_path)
@@ -292,7 +294,7 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
         return BackgroundOutcome(
             status,
             "None",
-            result_payload=encode_result_payload(ToolResultPayload(value=None, error=stored_error, elapsed=0.1)),
+            result_payload=encode_result_payload(ToolResultPayload(value=value, error=stored_error, elapsed=0.1)),
         )
 
     storage = storage_factory()
@@ -319,8 +321,8 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
             response = await run()
 
         tool = response.tools[0]
-        assert tool.tool_call_error is expected_error
-        assert tool.result == (stored_error if expected_error else "None")
+        assert tool.tool_call_error is (status == "failed")
+        assert tool.result == expected_result
         assert (await runtime.lookup("ordinary", owner=owner, depth=0)).wait_acknowledged
     finally:
         storage.close()

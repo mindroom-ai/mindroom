@@ -16,6 +16,7 @@ import pytest
 
 from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context, job_checkpoint
+from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
 from tests.test_background_subagents import _owner
 from tests.tool_job_helpers import tool_job_runtime, wait_for_status
@@ -126,12 +127,13 @@ async def test_consumed_payload_is_loaded_on_demand_without_startup_rewrites(
     """Terminal history keeps disk results and replay ownership without resident payloads."""
     runtime = tool_job_runtime(tmp_path)
     value = "large result" * 10_000
+    payload = encode_result_payload(ToolResultPayload(value))
     calls = 0
 
     async def operation() -> BackgroundOutcome:
         nonlocal calls
         calls += 1
-        return BackgroundOutcome("completed", value, result_payload={"value": value})
+        return BackgroundOutcome("completed", value, result_payload=payload)
 
     await runtime.start("consumed", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
     waited = await runtime.wait("consumed", owner=_owner(), depth=0)
@@ -145,7 +147,7 @@ async def test_consumed_payload_is_loaded_on_demand_without_startup_rewrites(
     try:
         assert runtime._entries["consumed"].job.result_payload is None
         assert runtime._entries["consumed"].drain is None
-        assert (await runtime.lookup("consumed", owner=_owner(), depth=0)).result_payload == {"value": value}
+        assert (await runtime.lookup("consumed", owner=_owner(), depth=0)).result_payload == payload
         assert bool(await runtime.pending_outcomes()) is not acknowledged
     finally:
         await runtime.shutdown()
@@ -169,7 +171,7 @@ async def test_consumed_payload_is_loaded_on_demand_without_startup_rewrites(
             value[: runtime_module._JOB_SUMMARY_MAX_CHARS],
             True,
         )
-        assert reread.job.result_payload == {"value": value}
+        assert reread.job.result_payload == payload
         assert calls == 1
         await restored.acknowledge_wait("consumed", reread.token)
         assert restored._entries["consumed"].job.result_payload is None
@@ -183,9 +185,10 @@ async def test_cancelling_consumed_job_does_not_retain_the_returned_payload(tmp_
     """Cancelling already-settled history must not put its full result back in the runtime cache."""
     runtime = tool_job_runtime(tmp_path)
     value = "large result" * 10_000
+    payload = encode_result_payload(ToolResultPayload(value))
 
     async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", value, result_payload={"value": value})
+        return BackgroundOutcome("completed", value, result_payload=payload)
 
     await runtime.start("consumed", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
     waited = await runtime.wait("consumed", owner=_owner(), depth=0)
@@ -197,14 +200,14 @@ async def test_cancelling_consumed_job_does_not_retain_the_returned_payload(tmp_
             else await runtime.cancel("consumed", owner=_owner(), depth=0)
         )
         assert result is not None
-        assert result.result_payload == {"value": value}
+        assert result.result_payload == payload
         reference = weakref.ref(result)
         del result
         await asyncio.sleep(0)
         gc.collect()
         assert reference() is None, "runtime retained the full cancelled-history snapshot"
         assert runtime._entries["consumed"].job.result_payload is None
-        assert (await runtime.lookup("consumed", owner=_owner(), depth=0)).result_payload == {"value": value}
+        assert (await runtime.lookup("consumed", owner=_owner(), depth=0)).result_payload == payload
     finally:
         await runtime.shutdown()
 
@@ -429,13 +432,14 @@ async def test_result_expiry_preserves_receipt_and_protected_work(tmp_path: Path
     """Only old consumed terminal results with a finished source may expire."""
     runtime = tool_job_runtime(tmp_path)
     calls: list[str] = []
+    payload = encode_result_payload(ToolResultPayload("saved"))
 
     def adapter() -> dict[str, object]:
         return {"arguments": {"payload": "sensitive input" * 500}}
 
     async def completed() -> BackgroundOutcome:
         calls.append("executed")
-        return BackgroundOutcome("completed", "saved", result_payload={"value": "saved"})
+        return BackgroundOutcome("completed", "saved", result_payload=payload)
 
     async def source_finished(job: runtime_module.BackgroundJob) -> bool:
         return job.job_id != "approval"
@@ -470,7 +474,7 @@ async def test_result_expiry_preserves_receipt_and_protected_work(tmp_path: Path
         for name in ("approval", "unread", "recent", "claimed"):
             saved = await runtime.lookup(name, owner=_owner(), depth=0)
             assert not saved.result_expired
-            assert saved.result_payload == {"value": "saved"}
+            assert saved.result_payload == payload
         assert [job.job_id for job in await runtime.pending_outcomes()] == ["unread"]
     finally:
         if claimed is not None:

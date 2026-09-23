@@ -263,5 +263,6 @@ async def consume_tool_job(
     if payload.control is not None:
         raise restore_control(payload.control)
     if is_job_function(call.function) and job.status == "failed":
-        raise RuntimeError(str(payload.error or value or "Background tool job failed."))
+        text = value.content if isinstance(value, ToolResult) else value
+        raise RuntimeError(str(payload.error or text or "Background tool job failed."))
     return value

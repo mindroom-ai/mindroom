@@ -55,6 +55,8 @@ _UNAVAILABLE = "Tool job is not available in this conversation."
 _JOB_SUMMARY_MAX_CHARS = 500
 _SNAPSHOT_SCHEMA_VERSION = 3
 logger = get_logger(__name__)
+# A ToolResultPayload encoded by `tool_jobs.results`; the runtime stores it without reading it.
+type EncodedResultPayload = dict[str, Any]
 
 
 class JobAccessError(ValueError):
@@ -78,13 +80,13 @@ class BackgroundOutcome:
     """Serializable operation outcome; approval semantics remain owned by its adapter.
 
     `result` is the outcome's text, which the job keeps only as a bounded summary.
-    `result_payload` is the adapter's encoded full result, which the runtime stores without reading it.
+    `result_payload` is the adapter's full result.
     """
 
     status: _OutcomeStatus
     result: str | None = None
     approval_state: dict[str, Any] = field(default_factory=dict)
-    result_payload: dict[str, Any] | None = None
+    result_payload: EncodedResultPayload | None = None
 
 
 @dataclass(frozen=True)
@@ -104,7 +106,7 @@ class BackgroundJob:
     # At most _JOB_SUMMARY_MAX_CHARS of the outcome text; an adapter's payload keeps its full result.
     result: str | None = None
     summary_truncated: bool = False
-    result_payload: dict[str, Any] | None = None
+    result_payload: EncodedResultPayload | None = None
     approval_state: dict[str, Any] = field(default_factory=dict)
     generation: int = 0
     wait_acknowledged: bool = False

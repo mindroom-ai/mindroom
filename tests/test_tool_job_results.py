@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from agno.media import File, Image
@@ -12,7 +13,17 @@ from agno.models.message import Message
 from agno.tools.function import ToolResult
 
 from mindroom.tool_jobs import results
-from mindroom.tool_jobs.results import ToolResultPayload, _decode_result_payload, encode_result_payload
+from mindroom.tool_jobs.results import (
+    ToolResultPayload,
+    _decode_result_payload,
+    encode_result_payload,
+    read_result_payload,
+)
+from tests.test_background_subagents import _owner
+from tests.tool_job_helpers import tool_job_runtime
+
+if TYPE_CHECKING:
+    from mindroom.tool_jobs.runtime import BackgroundOutcome
 
 
 def _saved(payload: ToolResultPayload) -> ToolResultPayload:
@@ -76,6 +87,27 @@ def test_payload_rejects_an_oversized_artifact_without_reading_it(
         encode_result_payload(ToolResultPayload(value=File(filepath=path)))
 
 
+def test_payload_artifacts_share_one_read_allowance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Files that each fit alone cannot be read together: the second is rejected from its size unopened."""
+    monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 400)
+    first, second = tmp_path / "first.bin", tmp_path / "second.bin"
+    first.write_bytes(b"x" * 200)
+    second.write_bytes(b"y" * 200)
+    opened: list[Path] = []
+    real_open = Path.open
+
+    def recording_open(path: Path, *args: object, **kwargs: object) -> object:
+        opened.append(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", recording_open)
+
+    with pytest.raises(ValueError, match="encoded JSON limit"):
+        encode_result_payload(ToolResultPayload(value=[File(filepath=first), File(filepath=second)]))
+
+    assert opened == [first]
+
+
 def test_payload_reads_a_growing_artifact_once_within_its_bound(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -98,3 +130,22 @@ def test_payload_reads_a_growing_artifact_once_within_its_bound(
         encode_result_payload(ToolResultPayload(value=File(filepath=path)))
 
     assert read_sizes == [3 * (2048 // 4) + 1]
+
+
+@pytest.mark.asyncio
+async def test_runtime_written_summary_reports_its_truncation(tmp_path: Path) -> None:
+    """A long message the runtime saved only as a summary says it was cut when read as the result."""
+    runtime = tool_job_runtime(tmp_path)
+    message = "failure detail " * 100
+
+    async def operation() -> BackgroundOutcome:
+        raise RuntimeError(message)
+
+    try:
+        await runtime.start("failed", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
+        waited = await runtime.wait("failed", owner=_owner(), depth=0)
+        await runtime.release_wait("failed", waited.token)
+        assert (waited.job.status, waited.job.result_payload) == ("failed", None)
+        assert read_result_payload(waited.job).value == f"{message[:500]}\n{results._SUMMARY_TRUNCATED_NOTICE}"
+    finally:
+        await runtime.shutdown()

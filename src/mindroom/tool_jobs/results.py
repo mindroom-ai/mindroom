@@ -13,10 +13,11 @@ from agno.models.message import Message
 from agno.tools.function import ToolResult
 
 if TYPE_CHECKING:
-    from mindroom.tool_jobs.runtime import BackgroundJob
+    from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload
 
 _MODELS = {model.__name__: model for model in (ToolResult, Image, Audio, Video, File, Message)}
 _MAX_ENCODED_RESULT_BYTES = 64 * 1024 * 1024
+_SUMMARY_TRUNCATED_NOTICE = "[Truncated: only the start of this runtime message was saved.]"
 # One drained stream item: the length of its text within the value's text, and its SDK event without that text.
 type ReplayItem = tuple[int, dict[str, Any] | None]
 
@@ -37,19 +38,26 @@ def _size_error() -> ValueError:
     return ValueError(f"Durable tool result exceeds the {_MAX_ENCODED_RESULT_BYTES}-byte encoded JSON limit.")
 
 
-def _file_bytes(path: Path) -> bytes:
-    """Read a local artifact whose base64 form can still fit, even if the file grows meanwhile."""
-    limit = 3 * (_MAX_ENCODED_RESULT_BYTES // 4)
-    if path.stat().st_size > limit:
+@dataclass
+class _FileAllowance:
+    """Raw artifact bytes one encoding may still read, so many files cannot exhaust memory before the size check."""
+
+    remaining: int
+
+
+def _file_bytes(path: Path, allowance: _FileAllowance) -> bytes:
+    """Read a local artifact within the remaining allowance, even if the file grows meanwhile."""
+    if path.stat().st_size > allowance.remaining:
         raise _size_error()
     with path.open("rb") as source:
-        raw = source.read(limit + 1)
-    if len(raw) > limit:
+        raw = source.read(allowance.remaining + 1)
+    if len(raw) > allowance.remaining:
         raise _size_error()
+    allowance.remaining -= len(raw)
     return raw
 
 
-def _encode(value: Any) -> Any:  # noqa: ANN401, C901, PLR0911 - One explicit branch per supported wire tag.
+def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901, PLR0911 - One explicit branch per supported wire tag.
     if isinstance(value, ToolResult):
         fields = {
             "content": value.content,
@@ -59,15 +67,15 @@ def _encode(value: Any) -> Any:  # noqa: ANN401, C901, PLR0911 - One explicit br
             "videos": value.videos,
             "files": value.files,
         }
-        return {"type": "ToolResult", "value": _encode(fields)}
+        return {"type": "ToolResult", "value": _encode(fields, allowance)}
     if isinstance(value, (Image, Audio, Video, File)):
         fields = value.model_dump(mode="python")
         if value.filepath is not None:
             fields["filepath"] = None
-            fields["content"] = _file_bytes(Path(value.filepath))
-        return {"type": type(value).__name__, "value": _encode(fields)}
+            fields["content"] = _file_bytes(Path(value.filepath), allowance)
+        return {"type": type(value).__name__, "value": _encode(fields, allowance)}
     if isinstance(value, Message):
-        return {"type": "Message", "value": _encode(value.model_dump(mode="python"))}
+        return {"type": "Message", "value": _encode(value.model_dump(mode="python"), allowance)}
     if isinstance(value, bytes):
         return {"type": "bytes", "value": base64.b64encode(value).decode("ascii")}
     if isinstance(value, Path):
@@ -76,10 +84,10 @@ def _encode(value: Any) -> Any:  # noqa: ANN401, C901, PLR0911 - One explicit br
         if not all(isinstance(key, str) for key in value):
             msg = "Tool result dictionaries require string keys"
             raise TypeError(msg)
-        return {"type": "dict", "value": {key: _encode(item) for key, item in value.items()}}
+        return {"type": "dict", "value": {key: _encode(item, allowance) for key, item in value.items()}}
     if isinstance(value, (list, tuple)):
         kind = "tuple" if isinstance(value, tuple) else "list"
-        return {"type": kind, "value": [_encode(item) for item in value]}
+        return {"type": kind, "value": [_encode(item, allowance) for item in value]}
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     msg = f"Unsupported durable tool result type: {type(value).__name__}"
@@ -108,19 +116,20 @@ def _decode(value: Any) -> Any:  # noqa: ANN401, PLR0911 - One explicit branch p
 
 def encode_tool_result(value: Any) -> dict[str, Any]:  # noqa: ANN401 - Public SDK value boundary.
     """Encode one supported value in a versioned envelope within the 64 MiB encoded-JSON limit."""
-    envelope = {"version": 1, "value": _encode(value)}
+    # Base64 turns every 3 raw artifact bytes into 4 encoded bytes.
+    envelope = {"version": 1, "value": _encode(value, _FileAllowance(3 * (_MAX_ENCODED_RESULT_BYTES // 4)))}
     # Default JSON escapes every non-ASCII character, so its length is the saved byte count.
     if len(json.dumps(envelope, allow_nan=False)) > _MAX_ENCODED_RESULT_BYTES:
         raise _size_error()
     return envelope
 
 
-def encode_result_payload(payload: ToolResultPayload) -> dict[str, Any]:
+def encode_result_payload(payload: ToolResultPayload) -> EncodedResultPayload:
     """Encode a whole job result in one envelope, so one limit covers every field."""
     return encode_tool_result(vars(payload))
 
 
-def _decode_result_payload(envelope: dict[str, Any]) -> ToolResultPayload:
+def _decode_result_payload(envelope: EncodedResultPayload) -> ToolResultPayload:
     if envelope["version"] != 1:
         msg = "Unsupported durable tool result version"
         raise ValueError(msg)
@@ -129,6 +138,8 @@ def _decode_result_payload(envelope: dict[str, Any]) -> ToolResultPayload:
 
 def read_result_payload(job: BackgroundJob) -> ToolResultPayload:
     """Read the full result of a snapshot that includes it; an outcome the runtime authored itself has only its summary."""
-    if job.result_payload is None:
-        return ToolResultPayload(value=job.result)
-    return _decode_result_payload(job.result_payload)
+    if job.result_payload is not None:
+        return _decode_result_payload(job.result_payload)
+    if job.summary_truncated:
+        return ToolResultPayload(value=f"{job.result}\n{_SUMMARY_TRUNCATED_NOTICE}")
+    return ToolResultPayload(value=job.result)

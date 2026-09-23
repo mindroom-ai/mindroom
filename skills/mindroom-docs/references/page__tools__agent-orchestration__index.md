@@ -408,7 +408,7 @@ Retained plugin jobs require the same plugin installation path and current grant
 A job stores its full result once, together with its session-state updates and stream replay, in one durable envelope with a 64 MiB encoded JSON limit, including base64 expansion and artifacts.
 Job metadata keeps only a summary of at most 500 characters, and tool arguments are stored separately, so this is not a limit on total job storage.
 A result that exceeds this limit becomes a failed job with a size-limit error.
-An artifact file that cannot fit is rejected before it is fully read; the configured large-output policy can save eligible text to a file before result encoding.
+Artifact files are read within the result's remaining budget, so a file that cannot fit is rejected before it is read; the configured large-output policy can save eligible text to a file before result encoding.
 
 Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.
 `run.json` and `events.jsonl` are updated with every event, while `transcript.md` is rendered when the delegation finishes.
