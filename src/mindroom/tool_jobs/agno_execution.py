@@ -12,11 +12,13 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from agno.exceptions import AgentRunException
-from agno.run.agent import RUN_EVENT_TYPE_REGISTRY, RunContentEvent
+from agno.run.agent import RUN_EVENT_TYPE_REGISTRY, CustomEvent, RunContentEvent
 from agno.run.base import BaseRunOutputEvent
 from agno.run.team import TEAM_RUN_EVENT_TYPE_REGISTRY
+from agno.run.team import CustomEvent as TeamCustomEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.workflow import WORKFLOW_RUN_EVENT_TYPE_REGISTRY
+from agno.run.workflow import CustomEvent as WorkflowCustomEvent
 from agno.tools import Toolkit
 from agno.tools.function import FunctionCall, FunctionExecutionResult, ToolResult
 from agno.utils.timer import Timer
@@ -82,7 +84,60 @@ logger = get_logger(__name__)
 
 type ToolCallResult = tuple[bool | AgentRunException, Timer, FunctionCall, FunctionExecutionResult]
 type _Execute = Callable[[FunctionCall], Coroutine[object, object, ToolCallResult]]
-_EVENT_TYPES = {**RUN_EVENT_TYPE_REGISTRY, **TEAM_RUN_EVENT_TYPE_REGISTRY, **WORKFLOW_RUN_EVENT_TYPE_REGISTRY}
+_EVENT_TYPES: dict[str, type[BaseRunOutputEvent]] = {
+    f"{event_type.__module__}.{event_type.__name__}": event_type
+    for registry in (RUN_EVENT_TYPE_REGISTRY, TEAM_RUN_EVENT_TYPE_REGISTRY, WORKFLOW_RUN_EVENT_TYPE_REGISTRY)
+    for event_type in registry.values()
+}
+_EVENT_IDS: dict[type, str] = {event_type: name for name, event_type in _EVENT_TYPES.items()}
+
+
+class _SavedCustomEvent(BaseRunOutputEvent):
+    """Replay saved fields/text, preserving SDK updates without importing plugin subclasses."""
+
+    saved_fields: dict[str, Any]
+    saved_text: str
+
+    def __str__(self) -> str:
+        return self.saved_text
+
+    def to_dict(self) -> dict[str, Any]:
+        """Keep custom fields from the snapshot alongside current SDK-owned fields."""
+        return {**self.saved_fields, **super().to_dict()}
+
+
+class _SavedAgentCustomEvent(_SavedCustomEvent, CustomEvent):
+    """Retain the agent event's SDK text-accumulation behavior."""
+
+
+class _SavedTeamCustomEvent(_SavedCustomEvent, TeamCustomEvent):
+    """Retain a team custom event without adding it to tool result text."""
+
+
+class _SavedWorkflowCustomEvent(_SavedCustomEvent, WorkflowCustomEvent):
+    """Retain a workflow custom event without adding it to tool result text."""
+
+
+_CUSTOM_EVENT_TYPES: dict[type, type[_SavedCustomEvent]] = {
+    CustomEvent: _SavedAgentCustomEvent,
+    TeamCustomEvent: _SavedTeamCustomEvent,
+    WorkflowCustomEvent: _SavedWorkflowCustomEvent,
+}
+
+
+def _restore_event(saved: dict[str, Any], chunk: str) -> BaseRunOutputEvent:
+    """Restore only registered SDK families; saved data never selects plugin code."""
+    event_type = _EVENT_TYPES[saved["type"]]
+    fields = deepcopy(saved["event"])
+    if chunk and issubclass(event_type, (RunContentEvent, TeamRunContentEvent)):
+        fields["content"] = chunk
+    event = event_type.from_dict(fields)
+    if custom_type := _CUSTOM_EVENT_TYPES.get(event_type):
+        sdk_fields = event.to_dict()
+        event = custom_type(**vars(event))
+        event.saved_fields = {name: value for name, value in saved["event"].items() if name not in sdk_fields}
+        event.saved_text = saved.get("text", chunk)
+    return event
 
 
 def is_background_job_excluded(function: Function) -> bool:
@@ -143,9 +198,11 @@ class _CollectedResult:
     def collect(self, item: object) -> None:
         if isinstance(item, BaseRunOutputEvent):
             event = item.to_dict()
-            if event["event"] not in _EVENT_TYPES:
+            event_type = next((_EVENT_IDS[base] for base in type(item).__mro__ if base in _EVENT_IDS), None)
+            if event_type is None:
                 msg = f"Unsupported durable tool event: {event['event']}"
                 raise TypeError(msg)
+            saved: dict[str, Any] = {"type": event_type, "event": event}
             text = ""
             if isinstance(item, (RunContentEvent, TeamRunContentEvent)):
                 # Agno concatenates content during replay; model dictionaries must remain JSON text.
@@ -154,7 +211,12 @@ class _CollectedResult:
                 if text:
                     # The saved value holds this text; replay restores it into the event.
                     del event["content"]
-            self._append(text, event)
+            elif isinstance(item, CustomEvent):
+                # Agno adds an agent custom event's text to the tool result; replay restores it from there.
+                text = str(item)
+            elif _EVENT_TYPES[event_type] in _CUSTOM_EVENT_TYPES:
+                saved["text"] = str(item)
+            self._append(text, saved)
         elif isinstance(item, ToolResult):
             self.has_rich = True
             self._append(item.content)
@@ -202,11 +264,7 @@ def _replayed(value: str | ToolResult, replay: tuple[ReplayItem, ...]) -> Iterat
     for length, saved in replay:
         chunk = text[offset : offset + length]
         offset += length
-        if saved is None:
-            yield chunk
-            continue
-        event = dict(saved, content=chunk) if length else dict(saved)
-        yield _EVENT_TYPES[event["event"]].from_dict(event)
+        yield chunk if saved is None else _restore_event(saved, chunk)
     if offset < len(text):
         yield text[offset:]
 

@@ -54,6 +54,9 @@ uses `mindroom_output_path`, and ordinary automatic output saving bounds large m
 payloads.
 Each job stores its full result once, in one typed payload whose durable envelope has a separate 64 MiB backstop; it is not a display limit.
 
+Managed generator events retain their SDK family, serialized fields, and captured result text.
+Custom events replay as fixed SDK subclasses; plugin class identity and methods are not restored from saved data.
+
 Job metadata stays in memory, while each generation's payload is a separate file that retrieval reads on demand.
 A payload file is written before the metadata that references it, so a crash in between leaves the job running for recovery to interrupt.
 Consumed results remain for 30 days after the last acknowledged read, longer while response or approval ownership requires them.

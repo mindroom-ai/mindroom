@@ -52,7 +52,7 @@ TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied", "in
 READY_STATUSES = TERMINAL_STATUSES | {"awaiting_approval"}
 _UNAVAILABLE = "Tool job is not available in this conversation."
 _JOB_SUMMARY_MAX_CHARS = 500
-_SNAPSHOT_SCHEMA_VERSION = 6
+_SNAPSHOT_SCHEMA_VERSION = 7
 _JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 # The internal source that delivers one job generation's outcome; parsing accepts exactly what the builder emits.
 _COMPLETION_EVENT_ID = re.compile(rf"tool-job:(?P<job_id>{_JOB_ID.pattern}):(?P<generation>0|[1-9][0-9]*)")

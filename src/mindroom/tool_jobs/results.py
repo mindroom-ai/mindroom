@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 _MODELS = {model.__name__: model for model in (ToolResult, Image, Audio, Video, File, Message)}
 _MAX_ENCODED_RESULT_BYTES = 64 * 1024 * 1024
 _SUMMARY_TRUNCATED_NOTICE = "[Truncated: only the start of this runtime message was saved.]"
-# One drained stream item: the length of its text within the value's text, and its SDK event without that text.
+# One drained stream item: the length of its text within the value's text, and its typed SDK event without that text.
 type ReplayItem = tuple[int, dict[str, Any] | None]
 
 
