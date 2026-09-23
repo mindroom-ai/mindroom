@@ -2114,7 +2114,7 @@ describe("AgentEditor", () => {
               fallback_model: {
                 anyOf: [{ type: "string" }, { type: "null" }],
                 default: null,
-                "x-mindroom": { reference: "model", clears_inherited: true },
+                "x-mindroom": { reference: "model" },
               },
               timeout_seconds: {
                 anyOf: [
@@ -2122,7 +2122,6 @@ describe("AgentEditor", () => {
                   { type: "null" },
                 ],
                 default: null,
-                "x-mindroom": { clears_inherited: true },
               },
             },
           },
@@ -2138,27 +2137,12 @@ describe("AgentEditor", () => {
     });
     expect(section).toHaveTextContent("Fallback model, Timeout seconds");
     fireEvent.click(section);
-    const timeout = screen.getByRole("spinbutton", { name: "Timeout seconds" });
-    expect(timeout).toHaveAttribute("placeholder", "Inherited");
-    fireEvent.change(timeout, { target: { value: "30" } });
-    expect(mockStore.updateAgent).toHaveBeenLastCalledWith("test_agent", {
-      compaction: { timeout_seconds: 30 },
-    });
-
-    fireEvent.click(
-      screen.getByRole("checkbox", { name: "Use built-in default" }),
+    fireEvent.change(
+      screen.getByRole("spinbutton", { name: "Timeout seconds" }),
+      { target: { value: "30" } },
     );
     expect(mockStore.updateAgent).toHaveBeenLastCalledWith("test_agent", {
-      compaction: { timeout_seconds: null },
-    });
-    expect(timeout).toHaveAttribute("placeholder", "Built-in default");
-
-    // An explicit null opts this agent out of an inherited fallback model.
-    fireEvent.change(screen.getByRole("combobox", { name: "Fallback model" }), {
-      target: { value: "__none__" },
-    });
-    expect(mockStore.updateAgent).toHaveBeenLastCalledWith("test_agent", {
-      compaction: { timeout_seconds: null, fallback_model: null },
+      compaction: { timeout_seconds: 30 },
     });
   });
 

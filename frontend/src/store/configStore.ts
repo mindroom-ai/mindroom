@@ -105,100 +105,18 @@ function diagnosticsOverlapTouchedPath(
   );
 }
 
-function sameValue(left: unknown, right: unknown): boolean {
-  if (Object.is(left, right)) {
-    return true;
-  }
-  if (Array.isArray(left) && Array.isArray(right)) {
-    return (
-      left.length === right.length &&
-      left.every((item, index) => sameValue(item, right[index]))
-    );
-  }
-  if (isPlainObject(left) && isPlainObject(right)) {
-    const keys = Object.keys(left);
-    return (
-      keys.length === Object.keys(right).length &&
-      keys.every(
-        (key) =>
-          Object.prototype.hasOwnProperty.call(right, key) &&
-          sameValue(left[key], right[key]),
-      )
-    );
-  }
-  return false;
-}
-
-function hasSegment(value: unknown, segment: string | number): boolean {
-  return Array.isArray(value)
-    ? typeof segment === "number" && segment < value.length
-    : isPlainObject(value) &&
-        Object.prototype.hasOwnProperty.call(value, String(segment));
-}
-
-function childValue(value: unknown, segment: string | number): unknown {
-  return Array.isArray(value)
-    ? value[segment as number]
-    : (value as Record<string, unknown>)[String(segment)];
-}
-
-/**
- * Whether the value a validation issue points at differs between before and
- * after, the values at prefix, so editing one field keeps the errors of the
- * others. Pydantic adds loc segments that are no key in either value: the tag
- * of a discriminated union variant ("llm"), which changes when the variant
- * does, and the type of a plain union member ("list[str]"), which is skipped.
- * tests/test_config_schema.py keeps every object union discriminated.
- */
-function issueValueChanged(
-  { loc, type }: ConfigValidationIssue,
-  prefix: ConfigDiagnosticPath,
-  before: unknown,
-  after: unknown,
-): boolean {
-  if (pathStartsWith(prefix, loc)) {
-    return !sameValue(before, after);
-  }
-  if (!pathStartsWith(loc, prefix)) {
-    return false;
-  }
-  const rest = loc.slice(prefix.length);
-  let from = before;
-  let to = after;
-  for (let index = 0; index < rest.length; index += 1) {
-    const segment = rest[index];
-    const inFrom = hasSegment(from, segment);
-    const inTo = hasSegment(to, segment);
-    if (!inFrom && !inTo) {
-      if (!isPlainObject(from) || !isPlainObject(to)) {
-        continue;
-      }
-      // A missing key stays missing while both containers exist.
-      if (type === "missing" && index === rest.length - 1) {
-        return false;
-      }
-      if (
-        Object.values(from).includes(segment) !==
-        Object.values(to).includes(segment)
-      ) {
-        return true;
-      }
-      continue;
-    }
-    from = inFrom ? childValue(from, segment) : undefined;
-    to = inTo ? childValue(to, segment) : undefined;
-  }
-  return !sameValue(from, to);
-}
-
 function retainedDraftDiagnostics(
   diagnostics: ConfigDiagnostic[],
-  isStale: (issue: ConfigValidationIssue) => boolean = () => false,
+  touchedPaths: ConfigDiagnosticPath[] = [],
 ): ConfigDiagnostic[] {
-  const filteredDiagnostics = diagnostics.filter(
-    (diagnostic) =>
-      diagnostic.kind !== "validation" || !isStale(diagnostic.issue),
-  );
+  const filteredDiagnostics = diagnostics.filter((diagnostic) => {
+    if (diagnostic.kind !== "validation") {
+      return true;
+    }
+    return !touchedPaths.some((path) =>
+      diagnosticsOverlapTouchedPath(diagnostic.issue.loc, path),
+    );
+  });
 
   const hasValidationErrors =
     diagnosticsContainValidationErrors(filteredDiagnostics);
@@ -272,22 +190,16 @@ function nextDraftVersion(draftVersion: number): number {
   return draftVersion + 1;
 }
 
-/**
- * Mark the roots of touchedPaths dirty. Validation issues under touchedPaths
- * are cleared unless isStale narrows that to the issues whose value changed.
- */
 function markDraftDirty<T extends object>(
   state: Pick<ConfigState, "draftVersion" | "diagnostics" | "dirtyRoots">,
   changes: T,
   touchedPaths: ConfigDiagnosticPath[] = [],
-  isStale: (issue: ConfigValidationIssue) => boolean = (issue) =>
-    touchedPaths.some((path) => diagnosticsOverlapTouchedPath(issue.loc, path)),
 ): T &
   Pick<ConfigState, "isDirty" | "diagnostics" | "draftVersion" | "dirtyRoots"> {
   return {
     ...changes,
     isDirty: true,
-    diagnostics: retainedDraftDiagnostics(state.diagnostics, isStale),
+    diagnostics: retainedDraftDiagnostics(state.diagnostics, touchedPaths),
     draftVersion: nextDraftVersion(state.draftVersion),
     dirtyRoots: mergeDirtyRoots(state.dirtyRoots, touchedPaths),
   };
@@ -1542,14 +1454,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           nextAgents,
           state.teams,
         ),
-        ...markDraftDirty(state, {}, touchedPaths, (issue) =>
-          issueValueChanged(
-            issue,
-            ["agents", agentId],
-            currentAgent,
-            nextAgent,
-          ),
-        ),
+        ...markDraftDirty(state, {}, touchedPaths),
       };
     });
     if (shouldRefreshAgentPolicies && get().config != null) {
@@ -1698,9 +1603,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const touchedPaths = Object.keys(normalizedUpdates).map(
         (key) => ["teams", teamId, key] as ConfigDiagnosticPath,
       );
-      const nextTeam = { ...currentTeam, ...normalizedUpdates };
       const nextTeams = state.teams.map((team) =>
-        team.id === teamId ? nextTeam : team,
+        team.id === teamId ? { ...team, ...normalizedUpdates } : team,
       );
       return {
         teams: nextTeams,
@@ -1710,9 +1614,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           state.agents,
           nextTeams,
         ),
-        ...markDraftDirty(state, {}, touchedPaths, (issue) =>
-          issueValueChanged(issue, ["teams", teamId], currentTeam, nextTeam),
-        ),
+        ...markDraftDirty(state, {}, touchedPaths),
       };
     });
   },
@@ -2100,14 +2002,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateMemoryConfig: (memoryConfig) => {
     set((state) => {
       if (!state.config) return state;
-      const currentMemory = state.config.memory;
       const nextConfig = { ...state.config, memory: memoryConfig };
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["memory"]], (issue) =>
-          issueValueChanged(issue, ["memory"], currentMemory, memoryConfig),
-        ),
+        ...markDraftDirty(state, {}, [["memory"]]),
       };
     });
   },
@@ -2128,14 +2027,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["knowledge_bases", baseName]], (issue) =>
-          issueValueChanged(
-            issue,
-            ["knowledge_bases", baseName],
-            currentBaseConfig,
-            nextBaseConfig,
-          ),
-        ),
+        ...markDraftDirty(state, {}, [["knowledge_bases", baseName]]),
       };
     });
   },
@@ -2228,14 +2120,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return {
         config: nextConfig,
         rooms: deriveRooms(nextConfig, state.agents, state.teams),
-        ...markDraftDirty(state, {}, [[...path]], (issue) =>
-          issueValueChanged(
-            issue,
-            [root],
-            readConfigRoot(state.config!, root),
-            readConfigRoot(nextConfig, root),
-          ),
-        ),
+        ...markDraftDirty(state, {}, [[...path]]),
       };
     });
   },

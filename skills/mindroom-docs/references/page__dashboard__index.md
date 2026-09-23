@@ -192,11 +192,9 @@ Connect external services to enable agent capabilities:
 
 ### Settings
 
-The **Settings** tab edits every top-level configuration root that has no dedicated tab.
-Sections group related roots: response defaults, history and context, tools and workers, router, personal rooms, room defaults, tool approval, prompts, MCP servers, plugins, access and identity, Matrix and runtime, and diagnostics.
-A root or field that no tab or section claims appears under **Other**, so new options are never hidden.
-The **Tools and workers** section also edits per-tool overrides for the default tools every agent inherits.
-Sections with validation errors from the last save are marked **Needs attention**.
+The **Settings** tab lists every top-level configuration root that has no dedicated tab, in `config.yaml` order, so new options are never hidden.
+Object roots such as `defaults` and `router` are collapsible blocks, and roots another tab edits in part, such as `voice` and `room_defaults`, show only the fields that tab does not render.
+Below the roots, **Default tool settings** edits per-tool overrides for the default tools every agent inherits.
 Changes join the same draft as every other tab and are saved with **Save**.
 
 ## Features
@@ -213,7 +211,6 @@ Each field shows its description and default, entity references such as model or
 Resetting a field removes it from `config.yaml` so the default applies again, and optional blocks are added or removed with their **Configure** checkbox.
 Lists keep their order and can repeat values, such as MCP server arguments.
 Validation errors from a save appear beside the affected field, and collapsed sections that contain one open automatically.
-Changing a value clears only the errors reported for it; errors on values you have not changed stay visible until the next save.
 If the schema cannot be loaded, these forms show the error with a **Retry** button.
 
 ### Save Status

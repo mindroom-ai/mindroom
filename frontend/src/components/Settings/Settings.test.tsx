@@ -22,6 +22,8 @@ vi.mock("@/components/ui/use-toast", () => ({
 const ROOT: JsonSchema = {
   type: "object",
   properties: {
+    agents: { type: "object", additionalProperties: { type: "object" } },
+    voice: { $ref: "#/$defs/VoiceConfig" },
     defaults: { $ref: "#/$defs/DefaultsConfig" },
     router: { $ref: "#/$defs/RouterConfig" },
     personal_rooms: {
@@ -31,6 +33,13 @@ const ROOT: JsonSchema = {
     },
   },
   $defs: {
+    VoiceConfig: {
+      type: "object",
+      properties: {
+        enabled: { type: "boolean", default: false },
+        future_option: { type: "string", default: "" },
+      },
+    },
     DefaultsConfig: {
       type: "object",
       properties: {
@@ -95,16 +104,17 @@ describe("Settings", () => {
 
   it("edits a settings root through updateConfigValue", () => {
     render(<Settings />);
-    fireEvent.click(screen.getByRole("button", { name: "Router" }));
+    // Authored roots start open.
     fireEvent.change(screen.getByRole("combobox", { name: "Model" }), {
       target: { value: "fast" },
     });
-    expect(updateConfigValue).toHaveBeenCalledWith(["router", "model"], "fast");
+    expect(updateConfigValue).toHaveBeenCalledWith(["router"], {
+      model: "fast",
+    });
   });
 
   it("enables optional roots with their required fields", () => {
     render(<Settings />);
-    fireEvent.click(screen.getByRole("button", { name: "Personal rooms" }));
     fireEvent.click(
       screen.getByRole("checkbox", { name: "Configure personal rooms" }),
     );
@@ -113,7 +123,15 @@ describe("Settings", () => {
     });
   });
 
-  it("flags sections that contain validation errors", () => {
+  it("leaves roots and keys that other pages edit to those pages", () => {
+    render(<Settings />);
+    expect(screen.queryByText("Agents")).not.toBeInTheDocument();
+    const voice = screen.getByRole("button", { name: /Voice/ });
+    expect(voice).toHaveTextContent("Future option");
+    expect(voice).not.toHaveTextContent("Enabled");
+  });
+
+  it("opens roots that contain validation errors", () => {
     vi.mocked(useConfigStore).mockReturnValue({
       ...vi.mocked(useConfigStore)(),
       diagnostics: [
@@ -128,12 +146,11 @@ describe("Settings", () => {
       ],
     } as never);
     render(<Settings />);
-    expect(
-      screen.getByRole("button", { name: "Router Needs attention" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("option", { name: "Router (needs attention)" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Router" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(screen.getByText("Unknown model")).toBeInTheDocument();
   });
 
   it("saves the draft", async () => {
