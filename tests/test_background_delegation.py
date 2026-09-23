@@ -511,7 +511,12 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
 
     try:
         with (
-            tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
+            tool_runtime_context(
+                replace(
+                    _delegate_runtime_context(config, paths, execution_identity=identity),
+                    membership_turn_id="$native-reader",
+                ),
+            ),
             human_message_signal_context(signal),
         ):
             current_parent = parent(
@@ -557,6 +562,15 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             elif not approval:
                 assert "Exact child result" in first
                 assert child.subagent_id in first
+            saved = await runtime.lookup(child.delegation_id, owner=identity, depth=0)
+            assert (
+                await runtime.outcome(
+                    child.delegation_id,
+                    saved.generation,
+                    source_event_id="$native-reader",
+                )
+                is not None
+            )
             if approval:
                 result = await finish_approval_sequence(result)
 

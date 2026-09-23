@@ -56,9 +56,9 @@ def _saved_sources(runtime_paths: RuntimePaths) -> _ParkedWork:
     parked = _ParkedWork()
     for path in sorted(root.glob("*.json")):
         job = read_job_snapshot(path)
-        source = job.adapter.get("source_event_id")
-        if isinstance(source, str):
-            parked.sources.add((job.owner.transport_agent_name or job.owner.agent_name, source))
+        for source in (job.adapter.get("source_event_id"), job.consumed_by_source):
+            if isinstance(source, str):
+                parked.sources.add((job.owner.transport_agent_name or job.owner.agent_name, source))
     return parked
 
 

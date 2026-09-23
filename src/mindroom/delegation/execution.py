@@ -1109,6 +1109,8 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         # Persist the child before execution, with startup covered by cleanup.
                         await _persist(entity, response, state)
                     if background is not None:
+                        context = get_tool_runtime_context()
+                        source_event_id = context.membership_turn_id if context is not None else None
                         if not fresh and background_job is None:
                             background_job = await background.lookup(
                                 child.delegation_id,
@@ -1199,7 +1201,11 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 _pending_child(state, child, child_outcome, job_generation=background_job.generation)
                                 await _persist(entity, response, state)
                                 if waited.token is not None:
-                                    await background.acknowledge_wait(child.delegation_id, waited.token)
+                                    await background.acknowledge_wait(
+                                        child.delegation_id,
+                                        waited.token,
+                                        source_event_id=source_event_id,
+                                    )
                                 return response
                             result = (
                                 background_job.result
@@ -1222,7 +1228,11 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             )
                             await _persist(entity, response, state)
                             if waited.token is not None:
-                                await background.acknowledge_wait(child.delegation_id, waited.token)
+                                await background.acknowledge_wait(
+                                    child.delegation_id,
+                                    waited.token,
+                                    source_event_id=source_event_id,
+                                )
                         finally:
                             if waited.token is not None:
                                 await background.release_wait(child.delegation_id, waited.token)
