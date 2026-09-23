@@ -453,6 +453,45 @@ describe("AgentEditor", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("offers lazy loading only for tools whose entries may set it", () => {
+    const lazyAgent = { ...mockAgent, tools: ["calculator", "dynamic_tools"] };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [lazyAgent],
+      config: { ...mockConfig, agents: { test_agent: lazyAgent } },
+      getAgentToolOverrides: vi.fn(() => null),
+    });
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: "calculator",
+          display_name: "Calculator",
+          setup_type: "none",
+          status: "available",
+          lazy_loading_supported: true,
+        },
+        {
+          name: "dynamic_tools",
+          display_name: "Dynamic Tools",
+          setup_type: "none",
+          status: "available",
+          lazy_loading_supported: false,
+        },
+      ],
+      loading: false,
+      statusAuthoritative: true,
+    });
+
+    render(<AgentEditor />);
+
+    // A control-plane tool with no fields has no settings to open.
+    expect(
+      screen.queryByRole("button", { name: "Dynamic Tools" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Calculator" }));
+    expect(screen.getByLabelText("Load lazily")).toBeInTheDocument();
+  });
+
   it("shows customized indicators and opens the inline tool settings panel for checked tools", () => {
     const shellAgent = { ...mockAgent, tools: ["shell"] };
     const getAgentToolOverrides = vi.fn((agentId: string, toolName: string) =>

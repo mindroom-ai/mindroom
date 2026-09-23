@@ -1486,6 +1486,12 @@ def test_get_tools(test_client: TestClient) -> None:
     assert "category" in first_tool
     assert "icon_color" in first_tool  # New field we added
 
+    # Presets and control-plane tools reject defer/initial, so the dashboard hides lazy loading for them.
+    lazy_loading = {tool["name"]: tool["lazy_loading_supported"] for tool in data["tools"]}
+    assert lazy_loading["calculator"] is True
+    assert lazy_loading["dynamic_tools"] is False
+    assert lazy_loading["openclaw_compat"] is False
+
     shell_tool = next(tool for tool in data["tools"] if tool["name"] == "shell")
     assert shell_tool["agent_override_fields"] == [
         {

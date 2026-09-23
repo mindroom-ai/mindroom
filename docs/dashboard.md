@@ -69,7 +69,7 @@ Configure AI agents:
 - **Rooms** - Where the agent operates
 - **Learning** - Enable or disable Agno Learning per agent (enabled by default)
 - **Learning mode** - Choose `always` (automatic extraction) or `agentic` (tool-driven)
-- **Lazy tool loading** - Open a checked tool's settings and enable **Load lazily** (`defer`) or **Load at session start** (`initial`, which requires `defer`)
+- **Lazy tool loading** - Open a checked tool's settings and enable **Load lazily** (`defer`) or **Load at session start** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` cannot be deferred, so they do not offer it
 - **More settings** - Every other agent field, such as `participation`, `mid_turn`, `accept_invites`, `access`, `memory_search`, `thread_exports`, and `room_thread_modes`
 
 ### Teams

@@ -33,7 +33,7 @@ import {
 } from "@/types/config";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { useTools } from "@/hooks/useTools";
+import { useTools, type ToolInfo } from "@/hooks/useTools";
 import { useSkills } from "@/hooks/useSkills";
 import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
 import { ToolConfigPanel } from "@/components/ToolConfig/ToolConfigPanel";
@@ -82,6 +82,16 @@ const PRIVATE_KNOWLEDGE_EDITOR_FIELDS = [
 
 const TOOL_VALIDATION_UNAVAILABLE_MESSAGE =
   "Tool availability preview is unavailable while agent policy preview is unavailable. Save or refresh to validate tool assignments.";
+
+/** Whether a checked tool's row opens settings: fields, overrides, or lazy loading. */
+function toolHasSettings(tool: ToolInfo, hasOverrides: boolean): boolean {
+  return (
+    hasOverrides ||
+    tool.lazy_loading_supported === true ||
+    (tool.agent_override_fields?.length ?? 0) > 0 ||
+    (tool.config_fields?.length ?? 0) > 0
+  );
+}
 
 export function AgentEditor() {
   const {
@@ -1231,6 +1241,10 @@ export function AgentEditor() {
                           const isChecked = field.value.includes(tool.name);
                           const hasOverrides = toolHasOverrides(tool.name);
                           const isActive = activeToolName === tool.name;
+                          const showSettings = toolHasSettings(
+                            tool,
+                            hasOverrides,
+                          );
 
                           return (
                             <>
@@ -1241,6 +1255,7 @@ export function AgentEditor() {
                                 isChecked={isChecked}
                                 isActive={isActive}
                                 hasOverrides={hasOverrides}
+                                showSettings={showSettings}
                                 onCheckedChange={(checked) => {
                                   field.onChange(
                                     updateSelectedTools(
@@ -1256,11 +1271,13 @@ export function AgentEditor() {
                                   )
                                 }
                               />
-                              {isChecked && isActive && (
+                              {isChecked && isActive && showSettings && (
                                 <ToolConfigPanel
                                   target={{
                                     kind: "agent",
                                     agentId: selectedAgent.id,
+                                    lazyLoading:
+                                      tool.lazy_loading_supported === true,
                                   }}
                                   toolName={tool.name}
                                   toolDisplayName={tool.display_name}
@@ -1309,6 +1326,10 @@ export function AgentEditor() {
                           const isChecked = field.value.includes(tool.name);
                           const hasOverrides = toolHasOverrides(tool.name);
                           const isActive = activeToolName === tool.name;
+                          const showSettings = toolHasSettings(
+                            tool,
+                            hasOverrides,
+                          );
 
                           return (
                             <>
@@ -1319,6 +1340,7 @@ export function AgentEditor() {
                                 isChecked={isChecked}
                                 isActive={isActive}
                                 hasOverrides={hasOverrides}
+                                showSettings={showSettings}
                                 onCheckedChange={(checked) => {
                                   field.onChange(
                                     updateSelectedTools(
@@ -1334,11 +1356,13 @@ export function AgentEditor() {
                                   )
                                 }
                               />
-                              {isChecked && isActive && (
+                              {isChecked && isActive && showSettings && (
                                 <ToolConfigPanel
                                   target={{
                                     kind: "agent",
                                     agentId: selectedAgent.id,
+                                    lazyLoading:
+                                      tool.lazy_loading_supported === true,
                                   }}
                                   toolName={tool.name}
                                   toolDisplayName={tool.display_name}
@@ -1389,6 +1413,10 @@ export function AgentEditor() {
                             tool.dashboard_configuration_supported === false;
                           const hasOverrides = toolHasOverrides(tool.name);
                           const isActive = activeToolName === tool.name;
+                          const showSettings = toolHasSettings(
+                            tool,
+                            hasOverrides,
+                          );
 
                           return (
                             <>
@@ -1399,6 +1427,7 @@ export function AgentEditor() {
                                 isChecked={isChecked}
                                 isActive={isActive}
                                 hasOverrides={hasOverrides}
+                                showSettings={showSettings}
                                 setupBlocked={setupBlocked}
                                 onCheckedChange={(checked) => {
                                   field.onChange(
@@ -1415,11 +1444,13 @@ export function AgentEditor() {
                                   )
                                 }
                               />
-                              {isChecked && isActive && (
+                              {isChecked && isActive && showSettings && (
                                 <ToolConfigPanel
                                   target={{
                                     kind: "agent",
                                     agentId: selectedAgent.id,
+                                    lazyLoading:
+                                      tool.lazy_loading_supported === true,
                                   }}
                                   toolName={tool.name}
                                   toolDisplayName={tool.display_name}

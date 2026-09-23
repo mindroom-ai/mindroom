@@ -36,6 +36,8 @@ export interface ToolInfo {
   function_names?: string[] | null;
   dashboard_configuration_supported?: boolean;
   execution_scope_supported?: boolean;
+  /** Whether an agent's entry may set defer/initial; presets and control-plane tools may not. */
+  lazy_loading_supported?: boolean;
   oauth_fallback_fields?: string[];
   manual_auth_configured?: boolean;
   environment_auth_configured?: boolean;

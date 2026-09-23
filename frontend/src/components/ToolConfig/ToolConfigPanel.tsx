@@ -15,13 +15,18 @@ import {
 import { useConfigStore } from "@/store/configStore";
 import type { ToolFieldSchema } from "@/hooks/useTools";
 
-/** Whose tool entry the panel edits: one agent's, or the shared defaults.tools. */
+/**
+ * Whose tool entry the panel edits: one agent's, where lazy loading applies
+ * unless the tool is a preset or control-plane tool, or the shared
+ * defaults.tools, which rejects lazy loading.
+ */
 export type ToolOverrideTarget =
-  { kind: "agent"; agentId: string } | { kind: "defaults" };
+  | { kind: "agent"; agentId: string; lazyLoading: boolean }
+  | { kind: "defaults" };
 
 interface ToolConfigPanelProps {
   target: ToolOverrideTarget;
-  toolName: string | null;
+  toolName: string;
   toolDisplayName?: string;
   /** Dedicated per-agent override fields (curated, e.g. shell). */
   overrideFields?: ToolFieldSchema[] | null;
@@ -122,16 +127,13 @@ export function ToolConfigPanel({
     getDefaultToolOverrides,
     updateDefaultToolOverrides,
   } = useConfigStore();
-  // Lazy loading is per agent; defaults.tools rejects defer and initial.
-  const lazyLoading = target.kind === "agent";
+  const lazyLoading = target.kind === "agent" && target.lazyLoading;
   const fields = resolveFields(overrideFields, configFields);
   const hasFields = fields != null && fields.length > 0;
   const currentOverrides =
-    toolName == null
-      ? null
-      : target.kind === "agent"
-        ? getAgentToolOverrides(target.agentId, toolName)
-        : getDefaultToolOverrides(toolName);
+    target.kind === "agent"
+      ? getAgentToolOverrides(target.agentId, toolName)
+      : getDefaultToolOverrides(toolName);
   const overrideSignature = JSON.stringify(currentOverrides ?? null);
   const deferEnabled = currentOverrides?.defer === true;
   const lazyId = useId();
@@ -140,11 +142,11 @@ export function ToolConfigPanel({
   const [draftValues, setDraftValues] = useState<DraftValues>({});
   const [enabledFields, setEnabledFields] = useState<EnabledFields>({});
 
-  const title = toolDisplayName ?? toolName ?? "Tool settings";
+  const title = toolDisplayName ?? toolName;
 
   // Initialize draft values and enabled state from current overrides
   useEffect(() => {
-    if (!toolName || !fields || fields.length === 0) {
+    if (!fields || fields.length === 0) {
       setDraftValues({});
       setEnabledFields({});
       return;
@@ -178,14 +180,6 @@ export function ToolConfigPanel({
     () => deferEnabled || Object.values(enabledFields).some(Boolean),
     [deferEnabled, enabledFields],
   );
-
-  if (!toolName) {
-    return (
-      <div className="rounded-lg border border-dashed px-4 py-3 text-sm text-muted-foreground">
-        Select a checked tool to edit per-agent settings.
-      </div>
-    );
-  }
 
   // Send a merge patch: null removes a key, and keys this panel does not
   // manage stay as authored.

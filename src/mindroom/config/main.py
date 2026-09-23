@@ -526,6 +526,11 @@ class Config(BaseModel):
         return None
 
     @classmethod
+    def supports_lazy_loading(cls, tool_name: str) -> bool:
+        """Return whether a tool entry may set defer/initial; presets and control-plane tools may not."""
+        return cls._lazy_flag_prohibited_message(tool_name=tool_name, config_path=tool_name) is None
+
+    @classmethod
     def _validate_raw_tool_lazy_flag_boundary(cls, entry: object, *, config_path: str) -> None:
         name, defer, initial = raw_tool_entry_name_and_lazy_flag_fields(entry)
         if name is None or not (defer or initial):

@@ -25,24 +25,26 @@ describe("ToolConfigPanel", () => {
     vi.mocked(useConfigStore).mockReturnValue(mockStore as never);
   });
 
-  it("renders an empty state when no tool is selected", () => {
+  it("hides lazy loading for tools whose entries may not set it", () => {
+    mockStore.getAgentToolOverrides.mockReturnValue(null);
     render(
       <ToolConfigPanel
-        target={{ kind: "agent", agentId: "openclaw" }}
-        toolName={null}
+        target={{ kind: "agent", agentId: "openclaw", lazyLoading: false }}
+        toolName="shell"
+        toolDisplayName="Shell"
+        overrideFields={[{ name: "timeout", label: "Timeout", type: "number" }]}
       />,
     );
 
-    expect(
-      screen.getByText("Select a checked tool to edit per-agent settings."),
-    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Load lazily")).not.toBeInTheDocument();
+    expect(screen.getByText(/Toggle fields/)).toBeInTheDocument();
   });
 
   it("offers only lazy loading when a tool has neither override fields nor config fields", () => {
     mockStore.getAgentToolOverrides.mockReturnValue(null);
     render(
       <ToolConfigPanel
-        target={{ kind: "agent", agentId: "openclaw" }}
+        target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
         toolName="browser"
         toolDisplayName="Browser"
         overrideFields={null}
@@ -60,7 +62,7 @@ describe("ToolConfigPanel", () => {
   it("renders override fields with toggle controls for string[] fields", () => {
     render(
       <ToolConfigPanel
-        target={{ kind: "agent", agentId: "openclaw" }}
+        target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
         toolName="shell"
         toolDisplayName="Shell Commands"
         overrideFields={[
@@ -91,7 +93,7 @@ describe("ToolConfigPanel", () => {
   it("commits override updates when toggling and editing string[] fields", () => {
     render(
       <ToolConfigPanel
-        target={{ kind: "agent", agentId: "openclaw" }}
+        target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
         toolName="shell"
         toolDisplayName="Shell Commands"
         overrideFields={[
@@ -156,7 +158,7 @@ describe("ToolConfigPanel", () => {
 
     render(
       <ToolConfigPanel
-        target={{ kind: "agent", agentId: "openclaw" }}
+        target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
         toolName="discord"
         toolDisplayName="Discord"
         configFields={[
@@ -190,7 +192,7 @@ describe("ToolConfigPanel", () => {
 
     render(
       <ToolConfigPanel
-        target={{ kind: "agent", agentId: "openclaw" }}
+        target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
         toolName="discord"
         toolDisplayName="Discord"
         overrideFields={null}
@@ -217,7 +219,7 @@ describe("ToolConfigPanel", () => {
     mockStore.getAgentToolOverrides.mockReturnValue(null);
     render(
       <ToolConfigPanel
-        target={{ kind: "agent", agentId: "openclaw" }}
+        target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
         toolName="shell"
         toolDisplayName="Shell"
         overrideFields={[
@@ -248,7 +250,7 @@ describe("ToolConfigPanel", () => {
     it("stores defer beside existing overrides", () => {
       render(
         <ToolConfigPanel
-          target={{ kind: "agent", agentId: "openclaw" }}
+          target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
           toolName="shell"
           overrideFields={shellFields}
         />,
@@ -270,7 +272,7 @@ describe("ToolConfigPanel", () => {
       mockStore.getAgentToolOverrides.mockReturnValue(null);
       render(
         <ToolConfigPanel
-          target={{ kind: "agent", agentId: "openclaw" }}
+          target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
           toolName="browser"
         />,
       );
@@ -294,7 +296,7 @@ describe("ToolConfigPanel", () => {
       });
       render(
         <ToolConfigPanel
-          target={{ kind: "agent", agentId: "openclaw" }}
+          target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
           toolName="shell"
           overrideFields={shellFields}
         />,
@@ -319,7 +321,7 @@ describe("ToolConfigPanel", () => {
       });
       render(
         <ToolConfigPanel
-          target={{ kind: "agent", agentId: "openclaw" }}
+          target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
           toolName="browser"
         />,
       );

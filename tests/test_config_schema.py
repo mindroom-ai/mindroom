@@ -126,7 +126,7 @@ def test_reference_fields_are_annotated() -> None:
 
 
 def test_secret_fields_are_annotated() -> None:
-    """Credential-bearing strings render as password inputs."""
+    """Credential fields are masked: strings and map values as passwords, free-form mappings until revealed."""
     defs = Config.model_json_schema()["$defs"]
     assert defs["ModelConfig"]["properties"]["extra_kwargs"][HINT_KEY] == {"secret": True}
     assert defs["_MemoryLLMConfig"]["properties"]["config"][HINT_KEY] == {"secret": True}
