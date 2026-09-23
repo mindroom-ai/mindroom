@@ -18,7 +18,7 @@ from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context, job_checkpoint
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
 from tests.test_background_subagents import _owner
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import tool_job_runtime, wait_for_status
 
 
 def _age(runtime: ToolJobRuntime, job_id: str, updated_at: datetime) -> None:
@@ -144,7 +144,7 @@ async def test_consumed_payload_is_loaded_on_demand_without_startup_rewrites(
     published = path.stat().st_mtime_ns
     try:
         assert runtime._entries["consumed"].job.result_payload is None
-        assert runtime._entries["consumed"].cancel_task is None
+        assert runtime._entries["consumed"].drain is None
         assert len(runtime._entries["consumed"].job.result) < 1000
         assert (await runtime.lookup("consumed", owner=_owner(), depth=0)).result_payload == {"value": value}
         assert bool(await runtime.pending_outcomes()) is not acknowledged
@@ -805,6 +805,98 @@ async def test_cancel_requested_remains_owned_until_operation_finally_finishes(t
 
 
 @pytest.mark.asyncio
+async def test_repeated_cancel_joins_the_in_flight_drain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second cancellation awaits the same drain and reports the settled job, not the request."""
+    runtime = tool_job_runtime(tmp_path)
+    cleaning, release, joined = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    cleanups = 0
+    request_cancel = runtime._request_cancel
+    drains: list[asyncio.Task[runtime_module.BackgroundJob]] = []
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def cleanup(_job: runtime_module.BackgroundJob) -> None:
+        nonlocal cleanups
+        cleanups += 1
+        cleaning.set()
+        await release.wait()
+
+    async def recorded_request(entry: runtime_module._Entry) -> asyncio.Task[runtime_module.BackgroundJob]:
+        drain = await request_cancel(entry)
+        drains.append(drain)
+        if len(drains) == 2:
+            joined.set()
+        return drain
+
+    monkeypatch.setattr(runtime, "_request_cancel", recorded_request)
+    try:
+        await runtime.start(
+            "twice",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=_owner(),
+            operation=operation,
+            cancel=cleanup,
+        )
+        first = asyncio.create_task(runtime.cancel("twice", owner=_owner(), depth=0))
+        await cleaning.wait()
+        second = asyncio.create_task(runtime.cancel("twice", owner=_owner(), depth=0))
+        await joined.wait()
+        assert drains[1] is drains[0]
+        assert not drains[0].done()
+        release.set()
+        settled = await asyncio.gather(first, second)
+        assert [job.status for job in settled] == ["cancelled", "cancelled"]
+        assert cleanups == 1
+    finally:
+        release.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_caller_still_settles_its_cancellation_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller cancelled while its request is being saved still stops execution and settles the job."""
+    runtime = tool_job_runtime(tmp_path)
+    writer = runtime_module.write_json_file_durable
+    loop = asyncio.get_running_loop()
+    started, writing = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+
+    async def operation() -> BackgroundOutcome:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    def blocked_request(path: Path, payload: dict[str, object], *, strict_atomic_replace: bool) -> None:
+        if payload["status"] == "cancel_requested":
+            loop.call_soon_threadsafe(writing.set)
+            assert release.wait(30)
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
+
+    try:
+        await runtime.start("caller", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
+        await started.wait()
+        monkeypatch.setattr(runtime_module, "write_json_file_durable", blocked_request)
+        cancelling = asyncio.create_task(runtime.cancel("caller", owner=_owner(), depth=0))
+        await writing.wait()
+        cancelling.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelling
+        await asyncio.wait_for(wait_for_status(runtime, "caller", "cancelled"), 30)
+        assert runtime_module.read_job_snapshot(tmp_path / "tool_jobs" / "caller.json").status == "cancelled"
+    finally:
+        release.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failed_write", [1, 2], ids=["admission", "terminal"])
 async def test_failed_cancellation_persistence_can_be_retried(
     tmp_path: Path,
@@ -1037,8 +1129,8 @@ async def test_failed_approval_cancellation_admission_preserves_generation_trans
 
 
 @pytest.mark.asyncio
-async def test_default_cancellation_retry_propagates_failed_terminal_persistence(tmp_path: Path) -> None:
-    """A stale admission signal cannot report terminal success after retry persistence fails."""
+async def test_cancellation_retry_propagates_failed_terminal_persistence(tmp_path: Path) -> None:
+    """A cancellation retry reports its own failed terminal persistence instead of success."""
     runtime = tool_job_runtime(tmp_path)
     started = asyncio.Event()
     retry_write_started = asyncio.Event()
@@ -1092,16 +1184,16 @@ async def test_default_cancellation_retry_propagates_failed_terminal_persistence
         release_retry_write.set()
         if retry is not None:
             await asyncio.gather(retry, return_exceptions=True)
-        cancel_task = runtime._entries[job.job_id].cancel_task
-        if cancel_task is not None:
-            await asyncio.gather(cancel_task, return_exceptions=True)
+        drain = runtime._entries[job.job_id].drain
+        if drain is not None:
+            await asyncio.gather(drain, return_exceptions=True)
         runtime._publish = original_publish
         await runtime.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_shutdown_cancels_operation_after_failed_cancellation_admission(tmp_path: Path) -> None:
-    """A completed failed cancellation task cannot leave its operation blocking shutdown."""
+    """A failed cancellation request cannot leave its operation blocking shutdown."""
     runtime = tool_job_runtime(tmp_path)
     started = asyncio.Event()
 

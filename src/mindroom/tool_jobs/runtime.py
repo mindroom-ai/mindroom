@@ -160,13 +160,12 @@ class _Entry:
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     wait_token: str | None = None
     cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] | None = None
-    stopping: bool = False
     # False only while memory retains an outcome of work that already ran but could not be saved.
     saved: bool = True
     cold: bool = False
     stopped_outcome: BackgroundOutcome | None = None
-    cancel_task: asyncio.Task[BackgroundJob] | None = None
-    cancel_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    # The one in-flight cancellation drain; every concurrent canceller awaits it.
+    drain: asyncio.Task[BackgroundJob] | None = None
 
     def notify_changed(self) -> None:
         """Wake existing state waiters while keeping the next wait fresh."""
@@ -447,7 +446,8 @@ class ToolJobRuntime:
                 # The operation raised cancellation itself; settle it so waiters and delivery see an outcome.
                 outcome = BackgroundOutcome("cancelled")
             async with self._lock:
-                if entry.stopping:
+                # Runtime-owned cancellation and shutdown set the control; their settlement consumes this outcome.
+                if entry.control.cancelled:
                     entry.stopped_outcome = outcome
                 elif entry.job.status not in _TERMINAL:
                     try:
@@ -468,7 +468,7 @@ class ToolJobRuntime:
                         )
         except asyncio.CancelledError:
             # Only runtime-owned cancellation settles the job; external teardown leaves it for recovery.
-            if entry.stopping:
+            if entry.control.cancelled:
                 entry.stopped_outcome = outcome
             raise
         finally:
@@ -636,21 +636,8 @@ class ToolJobRuntime:
         async with self._lock:
             self._ensure_accepting()
             entry = self._entry(job_id, owner, depth)
-            task = self._cancellation_task(entry)
-        return await wait_for_future_until_complete(task)
-
-    async def _cancel_admitted(self, entry: _Entry, task: asyncio.Task[BackgroundJob]) -> BackgroundJob:
-        """Wait for durable admission without waiting for uncooperative execution to drain."""
-        admitted = asyncio.create_task(entry.cancel_ready.wait())
-        try:
-            await asyncio.wait({task, admitted}, return_when=asyncio.FIRST_COMPLETED)
-            async with self._lock:
-                if task.done():
-                    return task.result()
-                return await self._snapshot(entry)
-        finally:
-            admitted.cancel()
-            await asyncio.gather(admitted, return_exceptions=True)
+            drain = await self._request_cancel(entry)
+        return await wait_for_future_until_complete(drain)
 
     async def stop_jobs(
         self,
@@ -659,7 +646,6 @@ class ToolJobRuntime:
         matches: Callable[[BackgroundJob], Awaitable[bool]],
     ) -> None:
         """Persist explicit Stop independently of result consumption, then request owned cleanup."""
-        cancellations = []
         async with self._lock:
             self._ensure_accepting()
             for entry in self._entries.values():
@@ -669,11 +655,9 @@ class ToolJobRuntime:
                 order = max(job.user_stop_receipt_order or 0, receipt_order)
                 await self._publish(entry, _updated(job, user_stop_receipt_order=order))
                 if entry.job.status not in _TERMINAL:
-                    cancellations.append((entry, self._cancellation_task(entry)))
+                    await self._request_cancel(entry)
                 else:
                     self._cool(entry)
-        for entry, task in cancellations:
-            await self._cancel_admitted(entry, task)
 
     async def is_user_stopped(self, job_id: str) -> bool:
         """Check suppression without confusing a read receipt with explicit user intent."""
@@ -704,68 +688,68 @@ class ToolJobRuntime:
             entry = self._entries.get(job_id)
             if entry is None or not matches(await self._snapshot(entry, include_result=False)):
                 return None
-            task = self._cancellation_task(entry)
-        return await wait_for_future_until_complete(task)
+            drain = await self._request_cancel(entry)
+        return await wait_for_future_until_complete(drain)
 
     async def cancel_revoked(self) -> None:
         """Withdraw execution when current grants disappear, retaining owned cleanup."""
         async with self._lock:
             self._ensure_accepting()
-            cancellations = [
-                (entry, self._cancellation_task(entry))
+            revoked = [
+                entry
                 for entry in self._entries.values()
                 if entry.job.status not in _TERMINAL and not self._authorize(entry.job)
             ]
-        for entry, task in cancellations:
-            await self._cancel_admitted(entry, task)
+            for entry in revoked:
+                await self._request_cancel(entry)
 
-    def _cancellation_task(self, entry: _Entry) -> asyncio.Task[BackgroundJob]:
-        """Accept exactly one cleanup while the caller holds the runtime admission lock."""
-        task = entry.cancel_task
-        failed = task is not None and task.done() and (task.cancelled() or task.exception() is not None)
-        if task is None or failed:
-            entry.cancel_ready = asyncio.Event()
-            task = asyncio.create_task(self._cancel_entry(entry))
-            entry.cancel_task = task
-        return task
+    async def _request_cancel(self, entry: _Entry) -> asyncio.Task[BackgroundJob]:
+        """Durably request cancellation and return its one drain; the caller holds the runtime lock."""
 
-    async def _cancel_entry(self, entry: _Entry) -> BackgroundJob:
-        async with self._lock:
-            if entry.job.status in _TERMINAL:
-                if not entry.saved:
+        async def request() -> asyncio.Task[BackgroundJob]:
+            if entry.job.status in {"running", "awaiting_approval"}:
+                approval = entry.job.status == "awaiting_approval"
+                requested = _updated(entry.job, status="cancel_requested")
+                if approval:
+                    # Cancelling an approval publishes a fresh unconsumed generation that stale claims cannot own.
+                    requested = replace(requested, generation=requested.generation + 1, wait_acknowledged=False)
+                await self._publish(entry, requested)
+                if approval:
+                    entry.wait_token = None
+                entry.control.cancel()
+                if entry.task is not None:
+                    entry.task.cancel()
+            if entry.drain is None:
+                entry.drain = asyncio.create_task(self._drain_cancel(entry), name=f"tool-job-cancel:{entry.job.job_id}")
+            return entry.drain
+
+        # A cancelled caller cannot separate a durable request from stopping execution and starting its drain.
+        return await run_coroutine_until_complete(request())
+
+    async def _drain_cancel(self, entry: _Entry) -> BackgroundJob:
+        """Await requested execution and cleanup, then publish the settled job or retry an unsaved terminal one."""
+        try:
+            settling = entry.job.status == "cancel_requested"
+            outcome = None
+            if settling:
+                if entry.task is not None:
+                    await asyncio.gather(entry.task, return_exceptions=True)
+                outcome = await self._cleanup(entry)
+            async with self._lock:
+                if settling:
+                    await self._publish_outcome(
+                        entry,
+                        self._settled(entry, status="cancelled", reason=None, outcome=outcome),
+                    )
+                elif not entry.saved:
                     await self._publish(entry, entry.job)
-                    self._release_control(entry)
+                self._release_control(entry)
                 snapshot = await self._snapshot(entry)
-                entry.cancel_task = None
+                self._cool(entry)
                 return snapshot
-            approval = entry.job.status == "awaiting_approval"
-            requested = _updated(entry.job, status="cancel_requested")
-            if approval:
-                # Cancelling an approval publishes a fresh unconsumed generation that stale claims cannot own.
-                requested = replace(requested, generation=requested.generation + 1, wait_acknowledged=False)
-            await self._publish(entry, requested)
-            if approval:
-                entry.wait_token = None
-            entry.cancel_ready.set()
-            entry.control.cancel()
-            entry.stopping = True
-            task = entry.task
-            if task is not None:
-                task.cancel()
-        if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
-        outcome = await self._cleanup(entry)
-        async with self._lock:
-            if entry.job.status not in _TERMINAL:
-                await self._publish_outcome(
-                    entry,
-                    self._settled(entry, status="cancelled", reason=None, outcome=outcome),
-                )
-            self._release_control(entry)
-            snapshot = await self._snapshot(entry)
-            entry.cancel_task = None
-            self._cool(entry)
-            return snapshot
+        finally:
+            # A failed drain leaves the job for the next canceller, recovery, or shutdown to settle.
+            entry.drain = None
 
     async def _cleanup(self, entry: _Entry) -> BackgroundOutcome | None:
         try:
@@ -994,26 +978,22 @@ class ToolJobRuntime:
             self.changed.set()
             self._lease.close()
 
-    async def _shutdown(self) -> None:  # noqa: C901 - Drain execution and retry unsaved outcomes before releasing storage.
+    async def _shutdown(self) -> None:
+        """Drain execution and retry unsaved outcomes before releasing storage."""
         tasks = []
-        cancellations = []
         failures = []
         async with self._lock:
             for entry in self._entries.values():
                 if entry.job.status not in _READY:
-                    entry.stopping = True
                     entry.control.cancel()
                 self._release_control(entry)
-                cancellation = entry.cancel_task
-                cancellation_is_live = cancellation is not None and not cancellation.done()
-                if cancellation_is_live:
-                    cancellations.append(cancellation)
-                task = entry.task
-                if task is not None and not task.done():
-                    if not cancellation_is_live:
-                        task.cancel()
-                    tasks.append(task)
-        await asyncio.gather(*tasks, *cancellations, return_exceptions=True)
+                if entry.drain is not None:
+                    # The cancellation request already cancelled execution; its drain settles it.
+                    tasks.append(entry.drain)
+                elif entry.task is not None and not entry.task.done():
+                    entry.task.cancel()
+                    tasks.append(entry.task)
+        await asyncio.gather(*tasks, return_exceptions=True)
         for entry in self._entries.values():
             settling = entry.job.status not in _READY
             try:
