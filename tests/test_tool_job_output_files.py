@@ -1,4 +1,4 @@
-"""Workspace output policies cover managed result retrieval and generated knowledge tools."""
+"""Workspace output policies cover managed result retrieval."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 import pytest_asyncio
-from agno.knowledge.knowledge import Knowledge
 from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
 
@@ -29,8 +28,7 @@ from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload,
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths
-from tests.delegation_helpers import _call, _delegate_runtime_context, _runtime_paths
-from tests.test_tool_job_exclusions import _SchemaRecordingModel
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.tool_job_helpers import start_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
@@ -52,7 +50,7 @@ pytestmark = pytest.mark.asyncio
 @dataclass
 class _OutputAgent:
     agent: Agent
-    model: _SchemaRecordingModel
+    model: DelegationModel
     runtime: ToolJobRuntime
     owner: ToolExecutionIdentity
     workspace: Path
@@ -86,20 +84,13 @@ class _OutputAgent:
         return job_id
 
 
-@pytest.fixture
-def managed() -> bool:
-    """Most cases exercise managed jobs; knowledge also covers the disabled path."""
-    return True
-
-
 @pytest_asyncio.fixture
-async def output_agent(tmp_path: Path, managed: bool) -> AsyncIterator[_OutputAgent]:
+async def output_agent(tmp_path: Path) -> AsyncIterator[_OutputAgent]:
     """Build a workspace agent with real SDK dispatch and isolated durable jobs."""
     paths = _runtime_paths(tmp_path)
     config = Config(
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=managed),
-        agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"], knowledge_bases=["probe"])},
-        knowledge_bases={"probe": {"path": str(tmp_path / "knowledge")}},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])},
         models={"default": {"provider": "openai", "id": "gpt-6-astra"}},
         memory={"backend": "file"},
         defaults={"tools": []},
@@ -108,20 +99,11 @@ async def output_agent(tmp_path: Path, managed: bool) -> AsyncIterator[_OutputAg
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
-    if managed:
-        pin_background_tool_jobs(context.config, paths)
-        register_background_runtime(paths, runtime)
-    agent = create_agent(
-        "leader",
-        config,
-        paths,
-        execution_identity=owner,
-        persist_runtime_state=False,
-        knowledge=Knowledge(name="probe"),
-    )
-    model = _SchemaRecordingModel(id="output-test")
-    if managed:
-        install_tool_job_execution(model)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    agent = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
+    model = DelegationModel(id="output-test")
+    install_tool_job_execution(model)
     agent.model = model
     workspace = resolve_agent_runtime("leader", config, paths, execution_identity=owner).workspace
     assert workspace is not None
@@ -184,46 +166,6 @@ async def test_job_output_path_is_validated_before_claiming_result(output_agent:
     saved = await case.runtime.lookup(job_id, owner=case.owner, depth=0)
     assert not saved.consumed
     assert not (case.workspace.parent / "escape.txt").exists()
-
-
-@pytest.mark.parametrize("managed", [False, True])
-@pytest.mark.parametrize("explicit", [False, True])
-async def test_generated_knowledge_search_uses_shared_output_policy(
-    output_agent: _OutputAgent,
-    managed: bool,
-    explicit: bool,
-) -> None:
-    """Knowledge results use the same full-file contract before managed result encoding."""
-    case = output_agent
-
-    async def retrieve(query: str, num_documents: int | None = None) -> list[dict[str, str]]:
-        del query, num_documents
-        return [{"content": _LARGE_RESULT, "name": "synthetic document"}]
-
-    case.agent.knowledge_retriever = retrieve
-    arguments: dict[str, object] = {"query": "full output"}
-    if explicit:
-        arguments["mindroom_output_path"] = "results/knowledge.json"
-    if managed:
-        arguments["wait_timeout"] = 0
-    response = await case.call("search_knowledge_base", **arguments)
-    assert response.tools
-    assert not response.tools[0].tool_call_error
-    assert "mindroom_output_path" in case.model.schemas["search_knowledge_base"]["properties"]
-    if managed:
-        handle = json.loads(response.tools[0].result)
-        response = await case.call("job", action="wait", job_id=handle["job_id"])
-        assert response.tools
-        assert not response.tools[0].tool_call_error
-    receipt = literal_eval(response.tools[0].result)["mindroom_tool_output"]
-    assert receipt["status"] == "saved_to_file"
-    saved = (case.workspace / receipt["path"]).read_bytes()
-    assert json.loads(saved)[0]["content"].encode() == _LARGE_RESULT.encode()
-    assert "truncated" not in saved.decode()
-    if explicit:
-        assert receipt["path"] == "results/knowledge.json"
-    else:
-        assert receipt["auto_saved"] is True
 
 
 @pytest.mark.parametrize("explicit", [False, True])

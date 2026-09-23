@@ -37,7 +37,7 @@ from mindroom.tools.shell import _process_registry
 from tests.conftest import test_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_config_lifecycle import _make_lifecycle
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import assembled_function, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -251,7 +251,7 @@ async def test_same_named_unrelated_function_still_backgrounds(shell_runtime: _S
         await release.wait()
         return "unrelated result"
 
-    actor.tools = [run_shell_command]
+    actor.tools = [assembled_function(run_shell_command)]
     try:
         result = await _invoke(actor, model, "run_shell_command", wait_timeout=0)
         handle = json.loads(result.result)

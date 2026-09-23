@@ -36,7 +36,7 @@ from mindroom.tool_jobs.wait_timeout import record_tool_wait_mode, saved_tool_wa
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import assembled_function, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -321,7 +321,12 @@ async def test_earlier_managed_call_keeps_native_approval_owned(tmp_path: Path, 
         ],
     )
     install_tool_job_execution(model)
-    kwargs = {"id": "leader", "model": model, "tools": [ordinary_tool, _NativeTools([])], "telemetry": False}
+    kwargs = {
+        "id": "leader",
+        "model": model,
+        "tools": [assembled_function(ordinary_tool), _NativeTools([])],
+        "telemetry": False,
+    }
     actor = Team(**kwargs, members=[]) if team else Agent(**kwargs)
     try:
         async with execution_resources():
@@ -372,7 +377,7 @@ async def test_nested_native_owner_keeps_slow_child_tool_after_human_signal(tmp_
         ],
     )
     install_tool_job_execution(model, depth=1)
-    actor = Agent(id="leader", model=model, tools=[slow_child_tool], telemetry=False)
+    actor = Agent(id="leader", model=model, tools=[assembled_function(slow_child_tool)], telemetry=False)
     signal = HumanMessageSignal()
     task = None
     try:

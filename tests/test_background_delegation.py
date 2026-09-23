@@ -330,6 +330,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     register_background_runtime(paths, runtime)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    bind_toolkit_authority(toolkit, authored_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     release = asyncio.Event()
     completed = asyncio.Event()

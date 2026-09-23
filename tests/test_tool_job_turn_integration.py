@@ -39,7 +39,7 @@ from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_response_turn import _AdapterLog, _continuation, _ctx, _streaming_adapter
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import assembled_function, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -86,9 +86,9 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
     install_tool_job_execution(model)
     storage = storage_factory()
     actor = (
-        Team(id="leader", model=model, members=[], tools=[report], db=storage, telemetry=False)
+        Team(id="leader", model=model, members=[], tools=[assembled_function(report)], db=storage, telemetry=False)
         if team
-        else Agent(id="leader", model=model, tools=[report], db=storage, telemetry=False)
+        else Agent(id="leader", model=model, tools=[assembled_function(report)], db=storage, telemetry=False)
     )
 
     @owned_tool_execution
@@ -220,7 +220,13 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
     )
     install_tool_job_execution(model)
     storage = storage_factory()
-    actor = Agent(id="leader", model=model, tools=[slow_tool, JobTools(paths, owner)], db=storage, telemetry=False)
+    actor = Agent(
+        id="leader",
+        model=model,
+        tools=[assembled_function(slow_tool), JobTools(paths, owner)],
+        db=storage,
+        telemetry=False,
+    )
 
     @owned_tool_execution
     async def run_turn(prompt: str) -> RunOutput:
@@ -327,7 +333,13 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
     )
     install_tool_job_execution(model)
     storage = storage_factory()
-    actor = Agent(id="leader", model=model, tools=[slow_tool, JobTools(paths, owner)], db=storage, telemetry=False)
+    actor = Agent(
+        id="leader",
+        model=model,
+        tools=[assembled_function(slow_tool), JobTools(paths, owner)],
+        db=storage,
+        telemetry=False,
+    )
     scope = ScopeSessionContext(
         HistoryScope(kind="agent", scope_id="leader"),
         storage,

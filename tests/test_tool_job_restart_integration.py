@@ -57,7 +57,7 @@ from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_c
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx
 from tests.test_tool_job_turn_integration import _provider_tool_content, _wait_until_ready
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import assembled_function, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -122,7 +122,13 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
     )
     install_tool_job_execution(original_model)
     original_storage = storage_factory()
-    original_actor = Agent(id="leader", model=original_model, tools=[slow_tool], db=original_storage, telemetry=False)
+    original_actor = Agent(
+        id="leader",
+        model=original_model,
+        tools=[assembled_function(slow_tool)],
+        db=original_storage,
+        telemetry=False,
+    )
 
     @owned_tool_execution
     async def start_original() -> RunOutput:

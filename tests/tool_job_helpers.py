@@ -1,8 +1,10 @@
-"""Shared tool job runtime construction for tests."""
+"""Shared tool job runtime and assembled-function construction for tests."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+
+from agno.tools.function import Function
 
 from mindroom.delegation.background import start_delegation
 from mindroom.tool_jobs.runtime import ToolJobRuntime
@@ -10,8 +12,6 @@ from mindroom.tool_jobs.runtime import ToolJobRuntime
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
-
-    from agno.tools.function import Function
 
     from mindroom.delegation.state import DelegationChild
     from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
@@ -39,6 +39,13 @@ def tool_job_runtime(
 ) -> ToolJobRuntime:
     """Build a runtime whose current grants allow every job and call and whose adapters need no extra cleanup."""
     return ToolJobRuntime(storage_root, authorize=authorize, authorize_execution=authorize_execution, cancel=cancel)
+
+
+def assembled_function(entrypoint: Callable[..., object]) -> Function:
+    """Build a function as MindRoom toolkit assembly binds it; only such functions may become jobs."""
+    function = Function.from_callable(entrypoint)
+    function.owning_toolkit = "application"
+    return function
 
 
 async def start_job(runtime: ToolJobRuntime, job_id: str, **options: Any) -> BackgroundJob:  # noqa: ANN401

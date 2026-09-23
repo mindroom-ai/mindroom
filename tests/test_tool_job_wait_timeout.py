@@ -24,6 +24,7 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.job import JobTools
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.agno_execution import _drain_result
+from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
@@ -31,7 +32,7 @@ from mindroom.tool_jobs.results import encode_tool_result
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import assembled_function, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -55,7 +56,7 @@ async def test_application_wait_timeout_collision_fails_before_execution(tmp_pat
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model, depth=depth)
-    function = Function.from_callable(application)
+    function = assembled_function(application)
     function._agent = Agent(id="leader", model=model)
     function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
     sibling = Function.from_callable(lambda: "other tool")
@@ -98,7 +99,7 @@ async def test_shared_schema_adds_optional_wait_without_changing_application_sch
     register_background_runtime(paths, runtime)
     model, backup = DelegationModel(id="primary"), DelegationModel(id="backup")
     install_tool_job_execution(model, FallbackConfig(on_error=[backup]))
-    function = Function.from_callable(application)
+    function = assembled_function(application)
     function._agent = Agent(id="leader", model=model)
     controls = JobTools(paths, build_execution_identity_from_runtime_context(context)).get_async_functions()["job"]
     controls.process_entrypoint()
@@ -143,7 +144,7 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
-    function = Function.from_callable(application)
+    function = assembled_function(application)
     function.pre_hook = before
     function._agent = Agent(id="leader")
     function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
@@ -203,7 +204,7 @@ async def test_invalid_wait_budget_never_starts_application(tmp_path: Path, budg
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
-    function = Function.from_callable(application)
+    function = assembled_function(application)
     function._agent = Agent(id="leader")
     function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
     try:
@@ -270,6 +271,7 @@ async def test_batch_tools_keep_independent_wait_budgets(tmp_path: Path) -> None
     )
     install_tool_job_execution(model)
     plugin = Toolkit(name="plugin", tools=[Function.from_callable(slow), Function.from_callable(fast)])
+    bind_toolkit_authority(plugin, authored_name="plugin")
     agent = Agent(id="leader", model=model, tools=[plugin])
     try:
         async with execution_resources():
@@ -305,7 +307,7 @@ async def test_rich_stream_reaches_sdk_with_media_metadata_and_events(tmp_path: 
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
-    function = Function.from_callable(generated)
+    function = assembled_function(generated)
     function._agent = Agent(id="leader")
     function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
     try:
@@ -346,7 +348,7 @@ async def test_owned_nested_application_cannot_create_detached_job(
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
-    function = Function.from_callable(application)
+    function = assembled_function(application)
     function._agent = Agent(id="leader")
     function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
     try:
@@ -415,7 +417,7 @@ async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
         ],
     )
     install_tool_job_execution(model)
-    agent = Agent(id="leader", model=model, tools=[application])
+    agent = Agent(id="leader", model=model, tools=[assembled_function(application)])
     try:
         async with execution_resources():
             with tool_runtime_context(context), job_control_context(JobControl()) if nested else nullcontext():

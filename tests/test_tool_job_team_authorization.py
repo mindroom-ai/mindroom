@@ -29,6 +29,7 @@ from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobAccessError,
     register_background_runtime,
+    saved_job_paths,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -76,7 +77,7 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
     tmp_path: Path,
     configured: bool,
 ) -> None:
-    """A non-transport team member can execute tools, until its requester grant is withdrawn."""
+    """A member's tool becomes a job, while the leader's SDK delegation runs inline, until the grant is withdrawn."""
     config = _config(tmp_path)
     config.agents["worker"].tools = ["calculator"]
     config.teams["team"].agents = ["lead", "worker"]
@@ -107,6 +108,7 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
                 member_owner = replace(owner, agent_name="worker")
                 jobs = await coordinator.runtime.list_jobs(owner=member_owner, depth=0)
                 assert len(jobs) == 1
+                assert len(saved_job_paths(paths.storage_root / "tool_jobs")) == 1
                 waited = await coordinator.runtime.wait(jobs[0].job_id, owner=member_owner, depth=0)
                 assert waited.job.status == "completed", waited.job.result
                 assert json.loads(waited.job.result)["result"] == 5

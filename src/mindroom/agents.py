@@ -19,7 +19,6 @@ from mindroom import agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
 from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
-from mindroom.agent_policy import is_learning_enabled
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools.job import JobTools
@@ -1091,6 +1090,12 @@ def _registry_tool_routes_through_worker(
     )
 
 
+def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) -> bool:
+    """Check if learning is enabled for an agent, falling back to defaults."""
+    learning = agent_config.learning if agent_config.learning is not None else defaults.learning
+    return learning is not False
+
+
 def _context_hidden_toolkits(execution_identity: ToolExecutionIdentity | None) -> frozenset[str]:
     if execution_identity is None or execution_identity.room_id is not None:
         return frozenset()
@@ -1116,7 +1121,7 @@ def _resolve_agent_learning(
     learning_storage: BaseDb | None = None,
 ) -> bool | LearningMachine:
     """Resolve Agent.learning setting from MindRoom agent configuration."""
-    if not is_learning_enabled(agent_config, defaults):
+    if not _is_learning_enabled(agent_config, defaults):
         return False
 
     learning_mode = agent_config.learning_mode or defaults.learning_mode
@@ -1490,7 +1495,6 @@ def _load_agent_skills(
 
 @timed("system_prompt_assembly.agent_create.agent_init")
 def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
-    output_file_policy = cast("ToolOutputFilePolicy | None", agent_kwargs.pop("tool_output_file_policy", None))
     knowledge_sources = cast(
         "tuple[KnowledgeSourceDescription, ...]",
         agent_kwargs.pop("knowledge_sources", ()),
@@ -1506,7 +1510,6 @@ def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
     agent.knowledge_sources = knowledge_sources
     agent.tool_function_filter = tool_function_filter
     agent.tool_hook_bridge = tool_hook_bridge
-    agent.tool_output_file_policy = output_file_policy
     return agent
 
 
@@ -2069,7 +2072,7 @@ def create_agent(
             subdir="learning",
             session_table=f"{agent_name}_learning_sessions",
         )
-        if persist_runtime_state and is_learning_enabled(agent_config, defaults)
+        if persist_runtime_state and _is_learning_enabled(agent_config, defaults)
         else None
     )
 
@@ -2175,11 +2178,6 @@ def create_agent(
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
-        tool_output_file_policy=_agent_tool_output_file_policy(
-            agent_runtime,
-            runtime_paths,
-            config.defaults.tool_output_auto_save_threshold_bytes,
-        ),
         tool_function_filter=partial(_generated_function_visible, config, tool_function_filter),
         tool_hook_bridge=tool_assembly.tool_hook_bridge,
         search_knowledge=knowledge_enabled,

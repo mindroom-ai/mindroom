@@ -27,7 +27,7 @@ configuration and examples are in [Agent Orchestration](../tools/agent-orchestra
 | Owner | Responsibility |
 | --- | --- |
 | `tool_jobs/runtime.py` | One accepted execution, durable generations, result claims, cancellation and retention |
-| `tool_jobs/authorization.py` | Current local grants using shared construction and knowledge policy |
+| `tool_jobs/authorization.py` | Current local grants using shared construction policy |
 | `tool_jobs/agno_compat_*.py` | Explicit, version-checked SDK bindings; no application authorization policy |
 | `tool_jobs/agno_execution.py` and `consumption.py` | Exact call execution and acknowledgement after the SDK saves consumption |
 | `tool_jobs/resources.py` | Retain toolkit resources until every accepted user drains |
@@ -72,6 +72,7 @@ Cancellation cannot undo remote side effects or forcibly stop arbitrary Python
 threads. Excluded tools retain native behavior. Nested tools stay within their
 outer execution owner. Subagent follow-ups use reusable sessions after the previous
 child turn finishes; injecting instructions into a running child is outside scope.
+Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.
 
 ## Verification contract
 

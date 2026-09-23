@@ -192,7 +192,7 @@ Generic ownership lives in `src/mindroom/tool_jobs/`; native child execution and
 | `tool_jobs/agno_compat_execution.py` / `tool_jobs/agno_compat_resources.py` | SDK schema, dispatch, and toolkit connection-lifetime bindings |
 | `tool_jobs/agno_execution.py` / `tool_jobs/consumption.py` | Original SDK result capture and exact durable consumption |
 | `tool_jobs/execution_scope.py` / `tool_jobs/resources.py` | Response execution envelopes and shared connection/cleanup lifetime across foreground handoff |
-| `tool_jobs/authorization.py` / `tool_jobs/execution_authority.py` / `tool_jobs/provenance.py` | Current local grants, checks at application entry, and exact callable provenance |
+| `tool_jobs/authorization.py` / `tool_jobs/execution_authority.py` / `tool_jobs/provenance.py` | Current local grants, checks at application entry, and exact MCP bridge identity |
 | `tool_jobs/results.py` | Typed job result payload and non-executable serialization of durable tool values, media, and SDK artifacts |
 | `custom_tools/job.py` | One reserved management schema and exact native wait projection |
 | `tool_jobs/completion.py` | Internal completion sources, admission and automatic joining at response boundaries |

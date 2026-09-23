@@ -41,57 +41,6 @@ if TYPE_CHECKING:
 _OWNER = ToolExecutionIdentity("matrix", "lead", "@human:localhost", "!room:localhost", None, None, "session")
 
 
-@pytest.mark.parametrize("change", ["files_only", "remove_one", "private_disabled", "keyword_memory", "missing_scope"])
-def test_retained_knowledge_requires_the_exact_current_source_policy(change: str) -> None:
-    """A surviving search capability cannot retain a removed source or an uncaptured scope."""
-    agent: dict[str, object] = {"display_name": "Lead", "knowledge_bases": ["first", "second"]}
-    if change == "private_disabled":
-        agent = {
-            "display_name": "Lead",
-            "private": {"per": "user_agent", "knowledge": {"enabled": True, "path": "knowledge"}},
-        }
-    elif change == "keyword_memory":
-        agent = {"display_name": "Lead", "memory_backend": "file", "memory_search": {"mode": "semantic"}}
-    config = Config.model_validate(
-        {
-            "agents": {"lead": agent},
-            "knowledge_bases": {"first": {"path": "first"}, "second": {"path": "second"}},
-        },
-    )
-    captured = authority_snapshot(config, "lead")
-
-    def allowed() -> bool:
-        return locally_allowed(
-            config,
-            _OWNER,
-            tool_name="search_knowledge_base",
-            toolkit_name=None,
-            depth=0,
-            origin={
-                "module": "agno.agent._default_tools",
-                "qualname": "create_knowledge_search_tool.search_knowledge_base",
-            },
-            authority=captured,
-        )
-
-    assert allowed()
-    if change == "files_only":
-        for base in config.knowledge_bases.values():
-            base.mode = "files"
-    elif change == "remove_one":
-        config.agents["lead"].knowledge_bases.pop()
-    elif change == "private_disabled":
-        private = config.agents["lead"].private
-        assert private is not None
-        assert private.knowledge is not None
-        private.knowledge.enabled = False
-    elif change == "keyword_memory":
-        config.agents["lead"].memory_search.mode = "keyword"
-    else:
-        captured.clear()
-    assert not allowed()
-
-
 def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> None:
     """Direct toolkit construction admits its current options and rejects changed ones."""
     entry = ToolConfigEntry(name="dynamic_workflow", overrides={"allowed_tools": ["calculator"]})
@@ -457,29 +406,3 @@ def test_deferred_job_policy_survives_unloading_but_rejects_new_filters_and_orig
 
     monkeypatch.setitem(TOOL_REGISTRY, "calculator", replacement)
     assert not allowed()
-
-
-def test_sdk_learning_job_requires_current_enabled_learning() -> None:
-    """An arbitrary SDK origin is insufficient; the exact generated feature must remain enabled."""
-    config = Config(agents={"lead": AgentConfig(display_name="Lead", learning=True, learning_mode="agentic")})
-    owner = ToolExecutionIdentity("matrix", "lead", "@human:localhost", "!room:localhost", None, None, "session")
-    origin = {
-        "module": "agno.learn.stores.user_memory",
-        "qualname": "UserMemoryStore.aget_tools.<locals>.update_user_memory",
-    }
-
-    def allowed(tool_name: str) -> bool:
-        return locally_allowed(
-            config,
-            owner,
-            tool_name=tool_name,
-            toolkit_name=None,
-            origin=origin,
-            depth=0,
-            authority=authority_snapshot(config, "lead"),
-        )
-
-    assert allowed("update_user_memory")
-    assert not allowed("arbitrary_callable")
-    config.agents["lead"].learning = False
-    assert not allowed("update_user_memory")

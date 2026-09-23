@@ -304,6 +304,8 @@ The name `wait_timeout` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
 Tools that stop the current model step, including model switching and dynamic tool loading, stay inline so the continuation receives their actual control result.
 Their schemas omit `wait_timeout`, and numeric waiting budgets are rejected before execution.
+Only functions of toolkits that MindRoom assembles for an agent can become jobs.
+Functions the SDK generates itself, including knowledge search, skill access, learning, and team delegation, always run inline without `wait_timeout`.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 
@@ -365,7 +367,7 @@ Output redirection and automatic output saving apply to the completed child resu
 The accepted output path survives approval recovery and is revalidated before resumed execution; retrieving a completed result only reads its saved receipt.
 Run IDs do not define ownership, so `job(action="list")` can rediscover handles after compaction, later turns, and runtime restart.
 For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result, while `inspect` saves its bounded summary.
-Large supported results use the same configured automatic file-saving policy as other tools; this also covers SDK-generated knowledge search.
+Large supported results use the same configured automatic file-saving policy as other tools.
 Redirecting a stored result does not rerun the original tool or change its saved output.
 A team must route management through the member that started the job; a leader cannot read another member's jobs directly.
 Still-authorized deferred tools remain discoverable without loading them or connecting to remote services.

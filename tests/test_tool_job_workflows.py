@@ -18,6 +18,7 @@ from mindroom.config.models import ToolConfigEntry
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.hooks import HookRegistry
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import defer_execution_cleanup, execution_resources
@@ -26,7 +27,7 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from tests.delegation_helpers import DelegationModel, _call
 from tests.test_dynamic_workflows import _make_context, _workflow_spec
-from tests.tool_job_helpers import tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import assembled_function, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -68,6 +69,7 @@ async def test_workflow_participant_runs_multiple_sync_tools(
     if managed:
         install_tool_job_execution(outer)
     toolkit = DynamicWorkflowTools()
+    bind_toolkit_authority(toolkit, authored_name="dynamic_workflow")
     function = toolkit.get_async_functions()["run_workflow"]
     function._agent = Agent(id="general", telemetry=False)
     function._run_context = RunContext(run_id="root", session_id=context.session_id, session_state={})
@@ -155,7 +157,7 @@ async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
         ],
     )
     install_tool_job_execution(model)
-    actor = Agent(id="general", model=model, tools=[composite], telemetry=False)
+    actor = Agent(id="general", model=model, tools=[assembled_function(composite)], telemetry=False)
 
     @owned_tool_execution
     async def run() -> str:

@@ -84,14 +84,6 @@ def resolve_file_memory_knowledge(
     )
 
 
-def agent_file_memory_search(agent_name: str, config: Config) -> MemorySearchConfig | None:
-    """Return the current semantic file-memory grant without opening its index."""
-    if agent_name not in config.agents:
-        return None
-    entity = config.resolve_entity(agent_name)
-    return entity.memory_search if entity.memory_backend == "file" and entity.memory_search.mode == "semantic" else None
-
-
 def resolve_agent_file_memory_knowledge(
     agent_name: str,
     config: Config,
@@ -99,8 +91,11 @@ def resolve_agent_file_memory_knowledge(
     execution_identity: ToolExecutionIdentity | None,
 ) -> _FileMemoryKnowledgeResolution | None:
     """Resolve an agent's semantic file-memory overlay without widening its runtime scope."""
-    search_config = agent_file_memory_search(agent_name, config)
-    if search_config is None:
+    if agent_name not in config.agents:
+        return None
+
+    entity = config.resolve_entity(agent_name)
+    if entity.memory_backend != "file" or entity.memory_search.mode != "semantic":
         return None
 
     runtime = resolve_agent_runtime(
@@ -116,5 +111,5 @@ def resolve_agent_file_memory_knowledge(
         scope_user_id=agent_scope_user_id(agent_name),
         root=runtime.file_memory_root,
         config=config,
-        search_config=search_config,
+        search_config=entity.memory_search,
     )

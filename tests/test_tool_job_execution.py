@@ -21,7 +21,7 @@ from agno.run.agent import RunContentEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.team import Team
 from agno.tools import Toolkit
-from agno.tools.function import Function, FunctionCall, ToolResult
+from agno.tools.function import FunctionCall, ToolResult
 from pydantic import BaseModel
 
 from mindroom.agent_storage import create_session_storage
@@ -32,6 +32,7 @@ from mindroom.custom_tools.job import JobTools
 from mindroom.hooks import HookRegistry
 from mindroom.tool_jobs import agno_execution, results
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.consumption import (
     ConsumptionOwner,
     consume_tool_job,
@@ -60,7 +61,7 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import assembled_function, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,7 +105,7 @@ async def test_large_outcome_encoding_leaves_event_loop_free(
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
-    function = Function.from_callable(streamed if kind == "stream" else tool)
+    function = assembled_function(streamed if kind == "stream" else tool)
     function._agent = Agent(id="leader")
     function._run_context = RunContext(run_id="payload-run", session_id=context.session_id, session_state={})
     monkeypatch.setattr(agno_execution, "encode_result_payload", encode)
@@ -172,7 +173,7 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
 
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
-    function = Function.from_callable(tool)
+    function = assembled_function(tool)
     function._agent = Agent(id="leader")
     function._run_context = RunContext(run_id="encoding", session_id=context.session_id, session_state={})
     monkeypatch.setattr(agno_execution, "encode_result_payload", encode)
@@ -234,6 +235,7 @@ async def test_registered_sync_tool_completes_through_sdk_dispatch(
         tool_init_overrides={"base_dir": str(tmp_path)},
     )
     prepend_tool_hook_bridge(toolkit, build_tool_hook_bridge(HookRegistry.empty(), agent_name="leader"))
+    bind_toolkit_authority(toolkit, authored_name="coding")
     arguments: dict[str, object] = {"path": "input.txt"}
     if managed:
         arguments["wait_timeout"] = wait_timeout
@@ -292,7 +294,7 @@ async def test_human_followup_releases_original_sdk_call_once(tmp_path: Path) ->
         responses=[ModelResponse(tool_calls=[_call("slow_tool", "exact-call")]), ModelResponse(content="done")],
     )
     install_tool_job_execution(model)
-    agent = Agent(id="leader", model=model, tools=[slow_tool])
+    agent = Agent(id="leader", model=model, tools=[assembled_function(slow_tool)])
     try:
         async with execution_resources():
             with tool_runtime_context(context), human_message_signal_context(signal):
@@ -347,7 +349,7 @@ async def test_streamed_result_saves_its_text_and_media_once(tmp_path: Path) -> 
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
-    function = Function.from_callable(streamed)
+    function = assembled_function(streamed)
     function._agent = Agent(id="leader")
     function._run_context = RunContext(run_id="once-run", session_id=context.session_id, session_state={})
     try:
@@ -388,7 +390,7 @@ async def test_oversized_result_becomes_a_failed_job(tmp_path: Path, monkeypatch
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
-    function = Function.from_callable(large)
+    function = assembled_function(large)
     function._agent = Agent(id="leader")
     function._run_context = RunContext(run_id="large-run", session_id=context.session_id, session_state={})
     monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 150)
@@ -463,6 +465,7 @@ async def test_sdk_toolkit_stays_connected_after_parent_handle(
     register_background_runtime(paths, runtime)
     signal = HumanMessageSignal()
     toolkit = ConnectionTools()
+    bind_toolkit_authority(toolkit, authored_name="connection")
     model = DelegationModel(
         id="test",
         responses=[ModelResponse(tool_calls=[_call("read", "read-call")]), ModelResponse(content="done")],
@@ -540,7 +543,7 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
         responses=[ModelResponse(tool_calls=[_call("generated", "generator-call")]), ModelResponse(content="done")],
     )
     install_tool_job_execution(model)
-    agent = Agent(id="leader", model=model, tools=[generated])
+    agent = Agent(id="leader", model=model, tools=[assembled_function(generated)])
 
     @owned_tool_execution
     async def parent_run() -> RunOutput | TeamRunOutput:
@@ -587,7 +590,7 @@ async def test_exact_call_reattachment_rejects_changed_arguments(tmp_path: Path)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
-    function = Function.from_callable(record)
+    function = assembled_function(record)
     function._agent = Agent(id="leader")
     function._run_context = RunContext(run_id="same-run", session_id=context.session_id, session_state={})
     try:
@@ -644,7 +647,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
     )
     install_tool_job_execution(model)
     storage = storage_factory()
-    function = Function.from_callable(fast_tool)
+    function = assembled_function(fast_tool)
     function.requires_confirmation = approval
     agent = Agent(id="leader", model=model, tools=[function], db=storage)
     if team_parent:
@@ -737,6 +740,7 @@ async def test_cancel_sync_job_waits_for_actual_thread(tmp_path: Path, with_brid
     toolkit = Toolkit(name="slow", tools=[slow_tool])
     if with_bridge:
         prepend_tool_hook_bridge(toolkit, build_tool_hook_bridge(HookRegistry.empty(), agent_name="leader"))
+    bind_toolkit_authority(toolkit, authored_name="slow")
     agent = Agent(id="leader", model=model, tools=[toolkit])
 
     @owned_tool_execution
@@ -895,7 +899,7 @@ async def test_fast_generator_preserves_sdk_events(tmp_path: Path, *, structured
         responses=[ModelResponse(tool_calls=[_call("generated", "event-call")]), ModelResponse(content="done")],
     )
     install_tool_job_execution(model)
-    agent = Agent(id="leader", model=model, tools=[generated])
+    agent = Agent(id="leader", model=model, tools=[assembled_function(generated)])
     try:
         async with execution_resources():
             with tool_runtime_context(context):
@@ -940,7 +944,7 @@ async def test_cancellation_receipt_does_not_replay_the_original_outcome(tmp_pat
 
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
-    function = Function.from_callable(original)
+    function = assembled_function(original)
     function._agent = Agent(id="leader")
     function._run_context = RunContext(
         run_id="original-run",
@@ -1029,7 +1033,13 @@ async def test_saved_result_reread_preserves_later_session_state(
         )
         install_tool_job_execution(model)
         first = await run(
-            Agent(id="leader", model=model, tools=[change_state], db=storage, session_state={"counter": 0}),
+            Agent(
+                id="leader",
+                model=model,
+                tools=[assembled_function(change_state)],
+                db=storage,
+                session_state={"counter": 0},
+            ),
         )
         assert storage.get_run(first.run_id).session_state["counter"] == 1
         job = (await runtime.list_jobs(owner=owner, depth=0))[0]
@@ -1086,7 +1096,7 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
     signal = HumanMessageSignal()
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
-    function = Function.from_callable(change_state)
+    function = assembled_function(change_state)
     function._agent = Agent(id="leader")
     state = {"changed": 0, "conflict": "old", "unrelated": "old"}
     function._run_context = RunContext(run_id="origin", session_id=context.session_id, session_state=state)
@@ -1137,7 +1147,7 @@ async def test_streamed_state_conflict_notice_reaches_sdk_tool_message(tmp_path:
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
     state = {"changed": 0, "conflict": "old"}
-    function = Function.from_callable(generated)
+    function = assembled_function(generated)
     function._agent = Agent(id="leader")
     function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state=state)
     call = FunctionCall(function=function, call_id="stream-state", arguments={})
@@ -1187,7 +1197,7 @@ async def test_sdk_cache_and_post_hook_never_receive_job_handles(tmp_path: Path)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
-    function = Function.from_callable(cached)
+    function = assembled_function(cached)
     function.cache_results = True
     function.cache_dir = str(tmp_path / "cache")
     function.post_hook = after
@@ -1221,7 +1231,7 @@ async def test_saved_control_exception_keeps_stop_semantics(tmp_path: Path) -> N
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
-    function = Function.from_callable(stop)
+    function = assembled_function(stop)
     function._agent = Agent(id="leader")
     function._run_context = RunContext(run_id="control-run", session_id=context.session_id, session_state={})
     call = FunctionCall(function=function, call_id="control-call")

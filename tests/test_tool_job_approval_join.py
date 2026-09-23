@@ -56,7 +56,7 @@ from mindroom.tool_system.runtime_context import (
 from tests.conftest import make_turn_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import assembled_function, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -355,14 +355,14 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
         ],
     )
     install_tool_job_execution(model)
-    function = Function.from_callable(approved_tool)
+    function = assembled_function(approved_tool)
     function.requires_confirmation = True
     db_file = str(tmp_path / "agent.db")
     storage = SqliteDb(db_file=db_file)
     actor = Agent(
         id="leader",
         model=model,
-        tools=[slow_tool, function, JobTools(paths, owner)],
+        tools=[assembled_function(slow_tool), function, JobTools(paths, owner)],
         db=storage,
         telemetry=False,
     )
@@ -510,7 +510,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
         id="leader",
         model=model,
         members=[member],
-        tools=[slow_tool, JobTools(paths, owner)],
+        tools=[assembled_function(slow_tool), JobTools(paths, owner)],
         db=storage,
         telemetry=False,
     )

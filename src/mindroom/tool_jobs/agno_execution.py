@@ -32,7 +32,6 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.agno_compat_functions import (
     function_actor,
     function_run_context,
-    is_framework_function,
     isolated_function_call,
     uses_sdk_async_dispatch,
 )
@@ -96,6 +95,11 @@ def is_background_job_excluded(function: Function) -> bool:
         and context is not None
         and toolkit_is_background_excluded(construction.name, context.config, context.runtime_paths)
     )
+
+
+def is_framework_function(function: Function) -> bool:
+    """Only functions of toolkits MindRoom assembled for an actor become jobs; SDK-generated ones run inline."""
+    return function.owning_toolkit is None or function_actor(function) is None
 
 
 def _validate_wait_timeout_parameter(function: Function) -> None:

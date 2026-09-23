@@ -81,7 +81,6 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
         identity = {
             "factory": tool_registry_origins()["stable_plugin"],
             "construction": list(construction.factory_origin),
-            "callable": function_provenance(function),
         }
         owner = ToolExecutionIdentity(
             "matrix",
@@ -239,7 +238,6 @@ def test_plugin_job_identity_survives_hash_seed_restart_and_distinguishes_roots(
     identity = created["identity"]
     assert identity["factory"] == identity["construction"]
     assert identity["factory"][1] == "stable_plugin_tools"
-    assert identity["callable"]["qualname"] == "StableTools.stable_echo"
 
 
 def test_prepare_module_installs_package_chain(tmp_path: Path) -> None:

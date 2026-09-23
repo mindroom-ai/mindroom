@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 import platform
@@ -33,8 +32,6 @@ from mindroom.tool_system.skill_usage import record_skill_use
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from agno.tools.function import Function
 
     from mindroom.config.main import Config
@@ -270,17 +267,6 @@ class _MindroomSkills(Skills):
             return {"error": f"Error reading workspace skill file {filename}: {type(exc).__name__}"}
         self._record_use(skill_name)
         return {"content": content}
-
-
-def skill_access_origin(entrypoint: Callable[..., object] | None, skill_name: object) -> dict[str, object]:
-    """Describe the configured or workspace source of a bound skill access call."""
-    skills = entrypoint.__self__ if inspect.ismethod(entrypoint) else None
-    if not isinstance(skills, _MindroomSkills):
-        return {}
-    return {
-        "skill_name": skill_name,
-        "workspace_skill": isinstance(skill_name, str) and skills._is_script_execution_blocked(skill_name),
-    }
 
 
 def build_agent_skills(

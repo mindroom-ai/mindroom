@@ -17,12 +17,12 @@ from agno.team import _tools as team_tools
 from agno.tools.function import Function
 
 from mindroom.custom_tools.job import is_job_function, project_native_job_wait
-from mindroom.tool_jobs.agno_compat_functions import is_framework_function
 from mindroom.tool_jobs.agno_compat_resources import install_execution_resource_bindings
 from mindroom.tool_jobs.agno_execution import (
     call_wait_mode,
     execute_owned_tool_call,
     is_background_job_excluded,
+    is_framework_function,
     wrap_tool_execution,
 )
 from mindroom.tool_jobs.control import job_owns_execution
@@ -163,7 +163,7 @@ def _wrap_tool_schemas(
 # Remove when: SDK exposes public approved-call execution ownership.
 # Coverage: tests/test_tool_job_execution.py::test_fast_result_acknowledges_exact_saved_sdk_run
 # Coverage: tests/test_tool_job_control_calls.py::test_model_control_preserves_timing_across_human_followup
-# Coverage: tests/test_tool_job_learning.py::test_learning_persists_with_background_jobs_and_scoped_storage
+# Coverage: tests/test_tool_job_sdk_functions.py::test_sdk_generated_functions_run_inline_with_native_schemas
 def install_tool_job_execution(
     model: Model,
     fallback_config: FallbackConfig | None = None,

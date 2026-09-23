@@ -41,7 +41,7 @@ from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_subagent_runtime import _job
-from tests.tool_job_helpers import start_delegation_job, start_job, tool_job_runtime
+from tests.tool_job_helpers import assembled_function, start_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -109,7 +109,7 @@ async def test_silent_join_preserves_the_deliverable_report(
     actor = Agent(
         id="leader",
         model=model,
-        tools=[probe_tool, JobTools(paths, owner)] if enabled else [probe_tool],
+        tools=[assembled_function(probe_tool), JobTools(paths, owner)] if enabled else [probe_tool],
         db=storage,
         telemetry=False,
     )
@@ -374,7 +374,7 @@ async def test_accepted_job_persists_silent_completion_policy_across_restart(tmp
         ],
     )
     install_tool_job_execution(model)
-    agent = Agent(id="general", model=model, tools=[slow])
+    agent = Agent(id="general", model=model, tools=[assembled_function(slow)])
     try:
         async with execution_resources():
             with tool_runtime_context(context):

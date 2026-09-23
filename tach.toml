@@ -816,7 +816,6 @@ depends_on = [
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.agent_descriptions",
     "mindroom.agent_knowledge_descriptions",
-    "mindroom.agent_policy",
     "mindroom.agent_storage",
     "mindroom.claude_prompt_cache",
     "mindroom.constants",
@@ -870,11 +869,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.agent_knowledge_descriptions"
-depends_on = [
-    "mindroom.knowledge_source_descriptions",
-    "mindroom.tool_system.output_files",
-    "mindroom.tool_system.tool_hooks",
-]
+depends_on = ["mindroom.knowledge_source_descriptions", "mindroom.tool_system.tool_hooks"]
 visibility = [
     "mindroom.minimal_agent",
     "mindroom.agents",
@@ -5575,7 +5570,6 @@ from = ["mindroom.teams"]
 
 [[interfaces]]
 expose = [
-    "is_learning_enabled",
     "AgentPolicySeed",
     "ResolvedAgentPolicy",
     "ResolvedAgentPolicyIndex",
@@ -6605,7 +6599,6 @@ expose = [
     "skill_can_edit",
     "workspace_entry_names",
     "workspace_skill_file_names",
-    "skill_access_origin",
 ]
 from = ["mindroom.tool_system.skills"]
 
@@ -7766,7 +7759,6 @@ depends_on = [
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_jobs.wait_timeout",
-    "mindroom.tool_jobs.agno_compat_functions",
 ]
 visibility = [
     "mindroom.agents",
@@ -7932,7 +7924,6 @@ depends_on = [
     "mindroom.tool_system.filters",
     "mindroom.tool_system.registry_state",
     "mindroom.agent_policy",
-    "mindroom.knowledge.utils",
     "mindroom.tool_jobs.agno_compat_functions",
 ]
 
@@ -7968,11 +7959,10 @@ visibility = [
 
 [[modules]]
 path = "mindroom.tool_jobs.provenance"
-depends_on = ["mindroom.mcp", "mindroom.mcp.toolkit", "mindroom.tool_system.declarations", "mindroom.tool_system.skills"]
+depends_on = ["mindroom.mcp", "mindroom.mcp.toolkit"]
 visibility = [
     "mindroom.tool_jobs.agno_execution",
     "mindroom.orchestration.tool_job_runtime",
-    "mindroom.tool_jobs.agno_compat_functions",
 ]
 
 [[modules]]
@@ -8204,10 +8194,9 @@ visibility = ["mindroom.response_runner", "mindroom.orchestration.tool_job_runti
 
 [[modules]]
 path = "mindroom.tool_jobs.agno_compat_functions"
-depends_on = ["mindroom.tool_jobs.provenance"]
+depends_on = []
 visibility = [
     "mindroom.tool_jobs.agno_execution",
-    "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.authorization",
 ]

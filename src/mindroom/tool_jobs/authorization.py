@@ -6,8 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools import Toolkit
 
-from mindroom.agent_policy import is_learning_enabled, resolve_agent_policy_from_data
-from mindroom.knowledge.utils import agent_knowledge_authority_signature
+from mindroom.agent_policy import resolve_agent_policy_from_data
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
 from mindroom.tool_jobs.agno_compat_functions import function_actor
 from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
@@ -45,10 +44,7 @@ def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:
         config.agents[agent_name],
         default_worker_scope=config.defaults.worker_scope,
     )
-    return {
-        "scope": policy.effective_execution_scope,
-        "knowledge": agent_knowledge_authority_signature(agent_name, config),
-    }
+    return {"scope": policy.effective_execution_scope}
 
 
 def function_authority(function: Function) -> dict[str, Any]:
@@ -73,46 +69,6 @@ def function_authority(function: Function) -> dict[str, Any]:
     }
 
 
-def _framework_tool_allowed(
-    config: Config,
-    agent_name: str,
-    tool_name: str,
-    origin: dict[str, Any],
-    authority: dict[str, Any],
-) -> bool:
-    agent = config.agents[agent_name]
-    module = str(origin.get("module", ""))
-    qualname = str(origin.get("qualname", ""))
-    skill_tools = {
-        "get_skill_instructions": ("agno.skills.agent_skills", "Skills._get_skill_instructions"),
-        "get_skill_reference": ("agno.skills.agent_skills", "Skills._get_skill_reference"),
-        "get_skill_script": ("mindroom.tool_system.skills", "_MindroomSkills._get_skill_script"),
-    }
-    if (module, qualname) == skill_tools.get(tool_name):
-        return origin.get("workspace_skill") is True or origin.get("skill_name") in agent.skills
-    if (
-        module == "agno.agent._default_tools"
-        and tool_name == "search_knowledge_base"
-        and "create_knowledge_search_tool." in qualname
-    ):
-        current = agent_knowledge_authority_signature(agent_name, config)
-        return current is not None and authority.get("knowledge") == current
-    mode = agent.learning_mode or config.defaults.learning_mode
-    expected = {
-        "agno.learn.stores.user_profile": {"update_profile"},
-        "agno.learn.stores.user_memory": {
-            "update_user_memory",
-            "add_memory",
-            "update_memory",
-            "delete_memory",
-            "clear_all_memories",
-        },
-    }
-    return (
-        is_learning_enabled(agent, config.defaults) and mode == "agentic" and tool_name in expected.get(module, set())
-    )
-
-
 def locally_allowed(
     config: Config,
     owner: ToolExecutionIdentity,
@@ -133,9 +89,6 @@ def locally_allowed(
     )
     if "scope" not in authority or authority["scope"] != policy.effective_execution_scope:
         return False
-    if toolkit_name is None:
-        # Framework-owned knowledge, memory, and skill functions have no authored toolkit.
-        return _framework_tool_allowed(config, owner.agent_name, tool_name, origin, authority)
     construction = authority.get("construction")
     if not isinstance(construction, dict):
         return False

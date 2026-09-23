@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING
 
 from agno.tools.function import FunctionCall
 
-from mindroom.tool_jobs.provenance import callable_origin
-
 if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.run import RunContext
@@ -53,18 +51,6 @@ def isolated_function_call(call: FunctionCall) -> FunctionCall:
             dependencies=dict(context.dependencies) if context.dependencies is not None else None,
         )
     return FunctionCall(function=function, arguments=deepcopy(call.arguments), call_id=call.call_id)
-
-
-def is_framework_function(function: Function) -> bool:
-    """Recognize SDK-owned calls that have no independent application execution."""
-    if function_actor(function) is None:
-        return True
-    origin = callable_origin(function)
-    return (
-        origin["module"] == "agno.team._default_tools"
-        and origin["qualname"] is not None
-        and "get_delegate_task" in origin["qualname"]
-    )
 
 
 def uses_sdk_async_dispatch(function: Function) -> bool:
