@@ -783,31 +783,36 @@ async def test_cancellation_mid_stream_appends_cancelled_note(config: Config) ->
     assert transport_outcome.visible_event_id == "$stream_1"
 
 
+def _live_ceiling_streaming(config: Config, *, max_live_chars: int) -> StreamingResponse:
+    return StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        max_live_chars=max_live_chars,
+    )
+
+
 @pytest.mark.asyncio
 async def test_nonterminal_updates_skip_formatting_past_live_ceiling(config: Config) -> None:
     """Past the ceiling, progressive updates cost nothing; forced and terminal deliveries still send."""
     gateway = _FakeGateway()
-    streaming = StreamingResponse(
-        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        max_live_chars=10,
-    )
-    streaming.event_id = "$stream_1"
-    streaming.accumulated_text = "x" * 11
+    streaming = _live_ceiling_streaming(config, max_live_chars=10)
     client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
     capture: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
     with (
-        patch("mindroom.streaming.format_message_with_mentions", side_effect=AssertionError("formatted")),
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
         patch("mindroom.streaming.edit_message_result", new=gateway.edit),
     ):
-        assert await streaming._send_or_edit_message(client, capture_completions=(capture,)) is True
+        streaming.accumulated_text = "x" * 5
+        assert await streaming._send_or_edit_message(client) is True
+        streaming.accumulated_text = "x" * 11
+        with patch("mindroom.streaming.format_message_with_mentions", side_effect=AssertionError("formatted")):
+            assert await streaming._send_or_edit_message(client, capture_completions=(capture,)) is True
 
-    assert gateway.ops == []
-    assert capture.result() is None
+        assert [op.kind for op in gateway.ops] == ["send"]
+        assert capture.result() is None
 
-    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
         assert await streaming._send_or_edit_message(client, force_nonterminal_delivery=True) is True
         assert await streaming._send_or_edit_message(
             client,
@@ -815,9 +820,75 @@ async def test_nonterminal_updates_skip_formatting_past_live_ceiling(config: Con
             stream_status=STREAM_STATUS_COMPLETED,
         )
 
-    assert [op.kind for op in gateway.ops] == ["edit", "edit"]
+    assert [op.kind for op in gateway.ops] == ["send", "edit", "edit"]
     assert gateway.ops[-1].display_text == "x" * 11
     assert gateway.ops[-1].content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_past_ceiling_heartbeat_edit_keeps_stream_recoverable(config: Config) -> None:
+    """Past the ceiling, one ordinary edit still lands once the last committed update is a heartbeat old."""
+    gateway = _FakeGateway()
+    streaming = _live_ceiling_streaming(config, max_live_chars=10)
+    client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
+    clock = {"now": 1_000_000.0}
+    heartbeat = streaming_mod._PAST_CEILING_HEARTBEAT_SECONDS
+
+    with (
+        patch("mindroom.streaming.time.time", side_effect=lambda: clock["now"]),
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+    ):
+        await streaming.update_content("Hello", client)
+        assert [op.kind for op in gateway.ops] == ["send"]
+
+        clock["now"] += heartbeat - 1
+        with patch("mindroom.streaming.format_message_with_mentions", side_effect=AssertionError("formatted")):
+            await streaming.update_content(" world, past the ceiling", client)
+        assert [op.kind for op in gateway.ops] == ["send"]
+
+        clock["now"] += 1
+        await streaming.update_content("!", client)
+        assert [op.kind for op in gateway.ops] == ["send", "edit"]
+        assert gateway.ops[-1].display_text == "Hello world, past the ceiling!"
+        assert gateway.ops[-1].content[STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
+
+        clock["now"] += heartbeat - 1
+        with patch("mindroom.streaming.format_message_with_mentions", side_effect=AssertionError("formatted")):
+            await streaming.update_content(" More.", client)
+        assert [op.kind for op in gateway.ops] == ["send", "edit"]
+
+
+@pytest.mark.asyncio
+async def test_past_ceiling_heartbeat_waits_for_oversized_edit_cadence(config: Config) -> None:
+    """A due heartbeat stays free while the size-proportional sidecar cadence would refuse its edit."""
+    gateway = _FakeGateway()
+    streaming = _live_ceiling_streaming(config, max_live_chars=10)
+    client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
+    clock = {"now": 1_000_000.0}
+    cadence_clock = {"now": 100.0}
+    heartbeat = streaming_mod._PAST_CEILING_HEARTBEAT_SECONDS
+
+    with (
+        patch("mindroom.streaming.time.time", side_effect=lambda: clock["now"]),
+        patch("mindroom.matrix.large_messages.monotonic", side_effect=lambda: cadence_clock["now"]),
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+    ):
+        await streaming.update_content("Hello", client)
+        clock["now"] += heartbeat
+        await streaming.update_content("x" * 40_000, client)
+        assert [op.kind for op in gateway.ops] == ["send", "edit"]
+
+        clock["now"] += heartbeat
+        with patch("mindroom.streaming.format_message_with_mentions", side_effect=AssertionError("formatted")):
+            await streaming.update_content("y", client)
+        assert [op.kind for op in gateway.ops] == ["send", "edit"]
+
+        cadence_clock["now"] += 10**6
+        await streaming.update_content("z", client)
+        assert [op.kind for op in gateway.ops] == ["send", "edit", "edit"]
+        assert gateway.ops[-1].display_text.endswith("yz")
 
 
 def _capped_streaming_config(config: Config, *, max_live_chars: int) -> Config:

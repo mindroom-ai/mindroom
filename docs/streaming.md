@@ -100,6 +100,7 @@ MindRoom throttles edits to avoid overwhelming the Matrix homeserver:
 - **Tool-start boundary refresh**: Visible tool-start markers request an immediate refresh so the marker can surface without waiting for later text.
   Rapid back-to-back tool starts are coalesced by the single delivery owner instead of forcing one Matrix edit per tool.
 - **Live-update ceiling**: once a streamed response exceeds `defaults.streaming.max_live_chars` characters (default: 1,000,000), MindRoom stops progressive edits and delivers the complete response when the turn ends.
+  While the turn keeps running, an ordinary edit still goes out once the previous one is 30 minutes old, so restart recovery can still find the in-progress message.
 
 ## Tool Calls During Streaming
 
