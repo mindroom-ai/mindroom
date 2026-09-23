@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -17,6 +18,8 @@ import pytest
 from agno.tools import Toolkit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.contextvars import merge_contextvars
+from structlog.testing import capture_logs
 
 from mindroom import agents, constants
 from mindroom.api import config_lifecycle, main
@@ -227,6 +230,50 @@ def _list(client: TestClient, token: str | None = None, **headers: str) -> httpx
             **headers,
         },
     )
+
+
+@pytest.mark.parametrize("agent", ["personal", "Personal", "private-unknown-agent-marker", None])
+@pytest.mark.parametrize("clear_selection", [False, True])
+def test_agent_selection_diagnostics(
+    gateway_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+    agent: str | None,
+    clear_selection: bool,
+) -> None:
+    """Logs distinguish case mismatches and unknown agents from unscoped discovery."""
+    token = _exchange(gateway_client, *_code(gateway_client, signed_headers("alice"))).json()["access_token"]
+    if clear_selection:
+        saved = gateway_client.post(
+            "/api/connections/mcp/selection",
+            headers={**signed_headers("alice"), "Origin": ORIGIN},
+            json={"agents": {}},
+        )
+        assert saved.status_code == 200
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        response = gateway_client.post(
+            "/mcp",
+            headers={**MCP_HEADERS, "Authorization": f"Bearer {token}"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "search_tools", "arguments": {} if agent is None else {"agent": agent}},
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is (agent is not None and (agent != "personal" or clear_selection))
+    selection = next(entry for entry in logs if entry["event"] == "mcp_gateway_agent_selection")
+    assert selection["agent_provided"] is (agent is not None)
+    assert selection["agent_selected"] is (agent == "personal" and not clear_selection)
+    assert selection["agent_saved"] is (agent == "personal" and not clear_selection)
+    assert selection["agent_eligible"] is (agent == "personal")
+    assert selection["agent_case_match"] is (agent in {"personal", "Personal"})
+    assert selection["selected_agent_count"] == (0 if clear_selection else 1)
+    call = next(entry for entry in logs if entry["event"] == "mcp_gateway_call_completed")
+    assert selection["request_id"] == call["request_id"]
+    assert call["requester_id"] == "@alice:example.org"
+    assert "private-unknown-agent-marker" not in json.dumps(logs)
+    assert token not in json.dumps(logs)
 
 
 def _native_dispatch_builder(
