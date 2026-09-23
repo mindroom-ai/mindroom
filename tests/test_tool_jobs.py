@@ -1412,6 +1412,31 @@ async def test_shutdown_cleanup_failure_does_not_strand_other_jobs(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_unsupported_snapshot_schema_fails_enabled_recovery(tmp_path: Path) -> None:
+    """Enabled recovery reports a retired snapshot loudly instead of adopting or rewriting it."""
+    runtime = ToolJobRuntime(tmp_path)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved answer")
+
+    await runtime.start(JobSpec("retired", "tool", 0), owner=_owner(), operation=operation)
+    await runtime.shutdown()
+    path = tmp_path / "tool_jobs" / "retired.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "schema_version": 1}))
+    retired = path.read_bytes()
+    restored = ToolJobRuntime(tmp_path)
+    try:
+        with pytest.raises(
+            runtime_module.UnsupportedToolJobSnapshotError,
+            match=r"\(schema_version=1\); remove it to continue\.$",
+        ):
+            await restored.recover()
+        assert path.read_bytes() == retired
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_failure_while_draining_cancellation_is_not_reported_cancelled(tmp_path: Path) -> None:
     """An operation's failing finalizer remains visible after its cancellation request."""
     runtime = ToolJobRuntime(tmp_path)

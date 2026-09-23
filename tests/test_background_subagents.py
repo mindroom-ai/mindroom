@@ -110,11 +110,7 @@ async def test_consumed_native_result_releases_live_child_and_discovery_payload(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("legacy_result_copy", [False, True])
-async def test_native_result_expires_to_a_compact_receipt_after_restart(
-    tmp_path: Path,
-    legacy_result_copy: bool,
-) -> None:
+async def test_native_result_expires_to_a_compact_receipt_after_restart(tmp_path: Path) -> None:
     """Native metadata cannot bypass the retention boundary or re-enable an expired execution."""
     runtime = ToolJobRuntime(tmp_path)
     child = _child()
@@ -131,11 +127,6 @@ async def test_native_result_expires_to_a_compact_receipt_after_restart(
     await runtime.acknowledge_wait(child.delegation_id, waited.token)
     await runtime.shutdown()
     path = tmp_path / "tool_jobs" / f"{child.delegation_id}.json"
-    if legacy_result_copy:
-        legacy = json.loads(path.read_text())
-        legacy["schema_version"] = 1
-        legacy["adapter"]["child"]["result"] = raw
-        path.write_text(json.dumps(legacy))
     restored = ToolJobRuntime(tmp_path)
 
     async def source_finished(_job: background.BackgroundJob) -> bool:

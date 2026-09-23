@@ -27,7 +27,7 @@ from mindroom.tool_jobs.authorization import (
     function_authority,
     locally_allowed,
 )
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry_state import TOOL_REGISTRY
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -128,6 +128,17 @@ def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> 
     assert allowed()
     entry.overrides.clear()
     assert not allowed()
+
+
+def test_constructor_identity_is_a_digest_with_separate_function_filters() -> None:
+    """Secrets do not survive in access evidence; order and function filters do not change identity."""
+    options = {"token": "synthetic-constructor-secret", "nested": {"endpoint": "example.test"}}
+    signature = tool_config_signature(options)
+    assert len(signature) == 64
+    assert "synthetic-constructor-secret" not in signature
+    assert signature == tool_config_signature({"nested": options["nested"], "token": options["token"]})
+    assert signature == tool_config_signature({**options, "include_tools": ["add"], "exclude_tools": ["subtract"]})
+    assert signature != tool_config_signature({**options, "token": "changed"})
 
 
 def _calculator_authority(config: Config) -> dict[str, object]:

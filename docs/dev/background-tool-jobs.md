@@ -59,12 +59,9 @@ the last acknowledged read, longer while response or approval ownership requires
 them. Expiry keeps an execution receipt but drops full results, tool arguments and
 child task input. Constructor identity is a digest, not a retained settings blob.
 
-The released v2026.9.165 format is normalized at one legacy boundary. Its exact
-notification receipt does not imply consumption. Saved child outcomes survive,
-abandoned human holds interrupt, and missing constructor or source evidence is
-never inferred. These old snapshots cannot support exact recovery of their original
-Matrix source because the writer did not record it. Consumed historical results
-can expire once no pending approval owns their conversation.
+Snapshots carry one schema version.
+Enabled recovery fails on a snapshot with any other version and names the file to remove.
+A disabled instance never opted in, so it logs a warning and skips unreadable snapshots while parking the others.
 
 ## Limits
 

@@ -7587,7 +7587,6 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.runtime"
 depends_on = [
-    "mindroom.tool_jobs.legacy_tool_jobs",
     "mindroom.tool_jobs.wait_timeout",
     "mindroom.ai_runtime",
     "mindroom.background_tasks",
@@ -7611,11 +7610,6 @@ visibility = [
     "mindroom.tool_jobs.disabled",
     "mindroom.tool_jobs.user_stop",
 ]
-
-[[modules]]
-path = "mindroom.tool_jobs.legacy_tool_jobs"
-depends_on = []
-visibility = ["mindroom.tool_jobs.runtime"]
 
 [[modules]]
 path = "mindroom.tool_jobs.control"

@@ -316,10 +316,8 @@ class ToolJobRuntimeCoordinator:
         async def source_finished(job: BackgroundJob) -> bool:
             entity = job.owner.transport_agent_name or job.owner.agent_name
             source = job.adapter.get("source_event_id")
-            if (entity, job.owner.session_id) in protected_sessions:
+            if not isinstance(source, str) or (entity, job.owner.session_id) in protected_sessions:
                 return False
-            if not isinstance(source, str):
-                return job.legacy_source_untracked
             key = (entity, source)
             if key not in finished:
                 record = await journal.turn_records(entity).load(source)

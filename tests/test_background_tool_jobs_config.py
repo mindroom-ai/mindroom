@@ -6,7 +6,7 @@ import json
 import subprocess
 import sys
 import textwrap
-from dataclasses import replace
+from dataclasses import asdict, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -35,10 +35,16 @@ from mindroom.event_journal import (
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseSources
-from mindroom.tool_jobs.disabled import approval_is_parked, event_is_parked
+from mindroom.tool_jobs.disabled import approval_is_parked, clear_parked_work, event_is_parked, index_parked_work
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.resources import current_execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, get_background_runtime
+from mindroom.tool_jobs.runtime import (
+    BackgroundJob,
+    BackgroundOutcome,
+    JobSpec,
+    ToolJobRuntime,
+    get_background_runtime,
+)
 from mindroom.tool_jobs.settings import (
     background_tool_jobs_enabled,
     pending_background_tool_jobs_restart,
@@ -454,3 +460,29 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
         assert await dispatcher._run_event(event)
     finally:
         await restarted.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unreadable",
+    [
+        '{"schema_version": 1, "job_id": "retired"}',
+        '{"schema_version": 2, "job_id": "trunc',
+        '{"schema_version": 2, "job_id": "another"}',
+    ],
+)
+async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unreadable: str) -> None:
+    """A disabled instance never opted in, so an unreadable snapshot cannot block parking the others."""
+    paths = test_runtime_paths(tmp_path)
+    directory = paths.storage_root / "tool_jobs"
+    directory.mkdir(parents=True)
+    (directory / "retired.json").write_text(unreadable)
+    owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
+    saved = BackgroundJob(job_id="saved", owner=owner, tool_name="tool", depth=0, adapter={"source_event_id": "$saved"})
+    (directory / "saved.json").write_text(json.dumps({"schema_version": 2, **asdict(saved)}))
+    event = JournalEvent("$saved", "!room:localhost", None, EventKind.MESSAGE, "@user:localhost", 1, {}, 1)
+    try:
+        await index_parked_work(paths)
+        assert event_is_parked(Config(), paths, "general", event)
+    finally:
+        clear_parked_work(paths)

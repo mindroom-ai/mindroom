@@ -28,7 +28,6 @@ from mindroom.tool_jobs.control import (
     human_message_signal_context,
     job_control_context,
 )
-from mindroom.tool_jobs.legacy_tool_jobs import upgrade_schema_one_job
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.wait_timeout import validate_wait_timeout
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
@@ -54,11 +53,16 @@ _TERMINAL = frozenset({"completed", "failed", "cancelled", "denied", "interrupte
 _READY = _TERMINAL | {"awaiting_approval"}
 _UNAVAILABLE = "Tool job is not available in this conversation."
 JOB_SUMMARY_MAX_CHARS = 500
+_SNAPSHOT_SCHEMA_VERSION = 2
 logger = get_logger(__name__)
 
 
 class JobAccessError(ValueError):
     """The requested job is unavailable to this caller or runtime."""
+
+
+class UnsupportedToolJobSnapshotError(ValueError):
+    """A saved job uses a snapshot schema this runtime does not read."""
 
 
 class JobRecoveryBlockedError(RuntimeError):
@@ -112,27 +116,22 @@ class BackgroundJob:
     wait_acknowledged: bool = False
     result_expired: bool = False
     user_stop_receipt_order: int | None = None
-    legacy_source_untracked: bool = False
-    legacy_notified_generation: int | None = None
 
 
 def read_job_snapshot(path: Path) -> BackgroundJob:
     """Validate one existing snapshot without claiming or changing its execution."""
-    return _read_job_snapshot(path)[0]
-
-
-def _read_job_snapshot(path: Path) -> tuple[BackgroundJob, bool]:
     if path.is_symlink() or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", path.stem) is None:
         raise JobAccessError(_UNAVAILABLE)
     payload = json.loads(path.read_text())
     version = payload.pop("schema_version")
-    if version not in {1, 2} or payload["job_id"] != path.stem:
+    if version != _SNAPSHOT_SCHEMA_VERSION:
+        msg = f"Unsupported tool job snapshot {path} (schema_version={version}); remove it to continue."
+        raise UnsupportedToolJobSnapshotError(msg)
+    if payload["job_id"] != path.stem:
         msg = "Invalid tool job snapshot."
         raise ValueError(msg)
-    if version == 1:
-        upgrade_schema_one_job(payload)
     payload["owner"] = parse_tool_execution_identity_payload(payload["owner"], strict=True)
-    return BackgroundJob(**payload), version == 1
+    return BackgroundJob(**payload)
 
 
 def format_job_handle(
@@ -303,7 +302,11 @@ class ToolJobRuntime:
         path = self._path(job.job_id)
 
         def write() -> None:
-            write_json_file_durable(path, {"schema_version": 2, **asdict(job)}, strict_atomic_replace=True)
+            write_json_file_durable(
+                path,
+                {"schema_version": _SNAPSHOT_SCHEMA_VERSION, **asdict(job)},
+                strict_atomic_replace=True,
+            )
 
         try:
             await run_blocking_until_complete(write)
@@ -323,9 +326,7 @@ class ToolJobRuntime:
             for path in await asyncio.to_thread(lambda: sorted(self._root.glob("*.json"))):
                 if path.stem in self._entries:
                     continue
-                job, upgraded = await asyncio.to_thread(_read_job_snapshot, path)
-                if upgraded and job.result_expired:
-                    job.adapter = self._compact_adapter(job.adapter)
+                job = await asyncio.to_thread(read_job_snapshot, path)
                 entry = _Entry(job, saved=True)
                 interrupted = job.status not in _READY
                 if interrupted:
@@ -337,8 +338,6 @@ class ToolJobRuntime:
                         outcome=outcome,
                     )
                     await self._persist(entry)
-                elif upgraded:
-                    await self._persist(entry, update_timestamp=False)
                 self._index_consumption(entry)
                 self._cool(entry)
                 self._entries[job.job_id] = entry
@@ -877,7 +876,6 @@ class ToolJobRuntime:
     def _unconsumed(self, entry: _Entry) -> bool:
         return (
             not entry.job.wait_acknowledged
-            and entry.job.legacy_notified_generation != entry.job.generation
             and entry.job.user_stop_receipt_order is None
             and entry.wait_token is None
             and self._allowed(entry.job)

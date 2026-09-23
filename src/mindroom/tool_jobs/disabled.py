@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.event_journal import EventKind
-from mindroom.tool_jobs.runtime import read_job_snapshot
+from mindroom.logging_config import get_logger
+from mindroom.tool_jobs.runtime import UnsupportedToolJobSnapshotError, read_job_snapshot
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 
 if TYPE_CHECKING:
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore, JournalEvent
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -55,7 +58,17 @@ def _saved_sources(runtime_paths: RuntimePaths) -> _ParkedWork:
         raise ValueError(msg)
     parked = _ParkedWork()
     for path in sorted(root.glob("*.json")):
-        job = read_job_snapshot(path)
+        try:
+            job = read_job_snapshot(path)
+        except (UnsupportedToolJobSnapshotError, ValueError) as error:
+            # A retired schema, invalid JSON, or rejected contents: this instance never opted in,
+            # and enabled recovery still reports the file loudly.
+            logger.warning(
+                "Ignoring unreadable tool job snapshot while background tool jobs are disabled",
+                path=str(path),
+                error=str(error),
+            )
+            continue
         source = job.adapter.get("source_event_id")
         if isinstance(source, str):
             parked.sources.add((job.owner.transport_agent_name or job.owner.agent_name, source))
