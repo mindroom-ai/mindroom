@@ -277,6 +277,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `thread_export/workspace_sync.py` | Always-on debounced runner that keeps `<workspace>/thread_exports/` current through the live bots' clients and journal principals |
 | `background_tasks.py` | Background task management for non-blocking operations |
 | `tool_jobs/runtime.py` | Accepted execution ownership, durable outcomes, scoped discovery, and result claims |
+| `tool_jobs/instances.py` | One per-storage-root instance: startup-pinned setting, published runtime, and parked work |
 | `tool_jobs/settings.py` | Startup-pinned feature and toolkit exclusion settings |
 | `tool_jobs/disabled.py` | Passive preservation of saved sources and approvals while the feature is off |
 | `tool_jobs/agno_compat_execution.py` | SDK schema and exact tool-dispatch bindings |
