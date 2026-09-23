@@ -703,6 +703,17 @@ class StreamingResponse:
             return self._inflight_nonterminal_capture
         return None
 
+    def _live_updates_paused(self) -> bool:
+        """Return whether the live-update ceiling should suppress progressive edits.
+
+        Once a stream already has a visible Matrix event and the accumulated text
+        exceeds `max_live_chars`, every progressive edit would re-format and re-size
+        the whole response via `asyncio.to_thread` (still costly under the GIL).
+        Forced non-terminal deliveries and the terminal delivery bypass this check
+        and always carry the complete answer.
+        """
+        return self.event_id is not None and len(self.accumulated_text) > self.max_live_chars
+
     async def _throttled_send(
         self,
         client: nio.AsyncClient,
@@ -712,6 +723,11 @@ class StreamingResponse:
         capture_completions: tuple[asyncio.Future[None], ...] = (),
     ) -> None:
         """Send/edit when either time or character thresholds are met."""
+        if self._live_updates_paused():
+            # Past the ceiling, skip the O(n) accumulated_text.strip() below along
+            # with any formatting; only the terminal delivery still sends.
+            _complete_capture_completions(capture_completions)
+            return
         current_time = time.time()
         if self.stream_started_at is None:
             self.stream_started_at = current_time
@@ -1013,15 +1029,11 @@ class StreamingResponse:
         capture_completions: tuple[asyncio.Future[None], ...] = (),
     ) -> bool:
         """Send new message or edit existing one."""
-        if (
-            not is_final
-            and not force_nonterminal_delivery
-            and self.event_id is not None
-            and len(self.accumulated_text) > self.max_live_chars
-        ):
+        if not is_final and not force_nonterminal_delivery and self._live_updates_paused():
             # Past the live ceiling every progressive edit would re-format and
-            # re-size the whole response on the event loop. The terminal
-            # delivery still carries the complete answer.
+            # re-size the whole response via asyncio.to_thread (still costly
+            # under the GIL). The terminal delivery still carries the
+            # complete answer.
             _complete_capture_completions(capture_completions)
             return True
         prepared_delivery = await self._prepare_delivery_async(
@@ -1835,8 +1847,11 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
 
         try:
             prepared_phase_boundary_flush = None
-            if merged_request.phase_boundary_flush and (
-                streaming.chars_since_last_update > 0 and streaming.accumulated_text.strip()
+            if (
+                merged_request.phase_boundary_flush
+                and not streaming._live_updates_paused()
+                and streaming.chars_since_last_update > 0
+                and streaming.accumulated_text.strip()
             ):
                 prepared_phase_boundary_flush = await streaming._prepare_delivery_async(
                     is_final=False,

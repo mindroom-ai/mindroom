@@ -805,7 +805,7 @@ async def test_nonterminal_updates_skip_formatting_past_live_ceiling(config: Con
         assert await streaming._send_or_edit_message(client, capture_completions=(capture,)) is True
 
     assert gateway.ops == []
-    assert capture.done()
+    assert capture.result() is None
 
     with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
         assert await streaming._send_or_edit_message(client, force_nonterminal_delivery=True) is True
@@ -820,10 +820,13 @@ async def test_nonterminal_updates_skip_formatting_past_live_ceiling(config: Con
     assert gateway.ops[-1].content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
 
 
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("fake_clock")
-async def test_stream_stops_live_edits_past_configured_ceiling(config: Config) -> None:
-    """`defaults.streaming.max_live_chars` freezes progressive edits but still delivers the full answer."""
+def _capped_streaming_config(config: Config, *, max_live_chars: int) -> Config:
+    """Build a runtime-bound config with a lowered `max_live_chars`.
+
+    `config.model_copy(update=...)` returns a new object whose `id()` is not
+    registered with `runtime_paths_for`, so it must instead be rebuilt the
+    same way the `config` fixture is, reusing the fixture's own runtime paths.
+    """
     runtime_paths = runtime_paths_for(config)
     capped_config = bind_runtime_paths(
         Config(
@@ -832,11 +835,19 @@ async def test_stream_stops_live_edits_past_configured_ceiling(config: Config) -
             room_models={},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             router=RouterConfig(model="default"),
-            defaults=DefaultsConfig(streaming=StreamingConfig(max_live_chars=5)),
+            defaults=DefaultsConfig(streaming=StreamingConfig(max_live_chars=max_live_chars)),
         ),
         runtime_paths,
     )
     persist_entity_accounts(capped_config, runtime_paths_for(capped_config))
+    return capped_config
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_stream_stops_live_edits_past_configured_ceiling(config: Config) -> None:
+    """`defaults.streaming.max_live_chars` freezes progressive edits but still delivers the full answer."""
+    capped_config = _capped_streaming_config(config, max_live_chars=5)
     gateway = _FakeGateway()
 
     async def scripted_stream() -> AsyncIterator[object]:
@@ -857,8 +868,65 @@ async def test_stream_stops_live_edits_past_configured_ceiling(config: Config) -
     assert gateway.ops[1].content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
 
 
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_hidden_tool_start_does_not_flush_past_live_ceiling(config: Config) -> None:
+    """A hidden tool-call start past the ceiling neither flushes nor throttle-sends an edit."""
+    capped_config = _capped_streaming_config(config, max_live_chars=5)
+    gateway = _FakeGateway()
+
+    async def scripted_stream() -> AsyncIterator[object]:
+        yield "Hello world"
+        await gateway.wait_for_ops(1)
+        yield " more text"
+        yield ToolCallStartedEvent(
+            tool=ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"path": "report.txt"}),
+        )
+        yield " final answer"
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+    ):
+        await send_streaming_response(
+            client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+            config=capped_config,
+            runtime_paths=runtime_paths_for(capped_config),
+            response_stream=scripted_stream(),
+            show_tool_calls=False,
+        )
+
+    assert [op.kind for op in gateway.ops] == ["send", "edit"]
+    assert gateway.ops[-1].content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+    final_text = gateway.ops[-1].display_text
+    assert "Hello world" in final_text
+    assert "more text" in final_text
+    assert "final answer" in final_text
+
+
 def test_streaming_config_live_ceiling_default_and_validation() -> None:
     """`max_live_chars` defaults to one million and rejects non-positive values."""
     assert StreamingConfig().max_live_chars == 1_000_000
     with pytest.raises(ValueError, match="greater than or equal to 1"):
         StreamingConfig(max_live_chars=0)
+
+
+@pytest.mark.asyncio
+async def test_first_chunk_exceeding_ceiling_still_sends_initial_message(config: Config) -> None:
+    """A first chunk already past the ceiling still produces the initial send (no visible event yet)."""
+    gateway = _FakeGateway()
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        max_live_chars=5,
+    )
+    streaming.accumulated_text = "x" * 11
+    client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
+
+    with patch("mindroom.streaming.send_message_result", new=gateway.send):
+        assert await streaming._send_or_edit_message(client) is True
+
+    assert [op.kind for op in gateway.ops] == ["send"]
+    assert gateway.ops[0].display_text == "x" * 11
