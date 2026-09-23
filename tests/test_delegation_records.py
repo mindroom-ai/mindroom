@@ -110,7 +110,70 @@ def _read_json(path: Path) -> dict[str, object]:
 
 
 def _read_events(path: Path) -> list[dict[str, object]]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    with path.open(encoding="utf-8") as stream:
+        return [json.loads(line) for line in stream]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "separator",
+    ["\u0085", "\u2028", "\u2029"],
+    ids=["next-line", "line-separator", "paragraph-separator"],
+)
+async def test_unicode_separators_preserve_delegation_event_boundaries(tmp_path: Path, separator: str) -> None:
+    """Unicode separators inside JSON strings must not split durable events."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    content = f"First{separator}second"
+    await owner.append_event(handle, module.DelegationEvent(kind="tool_result", data={"result": content}))
+    event_path = handle.record_dir / "events.jsonl"
+    committed = event_path.read_bytes()
+    assert separator.encode("utf-8") in committed
+
+    reopened = await owner.reopen(handle.locator)
+    await owner.finish(reopened, status="completed", output=content)
+
+    assert event_path.read_bytes().startswith(committed)
+    events = _read_events(event_path)
+    assert [event["sequence"] for event in events] == [1, 2, 3]
+    assert events[1]["data"]["result"] == content
+    assert events[2]["data"]["output"] == content
+    run = _read_json(handle.record_dir / "run.json")
+    assert run["status"] == "completed"
+    assert run["output"] == content
+    assert content in (handle.record_dir / "transcript.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("contents", "error"),
+    [(b"\n", "unreadable"), (b"{", "unreadable"), (b"[]\n", "malformed"), (b"\xff\n", "unreadable")],
+    ids=["blank-line", "invalid-json", "non-object", "invalid-utf8"],
+)
+async def test_invalid_event_stream_blocks_finish_without_mutation(tmp_path: Path, contents: bytes, error: str) -> None:
+    """Invalid records must fail closed instead of being skipped during settlement."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = handle.record_dir / "events.jsonl"
+    event_path.write_bytes(contents)
+    run_path = handle.record_dir / "run.json"
+    original_run = run_path.read_bytes()
+
+    with pytest.raises(ValueError, match=f"Delegation event stream is {error}"):
+        await owner.finish(handle, status="completed", output="Done")
+
+    assert event_path.read_bytes() == contents
+    assert run_path.read_bytes() == original_run
 
 
 @pytest.mark.asyncio
