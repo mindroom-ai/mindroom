@@ -158,9 +158,15 @@ function defaultSummary(node: SchemaNode): string | null {
 
 function helperText(node: SchemaNode): string | undefined {
   const summary = defaultSummary(node);
-  const parts = [node.description, summary ? `Default: ${summary}.` : null];
-  const text = parts.filter(Boolean).join(" ");
-  return text || undefined;
+  const description = node.description?.trim();
+  if (summary == null) {
+    return description || undefined;
+  }
+  if (!description) {
+    return `Default: ${summary}`;
+  }
+  const separator = /[.!?]$/.test(description) ? " " : ". ";
+  return `${description}${separator}Default: ${summary}`;
 }
 
 function ResetButton({
@@ -661,7 +667,7 @@ function NumberInput({
       inputMode="decimal"
       value={draft}
       disabled={disabled}
-      placeholder={summary ?? undefined}
+      placeholder={summary == null ? undefined : `Default: ${summary}`}
       min={node.schema.minimum ?? node.schema.exclusiveMinimum}
       max={node.schema.maximum ?? node.schema.exclusiveMaximum}
       step={node.integer ? 1 : "any"}
@@ -698,7 +704,8 @@ function TextInput({
 }) {
   const [revealed, setRevealed] = useState(false);
   const listId = `${id}-suggestions`;
-  const placeholder = defaultSummary(node) ?? undefined;
+  const summary = defaultSummary(node);
+  const placeholder = summary == null ? undefined : `Default: ${summary}`;
 
   if (node.hint.multiline) {
     return (
@@ -933,9 +940,7 @@ function ListEditor({
           className="space-y-3 rounded-lg border border-border/60 p-3"
         >
           <div className="flex items-center justify-between gap-2">
-            <Badge variant="outline">
-              {label} {index + 1}
-            </Badge>
+            <Badge variant="outline">#{index + 1}</Badge>
             <div className="flex items-center gap-1">
               <Button
                 type="button"
