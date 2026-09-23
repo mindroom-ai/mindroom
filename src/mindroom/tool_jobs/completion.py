@@ -144,12 +144,13 @@ async def admit_job_completion(envelope: MessageEnvelope, runtime_paths: Runtime
     """Under the conversation lock, admit an internal completion only while the runtime still offers its generation.
 
     A completion envelope is built from that same job's immutable owner, so its current outcome is the only recheck.
-    Every other turn is admitted, whatever its source event ID looks like.
+    Every other turn is admitted, whatever its source event ID looks like, including a recovered source that keeps its
+    human event ID.
     """
-    if envelope.origin.intent is not TurnIntent.TOOL_JOB_COMPLETION:
+    if envelope.origin.intent is not TurnIntent.TOOL_JOB_COMPLETION or (
+        completion := parse_completion_event_id(envelope.source_event_id)
+    ) is None:
         return True
-    completion = parse_completion_event_id(envelope.source_event_id)
-    assert completion is not None, "A completion envelope names its job generation"
     runtime = get_background_runtime(runtime_paths)
     if runtime is None:
         msg = "Tool job runtime is not ready for completion admission"

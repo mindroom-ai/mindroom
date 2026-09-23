@@ -130,13 +130,13 @@ async def restore_user_stops(
 
     Those are each job's source and, through completions, the turns behind it, so the cost follows the jobs.
     """
-    stopped: dict[tuple[str, ...], tuple[TurnRecord, int]] = {}
+    applied: set[tuple[str, ...]] = set()
     for job in jobs:
         if job.source_event_id is None:
             continue
         for event in await _source_ancestry(runtime, store, job.source_event_id):
             record = await turns.load(event.event_id)
-            if record is not None and record.user_stop_receipt_order is not None:
-                stopped.setdefault(record.source_event_ids, (record, record.user_stop_receipt_order))
-    for record, stop_receipt_order in stopped.values():
-        await stop_conversation_jobs(runtime, store, record, stop_receipt_order=stop_receipt_order)
+            if record is None or record.user_stop_receipt_order is None or record.source_event_ids in applied:
+                continue
+            applied.add(record.source_event_ids)
+            await stop_conversation_jobs(runtime, store, record, stop_receipt_order=record.user_stop_receipt_order)

@@ -2115,13 +2115,14 @@ async def test_one_failed_cancellation_request_does_not_block_the_others(
         for job_id in ("first", "second"):
             await start_job(runtime, job_id, tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
         failing = revoked = True
-        request = (
-            runtime.stop_jobs(receipt_order=1, matches=every_job) if action == "stop" else runtime.cancel_revoked()
-        )
-        with capture_logs() as logs, pytest.raises(ExceptionGroup) as raised:
-            await request
+        with capture_logs() as logs:
+            if action == "stop":
+                with pytest.raises(ExceptionGroup, match="Tool job Stop failed"):
+                    await runtime.stop_jobs(receipt_order=1, matches=every_job)
+            else:
+                # Revocation only logs; its next pass retries the failed job.
+                await runtime.cancel_revoked()
         failing = revoked = False
-        assert [str(error) for error in raised.value.exceptions] == ["injected durable write failure"]
         assert [entry["job_id"] for entry in logs if entry["log_level"] == "error"] == ["first"]
         settled = await runtime.wait("second", owner=_owner(), depth=0)
         await runtime.release_wait("second", settled.claim)

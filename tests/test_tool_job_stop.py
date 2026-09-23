@@ -499,10 +499,9 @@ async def test_slow_stop_matching_leaves_jobs_accessible(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_stop_judges_a_continued_job_again(tmp_path: Path) -> None:
+async def test_stop_reaches_an_approval_continued_while_it_was_judged(tmp_path: Path) -> None:
     """An approval continued while Stop was judging its paused generation still gets stopped in its new generation."""
     runtime = tool_job_runtime(tmp_path)
-    judged: list[int] = []
     judging, release, continued = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def awaiting() -> BackgroundOutcome:
@@ -513,8 +512,7 @@ async def test_stop_judges_a_continued_job_again(tmp_path: Path) -> None:
         await asyncio.Event().wait()
         raise AssertionError
 
-    async def held_match(job: BackgroundJob) -> bool:
-        judged.append(job.generation)
+    async def held_match(_job: BackgroundJob) -> bool:
         judging.set()
         await release.wait()
         return True
@@ -535,7 +533,6 @@ async def test_stop_judges_a_continued_job_again(tmp_path: Path) -> None:
         await stop
         settled = await runtime.wait("paused", owner=_owner(), depth=0)
         await runtime.release_wait("paused", settled.claim)
-        assert judged == [0, 1]
         assert settled.job.user_stop_receipt_order == 100
         assert settled.job.status == "cancelled"
     finally:
@@ -543,6 +540,37 @@ async def test_stop_judges_a_continued_job_again(tmp_path: Path) -> None:
         if stop is not None:
             await asyncio.gather(stop, return_exceptions=True)
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_approval_stopped_during_shutdown_is_cancelled_on_restart(tmp_path: Path) -> None:
+    """Shutdown leaves a Stopped approval paused, and it can never continue, so recovery cancels it with its cleanup."""
+    cleaned: list[str] = []
+
+    async def awaiting() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval")
+
+    async def cleanup(job: BackgroundJob) -> None:
+        cleaned.append(job.job_id)
+
+    runtime = tool_job_runtime(tmp_path)
+    try:
+        await start_job(runtime, "paused", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=awaiting)
+        waited = await runtime.wait("paused", owner=_owner(), depth=0)
+        await runtime.release_wait("paused", waited.claim)
+        await runtime.quiesce()
+        await runtime.stop_jobs(receipt_order=100, matches=_every_job)
+        assert (await runtime.lookup("paused", owner=_owner(), depth=0)).status == "awaiting_approval"
+    finally:
+        await runtime.shutdown()
+    restored = tool_job_runtime(tmp_path, cancel=cleanup)
+    try:
+        await restored.recover()
+        job = await restored.lookup("paused", owner=_owner(), depth=0)
+        assert await restored.stoppable_jobs() == []
+    finally:
+        await restored.shutdown()
+    assert (job.status, job.user_stop_receipt_order, cleaned) == ("cancelled", 100, ["paused"])
 
 
 def _conversation_owner(target: MessageTarget) -> ToolExecutionIdentity:

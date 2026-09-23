@@ -309,7 +309,7 @@ class _EntryIndex[Key]:
 
 
 def _report_failed_drain(job_id: str, drain: asyncio.Task[BackgroundJob]) -> None:
-    """Log a drain no caller may await; its job stays for a later canceller, recovery, or shutdown to settle."""
+    """Log a failed cancellation drain with its job, which stays for a later canceller, recovery, or shutdown."""
     if not drain.cancelled() and (error := drain.exception()) is not None:
         logger.error("Tool job cancellation drain failed", job_id=job_id, exc_info=error)
 
@@ -521,14 +521,20 @@ class ToolJobRuntime:
                 if path.stem in self._entries:
                     continue
                 entry = _Entry(await asyncio.to_thread(read_job_snapshot, path))
-                if entry.job.status not in READY_STATUSES:
+                # A Stopped approval can never continue; a Stop during shutdown left its cancellation to recovery.
+                stopped_approval = (
+                    entry.job.status == "awaiting_approval" and entry.job.user_stop_receipt_order is not None
+                )
+                if entry.job.status not in READY_STATUSES or stopped_approval:
                     outcome = await self._cleanup(entry)
                     await self._publish_outcome(
                         entry,
                         self._settled(
                             entry,
-                            status="interrupted",
-                            reason="Tool execution was interrupted by a runtime restart; it was not replayed.",
+                            status="cancelled" if stopped_approval else "interrupted",
+                            reason=None
+                            if stopped_approval
+                            else "Tool execution was interrupted by a runtime restart; it was not replayed.",
                             outcome=outcome,
                         ),
                     )
@@ -846,33 +852,23 @@ class ToolJobRuntime:
         """Persist explicit Stop independently of result consumption, then request owned cleanup.
 
         `matches` may read the journal, so it judges snapshots outside the runtime lock.
-        A job whose generation changed while it was judged is judged again.
-        A job this Stop or a later one already marked is not rewritten.
-        During shutdown the mark is still saved, while shutdown itself settles execution; a closed runtime saves nothing.
-        One job's failure does not keep the others from stopping; the failures are raised together at the end.
+        During shutdown the mark is saved while shutdown itself settles execution.
         """
-        pending: list[_Entry] | None = None
-        failures: list[Exception] = []
-        while pending is None or pending:
-            async with self._lock:
-                if self._closed:
-                    break
-                candidates = [
-                    (entry, await self._snapshot(entry, include_result=False))
-                    for entry in (self._entries.values() if pending is None else pending)
-                    if self._entries.get(entry.job.job_id) is entry and self._stop_applies(entry.job, receipt_order)
-                ]
-            selected = [(entry, job) for entry, job in candidates if await matches(job)]
-            async with self._lock:
-                if self._closed:
-                    break
-                current = [(entry, job) for entry, job in selected if self._entries.get(job.job_id) is entry]
-                pending = [entry for entry, job in current if entry.job.generation != job.generation]
-                failures += await self._isolated(
-                    (entry for entry, job in current if entry.job.generation == job.generation),
-                    partial(self._mark_stopped, receipt_order=receipt_order),
-                    "Tool job Stop failed",
-                )
+        async with self._lock:
+            self._ensure_open()
+            candidates = [
+                (entry, await self._snapshot(entry, include_result=False))
+                for entry in self._entries.values()
+                if self._stop_applies(entry.job, receipt_order)
+            ]
+        selected = [entry for entry, job in candidates if await matches(job)]
+        async with self._lock:
+            self._ensure_open()
+            failures = await self._isolated(
+                (entry for entry in selected if self._entries.get(entry.job.job_id) is entry),
+                partial(self._mark_stopped, receipt_order=receipt_order),
+                "Tool job Stop failed",
+            )
         if failures:
             msg = "Tool job Stop failed"
             raise ExceptionGroup(msg, failures)
@@ -938,7 +934,7 @@ class ToolJobRuntime:
         return await wait_for_future_until_complete(drain)
 
     async def cancel_revoked(self) -> None:
-        """Withdraw execution when current grants disappear, retaining owned cleanup; one failure blocks no other job."""
+        """Withdraw execution when current grants disappear, retaining owned cleanup; a failed job retries next pass."""
         async with self._lock:
             self._ensure_accepting()
             revoked = [
@@ -946,10 +942,7 @@ class ToolJobRuntime:
                 for entry in self._entries.values()
                 if entry.job.status not in TERMINAL_STATUSES and not self._authorize(entry.job)
             ]
-            failures = await self._isolated(revoked, self._request_cancel, "Tool job revocation failed")
-        if failures:
-            msg = "Tool job revocation failed"
-            raise ExceptionGroup(msg, failures)
+            await self._isolated(revoked, self._request_cancel, "Tool job revocation failed")
 
     async def _request_cancel(self, entry: _Entry) -> asyncio.Task[BackgroundJob]:
         """Durably request cancellation and return its one drain; the caller holds the runtime lock."""
@@ -1078,15 +1071,15 @@ class ToolJobRuntime:
             ]
 
     async def stoppable_jobs(self) -> list[BackgroundJob]:
-        """Return jobs a saved Stop could still change: live ones, and unconsumed outcomes no Stop has marked."""
+        """Return jobs no Stop has marked whose execution or unconsumed outcome a saved Stop could still end."""
         async with self._lock:
             if self._closed:
                 return []
             return [
                 await self._snapshot(entry, include_result=False)
                 for entry in self._entries.values()
-                if entry.job.status not in TERMINAL_STATUSES
-                or (not entry.job.consumed and entry.job.user_stop_receipt_order is None)
+                if entry.job.user_stop_receipt_order is None
+                and (entry.job.status not in TERMINAL_STATUSES or not entry.job.consumed)
             ]
 
     async def outcome(self, job_id: str, generation: int) -> BackgroundJob | None:

@@ -141,16 +141,26 @@ async def test_completion_requires_current_unconsumed_exact_claim(tmp_path: Path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
-async def test_human_turn_with_a_completion_shaped_source_is_admitted(tmp_path: Path, *, enabled: bool) -> None:
-    """Only a completion turn waits on its job; a human source ID that merely looks like one is admitted either way."""
+@pytest.mark.parametrize("turn", ["human", "recovered"])
+async def test_turn_that_names_no_completion_is_admitted(tmp_path: Path, *, enabled: bool, turn: str) -> None:
+    """Only a completion source waits on its job.
+
+    A human source ID that merely looks like one is admitted, and so is a recovered response, which carries
+    completion intent but keeps its human source ID.
+    """
     paths = test_runtime_paths(tmp_path)
-    request = _plain_request(_target(thread_id="$thread"), source_event_id="tool-job:job:0")
+    if turn == "human":
+        envelope = _plain_request(_target(thread_id="$thread"), source_event_id="tool-job:job:0").response_envelope
+    else:
+        owner = ToolExecutionIdentity("matrix", "general", "@human:localhost", "!room:localhost", None, None, "session")
+        job = BackgroundJob(job_id="job", owner=owner, tool_name="tool", depth=0)
+        envelope = replace(completion_envelope(job, sender_id="@mindroom_general:localhost"), source_event_id="$human")
     runtime = tool_job_runtime(tmp_path) if enabled else None
     pin_background_tool_jobs(Config(), paths)
     if runtime is not None:
         register_background_runtime(paths, runtime)
     try:
-        assert await admit_job_completion(request.response_envelope, paths)
+        assert await admit_job_completion(envelope, paths)
     finally:
         if runtime is not None:
             await runtime.shutdown()
