@@ -59,6 +59,28 @@ def _collect_hints(node: object) -> Iterator[dict[str, object]]:
             yield from _collect_hints(item)
 
 
+def _is_object_schema(member: dict[str, object], defs: dict[str, dict[str, object]]) -> bool:
+    ref = member.get("$ref")
+    if isinstance(ref, str):
+        member = defs[ref.removeprefix("#/$defs/")]
+    return member.get("type") == "object"
+
+
+def _untagged_object_unions(node: object, defs: dict[str, dict[str, object]], path: str = "") -> Iterator[str]:
+    if isinstance(node, dict):
+        for key in ("anyOf", "oneOf"):
+            members = node.get(key)
+            if isinstance(members, list) and "discriminator" not in node:
+                objects = [member for member in members if _is_object_schema(member, defs)]
+                if len(objects) > 1:
+                    yield path
+        for key, value in node.items():
+            yield from _untagged_object_unions(value, defs, f"{path}/{key}")
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            yield from _untagged_object_unions(item, defs, f"{path}/{index}")
+
+
 def test_every_config_field_has_description() -> None:
     """The dashboard shows each description as helper text, so none may be missing."""
     missing = [f"{model.__name__}.{name}" for model, name, field in _walk_fields() if not field.description]
@@ -124,6 +146,12 @@ def test_optional_blocks_default_to_their_model_defaults() -> None:
         and produced.model_dump() != type(produced)().model_dump()
     ]
     assert differing == []
+
+
+def test_object_unions_are_discriminated() -> None:
+    """MatchUnionVariant tells untagged union variants apart only by kind, so object unions must be discriminated."""
+    schema = dashboard_config_schema()
+    assert list(_untagged_object_unions(schema, schema["$defs"])) == []
 
 
 def test_dashboard_schema_reports_default_factory_values() -> None:

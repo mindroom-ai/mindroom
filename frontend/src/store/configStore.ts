@@ -2015,13 +2015,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateKnowledgeBase: (baseName, baseConfig) => {
     set((state) => {
       if (!state.config) return state;
-      const currentBaseConfig = state.config.knowledge_bases?.[baseName];
-      const nextBaseConfig = { ...(currentBaseConfig || {}), ...baseConfig };
+      const existingBaseConfig = state.config.knowledge_bases?.[baseName] || {};
       const nextConfig = {
         ...state.config,
         knowledge_bases: {
           ...(state.config.knowledge_bases || {}),
-          [baseName]: nextBaseConfig,
+          [baseName]: {
+            ...existingBaseConfig,
+            ...baseConfig,
+          },
         },
       };
       preserveRawToolEntries(state.config, nextConfig);
