@@ -947,7 +947,7 @@
       "type": "object"
     },
     "CompactionOverrideConfig": {
-      "description": "Optional per-scope overrides for destructive compaction.",
+      "description": "Optional per-scope overrides for destructive compaction; an authored null clears the inherited value.",
       "properties": {
         "enabled": {
           "anyOf": [
@@ -974,7 +974,10 @@
           ],
           "default": null,
           "description": "Soft replay trigger budget in tokens",
-          "title": "Threshold Tokens"
+          "title": "Threshold Tokens",
+          "x-mindroom": {
+            "clears_inherited": true
+          }
         },
         "threshold_percent": {
           "anyOf": [
@@ -989,7 +992,10 @@
           ],
           "default": null,
           "description": "Soft replay trigger budget as a fraction of the effective replay window",
-          "title": "Threshold Percent"
+          "title": "Threshold Percent",
+          "x-mindroom": {
+            "clears_inherited": true
+          }
         },
         "replay_window_tokens": {
           "anyOf": [
@@ -1003,7 +1009,10 @@
           ],
           "default": null,
           "description": "Optional operational cap for persisted replay and required-compaction planning; compaction summary input is instead budgeted from the selected compaction model's context window",
-          "title": "Replay Window Tokens"
+          "title": "Replay Window Tokens",
+          "x-mindroom": {
+            "clears_inherited": true
+          }
         },
         "reserve_tokens": {
           "anyOf": [
@@ -1017,7 +1026,10 @@
           ],
           "default": null,
           "description": "Reserved headroom for output and tool definitions",
-          "title": "Reserve Tokens"
+          "title": "Reserve Tokens",
+          "x-mindroom": {
+            "clears_inherited": true
+          }
         },
         "model": {
           "anyOf": [
@@ -1032,6 +1044,7 @@
           "description": "Optional model config name to use for summary generation",
           "title": "Model",
           "x-mindroom": {
+            "clears_inherited": true,
             "reference": "model"
           }
         },
@@ -1048,6 +1061,7 @@
           "description": "Optional model config name retried once when the summary model refuses for safeguards; summary input is rebuilt under the fallback model's context budget when needed",
           "title": "Fallback Model",
           "x-mindroom": {
+            "clears_inherited": true,
             "reference": "model"
           }
         },
@@ -1063,7 +1077,10 @@
           ],
           "default": null,
           "description": "Maximum seconds allowed for each compaction summary request",
-          "title": "Timeout Seconds"
+          "title": "Timeout Seconds",
+          "x-mindroom": {
+            "clears_inherited": true
+          }
         }
       },
       "title": "CompactionOverrideConfig",

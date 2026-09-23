@@ -11,6 +11,8 @@ export interface SchemaHint {
   key_reference?: ReferenceKind;
   secret?: boolean;
   multiline?: boolean;
+  /** An authored null removes a value inherited from defaults. */
+  clears_inherited?: boolean;
 }
 
 export interface JsonSchema {

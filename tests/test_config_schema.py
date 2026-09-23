@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 # The dashboard's configSchema.ts understands exactly this hint vocabulary.
 HINT_KEY = "x-mindroom"
-_HINT_FIELDS = {"reference", "key_reference", "secret", "multiline"}
+_HINT_FIELDS = {"reference", "key_reference", "secret", "multiline", "clears_inherited"}
 _REFERENCE_KINDS = {"model", "agent", "room", "tool"}
 
 
@@ -85,6 +85,7 @@ def test_dashboard_hint_omits_unset_fields() -> None:
     }
     assert dashboard_hint(secret=True) == {HINT_KEY: {"secret": True}}
     assert dashboard_hint(multiline=True) == {HINT_KEY: {"multiline": True}}
+    assert dashboard_hint(clears_inherited=True) == {HINT_KEY: {"clears_inherited": True}}
 
 
 def test_reference_fields_are_annotated() -> None:
@@ -111,6 +112,14 @@ def test_secret_fields_are_annotated() -> None:
     assert defs["EventJournalConfig"]["properties"]["database_url"][HINT_KEY] == {"secret": True}
     assert defs["MCPServerConfig"]["properties"]["headers"][HINT_KEY] == {"secret": True}
     assert defs["KnowledgeGitConfig"]["properties"]["repo_url"][HINT_KEY] == {"secret": True}
+
+
+def test_compaction_override_fields_clear_inherited_values() -> None:
+    """An authored null in an agent or team override drops the defaults.compaction value, so forms offer None."""
+    properties = Config.model_json_schema()["$defs"]["CompactionOverrideConfig"]["properties"]
+    clearing = {name for name, field in properties.items() if field.get(HINT_KEY, {}).get("clears_inherited")}
+    # An authored null enabled falls back to the defaults, like leaving it unset.
+    assert clearing == set(properties) - {"enabled"}
 
 
 def test_dashboard_schema_reports_default_factory_values() -> None:

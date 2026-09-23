@@ -19,12 +19,14 @@ def dashboard_hint(
     key_reference: _ReferenceKind | None = None,
     secret: bool = False,
     multiline: bool = False,
+    clears_inherited: bool = False,
 ) -> JsonDict:
     """Return a ``json_schema_extra`` mapping for one config field.
 
     ``reference`` names the configured entity a string (or each list item or
     mapping value) refers to, and ``key_reference`` does the same for mapping
-    keys.
+    keys. ``clears_inherited`` marks nullable fields where an authored null
+    removes a value inherited from defaults instead of meaning "not set".
     """
     hint: JsonDict = {}
     if reference is not None:
@@ -35,6 +37,8 @@ def dashboard_hint(
         hint["secret"] = True
     if multiline:
         hint["multiline"] = True
+    if clears_inherited:
+        hint["clears_inherited"] = True
     return {_HINT_KEY: hint}
 
 

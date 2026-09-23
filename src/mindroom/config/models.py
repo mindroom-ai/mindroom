@@ -250,7 +250,7 @@ def _validate_compaction_threshold_choice(
 
 
 class CompactionOverrideConfig(BaseModel):
-    """Optional per-scope overrides for destructive compaction."""
+    """Optional per-scope overrides for destructive compaction; an authored null clears the inherited value."""
 
     enabled: bool | None = Field(
         default=None,
@@ -260,12 +260,14 @@ class CompactionOverrideConfig(BaseModel):
         default=None,
         ge=1,
         description="Soft replay trigger budget in tokens",
+        json_schema_extra=dashboard_hint(clears_inherited=True),
     )
     threshold_percent: float | None = Field(
         default=None,
         gt=0,
         lt=1,
         description="Soft replay trigger budget as a fraction of the effective replay window",
+        json_schema_extra=dashboard_hint(clears_inherited=True),
     )
     replay_window_tokens: int | None = Field(
         default=None,
@@ -274,16 +276,18 @@ class CompactionOverrideConfig(BaseModel):
             "Optional operational cap for persisted replay and required-compaction planning; compaction summary "
             "input is instead budgeted from the selected compaction model's context window"
         ),
+        json_schema_extra=dashboard_hint(clears_inherited=True),
     )
     reserve_tokens: int | None = Field(
         default=None,
         ge=0,
         description="Reserved headroom for output and tool definitions",
+        json_schema_extra=dashboard_hint(clears_inherited=True),
     )
     model: str | None = Field(
         default=None,
         description="Optional model config name to use for summary generation",
-        json_schema_extra=dashboard_hint(reference="model"),
+        json_schema_extra=dashboard_hint(reference="model", clears_inherited=True),
     )
     fallback_model: str | None = Field(
         default=None,
@@ -291,12 +295,13 @@ class CompactionOverrideConfig(BaseModel):
             "Optional model config name retried once when the summary model refuses for safeguards; summary input "
             "is rebuilt under the fallback model's context budget when needed"
         ),
-        json_schema_extra=dashboard_hint(reference="model"),
+        json_schema_extra=dashboard_hint(reference="model", clears_inherited=True),
     )
     timeout_seconds: float | None = Field(
         default=None,
         gt=0,
         description="Maximum seconds allowed for each compaction summary request",
+        json_schema_extra=dashboard_hint(clears_inherited=True),
     )
 
     @model_validator(mode="after")

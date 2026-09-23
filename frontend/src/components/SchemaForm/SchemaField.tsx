@@ -149,7 +149,7 @@ export function SchemaField({
   const hasNestedError = errorForPath([], false) !== undefined;
   const id = useId();
   const label = labelOverride ?? fieldLabel(name);
-  const presence = presenceMode(node, required);
+  const presence = presenceMode(node, required, value);
   const canReset = !required && value !== undefined;
   const reset = canReset ? (
     <ResetButton label={label} onReset={() => onChange(undefined)} />

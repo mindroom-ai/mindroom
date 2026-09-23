@@ -2072,6 +2072,11 @@ describe("AgentEditor", () => {
             type: "object",
             properties: {
               model: { anyOf: [{ type: "string" }, { type: "null" }] },
+              fallback_model: {
+                anyOf: [{ type: "string" }, { type: "null" }],
+                default: null,
+                "x-mindroom": { reference: "model", clears_inherited: true },
+              },
               timeout_seconds: {
                 anyOf: [
                   { exclusiveMinimum: 0, type: "number" },
@@ -2091,15 +2096,22 @@ describe("AgentEditor", () => {
     const section = screen.getByRole("button", {
       name: /More compaction settings/,
     });
-    expect(section).toHaveTextContent("Timeout seconds");
+    expect(section).toHaveTextContent("Fallback model, Timeout seconds");
     fireEvent.click(section);
     fireEvent.change(
       screen.getByRole("spinbutton", { name: "Timeout seconds" }),
       { target: { value: "30" } },
     );
-
     expect(mockStore.updateAgent).toHaveBeenLastCalledWith("test_agent", {
       compaction: { timeout_seconds: 30 },
+    });
+
+    // An explicit null opts this agent out of an inherited fallback model.
+    fireEvent.change(screen.getByRole("combobox", { name: "Fallback model" }), {
+      target: { value: "__none__" },
+    });
+    expect(mockStore.updateAgent).toHaveBeenLastCalledWith("test_agent", {
+      compaction: { timeout_seconds: 30, fallback_model: null },
     });
   });
 

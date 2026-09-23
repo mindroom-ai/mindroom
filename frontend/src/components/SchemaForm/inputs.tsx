@@ -36,12 +36,23 @@ const SELECT_CLASS =
   "glass-control h-10 w-full px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50";
 
 // Nullable fields whose default is null only need "set or not"; nullable
-// fields with another default, or none reported, also need an explicit null.
-export function presenceMode(node: SchemaNode, required: boolean): Presence {
+// fields with another default, or none reported, also need an explicit null,
+// as do fields where null clears an inherited value and authored nulls.
+export function presenceMode(
+  node: SchemaNode,
+  required: boolean,
+  value: unknown,
+): Presence {
   if (!node.nullable) {
     return "inline";
   }
-  if (!required && node.hasDefault && node.defaultValue === null) {
+  if (
+    !required &&
+    node.hasDefault &&
+    node.defaultValue === null &&
+    node.hint.clears_inherited !== true &&
+    value !== null
+  ) {
     return "toggle";
   }
   return "tri";

@@ -123,6 +123,11 @@ const ROOT: JsonSchema = {
           default: null,
           "x-mindroom": { secret: true },
         },
+        fallback_model: {
+          anyOf: [{ type: "string" }, { type: "null" }],
+          default: null,
+          "x-mindroom": { reference: "model", clears_inherited: true },
+        },
         temperature: {
           anyOf: [{ type: "number" }, { type: "null" }],
           default: 0.2,
@@ -589,6 +594,24 @@ describe("SchemaFields", () => {
     expect(
       screen.getByRole("button", { name: "Show settings" }),
     ).toBeInTheDocument();
+  });
+
+  it("shows authored nulls on fields whose default is null", () => {
+    renderFixture({ markdown: null, participation: null });
+    expect(screen.getByRole("combobox", { name: "Markdown" })).toHaveValue(
+      "__none__",
+    );
+    expect(screen.getByRole("combobox", { name: "Participation" })).toHaveValue(
+      "__none__",
+    );
+  });
+
+  it("offers None where an authored null clears an inherited value", () => {
+    const { lastValue } = renderFixture();
+    fireEvent.change(screen.getByRole("combobox", { name: "Fallback model" }), {
+      target: { value: "__none__" },
+    });
+    expect(lastValue()).toEqual({ fallback_model: null });
   });
 
   it("does not mark freeform YAML dirty when it only loses focus", () => {
