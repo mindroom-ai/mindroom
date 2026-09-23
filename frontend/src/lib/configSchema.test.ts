@@ -104,7 +104,7 @@ describe("classifySchemaNode", () => {
     expect(node.discriminator).toBe("provider");
     expect(node.variants.map((variant) => variant.label)).toEqual([
       "LLM",
-      "Typesafe",
+      "TypeSafe",
     ]);
     expect(node.variants.map((variant) => variant.discriminatorValue)).toEqual([
       "llm",
@@ -282,6 +282,8 @@ describe("fieldLabel", () => {
     expect(fieldLabel("log_llm_requests")).toBe("Log LLM requests");
     expect(fieldLabel("database_url_env")).toBe("Database URL env");
     expect(fieldLabel("mcp_servers")).toBe("MCP servers");
+    expect(fieldLabel("mindroom_user")).toBe("MindRoom user");
+    expect(fieldLabel("streamable_http")).toBe("Streamable HTTP");
   });
 });
 

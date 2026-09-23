@@ -521,6 +521,29 @@ describe("SchemaFields", () => {
     ).toHaveValue("api_key: sk-secret\n");
   });
 
+  it("shows an empty secret freeform mapping without hiding it", () => {
+    renderFixture({ extra_kwargs: {} });
+    expect(
+      screen.getByRole("textbox", { name: "Extra kwargs YAML" }),
+    ).toHaveValue("{}\n");
+  });
+
+  it("clears a YAML parse error when the draft is reverted", () => {
+    renderFixture({ settings: { retries: 3 } });
+    const editor = screen.getByRole("textbox", { name: "Settings YAML" });
+    fireEvent.change(editor, { target: { value: "retries: [" } });
+    fireEvent.blur(editor);
+    expect(
+      screen.getByText(/unexpected end of the stream/i),
+    ).toBeInTheDocument();
+
+    fireEvent.change(editor, { target: { value: "retries: 3\n" } });
+    fireEvent.blur(editor);
+    expect(
+      screen.queryByText(/unexpected end of the stream/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("does not mark freeform YAML dirty when it only loses focus", () => {
     const { onValue } = renderFixture({ settings: { retries: 3 } });
     const editor = screen.getByRole("textbox", { name: "Settings YAML" });

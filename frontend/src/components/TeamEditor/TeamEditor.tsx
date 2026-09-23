@@ -296,6 +296,7 @@ export function TeamEditor() {
       <HistoryContextSection
         control={control}
         resetKey={selectedTeamId}
+        compactionPath={["teams", selectedTeam.id, "compaction"]}
         defaults={config?.defaults}
         onFieldChange={(fieldName, value) =>
           handleFieldChange(fieldName as keyof Team, value as Team[keyof Team])

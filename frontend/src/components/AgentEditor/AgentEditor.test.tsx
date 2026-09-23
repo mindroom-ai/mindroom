@@ -2061,6 +2061,48 @@ describe("AgentEditor", () => {
     });
   });
 
+  it("edits compaction fields the editor does not render through More compaction settings", () => {
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: {
+        type: "object",
+        properties: {},
+        $defs: {
+          AgentConfig: { type: "object", properties: {} },
+          CompactionOverrideConfig: {
+            type: "object",
+            properties: {
+              model: { anyOf: [{ type: "string" }, { type: "null" }] },
+              timeout_seconds: {
+                anyOf: [
+                  { exclusiveMinimum: 0, type: "number" },
+                  { type: "null" },
+                ],
+                default: null,
+              },
+            },
+          },
+        },
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+
+    render(<AgentEditor />);
+    const section = screen.getByRole("button", {
+      name: /More compaction settings/,
+    });
+    expect(section).toHaveTextContent("Timeout seconds");
+    fireEvent.click(section);
+    fireEvent.change(
+      screen.getByRole("spinbutton", { name: "Timeout seconds" }),
+      { target: { value: "30" } },
+    );
+
+    expect(mockStore.updateAgent).toHaveBeenLastCalledWith("test_agent", {
+      compaction: { timeout_seconds: 30 },
+    });
+  });
+
   it("edits private knowledge chunking through More private knowledge settings", () => {
     const privateAgent: Agent = {
       ...mockAgent,

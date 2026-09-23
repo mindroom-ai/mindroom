@@ -341,6 +341,15 @@ const MODEL_EDITOR_FIELDS = [
   "context_window",
 ] as const;
 
+/** Fields More settings leaves out because saving the row drops them for this provider. */
+function modelEditorFields(provider: string): string[] {
+  return [
+    ...MODEL_EDITOR_FIELDS,
+    ...(provider === "ollama" ? [] : ["host"]),
+    ...(provider === "openai" ? [] : ["api"]),
+  ];
+}
+
 export function ModelConfig() {
   const {
     config,
@@ -1742,18 +1751,20 @@ export function ModelConfig() {
           </div>
         </div>
 
-        {editingRowId != null && models[editingRowId] != null && (
-          <SchemaSection
-            title={`More settings for ${editingRowId}`}
-            definition="ModelConfig"
-            value={models[editingRowId]}
-            path={["models", editingRowId]}
-            exclude={MODEL_EDITOR_FIELDS}
-            onFieldChange={(key, next) =>
-              updateModel(editingRowId, { [key]: next })
-            }
-          />
-        )}
+        {editingRowId != null &&
+          rowDraft != null &&
+          models[editingRowId] != null && (
+            <SchemaSection
+              title={`More settings for ${editingRowId}`}
+              definition="ModelConfig"
+              value={models[editingRowId]}
+              path={["models", editingRowId]}
+              exclude={modelEditorFields(rowDraft.provider)}
+              onFieldChange={(key, next) =>
+                updateModel(editingRowId, { [key]: next })
+              }
+            />
+          )}
 
         <Button
           onClick={() => void handleSaveAllChanges()}

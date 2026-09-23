@@ -19,7 +19,11 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import type { ReferenceOptions, SchemaNode } from "@/lib/configSchema";
+import {
+  isPlainObject,
+  type ReferenceOptions,
+  type SchemaNode,
+} from "@/lib/configSchema";
 import { cn } from "@/lib/utils";
 
 export type SchemaPath = Array<string | number>;
@@ -671,7 +675,9 @@ export function YamlEditor({
     setParseError(null);
   }, [serialized]);
 
-  if (secret && !revealed && serialized !== "") {
+  const isEmpty =
+    value == null || (isPlainObject(value) && Object.keys(value).length === 0);
+  if (secret && !revealed && !isEmpty) {
     return (
       <div className="flex items-center justify-between gap-2 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
         <span>Hidden because it may contain credentials.</span>
@@ -699,6 +705,7 @@ export function YamlEditor({
         onChange={(event) => setDraft(event.target.value)}
         onBlur={() => {
           if (draft === serialized) {
+            setParseError(null);
             return;
           }
           try {

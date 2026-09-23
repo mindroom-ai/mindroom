@@ -1759,6 +1759,7 @@ export function AgentEditor() {
       <HistoryContextSection
         control={control}
         resetKey={selectedAgentId}
+        compactionPath={["agents", selectedAgent.id, "compaction"]}
         defaults={config?.defaults}
         onFieldChange={(fieldName, value) =>
           handleFieldChange(

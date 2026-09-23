@@ -552,10 +552,9 @@ function normalizeConfigToolEntries(rawConfig: configService.RawConfig): {
   const normalizedDefaults = rawDefaults
     ? {
         ...rawDefaults,
-        tools:
-          rawDefaults.tools === undefined
-            ? undefined
-            : normalizeToolEntries(rawDefaultToolEntries),
+        ...(rawDefaultToolEntries === undefined
+          ? {}
+          : { tools: normalizeToolEntries(rawDefaultToolEntries) }),
       }
     : undefined;
 

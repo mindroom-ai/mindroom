@@ -718,6 +718,54 @@ describe("ModelConfig", () => {
     });
   });
 
+  it("hides More settings fields that saving the row drops for its provider", () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...mockStore,
+      agents: [],
+      rooms: [],
+      diagnostics: [],
+    } as never);
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: {
+        type: "object",
+        properties: {},
+        $defs: {
+          ModelConfig: {
+            type: "object",
+            properties: {
+              provider: { type: "string" },
+              api: {
+                anyOf: [{ type: "string" }, { type: "null" }],
+                default: null,
+              },
+              host: {
+                anyOf: [{ type: "string" }, { type: "null" }],
+                default: null,
+              },
+              extra_kwargs: { anyOf: [{ type: "object" }, { type: "null" }] },
+            },
+          },
+        },
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+
+    render(<ModelConfig />);
+    fireEvent.click(screen.getByText("openai_local"));
+    expect(
+      screen.getByRole("button", { name: /More settings for openai_local/ }),
+    ).toHaveTextContent("API, Extra kwargs");
+
+    const row = screen.getByDisplayValue("openai_local").closest("tr");
+    if (!row) throw new Error("row not found");
+    fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByText("default"));
+    expect(
+      screen.getByRole("button", { name: /More settings for default/ }),
+    ).toHaveTextContent("Host, Extra kwargs");
+  });
+
   describe("while More settings edit the model being edited", () => {
     const withEditedExtraKwargs = () => ({
       ...mockStore,

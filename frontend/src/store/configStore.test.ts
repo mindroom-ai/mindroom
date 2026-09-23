@@ -6100,10 +6100,10 @@ describe("configStore", () => {
       },
     };
 
-    async function loadBaseConfig() {
+    async function loadBaseConfig(config: object = baseConfig) {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => structuredClone(baseConfig),
+        json: async () => structuredClone(config),
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
@@ -6145,17 +6145,7 @@ describe("configStore", () => {
 
     it("saves configs that omit the defaults root", async () => {
       const { defaults: _defaults, ...withoutDefaults } = baseConfig;
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => structuredClone(withoutDefaults),
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { helper: makeAgentPolicy("helper") },
-        }),
-      });
-      await useConfigStore.getState().loadConfig();
+      await loadBaseConfig(withoutDefaults);
       useConfigStore
         .getState()
         .updateConfigValue(["router"], { model: "fast" });
@@ -6228,6 +6218,16 @@ describe("configStore", () => {
 
       expect(useConfigStore.getState().config).not.toHaveProperty("router");
       expect(await savedPayload()).not.toHaveProperty("router");
+    });
+
+    it("drops defaults without tools once its last key is reset", async () => {
+      await loadBaseConfig({ ...baseConfig, defaults: { markdown: false } });
+      useConfigStore
+        .getState()
+        .updateConfigValue(["defaults", "markdown"], undefined);
+
+      expect(useConfigStore.getState().config).not.toHaveProperty("defaults");
+      expect(await savedPayload()).not.toHaveProperty("defaults");
     });
 
     it("removes a root when given undefined", async () => {

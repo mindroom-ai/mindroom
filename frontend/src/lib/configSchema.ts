@@ -75,14 +75,24 @@ export interface SchemaNode {
 
 const ACRONYMS: Record<string, string> = {
   api: "API",
+  cwd: "CWD",
+  http: "HTTP",
   id: "ID",
+  lfs: "LFS",
   livekit: "LiveKit",
   llm: "LLM",
   mcp: "MCP",
+  mindroom: "MindRoom",
   oauth: "OAuth",
+  openai: "OpenAI",
   pkce: "PKCE",
+  s256: "S256",
+  sqlite: "SQLite",
+  sse: "SSE",
   stt: "STT",
+  ttl: "TTL",
   tts: "TTS",
+  typesafe: "TypeSafe",
   url: "URL",
 };
 

@@ -23,6 +23,7 @@ const EDITOR_DEFINITIONS = [
   "AgentConfig",
   "AgentPrivateKnowledgeConfig",
   "TeamConfig",
+  "CompactionOverrideConfig",
   "RoomConfig",
   "MemoryConfig",
   "EmbedderConfig",

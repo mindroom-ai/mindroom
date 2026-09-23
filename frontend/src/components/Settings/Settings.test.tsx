@@ -159,5 +159,16 @@ describe("Settings", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(retry).toHaveBeenCalled();
+    expect(screen.queryByText("Loading settings...")).not.toBeInTheDocument();
+  });
+
+  it("shows a loading message until the schema arrives", () => {
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: null,
+      error: null,
+      retry: vi.fn(),
+    });
+    render(<Settings />);
+    expect(screen.getByText("Loading settings...")).toBeInTheDocument();
   });
 });

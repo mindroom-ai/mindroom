@@ -165,6 +165,9 @@ export function Settings() {
       {error != null && (
         <SchemaUnavailable subject="Settings" error={error} onRetry={retry} />
       )}
+      {root == null && error == null && (
+        <p className="text-sm text-muted-foreground">Loading settings...</p>
+      )}
       {root != null && active != null && (
         <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-[13rem_minmax(0,1fr)]">
           <nav aria-label="Settings sections" className="hidden md:block">
