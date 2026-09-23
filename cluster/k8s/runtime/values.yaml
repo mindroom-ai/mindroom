@@ -93,6 +93,8 @@ config:
   # Requires source: file and path inside its own directory below storage.mountPath.
   # contentBundles can transport files here; initialization runs in the runtime image.
   bootstrapBundlePath: ""
+  # Optional opaque revision; a new value validates and installs the bootstrap bundle.
+  bootstrapBundleRevision: ""
   create: true
   existingConfigMap: ""
   key: config.yaml

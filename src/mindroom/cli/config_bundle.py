@@ -14,7 +14,12 @@ from mindroom.cli.config import activate_cli_runtime
 from mindroom.constants import exported_process_env
 
 
-def initialize_runtime_bundle(source: Path, config_path: Path | None, storage_path: Path | None) -> None:
+def initialize_runtime_bundle(
+    source: Path,
+    config_path: Path | None,
+    storage_path: Path | None,
+    revision: str | None = None,
+) -> None:
     """Initialize the selected config directory before the runtime captures its environment."""
     # Both modules load Pydantic config models and cryptography-backed credentials;
     # keep that graph out of CLI help startup (see tests/test_import_graph.py).
@@ -31,6 +36,7 @@ def initialize_runtime_bundle(source: Path, config_path: Path | None, storage_pa
             runtime.config_dir,
             config=Path(runtime.config_path.name),
             initialize_only=True,
+            revision=revision,
             process_env=process_env,
         )
     except (*CONFIG_LOAD_USER_ERROR_TYPES, ValueError) as exc:
@@ -42,9 +48,10 @@ def config_install_bundle(
     source: Path = typer.Argument(..., help="Directory containing the complete configuration tree."),  # noqa: B008
     target: Path = typer.Option(..., help="Directory to install; its sibling TARGET.previous retains rollback."),  # noqa: B008
     config: Path = typer.Option(Path("config.yaml"), help="Config file path relative to the bundle root."),  # noqa: B008
-    initialize_only: bool = typer.Option(False, help="Keep an existing target directory unchanged."),
+    initialize_only: bool = typer.Option(False, help="Keep an existing target unless a declared revision changed."),
     force: bool = typer.Option(False, help="Explicitly replace authored edits or an unmanaged target."),
     expected_digest: str | None = typer.Option(None, help="Require this whole-tree candidate digest."),
+    revision: str | None = typer.Option(None, help="Record this bootstrap revision in the installed tree."),
     json_output: bool = typer.Option(False, "--json", help="Print a filesystem receipt as JSON."),
 ) -> None:
     """Validate and install a complete tree; use check-applied to confirm runtime reload."""
@@ -63,6 +70,7 @@ def config_install_bundle(
                 initialize_only=initialize_only,
                 force=force,
                 expected_digest=expected_digest,
+                revision=revision,
             )
     except (*CONFIG_LOAD_USER_ERROR_TYPES, ValueError) as exc:
         if json_output:

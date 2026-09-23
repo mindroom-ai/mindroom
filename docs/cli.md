@@ -170,30 +170,37 @@ Start MindRoom with your configuration.
  - Starts the bundled dashboard/API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --log-level                -l              TEXT     Set the logging level (DEBUG,      │
-│                                                     INFO, WARNING, ERROR)              │
-│                                                     [env var: LOG_LEVEL]               │
-│                                                     [default: INFO]                    │
-│ --config                   -c              PATH     Use this config file path.         │
-│                                                     Defaults the storage location to   │
-│                                                     the selected config directory      │
-│                                                     unless --storage-path is set.      │
-│ --storage-path             -s              PATH     Base directory for persistent      │
-│                                                     MindRoom data (state, sessions,    │
-│                                                     tracking)                          │
-│ --bootstrap-config-bundle                  PATH     Initialize the selected config     │
-│                                                     directory from this bundle only    │
-│                                                     when the directory is absent.      │
-│ --api                          --no-api             Start the bundled dashboard/API    │
-│                                                     server alongside the bot           │
-│                                                     [default: api]                     │
-│ --api-port                                 INTEGER  Port for the bundled dashboard/API │
-│                                                     server                             │
-│                                                     [default: 8765]                    │
-│ --api-host                                 TEXT     Host for the bundled dashboard/API │
-│                                                     server                             │
-│                                                     [default: 0.0.0.0]                 │
-│ --help                     -h                       Show this message and exit.        │
+│ --log-level                     -l              TEXT     Set the logging level (DEBUG, │
+│                                                          INFO, WARNING, ERROR)         │
+│                                                          [env var: LOG_LEVEL]          │
+│                                                          [default: INFO]               │
+│ --config                        -c              PATH     Use this config file path.    │
+│                                                          Defaults the storage location │
+│                                                          to the selected config        │
+│                                                          directory unless              │
+│                                                          --storage-path is set.        │
+│ --storage-path                  -s              PATH     Base directory for persistent │
+│                                                          MindRoom data (state,         │
+│                                                          sessions, tracking)           │
+│ --bootstrap-config-bundle                       PATH     Initialize the selected       │
+│                                                          config directory from this    │
+│                                                          bundle only when the          │
+│                                                          directory is absent.          │
+│ --bootstrap-config-bundle-rev…                  TEXT     Install a changed bootstrap   │
+│                                                          revision through native       │
+│                                                          validation; preserve a        │
+│                                                          matching active revision.     │
+│ --api                               --no-api             Start the bundled             │
+│                                                          dashboard/API server          │
+│                                                          alongside the bot             │
+│                                                          [default: api]                │
+│ --api-port                                      INTEGER  Port for the bundled          │
+│                                                          dashboard/API server          │
+│                                                          [default: 8765]               │
+│ --api-host                                      TEXT     Host for the bundled          │
+│                                                          dashboard/API server          │
+│                                                          [default: 0.0.0.0]            │
+│ --help                          -h                       Show this message and exit.   │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1202,6 +1209,7 @@ Install a complete configuration directory, including nested YAML includes, prom
 ```bash
 mindroom config install-bundle ./candidate --target ./active --json
 mindroom config install-bundle ./candidate --target ./active --initialize-only
+mindroom config install-bundle ./candidate --target ./active --revision deploy-2
 mindroom config check-applied --path ./active/config.yaml --fingerprint <receipt-fingerprint> --wait 300
 # Keep each installation receipt; pin rollback to the previous revision's digest:
 mindroom config install-bundle ./active.previous --target ./active --expected-digest <previous-receipt-digest> --json
@@ -1214,8 +1222,16 @@ Run the installer with the runtime's environment and filesystem access; external
 Relative paths resolve within the staged candidate during validation.
 Automatic config migrations affect the staged copy only.
 
-`--initialize-only` preserves any existing target directory, even when the supplied revision changes or the existing files have been edited.
+`--initialize-only` without `--revision` preserves any existing target directory.
 It does not validate that existing tree and returns `initialized` with no fingerprint.
+With `--revision`, a matching revision stored in `.mindroom-bundle.json` preserves the active tree after recovery, including any later hot installs.
+A different or missing stored revision validates the candidate.
+When `--revision` is supplied and the stored revision is missing or differs, an existing active tree must be owned and unedited, even when the candidate has identical content.
+Use ordinary installation with explicit `--force` to adopt an unmanaged tree or reset authored drift.
+The revision is an opaque, nonblank string of at most 128 UTF-8 bytes with no control characters.
+It changes only after successful validation and publication.
+If candidate content is identical, only metadata changes atomically; authored files and previous trees stay untouched.
+Ordinary installs without `--revision` carry the active revision forward and ignore revision metadata in the incoming bundle.
 Without this flag, unchanged trees return `unchanged`.
 Changed managed trees replace the active tree only if its file names, modes, and contents still match the last installation.
 This covers `.env` and files outside the YAML include graph too.
@@ -1238,10 +1254,12 @@ If the active revision has since been authored, rollback also requires explicit 
 A failed or missing runtime receipt does not automatically roll back filesystem state.
 
 For startup, `mindroom run --bootstrap-config-bundle SOURCE --config TARGET/config.yaml` runs initialize-only installation before loading the runtime environment.
+Add `--bootstrap-config-bundle-revision REVISION` to install a changed declared revision before startup; this option requires a bootstrap source.
 The target directory is derived from the selected config path, and the source must contain the same config filename at its root.
 Validation reads the staged `.env`, with exported process values and explicit `--storage-path` taking precedence.
 Startup then resolves paths and `.env` again from the installed tree.
-Existing target directories are preserved, so changed source revisions never overwrite authored edits on restart.
+Without a declared revision, existing target directories are preserved on restart.
+With a matching declared revision, restarts preserve hot updates and guarded rollbacks; a new revision uses native validation and drift protection.
 Keep storage outside this dedicated config directory.
 
 **Filesystem limits:** directory replacement uses two renames on the target filesystem.
