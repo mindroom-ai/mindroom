@@ -32,7 +32,7 @@ from mindroom.matrix.large_messages import (
     _SIDECAR_UPLOAD_FALLBACK_INDICATOR,
     _calculate_delivery_event_size,
     _create_preview,
-    _oversized_nonterminal_streaming_edit_sent_at,
+    _oversized_nonterminal_streaming_edit_next_allowed_at,
     _upload_text_as_mxc,
     calculate_event_size,
     is_edit_message,
@@ -290,42 +290,71 @@ def test_is_edit_message() -> None:
     assert is_edit_message(edit2)
 
 
+def _oversized_edit_content(original_event_id: str, body: str) -> dict[str, object]:
+    return {
+        "body": f"* {body}",
+        "m.new_content": {
+            "body": body,
+            "msgtype": "m.text",
+            STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
+        "msgtype": "m.text",
+    }
+
+
 def test_oversized_nonterminal_streaming_edit_rate_limit_prunes_expired_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Oversized streaming-edit rate state should not retain old streams forever."""
-    _oversized_nonterminal_streaming_edit_sent_at.clear()
+    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
     body = "x" * 40000
-
-    def oversized_edit_content(original_event_id: str) -> dict[str, object]:
-        return {
-            "body": f"* {body}",
-            "m.new_content": {
-                "body": body,
-                "msgtype": "m.text",
-                STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
-            },
-            "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
-            "msgtype": "m.text",
-        }
-
-    monotonic_values = iter([100.0, 106.0])
+    interval = max(5.0, calculate_event_size(_oversized_edit_content("$old", body)) / 4096)
+    monotonic_values = iter([100.0, 100.0 + interval])
     monkeypatch.setattr("mindroom.matrix.large_messages.monotonic", lambda: next(monotonic_values))
 
     assert should_send_oversized_nonterminal_streaming_edit(
         room_id="!room:server",
         original_event_id="$old",
-        edit_content=oversized_edit_content("$old"),
+        edit_content=_oversized_edit_content("$old", body),
     )
-    assert _oversized_nonterminal_streaming_edit_sent_at == {("!room:server", "$old"): 100.0}
+    assert _oversized_nonterminal_streaming_edit_next_allowed_at == {("!room:server", "$old"): 100.0 + interval}
 
     assert should_send_oversized_nonterminal_streaming_edit(
         room_id="!room:server",
         original_event_id="$new",
-        edit_content=oversized_edit_content("$new"),
+        edit_content=_oversized_edit_content("$new", body),
     )
 
-    assert _oversized_nonterminal_streaming_edit_sent_at == {("!room:server", "$new"): 106.0}
+    assert _oversized_nonterminal_streaming_edit_next_allowed_at == {
+        ("!room:server", "$new"): 100.0 + 2 * interval,
+    }
+
+
+def test_oversized_nonterminal_streaming_edit_interval_grows_with_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Large in-progress edits upload sidecars at a bounded average byte rate."""
+    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
+    edit = _oversized_edit_content("$big", "x" * 1_000_000)
+    expected_interval = calculate_event_size(edit) / 4096
+    assert expected_interval > 200
+    now = {"value": 1000.0}
+    monkeypatch.setattr("mindroom.matrix.large_messages.monotonic", lambda: now["value"])
+
+    def allowed() -> bool:
+        return should_send_oversized_nonterminal_streaming_edit(
+            room_id="!room:server",
+            original_event_id="$big",
+            edit_content=edit,
+        )
+
+    assert allowed()
+    now["value"] = 1000.0 + 6.0
+    assert not allowed()
+    now["value"] = 1000.0 + expected_interval - 1.0
+    assert not allowed()
+    now["value"] = 1000.0 + expected_interval + 0.001
+    assert allowed()
+    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
 
 
 def test__create_preview() -> None:

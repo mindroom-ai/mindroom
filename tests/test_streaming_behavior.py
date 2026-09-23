@@ -40,7 +40,7 @@ from mindroom.history.interrupted_replay import (
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_sent_at
+from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_next_allowed_at
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
@@ -268,9 +268,9 @@ def mock_calculator_agent() -> AgentMatrixUser:
 @pytest.fixture
 def reset_oversized_nonterminal_rate_limit() -> Iterator[None]:
     """Reset oversized nonterminal sidecar edit rate-limit state around a test."""
-    _oversized_nonterminal_streaming_edit_sent_at.clear()
+    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
     yield
-    _oversized_nonterminal_streaming_edit_sent_at.clear()
+    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
 
 
 class TestStreamingBehavior:
@@ -631,6 +631,10 @@ class TestStreamingBehavior:
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
         with (
+            # The size-proportional term is exercised directly by the
+            # large_messages unit tests; here it is pinned negligible so this
+            # integration test stays focused on the flat 5s floor wiring.
+            patch("mindroom.matrix.large_messages._OVERSIZED_NONTERMINAL_STREAMING_EDIT_BYTES_PER_SECOND", 10**12),
             patch(
                 "mindroom.matrix.large_messages.monotonic",
                 side_effect=lambda: next(monotonic_values),
