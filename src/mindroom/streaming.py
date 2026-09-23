@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
@@ -76,6 +76,7 @@ __all__ = [
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
     "FinalTextTransform",
+    "ProgressPublisher",
     "ReplacementStreamingResponse",
     "StreamInputChunk",
     "StreamingDeliveryError",
@@ -93,6 +94,7 @@ __all__ = [
     "interactive_response_for_visible_body",
     "is_interrupted_partial_reply",
     "send_streaming_response",
+    "stream_progress_edits",
     "strip_matching_visible_tool_markers",
     "strip_visible_tool_markers",
 ]
@@ -508,6 +510,8 @@ type TerminalEdit = Callable[..., Awaitable[DeliveredMatrixEvent | None]]
 type TerminalSend = Callable[..., Awaitable[DeliveredMatrixEvent | None]]
 # The answer text once the stream has ended, in and transformed out.
 type FinalTextTransform = Callable[[str], Awaitable[str]]
+# One complete presentation of a response whose terminal delivery has another owner.
+type ProgressPublisher = Callable[[StructuredStreamChunk], Awaitable[None]]
 
 
 @dataclass
@@ -2253,3 +2257,84 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
 
     assert transport_outcome is not None
     return transport_outcome
+
+
+@asynccontextmanager
+async def stream_progress_edits(
+    client: nio.AsyncClient,
+    target: MessageTarget,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    event_id: str,
+    show_tool_calls: bool,
+    extra_content: dict[str, Any] | None = None,
+    visible_progress_callback: Callable[[str], None] | None = None,
+    transport_is_current: Callable[[], Awaitable[bool]] | None = None,
+) -> AsyncIterator[ProgressPublisher]:
+    """Stream progress into one existing reply whose terminal update belongs to the caller.
+
+    Each publication is the caller's complete presentation. Appended text is
+    throttled like ordinary streamed deltas, and any other change counts as one
+    in-place mutation. The first publication is delivered at once, so the reply
+    leaves whatever state it showed before. Progress is transport only: a
+    rejected edit stops later progress without failing the caller, whose
+    terminal delivery still owns the reply.
+    """
+    stream_config = config.defaults.streaming
+    streaming = StreamingResponse(
+        target=target,
+        config=config,
+        runtime_paths=runtime_paths,
+        event_id=event_id,
+        last_update=float("-inf"),
+        update_interval=stream_config.update_interval,
+        min_update_interval=stream_config.min_update_interval,
+        interval_ramp_seconds=stream_config.interval_ramp_seconds,
+        max_idle=stream_config.max_idle,
+        show_tool_calls=show_tool_calls,
+        extra_content=extra_content,
+        visible_progress_callback=visible_progress_callback,
+        transport_is_current=transport_is_current,
+    )
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+    delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
+    published = False
+
+    def apply_presentation(text: str) -> None:
+        if text.startswith(streaming.accumulated_text):
+            streaming._append_incremental_text(text[len(streaming.accumulated_text) :])
+            return
+        streaming.accumulated_text = text
+        streaming._mark_nonadditive_text_mutation()
+
+    async def publish(chunk: StructuredStreamChunk) -> None:
+        nonlocal published
+        if delivery_task.done():
+            return
+        if chunk.tool_trace is not None and not _tool_traces_match(streaming.tool_trace, chunk.tool_trace):
+            # Callers keep mutating their trace entries; hold the published state.
+            streaming.tool_trace = deepcopy(chunk.tool_trace)
+        if not published:
+            published = True
+            streaming.accumulated_text = chunk.content
+            _queue_delivery_request(delivery_queue, force_refresh=True, allow_empty_progress=True)
+        elif chunk.content != streaming.accumulated_text:
+            await _apply_visible_text_chunk(
+                streaming,
+                delivery_queue,
+                chunk.content,
+                apply_chunk=apply_presentation,
+            )
+
+    try:
+        yield publish
+    finally:
+        delivery_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+        if delivery_error is not None:
+            logger.warning(
+                "Progress edits stopped before terminal delivery",
+                event_id=event_id,
+                room_id=target.room_id,
+                error=str(delivery_error),
+            )
