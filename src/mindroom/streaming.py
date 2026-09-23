@@ -29,10 +29,7 @@ from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.legacy_streaming import has_legacy_terminal_suffix, strip_legacy_terminal_suffixes
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result, send_message_result
-from mindroom.matrix.large_messages import (
-    oversized_nonterminal_streaming_edit_blocked,
-    should_send_oversized_nonterminal_streaming_edit,
-)
+from mindroom.matrix.large_messages import should_send_oversized_nonterminal_streaming_edit
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.orchestration.runtime import (
@@ -139,10 +136,6 @@ StreamInputChunk = (
 )
 _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
 _STREAM_DELIVERY_CANCEL_TIMEOUT_SECONDS = 5.0
-# Past the live ceiling, the oldest a stream's last committed in-progress edit
-# may get before one ordinary edit goes out again. Startup stale-stream
-# recovery only finds in-progress messages edited within its lookback window.
-_PAST_CEILING_HEARTBEAT_SECONDS = 30 * 60
 
 
 class _NonTerminalDeliveryError(Exception):
@@ -539,7 +532,6 @@ class StreamingResponse:
     min_char_update_interval: float = 0.35
     progress_update_interval: float = 1.0
     max_idle: float = 2.0
-    max_live_chars: int = 1_000_000
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
     show_tool_calls: bool = True  # When False, omit inline tool call text and tool-trace metadata
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
@@ -605,9 +597,6 @@ class StreamingResponse:
     )
     _inflight_nonterminal_capture: asyncio.Future[None] | None = field(default=None, init=False, repr=False)
     _inflight_nonterminal_capture_state: _CommittedDeliveryState | None = field(default=None, init=False, repr=False)
-    # When the last non-terminal send or edit reached Matrix, whatever state it
-    # carried; `last_update` only advances when that state was still current.
-    _last_nonterminal_commit_at: float | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Derive Matrix delivery fields from the canonical target."""
@@ -680,7 +669,6 @@ class StreamingResponse:
     ) -> None:
         """Advance throttle state after one non-terminal send or edit reached Matrix."""
         now = time.time()
-        self._last_nonterminal_commit_at = now
         if self.stream_started_at is None:
             self.stream_started_at = now
         delivery_matches_live_state = (
@@ -714,31 +702,6 @@ class StreamingResponse:
             return self._inflight_nonterminal_capture
         return None
 
-    def _live_updates_paused(self) -> bool:
-        """Return whether the live-update ceiling should suppress this progressive edit.
-
-        Once a stream already has a visible Matrix event and the accumulated text
-        exceeds `max_live_chars`, every progressive edit would cost time
-        proportional to the whole response: snapshot deep copies and
-        `calculate_event_size` run on the event loop, and formatting runs in
-        `asyncio.to_thread` but still holds the GIL.
-        Past the ceiling, one ordinary edit still goes out once the last committed
-        non-terminal delivery is `_PAST_CEILING_HEARTBEAT_SECONDS` old and the
-        oversized-edit cadence would accept it, so startup stale-stream recovery
-        still finds the message if a restart interrupts the turn.
-        Deciding to skip stays O(1).
-        Forced non-terminal deliveries and the terminal delivery bypass this check
-        and always carry the complete answer.
-        """
-        if self.event_id is None or len(self.accumulated_text) <= self.max_live_chars:
-            return False
-        last_commit_at = self._last_nonterminal_commit_at
-        if last_commit_at is not None and time.time() - last_commit_at < _PAST_CEILING_HEARTBEAT_SECONDS:
-            return True
-        # Wait out a closed cadence here, or every update until it opens would
-        # format the whole response only to have its edit refused.
-        return oversized_nonterminal_streaming_edit_blocked(room_id=self.room_id, original_event_id=self.event_id)
-
     async def _throttled_send(
         self,
         client: nio.AsyncClient,
@@ -748,11 +711,6 @@ class StreamingResponse:
         capture_completions: tuple[asyncio.Future[None], ...] = (),
     ) -> None:
         """Send/edit when either time or character thresholds are met."""
-        if self._live_updates_paused():
-            # Checked first so a skip also avoids the O(n) accumulated_text.strip()
-            # below; forced non-terminal deliveries and the terminal delivery still send.
-            _complete_capture_completions(capture_completions)
-            return
         current_time = time.time()
         if self.stream_started_at is None:
             self.stream_started_at = current_time
@@ -1054,9 +1012,6 @@ class StreamingResponse:
         capture_completions: tuple[asyncio.Future[None], ...] = (),
     ) -> bool:
         """Send new message or edit existing one."""
-        if not is_final and not force_nonterminal_delivery and self._live_updates_paused():
-            _complete_capture_completions(capture_completions)
-            return True
         prepared_delivery = await self._prepare_delivery_async(
             is_final=is_final,
             allow_empty_progress=allow_empty_progress,
@@ -1868,11 +1823,8 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
 
         try:
             prepared_phase_boundary_flush = None
-            if (
-                merged_request.phase_boundary_flush
-                and not streaming._live_updates_paused()
-                and streaming.chars_since_last_update > 0
-                and streaming.accumulated_text.strip()
+            if merged_request.phase_boundary_flush and (
+                streaming.chars_since_last_update > 0 and streaming.accumulated_text.strip()
             ):
                 prepared_phase_boundary_flush = await streaming._prepare_delivery_async(
                     is_final=False,
@@ -2096,7 +2048,6 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         min_update_interval=sc.min_update_interval,
         interval_ramp_seconds=sc.interval_ramp_seconds,
         max_idle=sc.max_idle,
-        max_live_chars=sc.max_live_chars,
         pipeline_timing=pipeline_timing,
         visible_event_id_callback=visible_event_id_callback,
         visible_progress_callback=visible_progress_callback,

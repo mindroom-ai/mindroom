@@ -43,7 +43,7 @@ _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
 
 
 class StreamingConfig(BaseModel):
-    """Timing and size limits for streaming response edits."""
+    """Timing parameters for streaming response edits."""
 
     update_interval: float = Field(
         default=5.0,
@@ -63,14 +63,6 @@ class StreamingConfig(BaseModel):
             "Flush buffered streaming text on the next streaming event when no new "
             "deltas have arrived for at least this many seconds (event-driven, not "
             "a background timer)."
-        ),
-    )
-    max_live_chars: int = Field(
-        default=1_000_000,
-        ge=1,
-        description=(
-            "Stop progressive edits once a streamed response exceeds this many characters; "
-            "the full response is still delivered when the turn ends"
         ),
     )
 
@@ -474,7 +466,7 @@ class DefaultsConfig(BaseModel):
     )
     streaming: StreamingConfig = Field(
         default_factory=StreamingConfig,
-        description="Streaming response edit timing and size limits",
+        description="Streaming response timing parameters",
     )
     thread_summary_model: str | None = Field(
         default=None,

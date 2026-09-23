@@ -329,12 +329,6 @@ def should_send_oversized_nonterminal_streaming_edit(
     return True
 
 
-def oversized_nonterminal_streaming_edit_blocked(*, room_id: str, original_event_id: str) -> bool:
-    """Return in O(1) whether the size-proportional cadence still holds back this stream's next oversized edit."""
-    next_allowed_at = _oversized_nonterminal_streaming_edit_next_allowed_at.get((room_id, original_event_id))
-    return next_allowed_at is not None and monotonic() < next_allowed_at
-
-
 def _build_nonterminal_streaming_edit_preview(
     content: dict[str, Any],
     source_content: dict[str, Any],
