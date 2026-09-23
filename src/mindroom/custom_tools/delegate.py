@@ -31,7 +31,7 @@ from mindroom.delegation.sessions import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.response_turn import ResponsePausedForApproval
-from mindroom.tool_jobs.runtime import JobAccessError, get_background_runtime
+from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
@@ -238,7 +238,7 @@ class DelegateTools(Toolkit):
                 runtime_paths=self._runtime_paths,
                 depth=self._delegation_depth,
             )
-        except (SubagentSessionError, JobAccessError) as error:
+        except SubagentSessionError as error:
             return str(error)
         return await self._run_child(child.child_agent_name, message, continuation=child)
 
@@ -284,7 +284,7 @@ class DelegateTools(Toolkit):
             await liveness.enter_async_context(subagent_liveness(child, self._runtime_paths))
             try:
                 await reserve_child_turn(child, owner=owner, runtime_paths=self._runtime_paths)
-            except (SubagentSessionError, JobAccessError) as error:
+            except SubagentSessionError as error:
                 return str(error)
             await start_child_turn(
                 child,

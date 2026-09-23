@@ -49,8 +49,7 @@ from mindroom.tool_jobs.runtime import ToolJobRuntime, read_job_snapshot, regist
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
-from tests.test_delegation_execution import DelegationModel, _call
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -280,16 +279,24 @@ async def test_human_followup_releases_original_sdk_call_once(tmp_path: Path) ->
         async with execution_resources():
             with tool_runtime_context(context), human_message_signal_context(signal):
                 parent = asyncio.create_task(agent.arun("start", session_id=context.session_id))
-                await asyncio.wait_for(started.wait(), 2)
+                await asyncio.wait_for(started.wait(), 30)
                 signal.notify()
-                done, _ = await asyncio.wait({parent}, timeout=0.5)
+                done, _ = await asyncio.wait({parent}, timeout=30)
                 try:
                     assert parent in done, "managed ordinary tool must release its parent on human follow-up"
                     response = parent.result()
                     assert response.tools is not None
                     handle = response.tools[0].result
                     job_id = json.loads(handle)["job_id"]
+                    signal.clear()
                     release.set()
+                    completed = await asyncio.wait_for(
+                        runtime.wait(job_id, owner=build_execution_identity_from_runtime_context(context), depth=0),
+                        30,
+                    )
+                    assert completed.job.status == "completed"
+                    assert completed.job.result == "actual result"
+                    await runtime.release_wait(job_id, completed.token)
                     jobs = await runtime.list_jobs(
                         owner=build_execution_identity_from_runtime_context(context),
                         depth=0,

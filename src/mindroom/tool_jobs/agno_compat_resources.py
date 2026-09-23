@@ -124,7 +124,7 @@ def _async_bindings[Actor: _Actor](
 # Upstream issue: No matching public resource-lease extension point identified.
 # Upstream PR: None identified.
 # Remove when: SDK connections can be owned through a public run/job lease.
-# Coverage: tests/test_tool_job_execution.py and tests/test_tool_job_resources.py.
+# Coverage: tests/test_tool_job_resources.py::test_sdk_actors_share_balanced_connection_references
 def install_execution_resource_bindings() -> None:
     """Bind only connection admission and exact toolkit-list teardown ownership."""
     global _INSTALLED

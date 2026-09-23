@@ -14,10 +14,9 @@ from mindroom.agents import create_agent
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import tool_execution_identity
+from tests.delegation_helpers import _call, _delegate_runtime_context
 from tests.history_helpers import RecordingModel
 from tests.identity_helpers import entity_ids
-from tests.test_delegate_tools import _delegate_runtime_context
-from tests.test_delegation_execution import _call
 from tests.test_subagent_runtime import _config, _delivery_coordinator, _job
 
 if TYPE_CHECKING:

@@ -320,7 +320,7 @@ class ToolJobRuntime:
             self._ensure_open()
             if self._recovered:
                 return [await self._snapshot(entry, include_result=False) for entry in self._entries.values()]
-            for path in sorted(self._root.glob("*.json")):
+            for path in await asyncio.to_thread(lambda: sorted(self._root.glob("*.json"))):
                 if path.stem in self._entries:
                     continue
                 job, upgraded = await asyncio.to_thread(_read_job_snapshot, path)
@@ -725,7 +725,7 @@ class ToolJobRuntime:
             if self._closed or self._shutdown_task is not None:
                 return None
             entry = self._entries.get(job_id)
-            if entry is None or not matches(await self._snapshot(entry)):
+            if entry is None or not matches(await self._snapshot(entry, include_result=False)):
                 return None
             task = self._cancellation_task(entry)
         return await wait_for_future_until_complete(task)

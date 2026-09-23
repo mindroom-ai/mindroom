@@ -34,8 +34,7 @@ from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runti
 from mindroom.tool_jobs.wait_timeout import record_tool_wait_mode, saved_tool_wait_mode
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
-from tests.test_delegation_execution import DelegationModel, _call
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable

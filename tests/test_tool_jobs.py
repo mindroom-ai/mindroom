@@ -564,31 +564,33 @@ async def test_failed_admission_rolls_back_without_subscription_or_execution(
 ) -> None:
     """A write that never publishes a record must leave a safely retryable exact job ID."""
     runtime = ToolJobRuntime(tmp_path)
-    signal = HumanMessageSignal()
-    original = runtime_module.write_json_file_durable
-    calls = 0
+    try:
+        signal = HumanMessageSignal()
+        original = runtime_module.write_json_file_durable
+        calls = 0
 
-    def failed_write(_path: Path, _payload: object, *, strict_atomic_replace: bool) -> None:
-        assert strict_atomic_replace
-        msg = "disk unavailable"
-        raise OSError(msg)
+        def failed_write(_path: Path, _payload: object, *, strict_atomic_replace: bool) -> None:
+            assert strict_atomic_replace
+            msg = "disk unavailable"
+            raise OSError(msg)
 
-    async def operation() -> BackgroundOutcome:
-        nonlocal calls
-        calls += 1
-        return BackgroundOutcome("completed", "once")
+        async def operation() -> BackgroundOutcome:
+            nonlocal calls
+            calls += 1
+            return BackgroundOutcome("completed", "once")
 
-    monkeypatch.setattr(runtime_module, "write_json_file_durable", failed_write)
-    with pytest.raises(OSError, match="disk unavailable"):
-        await runtime.start(JobSpec("retry", "tool", 0), owner=_owner(), operation=operation, human_signal=signal)
-    assert not signal.has_subscribers
-    assert await runtime.list_jobs(owner=_owner(), depth=0) == []
-    assert calls == 0
-    monkeypatch.setattr(runtime_module, "write_json_file_durable", original)
-    job = await runtime.start(JobSpec("retry", "tool", 0), owner=_owner(), operation=operation)
-    assert (await runtime.wait(job.job_id, owner=_owner(), depth=0)).job.result == "once"
-    assert calls == 1
-    await runtime.shutdown()
+        monkeypatch.setattr(runtime_module, "write_json_file_durable", failed_write)
+        with pytest.raises(OSError, match="disk unavailable"):
+            await runtime.start(JobSpec("retry", "tool", 0), owner=_owner(), operation=operation, human_signal=signal)
+        assert not signal.has_subscribers
+        assert await runtime.list_jobs(owner=_owner(), depth=0) == []
+        assert calls == 0
+        monkeypatch.setattr(runtime_module, "write_json_file_durable", original)
+        job = await runtime.start(JobSpec("retry", "tool", 0), owner=_owner(), operation=operation)
+        assert (await runtime.wait(job.job_id, owner=_owner(), depth=0)).job.result == "once"
+        assert calls == 1
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -699,34 +701,42 @@ async def test_failed_continuation_preserves_approval_for_safe_retry(
 ) -> None:
     """A continuation never accepted on disk must retain its prior approval generation."""
     runtime = ToolJobRuntime(tmp_path)
-    calls = 0
+    try:
+        calls = 0
 
-    async def approval() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval", approval_state={"owners": ["shell"]})
+        async def approval() -> BackgroundOutcome:
+            return BackgroundOutcome("awaiting_approval", approval_state={"owners": ["shell"]})
 
-    async def continuation() -> BackgroundOutcome:
-        nonlocal calls
-        calls += 1
-        return BackgroundOutcome("completed", "once")
+        async def continuation() -> BackgroundOutcome:
+            nonlocal calls
+            calls += 1
+            return BackgroundOutcome("completed", "once")
 
-    def failed_write(_path: Path, _payload: object, *, strict_atomic_replace: bool) -> None:
-        assert strict_atomic_replace
-        msg = "write failed"
-        raise OSError(msg)
+        def failed_write(_path: Path, _payload: object, *, strict_atomic_replace: bool) -> None:
+            assert strict_atomic_replace
+            msg = "write failed"
+            raise OSError(msg)
 
-    job = await runtime.start(JobSpec("approval", "tool", 0), owner=_owner(), operation=approval)
-    result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
-    await runtime.release_wait(job.job_id, result.token)
-    writer = runtime_module.write_json_file_durable
-    monkeypatch.setattr(runtime_module, "write_json_file_durable", failed_write)
-    with pytest.raises(OSError, match="write failed"):
+        job = await runtime.start(JobSpec("approval", "tool", 0), owner=_owner(), operation=approval)
+        result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        await runtime.release_wait(job.job_id, result.token)
+        writer = runtime_module.write_json_file_durable
+        monkeypatch.setattr(runtime_module, "write_json_file_durable", failed_write)
+        with pytest.raises(OSError, match="write failed"):
+            await runtime.continue_job(
+                job.job_id,
+                owner=_owner(),
+                depth=0,
+                expected_generation=0,
+                operation=continuation,
+            )
+        assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "awaiting_approval"
+        monkeypatch.setattr(runtime_module, "write_json_file_durable", writer)
         await runtime.continue_job(job.job_id, owner=_owner(), depth=0, expected_generation=0, operation=continuation)
-    assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "awaiting_approval"
-    monkeypatch.setattr(runtime_module, "write_json_file_durable", writer)
-    await runtime.continue_job(job.job_id, owner=_owner(), depth=0, expected_generation=0, operation=continuation)
-    assert (await runtime.wait(job.job_id, owner=_owner(), depth=0)).job.result == "once"
-    assert calls == 1
-    await runtime.shutdown()
+        assert (await runtime.wait(job.job_id, owner=_owner(), depth=0)).job.result == "once"
+        assert calls == 1
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -1082,40 +1092,46 @@ async def test_reads_are_copies_and_consumption_hides_pending_results(
 ) -> None:
     """Read snapshots cannot mutate stored results, and only acknowledgement consumes them."""
     runtime = ToolJobRuntime(tmp_path)
+    try:
 
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "answer", result_payload={"exact": [1]})
+        async def operation() -> BackgroundOutcome:
+            return BackgroundOutcome("completed", "answer", result_payload={"exact": [1]})
 
-    job = await runtime.start(JobSpec("read", "tool", 0, adapter={"context": [1]}), owner=_owner(), operation=operation)
-    result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
-    await runtime.release_wait(job.job_id, result.token)
-    writer = runtime_module.write_json_file_durable
+        job = await runtime.start(
+            JobSpec("read", "tool", 0, adapter={"context": [1]}),
+            owner=_owner(),
+            operation=operation,
+        )
+        result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        await runtime.release_wait(job.job_id, result.token)
+        writer = runtime_module.write_json_file_durable
 
-    def forbid_write(_path: Path, _payload: object, *, strict_atomic_replace: bool) -> None:
-        assert strict_atomic_replace
-        msg = "read attempted durable mutation"
-        raise AssertionError(msg)
+        def forbid_write(_path: Path, _payload: object, *, strict_atomic_replace: bool) -> None:
+            assert strict_atomic_replace
+            msg = "read attempted durable mutation"
+            raise AssertionError(msg)
 
-    monkeypatch.setattr(runtime_module, "write_json_file_durable", forbid_write)
-    snapshot = await runtime.lookup(job.job_id, owner=_owner(), depth=0)
-    snapshot.result_payload["exact"].append(2)
-    pending = await runtime.pending_outcomes()
-    assert pending[0].result_payload is None
-    pending[0].adapter["context"].append(3)
-    outcome = await runtime.outcome(job.job_id, job.generation)
-    assert outcome is not None
-    assert outcome.result_payload is None
-    outcome.adapter["context"].append(4)
-    listed = await runtime.list_jobs(owner=_owner(), depth=0)
-    assert listed[0].result_payload is None
-    assert listed[0].adapter == {"context": [1]}
-    monkeypatch.setattr(runtime_module, "write_json_file_durable", writer)
-    waited = await runtime.wait(job.job_id, owner=_owner(), depth=0)
-    await runtime.acknowledge_wait(job.job_id, waited.token)
-    assert await runtime.outcome(job.job_id, job.generation) is None
-    assert await runtime.pending_outcomes() == []
-    assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).result_payload == {"exact": [1]}
-    await runtime.shutdown()
+        monkeypatch.setattr(runtime_module, "write_json_file_durable", forbid_write)
+        snapshot = await runtime.lookup(job.job_id, owner=_owner(), depth=0)
+        snapshot.result_payload["exact"].append(2)
+        pending = await runtime.pending_outcomes()
+        assert pending[0].result_payload is None
+        pending[0].adapter["context"].append(3)
+        outcome = await runtime.outcome(job.job_id, job.generation)
+        assert outcome is not None
+        assert outcome.result_payload is None
+        outcome.adapter["context"].append(4)
+        listed = await runtime.list_jobs(owner=_owner(), depth=0)
+        assert listed[0].result_payload is None
+        assert listed[0].adapter == {"context": [1]}
+        monkeypatch.setattr(runtime_module, "write_json_file_durable", writer)
+        waited = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        await runtime.acknowledge_wait(job.job_id, waited.token)
+        assert await runtime.outcome(job.job_id, job.generation) is None
+        assert await runtime.pending_outcomes() == []
+        assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).result_payload == {"exact": [1]}
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio

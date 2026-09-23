@@ -10,6 +10,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.authorization import is_sender_allowed_for_responder
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.custom_tools.job import is_job_function
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.lifecycle import active_delegation_edges
@@ -86,6 +87,9 @@ class ToolJobRuntimeCoordinator:
             return
         if not pin_background_tool_jobs(config, self.runtime_paths):
             await index_parked_work(self.runtime_paths, journal)
+        else:
+            # The worker publishes ownership before cancellation can leave an acquired lease behind.
+            await run_blocking_until_complete(lambda: self.runtime)
         self._initialized = True
 
     @property

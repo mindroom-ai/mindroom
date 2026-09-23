@@ -33,8 +33,8 @@ from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
+from tests.delegation_helpers import _delegate_runtime_context
 from tests.response_runner_helpers import _plain_request, _target
-from tests.test_delegate_tools import _delegate_runtime_context
 from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx, _streaming_adapter
 from tests.test_subagent_runtime import _config, _delivery_coordinator, _finish_job
 
@@ -160,7 +160,7 @@ async def test_internal_completion_dispatch_does_not_parse_matrix_event(tmp_path
     assert admitted is not None
     callback = AsyncMock(return_value=False)
     dispatcher.callbacks = replace(dispatcher.callbacks, on_tool_job_completion=callback)
-    dispatcher._turn_replay_released = True
+    dispatcher.release_turn_replay()
     with patch("mindroom.journal_dispatch.parse_journal_event", side_effect=AssertionError("Matrix parser called")):
         assert not await dispatcher._run_event(admitted)
     callback.assert_awaited_once_with(admitted)

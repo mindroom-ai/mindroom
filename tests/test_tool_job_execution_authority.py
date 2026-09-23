@@ -14,7 +14,7 @@ from mindroom.tool_jobs.execution_authority import (
 from mindroom.tool_jobs.runtime import JobAccessError
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import test_runtime_paths
-from tests.test_delegate_tools import _delegate_runtime_context
+from tests.delegation_helpers import _delegate_runtime_context
 from tests.test_subagent_runtime import _config, _job
 
 

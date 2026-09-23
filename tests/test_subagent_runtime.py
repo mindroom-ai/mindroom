@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from dataclasses import asdict, fields, replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -51,6 +52,7 @@ from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobAccessError,
     JobSpec,
+    ToolJobRuntime,
     get_background_runtime,
     register_background_runtime,
 )
@@ -60,7 +62,7 @@ from mindroom.tool_system.registry_state import TOOL_REGISTRY, tool_registry_ori
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
-from tests.test_delegate_tools import _delegate_runtime_context
+from tests.delegation_helpers import _delegate_runtime_context
 from tests.test_mcp_toolkit import _oauth_server_config
 from tests.test_queued_message_notify import _envelope
 
@@ -118,6 +120,57 @@ def _config(tmp_path: Path) -> Config:
         ),
         runtime_paths=test_runtime_paths(tmp_path),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_startup", [False, True])
+async def test_runtime_startup_io_keeps_loop_live_and_retains_cancelled_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_startup: bool,
+) -> None:
+    """Storage setup runs off-loop, and cancellation cannot orphan its newly acquired lease."""
+    config = _config(tmp_path)
+    config.background_tool_jobs.enabled = True
+    paths = test_runtime_paths(tmp_path)
+    coordinator = ToolJobRuntimeCoordinator(paths, lambda: config, lambda _: None, AgentReplyMembershipIndex())
+    original_init = ToolJobRuntime.__init__
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    ready, release = asyncio.Event(), threading.Event()
+
+    def gated_init(runtime: ToolJobRuntime, *args: object, **kwargs: object) -> None:
+        assert threading.get_ident() != loop_thread, "storage setup blocks the event loop"
+        original_init(runtime, *args, **kwargs)
+        loop.call_soon_threadsafe(ready.set)
+        assert release.wait(30)
+
+    monkeypatch.setattr(ToolJobRuntime, "__init__", gated_init)
+    startup = asyncio.create_task(coordinator.sync())
+    ready_waiter = asyncio.create_task(ready.wait())
+    try:
+        done, _ = await asyncio.wait({startup, ready_waiter}, timeout=30, return_when=asyncio.FIRST_COMPLETED)
+        if startup in done:
+            await startup
+        assert ready_waiter in done
+        if cancel_startup:
+            startup.cancel()
+        release.set()
+        if cancel_startup:
+            with pytest.raises(asyncio.CancelledError):
+                await startup
+        else:
+            await startup
+        monkeypatch.setattr(ToolJobRuntime, "__init__", original_init)
+        with pytest.raises(BlockingIOError):
+            ToolJobRuntime(paths.storage_root)
+    finally:
+        release.set()
+        ready_waiter.cancel()
+        await asyncio.gather(startup, ready_waiter, return_exceptions=True)
+        await coordinator.stop()
+    replacement = ToolJobRuntime(paths.storage_root)
+    await replacement.shutdown()
 
 
 def test_completion_authority_uses_latest_config_and_team_membership(tmp_path: Path) -> None:

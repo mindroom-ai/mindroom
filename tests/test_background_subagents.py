@@ -224,21 +224,31 @@ async def test_timeout_and_cancelled_waiter_leave_one_child_alive(tmp_path: Path
         await finish.wait()
         return BackgroundOutcome("completed", "answer")
 
-    job = await start_delegation(runtime, _child(), owner=_owner(), operation=operation)
-    await started.wait()
-    first = await runtime.wait(job.job_id, owner=_owner(), depth=0, timeout=0)
-    assert first.job.status == "running"
-    waiter = asyncio.create_task(runtime.wait(job.job_id, owner=_owner(), depth=0))
-    waiter.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await waiter
-    finish.set()
-    result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
-    assert result.job.result == "answer"
-    assert calls == 1
-    assert await runtime.pending_outcomes() == []
-    await runtime.acknowledge_wait(job.job_id, result.token)
-    await runtime.shutdown()
+    try:
+        job = await start_delegation(runtime, _child(), owner=_owner(), operation=operation)
+        await started.wait()
+        first = await runtime.wait(job.job_id, owner=_owner(), depth=0, timeout=0)
+        assert first.job.status == "running"
+        entered = asyncio.Event()
+
+        async def wait_for_result() -> background._BackgroundWait:
+            entered.set()
+            return await runtime.wait(job.job_id, owner=_owner(), depth=0)
+
+        waiter = asyncio.create_task(wait_for_result())
+        await asyncio.wait_for(entered.wait(), 30)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        finish.set()
+        result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        assert result.job.result == "answer"
+        assert calls == 1
+        assert await runtime.pending_outcomes() == []
+        await runtime.acknowledge_wait(job.job_id, result.token)
+    finally:
+        finish.set()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -308,44 +318,50 @@ async def test_human_followup_allows_subagent_next_tool(tmp_path: Path) -> None:
 async def test_scope_mismatch_cannot_inspect_or_cancel(tmp_path: Path, change: dict[str, str]) -> None:
     """Knowledge of a job ID conveys no authority in another execution scope."""
     runtime = ToolJobRuntime(tmp_path)
-    finish = asyncio.Event()
+    try:
+        finish = asyncio.Event()
 
-    async def operation() -> BackgroundOutcome:
-        await finish.wait()
-        return BackgroundOutcome("completed", "done")
+        async def operation() -> BackgroundOutcome:
+            await finish.wait()
+            return BackgroundOutcome("completed", "done")
 
-    job = await start_delegation(runtime, _child(), owner=_owner(), operation=operation)
-    with pytest.raises(ValueError, match="not available"):
-        await runtime.lookup(job.job_id, owner=replace(_owner(), **change), depth=0)
-    with pytest.raises(ValueError, match="not available"):
-        await runtime.cancel(job.job_id, owner=replace(_owner(), **change), depth=0)
-    assert (await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)).status == "cancelled"
-    await runtime.shutdown()
+        job = await start_delegation(runtime, _child(), owner=_owner(), operation=operation)
+        with pytest.raises(ValueError, match="not available"):
+            await runtime.lookup(job.job_id, owner=replace(_owner(), **change), depth=0)
+        with pytest.raises(ValueError, match="not available"):
+            await runtime.cancel(job.job_id, owner=replace(_owner(), **change), depth=0)
+        assert (await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)).status == "cancelled"
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_restart_retains_result_and_marks_live_work_interrupted(tmp_path: Path) -> None:
     """Restart returns stored exact outcomes without executing abandoned work again."""
     runtime = ToolJobRuntime(tmp_path)
+    try:
 
-    async def completed() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "durable")
+        async def completed() -> BackgroundOutcome:
+            return BackgroundOutcome("completed", "durable")
 
-    async def running() -> BackgroundOutcome:
-        await asyncio.Event().wait()
-        raise AssertionError
+        async def running() -> BackgroundOutcome:
+            await asyncio.Event().wait()
+            raise AssertionError
 
-    first = await start_delegation(runtime, _child(), owner=_owner(), operation=completed)
-    result = await runtime.wait(first.job_id, owner=_owner(), depth=0)
-    await runtime.release_wait(first.job_id, result.token)
-    second = await start_delegation(runtime, _child("c" * 32), owner=_owner(), operation=running)
-    await runtime.shutdown()
+        first = await start_delegation(runtime, _child(), owner=_owner(), operation=completed)
+        result = await runtime.wait(first.job_id, owner=_owner(), depth=0)
+        await runtime.release_wait(first.job_id, result.token)
+        second = await start_delegation(runtime, _child("c" * 32), owner=_owner(), operation=running)
+    finally:
+        await runtime.shutdown()
     restored = ToolJobRuntime(tmp_path)
-    await restored.recover()
-    assert (await restored.lookup(first.job_id, owner=_owner(), depth=0)).result == "durable"
-    assert (await restored.lookup(second.job_id, owner=_owner(), depth=0)).status == "interrupted"
-    assert len(await restored.pending_outcomes()) == 2
-    await restored.shutdown()
+    try:
+        await restored.recover()
+        assert (await restored.lookup(first.job_id, owner=_owner(), depth=0)).result == "durable"
+        assert (await restored.lookup(second.job_id, owner=_owner(), depth=0)).status == "interrupted"
+        assert len(await restored.pending_outcomes()) == 2
+    finally:
+        await restored.shutdown()
 
 
 @pytest.mark.asyncio
@@ -413,104 +429,115 @@ async def test_existing_queued_human_releases_wait_without_blocking_first_tool(t
 async def test_idle_parent_human_ingress_releases_active_job_wait(tmp_path: Path) -> None:
     """Background jobs retain their conversation signal after parent lifecycle completion."""
     runtime = ToolJobRuntime(tmp_path)
-    coordinator = ResponseLifecycleCoordinator()
-    target = MessageTarget.resolve("!room:test", "$root", "$human")
-    signal = coordinator._get_or_create_queued_signal(target)
+    try:
+        coordinator = ResponseLifecycleCoordinator()
+        target = MessageTarget.resolve("!room:test", "$root", "$human")
+        signal = coordinator._get_or_create_queued_signal(target)
 
-    async def operation() -> BackgroundOutcome:
-        await asyncio.Event().wait()
-        raise AssertionError
+        async def operation() -> BackgroundOutcome:
+            await asyncio.Event().wait()
+            raise AssertionError
 
-    job = await start_delegation(
-        runtime,
-        _child(),
-        owner=_owner(),
-        operation=operation,
-        human_signal=signal.human_signal,
-    )
-    assert not coordinator.has_active_response_for_target(target)
-    waiter = asyncio.create_task(runtime.wait(job.job_id, owner=_owner(), depth=0))
-    await asyncio.sleep(0)
-    coordinator.reserve_waiting_human_message(target=target, response_envelope=_envelope(target=target))
-    result = await asyncio.wait_for(waiter, 1)
-    assert result.job.status == "running"
-    await runtime.shutdown()
+        job = await start_delegation(
+            runtime,
+            _child(),
+            owner=_owner(),
+            operation=operation,
+            human_signal=signal.human_signal,
+        )
+        assert not coordinator.has_active_response_for_target(target)
+        waiter = asyncio.create_task(runtime.wait(job.job_id, owner=_owner(), depth=0))
+        await asyncio.sleep(0)
+        coordinator.reserve_waiting_human_message(target=target, response_envelope=_envelope(target=target))
+        result = await asyncio.wait_for(waiter, 1)
+        assert result.job.status == "running"
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_cancelled_active_wait_releases_result_claim(tmp_path: Path) -> None:
     """Cancellation after wait admission must release its lease without killing the child."""
     runtime = ToolJobRuntime(tmp_path)
-    running, finish = asyncio.Event(), asyncio.Event()
+    try:
+        running, finish = asyncio.Event(), asyncio.Event()
 
-    async def operation() -> BackgroundOutcome:
-        running.set()
-        await finish.wait()
-        return BackgroundOutcome("completed", "survived")
+        async def operation() -> BackgroundOutcome:
+            running.set()
+            await finish.wait()
+            return BackgroundOutcome("completed", "survived")
 
-    job = await start_delegation(runtime, _child(), owner=_owner(), operation=operation)
-    await running.wait()
-    waiter = asyncio.create_task(runtime.wait(job.job_id, owner=_owner(), depth=0))
-    admitted = asyncio.Event()
-    asyncio.get_running_loop().call_soon(admitted.set)
-    await admitted.wait()
-    waiter.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await waiter
-    finish.set()
-    result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
-    assert result.job.result == "survived"
-    await runtime.shutdown()
+        job = await start_delegation(runtime, _child(), owner=_owner(), operation=operation)
+        await running.wait()
+        waiter = asyncio.create_task(runtime.wait(job.job_id, owner=_owner(), depth=0))
+        admitted = asyncio.Event()
+        asyncio.get_running_loop().call_soon(admitted.set)
+        await admitted.wait()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        finish.set()
+        result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        assert result.job.result == "survived"
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_cancellation_waits_for_native_approval_cleanup(tmp_path: Path) -> None:
     """A terminal job must never leave its child conversation locked in a paused approval."""
     runtime = ToolJobRuntime(tmp_path)
-    cleaning, cleaned = asyncio.Event(), asyncio.Event()
+    try:
+        cleaning, cleaned = asyncio.Event(), asyncio.Event()
 
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval", approval_state={"owners": [["tool", "shell"]]})
+        async def operation() -> BackgroundOutcome:
+            return BackgroundOutcome("awaiting_approval", approval_state={"owners": [["tool", "shell"]]})
 
-    async def cleanup(child: DelegationChild) -> None:
-        cleaning.set()
-        await cleaned.wait()
-        child.status = "cancelled"
+        async def cleanup(child: DelegationChild) -> None:
+            cleaning.set()
+            await cleaned.wait()
+            child.status = "cancelled"
 
-    job = await start_delegation(runtime, _child(), owner=_owner(), operation=operation, cancel=cleanup)
-    result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
-    await runtime.acknowledge_wait(job.job_id, result.token)
-    cancelling = asyncio.create_task(runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True))
-    await cleaning.wait()
-    assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "cancel_requested"
-    cleaned.set()
-    assert delegation_child(await cancelling).status == "cancelled"
-    assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "cancelled"
-    assert len(await runtime.pending_outcomes()) == 1
-    await runtime.shutdown()
+        job = await start_delegation(runtime, _child(), owner=_owner(), operation=operation, cancel=cleanup)
+        result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        await runtime.acknowledge_wait(job.job_id, result.token)
+        cancelling = asyncio.create_task(runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True))
+        await cleaning.wait()
+        assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "cancel_requested"
+        cleaned.set()
+        assert delegation_child(await cancelling).status == "cancelled"
+        assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "cancelled"
+        assert len(await runtime.pending_outcomes()) == 1
+    finally:
+        cleaned.set()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_restart_preserves_native_approval_owner_snapshot(tmp_path: Path) -> None:
     """Restart reconstructs approval authority without granting the protected action."""
     runtime = ToolJobRuntime(tmp_path)
-    human = HumanMessageSignal()
+    try:
+        human = HumanMessageSignal()
 
-    async def approval() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval", approval_state={"owners": [["run", "tool", "shell"]]})
+        async def approval() -> BackgroundOutcome:
+            return BackgroundOutcome("awaiting_approval", approval_state={"owners": [["run", "tool", "shell"]]})
 
-    job = await start_delegation(runtime, _child(), owner=_owner(), operation=approval, human_signal=human)
-    waited = await runtime.wait(job.job_id, owner=_owner(), depth=0)
-    await runtime.release_wait(job.job_id, waited.token)
-    human.notify()
-    await runtime.lookup(job.job_id, owner=_owner(), depth=0)
-    await runtime.shutdown()
+        job = await start_delegation(runtime, _child(), owner=_owner(), operation=approval, human_signal=human)
+        waited = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        await runtime.release_wait(job.job_id, waited.token)
+        human.notify()
+        await runtime.lookup(job.job_id, owner=_owner(), depth=0)
+    finally:
+        await runtime.shutdown()
     restored = ToolJobRuntime(tmp_path)
-    await restored.recover()
-    saved = await restored.lookup(job.job_id, owner=_owner(), depth=0)
-    assert saved.approval_state == {"owners": [["run", "tool", "shell"]]}
-    assert saved.status == "awaiting_approval"
-    await restored.shutdown()
+    try:
+        await restored.recover()
+        saved = await restored.lookup(job.job_id, owner=_owner(), depth=0)
+        assert saved.approval_state == {"owners": [["run", "tool", "shell"]]}
+        assert saved.status == "awaiting_approval"
+    finally:
+        await restored.shutdown()
 
 
 @pytest.mark.asyncio
@@ -549,21 +576,23 @@ async def test_retained_cleanup_can_cancel_after_authorization_revocation(tmp_pa
     """Revocation blocks public control but cannot prevent exact persisted approval cleanup."""
     allowed = True
     runtime = ToolJobRuntime(tmp_path, authorize=lambda _job: allowed)
+    try:
 
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval")
+        async def operation() -> BackgroundOutcome:
+            return BackgroundOutcome("awaiting_approval")
 
-    job = await start_delegation(runtime, _child(), owner=_owner(), operation=operation)
-    result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
-    await runtime.release_wait(job.job_id, result.token)
-    allowed = False
-    with pytest.raises(ValueError, match="not available"):
-        await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
-    assert not await cancel_retained_delegation(runtime, replace(delegation_child(job), run_id="other"))
-    assert await cancel_retained_delegation(runtime, delegation_child(job))
-    allowed = True
-    assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "cancelled"
-    await runtime.shutdown()
+        job = await start_delegation(runtime, _child(), owner=_owner(), operation=operation)
+        result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        await runtime.release_wait(job.job_id, result.token)
+        allowed = False
+        with pytest.raises(ValueError, match="not available"):
+            await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
+        assert not await cancel_retained_delegation(runtime, replace(delegation_child(job), run_id="other"))
+        assert await cancel_retained_delegation(runtime, delegation_child(job))
+        allowed = True
+        assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "cancelled"
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -638,19 +667,21 @@ async def test_cancelled_admission_still_launches_owned_operation_once(
 async def test_shutdown_keeps_native_result_committed_before_outcome_publication(tmp_path: Path) -> None:
     """Shutdown cannot replace a committed native answer with an interruption notice."""
     runtime = ToolJobRuntime(tmp_path)
-    child = _child()
-    committed = asyncio.Event()
+    try:
+        child = _child()
+        committed = asyncio.Event()
 
-    async def operation() -> BackgroundOutcome:
-        child.status = "completed"
-        child.result = "Exact durable completed answer"
-        committed.set()
-        await asyncio.Event().wait()
-        raise AssertionError
+        async def operation() -> BackgroundOutcome:
+            child.status = "completed"
+            child.result = "Exact durable completed answer"
+            committed.set()
+            await asyncio.Event().wait()
+            raise AssertionError
 
-    job = await start_delegation(runtime, child, owner=_owner(), operation=operation)
-    await committed.wait()
-    await runtime.shutdown()
+        job = await start_delegation(runtime, child, owner=_owner(), operation=operation)
+        await committed.wait()
+    finally:
+        await runtime.shutdown()
     saved = json.loads((tmp_path / "tool_jobs" / f"{job.job_id}.json").read_text())
     assert saved["status"] == "completed"
     assert saved["result"] == "Exact durable completed answer"

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import textwrap
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING
@@ -44,10 +47,10 @@ from mindroom.tool_jobs.settings import (
 )
 from mindroom.turn_record import TurnRecord
 from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
+from tests.delegation_helpers import DelegationModel
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
 from tests.test_config_lifecycle import _make_lifecycle
-from tests.test_delegation_execution import DelegationModel
 from tests.test_subagent_runtime import _job
 
 if TYPE_CHECKING:
@@ -301,7 +304,7 @@ async def test_execution_scope_bypasses_owners_when_disabled(enabled: bool) -> N
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_agent_installs_job_adapters_only_when_enabled(tmp_path: Path, enabled: bool) -> None:
-    """Construction in an off process must not patch a provider or the SDK resources."""
+    """Each constructed provider follows the effective feature setting."""
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
         agents={"lead": AgentConfig(display_name="Lead", tools=[])},
@@ -313,6 +316,56 @@ def test_agent_installs_job_adapters_only_when_enabled(tmp_path: Path, enabled: 
     agent = create_agent("lead", config, paths, execution_identity=None, persist_runtime_state=False)
     assert agent.model is not None
     assert bool(vars(agent.model).get("_mindroom_tool_jobs")) is enabled
+
+
+def test_disabled_construction_leaves_sdk_bindings_unchanged_in_fresh_process(tmp_path: Path) -> None:
+    """An earlier enabled test cannot conceal accidental SDK installation in disabled mode."""
+    script = textwrap.dedent("""
+        import asyncio
+        import sys
+        from pathlib import Path
+        from agno.agent import _init as agent_init
+        from agno.team import _init as team_init
+
+        names = ("connect_connectable_tools", "disconnect_connectable_tools", "connect_mcp_tools", "disconnect_mcp_tools")
+        bindings = [(module, prefix + name, vars(module)[prefix + name])
+                    for module, prefix in ((agent_init, ""), (team_init, "_")) for name in names]
+        from mindroom.agents import create_agent
+        from mindroom.config.agent import AgentConfig
+        from mindroom.config.main import Config
+        from mindroom.config.models import ModelConfig
+        from mindroom.tool_jobs import agno_compat_resources
+        from tests.conftest import test_runtime_paths
+        from tests.identity_helpers import persist_entity_accounts
+
+        config = Config(
+            agents={"lead": AgentConfig(display_name="Lead", tools=["calculator"], learning=False)},
+            models={"default": ModelConfig(provider="synthetic", id="lorem-ipsum", extra_kwargs={
+                "chars_per_second": 0, "tool_call_probability": 0, "min_response_chars": 32, "max_response_chars": 32,
+            })},
+        )
+        config.memory.backend = "none"
+        config.defaults.tools = []
+        paths = test_runtime_paths(Path(sys.argv[1]))
+        persist_entity_accounts(config, paths)
+        agent = create_agent("lead", config, paths, execution_identity=None, persist_runtime_state=False)
+        response = asyncio.run(agent.arun("Reply normally"))
+        assert response.content
+        functions = [function for toolkit in agent.tools for function in toolkit.get_async_functions().values()]
+        assert any(function.name == "add" for function in functions)
+        assert all(function.name != "job" for function in functions)
+        assert all("wait_timeout" not in function.parameters.get("properties", {}) for function in functions)
+        assert not vars(agent.model).get("_mindroom_tool_jobs")
+        assert not agno_compat_resources._INSTALLED
+        assert all(vars(module)[name] is original for module, name, original in bindings)
+    """)
+    subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
 
 
 @pytest.mark.asyncio

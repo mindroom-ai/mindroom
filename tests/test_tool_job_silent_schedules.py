@@ -22,12 +22,12 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.constants import is_silent_schedule_no_report_response
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child, start_delegation
+from mindroom.delivery_gateway import FinalDeliveryRequest, ResponseIdentity
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.response_runner import _is_silent_schedule_response, _with_silent_schedule_delivery
-from mindroom.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.streaming import StreamingPresentation, strip_matching_visible_tool_markers
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.completion import completion_envelope, join_conversation_jobs
@@ -37,9 +37,8 @@ from mindroom.tool_system.events import ToolTraceEntry, tool_markers_match_trace
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.turn_origin import TurnIntent
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
-from tests.test_delegation_execution import DelegationModel, _call
 from tests.test_subagent_runtime import _job
 
 if TYPE_CHECKING:
@@ -254,15 +253,24 @@ async def test_recovered_silent_schedule_retains_guidance_and_receipt(tmp_path: 
         assert _is_silent_schedule_response(recovered)
         assert recovered.response_envelope.origin.intent is TurnIntent.TOOL_JOB_COMPLETION
         assert "NO_REPLY" in _with_silent_schedule_delivery((), recovered.response_envelope)[0].text
-        await record_silent_schedule_result_if_needed(
-            entity_name="general",
-            agent_names=("general",),
-            envelope=recovered.response_envelope,
-            config=bot.config,
-            runtime_paths=bot.runtime_paths,
-            suppression_reason="silent_no_report",
-            response_text="NO_REPLY",
+        outcome = await runner.deps.delivery_gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=recovered.response_envelope.target,
+                existing_event_id=None,
+                response_text="NO_REPLY",
+                identity=ResponseIdentity(
+                    response_kind="agent",
+                    response_envelope=recovered.response_envelope,
+                    sources=recovered.sources,
+                    correlation_id="silent-recovery",
+                    participating_agent_names=("general",),
+                ),
+                tool_trace=None,
+                extra_content=None,
+            ),
         )
+        assert outcome.failure_reason == "silent_no_report"
+        bot.client.room_send.assert_not_called()
         receipts = list(bot.runtime_paths.storage_root.glob("agents/general/workspace/.mindroom/scheduled_runs/*.json"))
         assert len(receipts) == 1
         assert json.loads(receipts[0].read_text())["result"] == "no_report"

@@ -14,7 +14,6 @@ import pytest
 import pytest_asyncio
 from agno.agent import Agent
 from agno.models.response import ModelResponse
-from agno.run.base import RunStatus
 from agno.team import Team
 
 from mindroom.config.agent import AgentConfig
@@ -36,9 +35,8 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tools.shell import _process_registry
 from tests.conftest import test_runtime_paths
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_config_lifecycle import _make_lifecycle
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
-from tests.test_delegation_execution import DelegationModel, _call
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -325,9 +323,9 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
             )
             async with execution_resources():
                 if not excluded:
-                    rejected = await actor.arun("Execute the tool", session_id="session")
-                    assert rejected.status is RunStatus.error
-                    assert "exclude_toolkits" in rejected.content
+                    rejected = await _invoke(actor, model, "native_step", wait_timeout=3)
+                    assert rejected.tool_call_error
+                    assert "exclude_toolkits" in rejected.result
                     assert not (plugin / "executions").exists()
                     assert await runtime.list_jobs(owner=owner, depth=0) == []
                     return
@@ -351,9 +349,9 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
                 release_background_tool_jobs(paths)
                 pin_background_tool_jobs(config, paths)
-                rejected = await actor.arun("Execute the tool", session_id="session")
-                assert rejected.status is RunStatus.error
-                assert "exclude_toolkits" in rejected.content
+                rejected = await _invoke(actor, model, "native_step", wait_timeout=3)
+                assert rejected.tool_call_error
+                assert "exclude_toolkits" in rejected.result
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:
         release_background_tool_jobs(paths)

@@ -29,8 +29,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import decode_tool_result, encode_tool_result
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
-from tests.test_delegation_execution import DelegationModel, _call
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -123,10 +122,11 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
     """A real no-keyword callable executes once and bounded waits return without cancellation."""
     invoked = []
     hooked = []
-    gate = asyncio.Event()
+    gate, entered = asyncio.Event(), asyncio.Event()
 
     async def application() -> str:
         invoked.append(True)
+        entered.set()
         await gate.wait()
         return "finished"
 
@@ -150,7 +150,7 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
             with tool_runtime_context(context):
                 waiting = asyncio.create_task(model.arun_function_call(call))
                 if arguments.get("wait_timeout") is None:
-                    await asyncio.sleep(0.03)
+                    await asyncio.wait_for(entered.wait(), 30)
                     assert not waiting.done()
                     gate.set()
                     result = await asyncio.wait_for(waiting, 1)

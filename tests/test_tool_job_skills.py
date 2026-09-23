@@ -16,8 +16,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.skills import build_agent_skills
-from tests.test_delegate_tools import _delegate_runtime_context
-from tests.test_delegation_execution import DelegationModel, _call
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
 from tests.test_skills import _write_skill, _write_skill_script
 from tests.test_subagent_runtime import _config, _delivery_coordinator, _job
 

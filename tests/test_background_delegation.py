@@ -47,10 +47,11 @@ from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_con
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
-from tests.test_delegation_execution import (
+from tests.delegation_helpers import (
     DelegationModel,
     _call,
+    _delegate_runtime_context,
+    _runtime_paths,
     _saved_approval_calls,
 )
 from tests.test_delegation_execution import (

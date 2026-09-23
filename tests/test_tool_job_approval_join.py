@@ -24,7 +24,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.event_journal import ApprovalContinuation
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
@@ -53,12 +53,24 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from tests.conftest import make_turn_context
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
-from tests.test_delegation_execution import DelegationModel, _call
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+async def _wait_for_progress(pending: asyncio.Task[str], progress: asyncio.Event) -> None:
+    """Wait for real progress, surfacing a premature response failure immediately."""
+    waiter = asyncio.create_task(progress.wait())
+    try:
+        await asyncio.wait({pending, waiter}, timeout=30, return_when=asyncio.FIRST_COMPLETED)
+        if pending.done():
+            pending.result()
+        assert progress.is_set(), "response did not reach expected progress"
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -74,7 +86,7 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
     """Approved work stays owned and visibly waiting until a result or human release."""
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
-        agents={"leader": AgentConfig(display_name="Leader")},
+        agents={"leader": AgentConfig(display_name="Leader", tools=["calculator"])},
     )
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
@@ -100,21 +112,42 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
     model = DelegationModel(
         id="test",
         responses=[
-            ModelResponse(tool_calls=[_call("slow_tool", "approved-call", wait_timeout=wait_timeout)]),
+            ModelResponse(tool_calls=[_call("add", "approved-call", wait_timeout=wait_timeout)]),
             ModelResponse(content="Independent work done."),
         ],
     )
     install_tool_job_execution(model)
     function = Function.from_callable(slow_tool)
+    function.name = "add"
+    function.owning_toolkit = "calculator"
     function.requires_confirmation = True
     db_file = str(tmp_path / "approval.db")
     storage = SqliteDb(db_file=db_file)
     tools = [function, JobTools(paths, owner)]
-    actor = (
-        Team(id="leader", model=model, members=[], tools=tools, db=storage, telemetry=False)
-        if team
-        else Agent(id="leader", model=model, tools=tools, db=storage, telemetry=False)
-    )
+    member_model = model
+    member = Agent(id="leader", name="Leader", model=member_model, tools=tools, db=storage, telemetry=False)
+    if team:
+        member_model.responses[-1] = ModelResponse(content="Member waiting for its result.")
+        model = DelegationModel(
+            id="coordinator",
+            responses=[
+                ModelResponse(
+                    tool_calls=[_call("delegate_task_to_member", "delegate", member_id="leader", task="Add")],
+                ),
+                ModelResponse(content="Independent work done."),
+                ModelResponse(
+                    tool_calls=[
+                        _call("delegate_task_to_member", "retrieve-member", member_id="leader", task="Retrieve result"),
+                    ],
+                ),
+                ModelResponse(content="Final result received."),
+            ],
+        )
+        install_tool_job_execution(model)
+        actor = Team(id="leader", model=model, members=[member], db=storage, telemetry=False)
+    else:
+        actor = member
+    approval_calls = (ApprovalCall("approved-call", "add", "leader", 2**62, toolkit_name="calculator"),)
     pending = None
     try:
         with tool_runtime_context(context), human_message_signal_context(signal), background_wait_notice(notice):
@@ -139,7 +172,7 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
                 requester_id=owner.requester_id,
                 response_event_id="$response",
                 sources=ResponseSources(("$source",), ("$source",)),
-                calls=(),
+                calls=approval_calls,
                 state="claimed",
             )
 
@@ -210,13 +243,13 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
                     patch("mindroom.teams.open_resolved_scope_session_context", return_value=nullcontext(scope)),
                     patch(
                         "mindroom.teams.materialize_exact_team_members",
-                        return_value=ResolvedExactTeamMembers([], [], [], set(), []),
+                        return_value=ResolvedExactTeamMembers(["leader"], [member], ["Leader"], {"leader"}, []),
                     ),
                     patch("mindroom.teams.build_materialized_team_instance", return_value=actor),
-                    patch("mindroom.teams.validate_approval_tool_owners"),
                 ):
                     response = await continue_paused_team_run(
-                        member_names=(),
+                        member_names=("leader",),
+                        approval_calls=approval_calls,
                         mode=TeamMode.COORDINATE,
                         config=config,
                         runtime_paths=paths,
@@ -230,26 +263,17 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
                         denial_reasons={"approved-call": None},
                         refresh_scheduler=None,
                         history_scope=scope.scope,
-                        prior_presentation_state=_TeamStreamPresentation.new([], [], show_tool_calls=True).to_state(),
+                        prior_presentation_state=_TeamStreamPresentation.new(
+                            ["leader"],
+                            ["Leader"],
+                            show_tool_calls=True,
+                        ).to_state(),
                     )
                 return response.response_text
 
             pending = asyncio.create_task(resume_team() if team else resume_agent())
-            start_waiter = asyncio.create_task(started.wait())
-            try:
-                await asyncio.wait({pending, start_waiter}, timeout=2, return_when=asyncio.FIRST_COMPLETED)
-                if pending.done():
-                    pending.result()
-                await asyncio.wait_for(start_waiter, 2)
-            finally:
-                start_waiter.cancel()
-                await asyncio.gather(start_waiter, return_exceptions=True)
-            notice_waiter = asyncio.create_task(waiting.wait())
-            try:
-                await asyncio.wait({pending, notice_waiter}, timeout=2, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                notice_waiter.cancel()
-                await asyncio.gather(notice_waiter, return_exceptions=True)
+            await _wait_for_progress(pending, started)
+            await _wait_for_progress(pending, waiting)
             assert not pending.done(), "approval returned a final response while accepted work was still running"
             assert waiting.is_set(), "approval join did not publish visible wait progress"
             assert "Independent work done." in notices[-1]
@@ -259,12 +283,12 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
             job_id = jobs[0].job_id
             if human_release:
                 signal.notify()
-                text = await asyncio.wait_for(pending, 2)
+                text = await asyncio.wait_for(pending, 30)
                 assert "Independent work done." in text
                 assert (await runtime.lookup(job_id, owner=owner, depth=0)).status == "running"
                 release.set()
             else:
-                model.responses.extend(
+                member_model.responses.extend(
                     [
                         ModelResponse(
                             tool_calls=[_call("job", "retrieve", action="wait", job_id=job_id, wait_timeout=0)],
@@ -273,7 +297,7 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
                     ],
                 )
                 release.set()
-                text = await asyncio.wait_for(pending, 2)
+                text = await asyncio.wait_for(pending, 30)
                 assert "Final result received." in text
                 assert text.count("Independent work done.") == 1
                 assert await runtime.pending_outcomes() == []

@@ -29,8 +29,8 @@ from mindroom.tool_system.events import (
 from mindroom.turn_record import RevisionSnapshotChangedError
 from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_paths
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
+from tests.delegation_helpers import DelegationModel, _call
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_delegation_execution import DelegationModel, _call
 from tests.test_stale_stream_cleanup import _aiter, _make_message_event, _room_get_event_response
 from tests.test_subagent_runtime import _job
 

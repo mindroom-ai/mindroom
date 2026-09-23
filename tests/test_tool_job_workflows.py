@@ -23,7 +23,7 @@ from mindroom.tool_jobs.resources import defer_execution_cleanup, execution_reso
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
-from tests.test_delegation_execution import DelegationModel, _call
+from tests.delegation_helpers import DelegationModel, _call
 from tests.test_dynamic_workflows import _make_context, _workflow_spec
 
 if TYPE_CHECKING:

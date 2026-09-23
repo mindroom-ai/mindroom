@@ -199,6 +199,7 @@ def _run_plugin_process(action: str, plugin_root: Path, storage_root: Path, *, h
         capture_output=True,
         text=True,
         env={**os.environ, "PYTHONHASHSEED": str(hash_seed)},
+        timeout=30,
     )
     payload = next(
         line.removeprefix("PLUGIN_RESULT=")

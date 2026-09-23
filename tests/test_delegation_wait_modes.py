@@ -28,8 +28,7 @@ from mindroom.tool_jobs.settings import pin_background_tool_jobs, release_backgr
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
-from tests.test_delegation_execution import DelegationModel, _call
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path

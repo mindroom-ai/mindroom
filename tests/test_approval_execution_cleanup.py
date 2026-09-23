@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.agent import Agent
+from agno.db.sqlite import SqliteDb
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
@@ -53,12 +55,23 @@ async def test_agent_approval_closes_storage_after_consumption_finalization_erro
     config = _config()
     paths = test_runtime_paths(tmp_path)
     identity = _identity()
-    paused = RunOutput(run_id="run-1", session_id="session-1", status=RunStatus.paused)
+    paused = RunOutput(run_id="run-1", agent_id="general", session_id="session-1", status=RunStatus.paused)
     session = AgentSession(session_id="session-1", agent_id="general", user_id=identity.requester_id, runs=[paused])
-    history_storage = MagicMock()
-    history_storage.get_session.return_value = session
-    agent = MagicMock(model=None)
     cleanup_order: list[str] = []
+
+    class RecordingDb(SqliteDb):
+        def __init__(self, label: str) -> None:
+            super().__init__(db_file=str(tmp_path / f"{label}.db"))
+            self.label = label
+
+        def close(self) -> None:
+            cleanup_order.append(self.label)
+            super().close()
+
+    history_storage = RecordingDb("storage")
+    history_storage.upsert_session(session)
+    history_storage.upsert_run(paused, session_id=session.session_id, user_id=identity.requester_id)
+    agent = Agent(id="general", db=RecordingDb("agent"))
 
     async def fail_finalization() -> None:
         cleanup_order.append("finalize")
@@ -92,18 +105,8 @@ async def test_agent_approval_closes_storage_after_consumption_finalization_erro
     with (
         patch("mindroom.approval_execution.create_session_storage", return_value=history_storage),
         patch("mindroom.approval_execution.create_agent", return_value=agent),
-        patch("mindroom.approval_execution.required_approval_tool_names", new=AsyncMock(return_value=())),
         patch("mindroom.approval_execution.restore_native_history", side_effect=RuntimeError("continuation failed")),
         patch("mindroom.approval_execution.finalize_consumption", new=fail_finalization),
-        patch("mindroom.approval_execution.ai_runtime.register_queued_notice_storage"),
-        patch(
-            "mindroom.approval_execution.close_agent_runtime_state_dbs",
-            side_effect=lambda *_args, **_kwargs: cleanup_order.append("agent"),
-        ),
-        patch(
-            "mindroom.approval_execution.close_execution_storage",
-            side_effect=lambda *_args, **_kwargs: cleanup_order.append("storage"),
-        ),
         pytest.raises(RuntimeError, match="consumption finalization failed"),
     ):
         await execution.continue_run(

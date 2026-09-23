@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 from agno.models.response import ToolExecution
@@ -19,12 +19,12 @@ from mindroom.tool_system.events import (
     ToolTraceEntry,
     tool_markers_match_trace,
 )
-from tests.conftest import make_turn_context
+from tests.conftest import make_turn_context, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
+    from pathlib import Path
 
-    from mindroom.constants import RuntimePaths
     from mindroom.streaming import StreamingPresentation
 
 
@@ -180,7 +180,10 @@ async def test_collect_streamed_response_ignores_repeated_start_for_restored_cal
 
 
 @pytest.mark.asyncio
-async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Explicit stream collection should still work when inline tool markers are hidden."""
     seen_kwargs: dict[str, object] = {}
 
@@ -199,7 +202,7 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(monkeypat
     body = await ai_response(
         make_turn_context("general", session_id="session"),
         prompt="Read",
-        runtime_paths=cast("RuntimePaths", object()),
+        runtime_paths=test_runtime_paths(tmp_path),
         config=Config(),
         show_tool_calls=False,
         collect_streamed_response=True,

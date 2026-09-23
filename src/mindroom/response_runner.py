@@ -40,6 +40,7 @@ from mindroom.constants import (
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    TOOL_TRACE_CONTENT_KEY,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -3494,7 +3495,7 @@ class ResponseRunner:
         )
         if visible is None or visible.sender != self.deps.matrix_full_id:
             return None
-        trace_content = visible.content.get("io.mindroom.tool_trace", {})
+        trace_content = visible.content.get(TOOL_TRACE_CONTENT_KEY, {})
         return StreamingPresentation(
             response_text=clean_partial_reply_text(visible.body),
             tool_trace=tuple(deserialize_tool_trace(trace_content.get("events", []))),

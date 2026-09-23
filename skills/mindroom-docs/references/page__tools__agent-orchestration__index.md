@@ -292,7 +292,7 @@ Managed foreground application tools share one execution owner per accepted call
 Tool names and application arguments remain unchanged; the runtime consumes `wait_timeout` before invoking the application callable.
 This waiting budget is separate from a tool's own execution or network timeout.
 The name `wait_timeout` is reserved on managed tools.
-If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; tool preparation rejects the collision before execution.
+If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
 Tools that stop the current model step, including model switching and dynamic tool loading, stay inline so the continuation receives their actual control result.
 Their schemas omit `wait_timeout`, and numeric waiting budgets are rejected before execution.
 
@@ -349,7 +349,7 @@ SDK toolkit disconnects retain Agno's existing best-effort behavior: logged tear
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
-Non-MCP constructor settings are part of the accepted tool identity: changing those authored settings blocks retained calls and result access until they match again.
+Non-MCP constructor settings are part of the accepted tool identity, stored as a digest: changing those authored settings blocks retained calls and result access until they match again.
 Include/exclude filters remain checked per function.
 Native delegation also rechecks the saved caller and child storage bindings; changing either storage scope blocks discovery, controls, and completion delivery.
 Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.

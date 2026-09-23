@@ -77,7 +77,8 @@ def _wrap_wait_metadata[**P, R](original: Callable[P, R]) -> Callable[P, R]:
 # Upstream issue: No matching public persisted per-call metadata extension point identified.
 # Upstream PR: None identified.
 # Remove when: SDK preserves owner-controlled per-call metadata through approval continuation.
-# Coverage: tests/test_tool_job_approval_modes.py, tests/test_tool_job_restart_integration.py.
+# Coverage: tests/test_tool_job_approval_modes.py::test_sdk_preparation_preserves_wait_modes_with_either_call_style
+# Coverage: tests/test_tool_job_approval_modes.py::test_saved_approval_retains_timeout_semantics_after_exclusion_change
 def _install_sdk_bindings() -> None:
     global _SDK_BINDINGS_INSTALLED
     with _SDK_BINDINGS_LOCK:
@@ -94,7 +95,8 @@ def _install_sdk_bindings() -> None:
 # Upstream issue: No matching public accepted-call completion owner identified.
 # Upstream PR: None identified.
 # Remove when: SDK dispatch retains synchronous work until its resource owner can close.
-# Coverage: tests/test_tool_job_workflows.py, tests/test_tool_job_execution.py.
+# Coverage: tests/test_tool_job_workflows.py::test_workflow_participant_runs_multiple_sync_tools
+# Coverage: tests/test_tool_job_workflows.py::test_cancel_composite_job_drains_all_sync_children
 def _install_owned_dispatch_binding() -> None:
     original = Model.arun_function_call
 
@@ -110,7 +112,8 @@ def _install_owned_dispatch_binding() -> None:
 # Upstream issue: No matching public reserved-parameter extension point identified.
 # Upstream PR: None identified.
 # Remove when: SDK supports per-call framework metadata outside application kwargs.
-# Coverage: tests/test_tool_job_wait_timeout.py, tests/test_tool_job_control_calls.py, tests/test_tool_job_exclusions.py.
+# Coverage: tests/test_tool_job_wait_timeout.py::test_shared_schema_adds_optional_wait_without_changing_application_schema
+# Coverage: tests/test_tool_job_exclusions.py::test_registered_plugin_exclusion_is_pinned_for_every_function
 def _wrap_tool_schemas(
     original: Callable[..., list[dict[str, Any]]],
     *,
@@ -158,7 +161,9 @@ def _wrap_tool_schemas(
 # Upstream issue: No matching public accepted-operation extension point identified.
 # Upstream PR: None identified.
 # Remove when: SDK exposes public approved-call execution ownership.
-# Coverage: tests/test_tool_job_execution.py, tests/test_tool_job_control_calls.py, tests/test_tool_job_learning.py.
+# Coverage: tests/test_tool_job_execution.py::test_fast_result_acknowledges_exact_saved_sdk_run
+# Coverage: tests/test_tool_job_control_calls.py::test_model_control_preserves_timing_across_human_followup
+# Coverage: tests/test_tool_job_learning.py::test_learning_persists_with_background_jobs_and_scoped_storage
 def install_tool_job_execution(
     model: Model,
     fallback_config: FallbackConfig | None = None,
@@ -194,7 +199,7 @@ def install_tool_job_execution(
 # Upstream issue: No matching argument-sensitive public extension point identified.
 # Upstream PR: None identified.
 # Remove when: SDK supports per-call external approval requirements.
-# Coverage: tests/test_job_tools.py, tests/test_background_delegation.py, tests/test_tool_job_approval_modes.py.
+# Coverage: tests/test_job_tools.py::test_only_native_job_wait_projects_external_approval
 def _wrap_job_wait_dispatch(
     original: Callable[..., AsyncIterator[Any]],
     *,

@@ -14,7 +14,7 @@ from mindroom.tool_jobs import results
 
 def test_result_encoding_budget_counts_full_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
     """Individually valid byte values cannot exceed the budget when combined in one envelope."""
-    monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 180, raising=False)
+    monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 180)
 
     payload = results.encode_tool_result([b"a" * 40])
 
@@ -37,7 +37,7 @@ def test_result_file_encoding_uses_remaining_bounded_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A growing artifact is rejected after one bounded read and before base64 expansion."""
-    monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 2048, raising=False)
+    monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 2048)
     read_sizes: list[int] = []
 
     class GrowingFile(io.BytesIO):

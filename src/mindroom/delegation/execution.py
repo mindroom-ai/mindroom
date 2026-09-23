@@ -907,7 +907,12 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     resolve_result("Cannot wait: a managed Matrix job and string job_id are required.")
                     continue
                 try:
-                    background_job = await background.lookup(job_id, owner=caller_identity, depth=delegation_depth)
+                    background_job = await background.lookup(
+                        job_id,
+                        owner=caller_identity,
+                        depth=delegation_depth,
+                        include_result=False,
+                    )
                 except JobAccessError as error:
                     resolve_result(str(error))
                     continue
@@ -1105,6 +1110,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 child.delegation_id,
                                 owner=caller_identity,
                                 depth=delegation_depth,
+                                include_result=False,
                             )
                             child = retained_child(background, background_job)
                             state.children = [

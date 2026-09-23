@@ -35,10 +35,9 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity, tool_execution_identity
 from tests.conftest import unwrap_extracted_collaborator
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
-from tests.test_delegate_tools import _delegate_runtime_context
-from tests.test_delegation_execution import DelegationModel, _call
 from tests.test_subagent_runtime import _config, _delivery_coordinator, _job
 
 if TYPE_CHECKING:

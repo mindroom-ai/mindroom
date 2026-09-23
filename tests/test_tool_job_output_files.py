@@ -27,8 +27,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
-from tests.test_delegation_execution import _call
+from tests.delegation_helpers import _call, _delegate_runtime_context, _runtime_paths
 from tests.test_tool_job_exclusions import _SchemaRecordingModel
 
 if TYPE_CHECKING:
