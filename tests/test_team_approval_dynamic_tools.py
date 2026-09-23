@@ -317,6 +317,7 @@ async def _exercise_team_member_assembly(
                         expires_at_ns=2**62,
                     ),
                 ),
+                progress=None,
             )
     finally:
         dynamic_toolkits._loaded_tools.clear()
@@ -489,6 +490,7 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
             "show_tool_calls": False,
             "prior_presentation_state": pause.response_presentation_state,
             "prior_response_text": pause.response_text,
+            "progress": None,
         }
         if scenario == "removed":
             with pytest.raises(ExceptionGroup):

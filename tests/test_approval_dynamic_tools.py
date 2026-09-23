@@ -626,6 +626,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
                 },
                 tool_trace_collector=[],
                 typing_log_context={},
+                progress=None,
             )
 
         if (restriction is not None or expect_unavailable) and approved:

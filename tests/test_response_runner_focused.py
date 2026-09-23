@@ -3525,6 +3525,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
             denial_reasons={tool_call_id: reason},
             tool_trace_collector=tool_trace,
             typing_log_context={},
+            progress=None,
         )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -3649,6 +3650,7 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
             denial_reasons=denial_reasons,
             tool_trace_collector=[],
             typing_log_context={},
+            progress=None,
         )
 
     agent.acontinue_run.assert_not_awaited()
@@ -3716,6 +3718,7 @@ async def test_agent_continuation_closes_runtime_when_notice_hook_setup_fails(tm
             denial_reasons={},
             tool_trace_collector=[],
             typing_log_context={},
+            progress=None,
         )
 
     close_runtime.assert_called_once_with(agent, shared_scope_storage=storage)
@@ -3799,6 +3802,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
             denial_reasons={},
             tool_trace_collector=[],
             typing_log_context={},
+            progress=None,
         )
 
 
@@ -4565,8 +4569,13 @@ async def test_completed_approval_continuation_delivers_canonical_ordered_body_u
     assert final_request.tool_trace == trace
 
 
-async def _claim_streamable_approval(runner: ResponseRunner, *, requester_online: bool) -> ApprovalContinuation:
-    """Claim one ready continuation whose requester is online or away."""
+async def _claim_streamable_approval(
+    runner: ResponseRunner,
+    *,
+    requester_online: bool,
+    entity_kind: Literal["agent", "team"] = "agent",
+) -> ApprovalContinuation:
+    """Claim one ready agent or team continuation whose requester is online or away."""
     store = runner.deps.approval_store
     await _admit_approval_source(store)
     client = runner._client()
@@ -4580,7 +4589,7 @@ async def _claim_streamable_approval(runner: ResponseRunner, *, requester_online
         approval_id="approval-streamed",
         run_id="run-1",
         session_id="session-1",
-        entity_kind="agent",
+        entity_kind=entity_kind,
         entity_name="general",
         room_id="!room:localhost",
         thread_id="$thread",
@@ -4590,6 +4599,9 @@ async def _claim_streamable_approval(runner: ResponseRunner, *, requester_online
         calls=(),
         state="ready",
         show_tool_calls=True,
+        runtime_model_name="default",
+        team_member_names=("general",) if entity_kind == "team" else (),
+        team_mode="coordinate" if entity_kind == "team" else None,
         execution_identity=serialize_tool_execution_identity(
             runner.deps.tool_runtime.build_execution_identity(
                 target=_target(thread_id="$thread", reply_to_event_id="$source"),
@@ -4651,6 +4663,31 @@ async def test_approval_continuation_streams_into_its_reply_only_for_streaming_r
     assert outcome.terminal_status == "completed"
     progress_edits = [(STREAM_STATUS_STREAMING, body)] if requester_online else []
     assert _approval_reply_edits(runner._client()) == [*progress_edits, (STREAM_STATUS_COMPLETED, body)]
+
+
+@pytest.mark.asyncio
+async def test_team_approval_continuation_streams_into_its_reply(tmp_path: Path) -> None:
+    """A resumed team run edits the same reply live before its durable final edit."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    claimed = await _claim_streamable_approval(runner, requester_online=True, entity_kind="team")
+    body = "🤝 **Team Response** (General):\n\n**General**: The report is clean."
+
+    async def continue_team(*, progress: ProgressPublisher | None, **_kwargs: object) -> CompletedApprovalRun:
+        assert progress is not None
+        await progress(StructuredStreamChunk(content=body))
+        return CompletedApprovalRun(response_text=body, metadata_content={})
+
+    with (
+        patch("mindroom.response_runner.continue_paused_team_run", new=continue_team),
+        patch("mindroom.response_runner.typing_indicator", _noop_typing),
+    ):
+        outcome = await runner._run_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert outcome.terminal_status == "completed"
+    assert _approval_reply_edits(runner._client()) == [(STREAM_STATUS_STREAMING, body), (STREAM_STATUS_COMPLETED, body)]
 
 
 @pytest.mark.asyncio
@@ -5615,6 +5652,7 @@ async def test_continuation_rejects_missing_persisted_execution_identity(tmp_pat
             request=_plain_request(_target()),
             target=_target(),
             tool_trace_collector=[],
+            progress=None,
         )
 
 
@@ -5668,6 +5706,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
             request=_plain_request(target, source_event_id="$source"),
             target=target,
             tool_trace_collector=[],
+            progress=None,
         )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -8905,3 +8944,72 @@ async def test_mid_turn_empty_history_only_allows_a_proven_new_thread(
         await runner._prepare_request_after_lock(request)
         assert await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),)) is finish
     assert len(evaluated) == int(finish)
+
+
+@pytest.mark.asyncio
+async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlement(tmp_path: Path) -> None:
+    """A stop during progress shutdown ends the in-flight edit before the reply settles as cancelled."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    claimed = await _claim_streamable_approval(runner, requester_online=True)
+    client = runner._client()
+    send = client.room_send.side_effect
+    progress_started = asyncio.Event()
+    settlement_started = asyncio.Event()
+    exiting = asyncio.Event()
+    in_flight: list[str] = []
+    landed: list[str] = []
+
+    async def slow_progress_send(**kwargs: object) -> nio.RoomSendResponse:
+        new_content = cast("dict[str, Any]", kwargs["content"]).get("m.new_content")
+        if new_content is None:
+            return send(**kwargs)
+        status = new_content[STREAM_STATUS_KEY]
+        in_flight.append(status)
+        try:
+            if status == STREAM_STATUS_STREAMING:
+                progress_started.set()
+                await settlement_started.wait()
+            else:
+                settlement_started.set()
+            landed.append(status)
+            return send(**kwargs)
+        finally:
+            in_flight.remove(status)
+
+    client.room_send.side_effect = slow_progress_send
+
+    async def continue_call(
+        _continuation: ApprovalContinuation,
+        *,
+        progress: ProgressPublisher | None,
+        **_kwargs: object,
+    ) -> CompletedApprovalRun:
+        assert progress is not None
+        await progress(StructuredStreamChunk(content="Checking the report."))
+        await progress_started.wait()
+        exiting.set()
+        return CompletedApprovalRun(response_text="The report is clean.", metadata_content={})
+
+    with (
+        patch.object(runner, "_continue_entity_call", new=continue_call),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
+        ),
+    ):
+        lifecycle = asyncio.create_task(
+            runner._run_claimed_approval_lifecycle(
+                claimed,
+                target=_target(thread_id="$thread", reply_to_event_id="$source"),
+            ),
+        )
+        async with asyncio.timeout(5):
+            await exiting.wait()
+        request_task_cancel(runner.deps.stop_manager.tracked_messages["$waiting"].task, cancel_source="user_stop")
+        async with asyncio.timeout(5):
+            outcome = await lifecycle
+        assert in_flight == []
+
+    assert outcome.terminal_status == "cancelled"
+    assert landed == [STREAM_STATUS_COMPLETED]
+    assert _approval_reply_edits(client)[-1] == (STREAM_STATUS_COMPLETED, "**[Response cancelled by user]**")

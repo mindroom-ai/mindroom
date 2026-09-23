@@ -2460,7 +2460,8 @@ async def _publish_team_presentation(
 async def _collect_team_continuation(
     events: AsyncIterator[object],
     presentation: _TeamStreamPresentation,
-    progress: ProgressPublisher | None = None,
+    *,
+    progress: ProgressPublisher | None,
 ) -> TeamRunOutput:
     """Collect one team continuation stream and return its terminal run output."""
     response: TeamRunOutput | None = None
@@ -2647,7 +2648,7 @@ async def continue_paused_team_run(
     prior_presentation_state: Mapping[str, object] | None = None,
     show_tool_calls: bool = True,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
-    progress: ProgressPublisher | None = None,
+    progress: ProgressPublisher | None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run.
 
@@ -2774,7 +2775,7 @@ async def continue_paused_team_run(
             continued = await _collect_team_continuation(
                 continuation_stream,
                 presentation,
-                progress,
+                progress=progress,
             )
         paused = paused_attempt_from_response(
             continued,

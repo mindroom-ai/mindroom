@@ -2023,7 +2023,7 @@ class ResponseRunner:
         request: ResponseRequest,
         target: MessageTarget,
         tool_trace_collector: list[ToolTraceEntry],
-        progress: ProgressPublisher | None = None,
+        progress: ProgressPublisher | None,
     ) -> CompletedApprovalRun | PausedAttempt:
         execution_identity = parse_tool_execution_identity_payload(
             continuation.execution_identity,

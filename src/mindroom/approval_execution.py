@@ -102,7 +102,8 @@ async def _publish_presentation(
 async def _collect_agent_continuation(  # noqa: C901
     events: AsyncIterator[object],
     presentation: CollectedStreamPresentation,
-    progress: ProgressPublisher | None = None,
+    *,
+    progress: ProgressPublisher | None,
 ) -> _CollectedAgentContinuation:
     """Collect ordered events while leaving terminal fallback text for lifecycle settlement."""
     response: RunOutput | None = None
@@ -224,7 +225,7 @@ async def _continue_persisted_agent(
         tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
         track_hidden_tools=True,
     )
-    collected = await _collect_agent_continuation(events, presentation, progress)
+    collected = await _collect_agent_continuation(events, presentation, progress=progress)
     response = collected.response
     paused = paused_attempt_from_response(
         response,
@@ -301,7 +302,7 @@ async def _settle_agent_continuation(
     tool_trace_collector: list[ToolTraceEntry],
     run_id_callback: Callable[[str], None] | None,
     tool_dispatch: ToolDispatchContext,
-    progress: ProgressPublisher | None = None,
+    progress: ProgressPublisher | None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Settle resumed work and any fresh attempts through the shared response driver."""
     ctx = ResponseTurnContext(
@@ -379,8 +380,8 @@ class AgentApprovalExecution:
         denial_reasons: dict[str, str | None],
         tool_trace_collector: list[ToolTraceEntry],
         typing_log_context: Mapping[str, object],
+        progress: ProgressPublisher | None,
         run_id_callback: Callable[[str], None] | None = None,
-        progress: ProgressPublisher | None = None,
     ) -> CompletedApprovalRun | PausedAttempt:
         """Apply exact decisions and continue the matching persisted Agno run.
 
