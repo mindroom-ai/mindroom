@@ -2099,10 +2099,9 @@ describe("AgentEditor", () => {
     });
     expect(section).toHaveTextContent("Fallback model, Timeout seconds");
     fireEvent.click(section);
-    fireEvent.change(
-      screen.getByRole("spinbutton", { name: "Timeout seconds" }),
-      { target: { value: "30" } },
-    );
+    const timeout = screen.getByRole("spinbutton", { name: "Timeout seconds" });
+    expect(timeout).toHaveAttribute("placeholder", "Inherited");
+    fireEvent.change(timeout, { target: { value: "30" } });
     expect(mockStore.updateAgent).toHaveBeenLastCalledWith("test_agent", {
       compaction: { timeout_seconds: 30 },
     });

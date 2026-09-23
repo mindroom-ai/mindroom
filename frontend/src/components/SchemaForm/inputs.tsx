@@ -60,8 +60,10 @@ export function presenceMode(
 
 // Where an authored null clears an inherited value, leaving the field unset
 // inherits it and null restores the built-in default rather than meaning none.
+const INHERITED_LABEL = "Inherited";
+
 export function unsetLabel(node: SchemaNode, label: string): string {
-  return node.hint.clears_inherited === true ? "Inherited" : label;
+  return node.hint.clears_inherited === true ? INHERITED_LABEL : label;
 }
 
 export function noneLabel(node: SchemaNode): string {
@@ -94,6 +96,9 @@ function defaultSummary(node: SchemaNode): string | null {
 }
 
 function defaultPlaceholder(node: SchemaNode): string | undefined {
+  if (node.hint.clears_inherited === true) {
+    return INHERITED_LABEL;
+  }
   const summary = defaultSummary(node);
   return summary == null ? undefined : `Default: ${summary}`;
 }
