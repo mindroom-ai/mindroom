@@ -426,7 +426,9 @@ async def test_result_expiry_preserves_receipt_and_protected_work(tmp_path: Path
     """Only old consumed terminal results with a finished source may expire."""
     runtime = tool_job_runtime(tmp_path)
     calls: list[str] = []
-    adapter = {"arguments": {"payload": "sensitive input" * 500}}
+
+    def adapter() -> dict[str, object]:
+        return {"arguments": {"payload": "sensitive input" * 500}}
 
     async def completed() -> BackgroundOutcome:
         calls.append("executed")
@@ -444,7 +446,7 @@ async def test_result_expiry_preserves_receipt_and_protected_work(tmp_path: Path
                 name,
                 tool_name="tool",
                 depth=0,
-                adapter=adapter,
+                adapter=adapter(),
                 owner=_owner(),
                 operation=completed,
             )
@@ -479,7 +481,7 @@ async def test_result_expiry_preserves_receipt_and_protected_work(tmp_path: Path
                 "expire",
                 tool_name="tool",
                 depth=0,
-                adapter=adapter,
+                adapter=adapter(),
                 owner=_owner(),
                 operation=completed,
                 reattach=True,
@@ -489,7 +491,7 @@ async def test_result_expiry_preserves_receipt_and_protected_work(tmp_path: Path
                 "expire",
                 tool_name="tool",
                 depth=0,
-                adapter=adapter,
+                adapter=adapter(),
                 owner=_owner(),
                 operation=completed,
             )
@@ -1597,6 +1599,35 @@ async def test_external_task_cancel_recovers_as_interrupted(tmp_path: Path) -> N
         await restored.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_operation_raising_cancellation_itself_settles_cancelled(tmp_path: Path) -> None:
+    """A CancelledError the operation raises without a task cancellation request still settles and wakes waiters."""
+    runtime = tool_job_runtime(tmp_path)
+
+    async def operation() -> BackgroundOutcome:
+        cancelled = asyncio.get_running_loop().create_future()
+        cancelled.cancel()
+        await cancelled
+        raise AssertionError
+
+    try:
+        await runtime.start(
+            "self-cancelled",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=_owner(),
+            operation=operation,
+        )
+        waited = await runtime.wait("self-cancelled", owner=_owner(), depth=0)
+        assert waited.job.status == "cancelled"
+        await runtime.acknowledge_wait("self-cancelled", waited.token)
+        saved = runtime_module.read_job_snapshot(tmp_path / "tool_jobs" / "self-cancelled.json")
+        assert saved.status == "cancelled"
+    finally:
+        await runtime.shutdown()
+
+
 class _ContendedLock(asyncio.Lock):
     """Report when another task waits for this lock while it is held."""
 
@@ -1626,8 +1657,8 @@ async def test_repeated_waiter_cancellation_still_releases_its_claim(tmp_path: P
     entry = runtime._entries["claimed"]
     waiter = asyncio.create_task(runtime.wait("claimed", owner=_owner(), depth=0))
     try:
-        await asyncio.sleep(0)
-        assert entry.wait_token is not None
+        while entry.wait_token is None:  # noqa: ASYNC110 - the claim publishes no event to await
+            await asyncio.sleep(0)
         await lock.acquire()
         lock.contended.clear()
         waiter.cancel()

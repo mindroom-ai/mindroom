@@ -449,7 +449,15 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
     try:
         await restarted.initialize(bot._journal_store)
         await restarted.sync()
-        recovered = restarted.runtime._entries["saved"].job
+        # Current grants no longer cover this parked job, so read it through the unauthorized ownership lookup.
+        [recovered] = await restarted.runtime.source_jobs(
+            "$saved",
+            transport_agent_name="general",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            session_id="!room:localhost_$thread",
+            requester_id="@human:localhost",
+        )
         assert recovered.result == "kept result"
         assert not recovered.wait_acknowledged
         assert executions == 1

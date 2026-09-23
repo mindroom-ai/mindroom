@@ -440,6 +440,12 @@ class ToolJobRuntime:
                         await finalize_queued_notice_response_turn_async(notice)
             except Exception as error:
                 outcome = BackgroundOutcome("failed", str(error))
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise  # Requested cancellation: runtime-owned, or external teardown.
+                # The operation raised cancellation itself; settle it so waiters and delivery see an outcome.
+                outcome = BackgroundOutcome("cancelled")
             async with self._lock:
                 if entry.stopping:
                     entry.stopped_outcome = outcome

@@ -42,7 +42,7 @@ from mindroom.tool_jobs.control import (
     human_message_signal_context,
 )
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, read_job_snapshot, register_background_runtime
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -653,7 +653,8 @@ async def test_managed_team_approvals_keep_member_and_nested_ownership(
             retry=False,
             team_parent=True,
         )
-        jobs = [entry.job for entry in runtime._entries.values()]
+        [saved] = [read_job_snapshot(path) for path in (tmp_path / "tool_jobs").glob("*.json")]
+        jobs = await runtime.list_jobs(owner=saved.owner, depth=saved.depth)
         assert len(jobs) == 1
         assert jobs[0].status == ("completed" if outcome in {"approve", "cancel_completed"} else "cancelled")
         if outcome != "approve":
