@@ -41,7 +41,6 @@ import {
   helperText,
   inlineLabel,
   moveItem,
-  noneLabel,
   presenceMode,
   unsetOptions,
   type SchemaPath,
@@ -194,12 +193,10 @@ export function SchemaField({
       );
     }
     const options = [
-      ...unsetOptions(node, required, value, "Default"),
+      ...unsetOptions(required, value, "Default"),
       { value: "true", label: "On" },
       { value: "false", label: "Off" },
-      ...(presence === "tri"
-        ? [{ value: NONE_OPTION, label: noneLabel(node) }]
-        : []),
+      ...(presence === "tri" ? [{ value: NONE_OPTION, label: "None" }] : []),
     ];
     const current =
       value === undefined
@@ -330,8 +327,8 @@ export function SchemaField({
               : "custom"
         }
         options={[
-          ...unsetOptions(node, required, value, "Default"),
-          { value: NONE_OPTION, label: noneLabel(node) },
+          ...unsetOptions(required, value, "Default"),
+          { value: NONE_OPTION, label: "None" },
           { value: "custom", label: "Custom" },
         ]}
         onChange={(next) => {

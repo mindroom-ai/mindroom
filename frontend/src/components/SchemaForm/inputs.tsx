@@ -37,7 +37,7 @@ const SELECT_CLASS =
 
 // Nullable fields whose default is null only need "set or not"; nullable
 // fields with another default, or none reported, also need an explicit null,
-// as do fields where null clears an inherited value and authored nulls.
+// as do authored nulls.
 export function presenceMode(
   node: SchemaNode,
   required: boolean,
@@ -50,7 +50,6 @@ export function presenceMode(
     !required &&
     node.hasDefault &&
     node.defaultValue === null &&
-    node.hint.clears_inherited !== true &&
     value !== null
   ) {
     return "toggle";
@@ -58,40 +57,21 @@ export function presenceMode(
   return "tri";
 }
 
-// Where an authored null clears an inherited value, leaving the field unset
-// inherits it and null restores the built-in default rather than meaning none.
-const INHERITED_LABEL = "Inherited";
-
-function unsetLabel(node: SchemaNode, label: string): string {
-  return node.hint.clears_inherited === true ? INHERITED_LABEL : label;
-}
-
 /**
  * Select options for an absent value: the default of an optional field, or a
  * prompt while a required one is missing, so no real option looks selected.
  */
 export function unsetOptions(
-  node: SchemaNode,
   required: boolean,
   value: unknown,
   label: string,
 ): Array<{ value: string; label: string }> {
   if (!required) {
-    return [{ value: DEFAULT_OPTION, label: unsetLabel(node, label) }];
+    return [{ value: DEFAULT_OPTION, label }];
   }
   return value === undefined
     ? [{ value: DEFAULT_OPTION, label: "Choose…" }]
     : [];
-}
-
-export function noneLabel(node: SchemaNode): string {
-  return node.hint.clears_inherited === true ? "Built-in default" : "None";
-}
-
-function noneToggleLabel(node: SchemaNode): string {
-  return node.hint.clears_inherited === true
-    ? "Use built-in default"
-    : "Set to none";
 }
 
 /** Lowercase a label for use mid-sentence, keeping leading acronyms. */
@@ -120,9 +100,6 @@ function defaultSummary(node: SchemaNode): string | null {
 }
 
 function defaultPlaceholder(node: SchemaNode): string | undefined {
-  if (node.hint.clears_inherited === true) {
-    return INHERITED_LABEL;
-  }
   const summary = defaultSummary(node);
   return summary == null ? undefined : `Default: ${summary}`;
 }
@@ -351,14 +328,11 @@ export function ScalarInput({
         : [current, ...selectOptions];
     const options = [
       ...unsetOptions(
-        node,
         required,
         value,
         summary ? `Default (${summary})` : "Not set",
       ),
-      ...(presence === "tri"
-        ? [{ value: NONE_OPTION, label: noneLabel(node) }]
-        : []),
+      ...(presence === "tri" ? [{ value: NONE_OPTION, label: "None" }] : []),
       ...values.map((option) => ({ value: option, label: option })),
     ];
     return (
@@ -388,7 +362,7 @@ export function ScalarInput({
     !required &&
     (!node.hasDefault || node.defaultValue == null || node.defaultValue === "");
   const isNull = value === null;
-  const placeholder = isNull ? noneLabel(node) : defaultPlaceholder(node);
+  const placeholder = isNull ? "None" : defaultPlaceholder(node);
   const control =
     node.kind === "number" ? (
       <NumberInput
@@ -430,7 +404,7 @@ export function ScalarInput({
           onCheckedChange={(next) => onChange(next === true ? null : undefined)}
         />
         <Label htmlFor={`${id}-none`} className="cursor-pointer text-xs">
-          {noneToggleLabel(node)}
+          Set to none
         </Label>
       </div>
     </div>

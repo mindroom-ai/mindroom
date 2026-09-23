@@ -144,11 +144,6 @@ const ROOT: JsonSchema = {
           default: null,
           "x-mindroom": { secret: true },
         },
-        fallback_model: {
-          anyOf: [{ type: "string" }, { type: "null" }],
-          default: null,
-          "x-mindroom": { reference: "model", clears_inherited: true },
-        },
         pkce_code_challenge_method: {
           anyOf: [{ const: "S256", type: "string" }, { type: "null" }],
           default: "S256",
@@ -695,18 +690,6 @@ describe("SchemaFields", () => {
     expect(screen.getByRole("combobox", { name: "Participation" })).toHaveValue(
       "__none__",
     );
-  });
-
-  it("offers the built-in default where an authored null clears an inherited value", () => {
-    const { lastValue } = renderFixture();
-    const select = screen.getByRole("combobox", { name: "Fallback model" });
-    expect(
-      within(select)
-        .getAllByRole("option")
-        .map((option) => option.textContent),
-    ).toEqual(["Inherited", "Built-in default", "default", "sonnet"]);
-    fireEvent.change(select, { target: { value: "__none__" } });
-    expect(lastValue()).toEqual({ fallback_model: null });
   });
 
   it("does not mark freeform YAML dirty when it only loses focus", () => {

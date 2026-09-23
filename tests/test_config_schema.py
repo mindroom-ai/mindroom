@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 # The dashboard's configSchema.ts understands exactly this hint vocabulary.
 HINT_KEY = "x-mindroom"
-_HINT_FIELDS = {"reference", "key_reference", "secret", "multiline", "clears_inherited"}
+_HINT_FIELDS = {"reference", "key_reference", "secret", "multiline"}
 _REFERENCE_KINDS = {"model", "agent", "room", "tool"}
 
 
@@ -107,7 +107,6 @@ def test_dashboard_hint_omits_unset_fields() -> None:
     }
     assert dashboard_hint(secret=True) == {HINT_KEY: {"secret": True}}
     assert dashboard_hint(multiline=True) == {HINT_KEY: {"multiline": True}}
-    assert dashboard_hint(clears_inherited=True) == {HINT_KEY: {"clears_inherited": True}}
 
 
 def test_reference_fields_are_annotated() -> None:
@@ -136,14 +135,6 @@ def test_secret_fields_are_annotated() -> None:
     assert defs["KnowledgeGitConfig"]["properties"]["repo_url"][HINT_KEY] == {"secret": True}
 
 
-def test_compaction_override_fields_clear_inherited_values() -> None:
-    """An authored null in an override drops the defaults.compaction value, so forms offer a Built-in default choice."""
-    properties = Config.model_json_schema()["$defs"]["CompactionOverrideConfig"]["properties"]
-    clearing = {name for name, field in properties.items() if field.get(HINT_KEY, {}).get("clears_inherited")}
-    # An authored null enabled turns compaction off instead of clearing back to the inherited value.
-    assert clearing == set(properties) - {"enabled"}
-
-
 def test_optional_blocks_default_to_their_model_defaults() -> None:
     """Dashboard forms drop an emptied optional block, which must mean the same as authoring it empty."""
     differing = [
@@ -158,7 +149,7 @@ def test_optional_blocks_default_to_their_model_defaults() -> None:
 
 
 def test_object_unions_are_discriminated() -> None:
-    """Dashboard forms and validation errors tell object union variants apart by their tag."""
+    """Forms match untagged union variants only by kind (matchUnionVariant), so object unions must be discriminated."""
     schema = dashboard_config_schema()
     assert list(_untagged_object_unions(schema, schema["$defs"])) == []
 
