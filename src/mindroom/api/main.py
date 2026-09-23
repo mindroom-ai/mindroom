@@ -35,6 +35,7 @@ from mindroom.api.integrations import router as integrations_router
 from mindroom.api.knowledge import router as knowledge_router
 from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.mcp_gateway import gateway_cors_origins, gateway_lifespan, install_gateway_routes
+from mindroom.api.network_exposure import DashboardHostGuard
 from mindroom.api.oauth import router as oauth_router
 from mindroom.api.openai_compat import router as openai_compat_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
@@ -1136,4 +1137,4 @@ app.include_router(frontend_router)
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8765)  # noqa: S104
+    uvicorn.run(DashboardHostGuard(app, _runtime_paths), host="127.0.0.1", port=8765)

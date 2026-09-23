@@ -20,6 +20,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
+from mindroom.api.network_exposure import is_loopback_origin
 from mindroom.authorization import is_platform_administrator
 from mindroom.matrix.identity import (
     matrix_user_id_from_email,
@@ -946,6 +947,26 @@ def _require_browser_mutation_origin(
     require_same_origin(request, origin)
 
 
+def _require_open_access_mutation_origin(request: Request, settings: _ApiAuthSettings) -> None:
+    """Guard mutations a browser could forge while the dashboard needs no credential.
+
+    Open access has no credential that could exempt an API client, so the guard
+    applies to every request a browser marked with its own provenance. Browsers
+    attach `Origin` to every mutation, so a request carrying neither `Origin`
+    nor `Sec-Fetch-Site` cannot be a forged cross-origin one.
+
+    Open access is only reachable from this machine (see
+    `mindroom.api.network_exposure`), so a loopback origin such as the frontend
+    dev server is inside the same trust boundary as the dashboard itself.
+    """
+    origin = request.headers.get("origin")
+    if origin is None and request.headers.get("sec-fetch-site") is None:
+        return
+    if origin is not None and is_loopback_origin(origin):
+        return
+    _require_browser_mutation_origin(request, settings)
+
+
 async def authenticate_user(
     request: Request,
     authorization: str | None = Header(None),
@@ -983,6 +1004,8 @@ async def authenticate_user(
             if not secrets.compare_digest(token, mindroom_api_key):
                 raise HTTPException(status_code=401, detail="Invalid API key")
             _require_browser_mutation_origin(request, auth_state.settings, authorization)
+        else:
+            _require_open_access_mutation_origin(request, auth_state.settings)
         auth_user = {"user_id": "standalone", "email": None}
         request.scope["auth_user"] = auth_user
         return auth_user

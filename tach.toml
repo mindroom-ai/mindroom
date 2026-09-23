@@ -1080,8 +1080,15 @@ path = "mindroom.api.auth"
 depends_on = [
     "mindroom.authorization",
     "mindroom.api.config_lifecycle",
+    "mindroom.api.network_exposure",
     "mindroom.constants",
     "mindroom.tool_system.dependencies",
+]
+
+[[modules]]
+path = "mindroom.api.network_exposure"
+depends_on = [
+    "mindroom.logging_config",
 ]
 
 [[modules]]
@@ -1294,6 +1301,7 @@ depends_on = [
     "mindroom.api.integrations",
     "mindroom.api.knowledge",
     "mindroom.api.matrix_operations",
+    "mindroom.api.network_exposure",
     "mindroom.api.openai_compat",
     "mindroom.api.oauth",
     "mindroom.api.report_publishing",
@@ -2143,6 +2151,7 @@ depends_on = [
     "mindroom.agents",
     "mindroom.event_journal_open",
     "mindroom.api.main",
+    "mindroom.api.network_exposure",
     "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.config.main",

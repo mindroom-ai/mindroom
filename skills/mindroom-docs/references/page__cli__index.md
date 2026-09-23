@@ -194,8 +194,10 @@ Start MindRoom with your configuration.
 │                                                          dashboard/API server          │
 │                                                          [default: 8765]               │
 │ --api-host                                      TEXT     Host for the bundled          │
-│                                                          dashboard/API server          │
-│                                                          [default: 0.0.0.0]            │
+│                                                          dashboard/API server. Bind a  │
+│                                                          non-loopback host only with   │
+│                                                          MINDROOM_API_KEY set.         │
+│                                                          [default: 127.0.0.1]          │
 │ --help                          -h                       Show this message and exit.   │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 

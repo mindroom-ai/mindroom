@@ -2301,7 +2301,7 @@ class TestRunApiFlags:
         assert "--api-host" in output
 
     def test_run_passes_api_defaults(self, tmp_path: Path) -> None:
-        """Run passes api=True, port=8765, host=0.0.0.0 by default."""
+        """Run passes api=True, port=8765, and the loopback host by default."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
@@ -2317,7 +2317,7 @@ class TestRunApiFlags:
         kwargs = mock_main.call_args
         assert kwargs.kwargs["api"] is True
         assert kwargs.kwargs["api_port"] == 8765
-        assert kwargs.kwargs["api_host"] == "0.0.0.0"  # noqa: S104
+        assert kwargs.kwargs["api_host"] == "127.0.0.1"
 
     def test_run_no_api_flag(self, tmp_path: Path) -> None:
         """Run --no-api passes api=False to bot main."""
@@ -2345,10 +2345,10 @@ class TestRunApiFlags:
         )
         mock_main = AsyncMock()
         with patch("mindroom.orchestrator.main", mock_main):
-            result = _invoke_with_runtime(["run", "--api-port", "9000", "--api-host", "127.0.0.1"], cfg)
+            result = _invoke_with_runtime(["run", "--api-port", "9000", "--api-host", "0.0.0.0"], cfg)  # noqa: S104
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["api_port"] == 9000
-        assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"
+        assert mock_main.call_args.kwargs["api_host"] == "0.0.0.0"  # noqa: S104
 
     def test_run_config_path_updates_runtime_paths(
         self,

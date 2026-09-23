@@ -472,7 +472,8 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 |----------|-------------|---------|
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
 | `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling; it does **not** change the API server bind port, which uses `mindroom run --api-port`. | `8765` |
-| `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
+| `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access, which is only served for loopback host names, `MINDROOM_PUBLIC_URL`, and `MINDROOM_DASHBOARD_ALLOWED_HOSTS`, and rejects browser mutations from other origins) | _(none)_ |
+| `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra `Host` values an open-access dashboard answers, beyond loopback names and the `MINDROOM_PUBLIC_URL` host; `*` accepts any host and gives up the DNS-rebinding defence | _(none)_ |
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |

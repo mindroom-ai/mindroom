@@ -142,9 +142,9 @@ def run(
         help="Port for the bundled dashboard/API server",
     ),
     api_host: str = typer.Option(
-        "0.0.0.0",  # noqa: S104
+        "127.0.0.1",
         "--api-host",
-        help="Host for the bundled dashboard/API server",
+        help="Host for the bundled dashboard/API server. Bind a non-loopback host only with MINDROOM_API_KEY set.",
     ),
 ) -> None:
     """Run the mindroom multi-agent system.

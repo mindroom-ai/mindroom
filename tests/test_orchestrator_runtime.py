@@ -37,6 +37,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import EventJournalConfig
+from mindroom.api.network_exposure import DashboardHostGuard
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
@@ -560,6 +561,8 @@ class TestAgentBot(AgentBotTestBase):
             log_level="info",
             ws="websockets-sansio",
         )
+        # The served app is the dashboard behind its Host allow-list, never the bare app.
+        assert isinstance(mock_uvicorn_config.call_args.args[0], DashboardHostGuard)
         mock_error.assert_called_once()
         assert mock_error.call_args.args == ("fatal_embedded_api_server_exit",)
         assert get_api_server_address() is None

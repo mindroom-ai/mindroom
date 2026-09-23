@@ -3874,6 +3874,64 @@ def test_cookie_mutations_use_configured_public_origin(
     assert response.status_code == expected, response.text
 
 
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({}, 200),
+        ({"Origin": "http://testserver"}, 200),
+        ({"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin"}, 200),
+        ({"Origin": "http://localhost:3003"}, 200),
+        ({"Origin": "http://127.0.0.1:5173"}, 200),
+        ({"Origin": "https://attacker.example"}, 403),
+        ({"Origin": "null"}, 403),
+        ({"Origin": "http://testserver", "Sec-Fetch-Site": "cross-site"}, 403),
+        ({"Sec-Fetch-Site": "cross-site"}, 403),
+    ],
+)
+def test_open_access_mutations_require_browser_origin(
+    test_client: TestClient,
+    headers: dict[str, str],
+    expected: int,
+) -> None:
+    """Without an API key, browser-marked mutations still need an accepted origin."""
+    response = test_client.post("/api/config/load", headers=headers)
+    assert response.status_code == expected, response.text
+
+
+def test_open_access_rejects_cross_origin_json_post_without_content_type(
+    test_client: TestClient,
+    sample_agent_data: dict[str, Any],
+    temp_config_file: Path,
+) -> None:
+    """A preflight-free JSON POST from another origin must not create an agent."""
+    response = test_client.post(
+        "/api/config/agents",
+        content=json.dumps(sample_agent_data).encode(),
+        headers={"Origin": "https://attacker.example"},
+    )
+
+    assert response.status_code == 403, response.text
+    assert yaml.safe_load(temp_config_file.read_text())["agents"].keys() == {"test_agent"}
+
+    allowed = test_client.post(
+        "/api/config/agents",
+        json=sample_agent_data,
+        headers={"Origin": "http://testserver"},
+    )
+    assert allowed.status_code == 200, allowed.text
+
+
+def test_open_access_rejects_cross_origin_multipart_upload(test_client: TestClient) -> None:
+    """A cross-origin form post must not reach the knowledge upload handler."""
+    response = test_client.post(
+        "/api/knowledge/bases/research/upload",
+        files=[("files", ("planted.md", b"payload", "text/markdown"))],
+        headers={"Origin": "https://attacker.example"},
+    )
+
+    assert response.status_code == 403, response.text
+
+
 def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClient) -> None:
     """A valid standalone auth session cookie should work without bearer headers."""
     response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
