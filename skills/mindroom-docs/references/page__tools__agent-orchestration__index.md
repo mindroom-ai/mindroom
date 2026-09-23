@@ -483,7 +483,7 @@ A function name shared by several granted toolkits receives a generated grant on
 
 ### What It Does
 
-`report_publishing` exposes `publish_report()` and the backwards-compatible `revoke_public_report(slug)` revocation function for both policies.
+`report_publishing` exposes `publish_report()` and `revoke_report(slug)`, which revokes reports under either policy.
 All calls return JSON strings with a `status` field and operation-specific payload data.
 The tool does not accept arbitrary filesystem paths.
 It publishes only registered source references that the current Matrix requester is authorized to read.
@@ -503,6 +503,7 @@ Authentication verifies the browser principal, identity resolution yields its Ma
 The viewer and publisher agent must both be current joined members of the exact Matrix room where publication occurred.
 Sharing another room with the publisher agent grants no access to the origin-room report.
 The origin room ID and publisher identities come from trusted tool runtime context and are never model-controlled arguments.
+Delegated and workflow agents record the calling agent's Matrix account as the publisher because that account owns the room membership.
 The browser route re-reads report metadata and revocation state for every document or asset request.
 Successful Matrix membership checks are cached for at most 20 seconds and in at most 1024 entries, so departure may take up to 20 seconds to affect access.
 Revocation bypasses that membership cache and takes effect immediately.
@@ -562,7 +563,7 @@ publish_report(
     access_policy="origin_room",
     confirm_public=False,
 )
-revoke_public_report("pub_...")
+revoke_report("pub_...")
 ```
 
 ### Notes

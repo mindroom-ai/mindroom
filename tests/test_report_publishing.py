@@ -20,8 +20,12 @@ from mindroom.custom_tools.report_publishing import ReportPublishingTools
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.message_target import MessageTarget
-from mindroom.report_access_policy import ReportAccessPolicy
-from mindroom.report_publishing.store import PublishableReport, ReportPublishingError, ReportPublishingStore
+from mindroom.report_publishing.store import (
+    OriginRoomBinding,
+    PublishableReport,
+    ReportPublishingError,
+    ReportPublishingStore,
+)
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
@@ -159,7 +163,7 @@ def test_report_publishing_tool_registered() -> None:
     assert metadata.consumes_workspace_paths is True
     assert metadata.function_names == (
         "publish_report",
-        "revoke_public_report",
+        "revoke_report",
     )
 
 
@@ -214,17 +218,20 @@ def test_report_publishing_store_round_trips_origin_room_metadata(tmp_path: Path
         ),
         published_by="@alice:localhost",
         base_url="https://acme.mindroom.chat",
-        access_policy=ReportAccessPolicy.ORIGIN_ROOM,
-        origin_room_id="!Nhcu5BS-UMnFX7hBVfVSoXiD7OgH6iRT-xyIuqDnpYQ",
-        publisher_entity_name="general",
-        publisher_matrix_user_id="@mindroom_general:localhost",
+        origin_room=OriginRoomBinding(
+            room_id="!Nhcu5BS-UMnFX7hBVfVSoXiD7OgH6iRT-xyIuqDnpYQ",
+            publisher_entity_name="general",
+            publisher_matrix_user_id="@mindroom_general:localhost",
+        ),
     )
     loaded = store.get_report(report.slug)
 
-    assert loaded.access_policy is ReportAccessPolicy.ORIGIN_ROOM
-    assert loaded.origin_room_id == "!Nhcu5BS-UMnFX7hBVfVSoXiD7OgH6iRT-xyIuqDnpYQ"
-    assert loaded.publisher_entity_name == "general"
-    assert loaded.publisher_matrix_user_id == "@mindroom_general:localhost"
+    assert loaded.access_policy == "origin_room"
+    assert loaded.origin_room == OriginRoomBinding(
+        room_id="!Nhcu5BS-UMnFX7hBVfVSoXiD7OgH6iRT-xyIuqDnpYQ",
+        publisher_entity_name="general",
+        publisher_matrix_user_id="@mindroom_general:localhost",
+    )
     assert loaded.public_url == f"https://acme.mindroom.chat/reports/room/{report.slug}"
 
 
@@ -247,19 +254,14 @@ def test_report_publishing_store_loads_legacy_record_as_public(tmp_path: Path) -
     )
     metadata_path = storage_root / "report_publishing" / "public_reports" / f"{report.slug}.json"
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    for key in (
-        "access_policy",
-        "origin_room_id",
-        "publisher_entity_name",
-        "publisher_matrix_user_id",
-    ):
+    for key in ("access_policy", "origin_room"):
         payload.pop(key)
     metadata_path.write_text(json.dumps(payload), encoding="utf-8")
 
     loaded = store.get_report(report.slug)
 
-    assert loaded.access_policy is ReportAccessPolicy.PUBLIC
-    assert loaded.origin_room_id is None
+    assert loaded.access_policy == "public"
+    assert loaded.origin_room is None
 
 
 @pytest.mark.parametrize(
@@ -267,7 +269,21 @@ def test_report_publishing_store_loads_legacy_record_as_public(tmp_path: Path) -
     [
         {"access_policy": "origin_room"},
         {"access_policy": "shared_room"},
-        {"publisher_matrix_user_id": 123},
+        {
+            "origin_room": {
+                "room_id": "!origin:localhost",
+                "publisher_entity_name": "general",
+                "publisher_matrix_user_id": "@mindroom_general:localhost",
+            },
+        },
+        {
+            "access_policy": "origin_room",
+            "origin_room": {
+                "room_id": "#alias:localhost",
+                "publisher_entity_name": "general",
+                "publisher_matrix_user_id": "@mindroom_general:localhost",
+            },
+        },
     ],
 )
 def test_report_publishing_store_rejects_malformed_policy_records(
@@ -297,27 +313,6 @@ def test_report_publishing_store_rejects_malformed_policy_records(
 
     with pytest.raises(ReportPublishingError):
         store.get_report(report.slug)
-
-
-def test_report_publishing_store_rejects_incidental_public_room_metadata(tmp_path: Path) -> None:
-    """New public records must not carry misleading protected metadata."""
-    storage_root = tmp_path / "mindroom_data"
-    report_path = storage_root / "reports" / "example.html"
-    report_path.parent.mkdir(parents=True)
-    report_path.write_text("<html>Report</html>", encoding="utf-8")
-
-    with pytest.raises(ReportPublishingError, match="must not contain"):
-        ReportPublishingStore(storage_root).publish_report(
-            source=PublishableReport(
-                source_type="test_report",
-                source={},
-                artifact_path=report_path,
-                title="Example",
-                requested_by="@alice:localhost",
-            ),
-            published_by="@alice:localhost",
-            origin_room_id="!origin:localhost",
-        )
 
 
 def test_report_publishing_store_upgrades_legacy_html_record_on_revoke(tmp_path: Path) -> None:
@@ -354,7 +349,7 @@ def test_report_publishing_store_upgrades_legacy_html_record_on_revoke(tmp_path:
     revoked = store.revoke_report(slug, revoked_by="@admin:localhost")
 
     assert loaded.artifact_kind == "html_file"
-    assert loaded.access_policy is ReportAccessPolicy.PUBLIC
+    assert loaded.access_policy == "public"
     assert served_path == artifact_path
     assert served_path.read_bytes() == b"<!doctype html><h1>Legacy report</h1>\n"
     assert revoked.source_type == "dynamic_workflow_run"
@@ -664,7 +659,7 @@ def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: 
                 confirm_public=True,
             ),
         )
-        revoked = _tool_payload(report_tool.revoke_public_report(published["slug"]))
+        revoked = _tool_payload(report_tool.revoke_report(published["slug"]))
 
     assert missing_confirmation["status"] == "error"
     assert "confirm_public" in missing_confirmation["message"]
@@ -677,8 +672,6 @@ def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: 
     }
     assert published["report_url"] == f"https://acme.mindroom.chat/mindroom/reports/public/{published['slug']}"
     assert published["report_path"] == f"/mindroom/reports/public/{published['slug']}"
-    assert published["public_url"] == published["report_url"]
-    assert published["public_path"] == published["report_path"]
     assert revoked["status"] == "ok"
     assert revoked["revoked_at"] is not None
 
@@ -752,10 +745,44 @@ def test_report_publishing_tool_publishes_origin_room_from_trusted_context(tmp_p
     assert "public_url" not in published
     assert "public_path" not in published
     assert "current" in published["message"]
-    assert report.origin_room_id == "!room:localhost"
-    assert report.publisher_entity_name == "general"
-    assert report.publisher_matrix_user_id == expected_publisher_id
+    assert report.origin_room == OriginRoomBinding(
+        room_id="!room:localhost",
+        publisher_entity_name="general",
+        publisher_matrix_user_id=expected_publisher_id,
+    )
     assert report.requested_by == "@user:localhost"
+
+
+def test_report_publishing_tool_records_transport_account_as_origin_room_publisher(tmp_path: Path) -> None:
+    """Delegated tools publish through the caller's Matrix account, so that account must authorize viewers."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(
+        tmp_path,
+        agent_memory_backend="file",
+        trusted_auth=True,
+    )
+    context = replace(context, transport_agent_name="router")
+    workspace_root = context.runtime_paths.storage_root / "agents" / "general" / "workspace"
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "report.html").write_text("<!doctype html>Protected", encoding="utf-8")
+
+    with tool_runtime_context(context):
+        published = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "report.html", "title": "Protected"},
+                confirm_public=False,
+                access_policy="origin_room",
+            ),
+        )
+
+    report = ReportPublishingStore(context.runtime_paths.storage_root).get_report(published["slug"])
+    router_id = entity_identity_registry(context.config, context.runtime_paths).current_id("router").full_id
+    assert report.origin_room == OriginRoomBinding(
+        room_id="!room:localhost",
+        publisher_entity_name="router",
+        publisher_matrix_user_id=router_id,
+    )
 
 
 def test_report_publishing_tool_uses_configured_origin_room_default(tmp_path: Path) -> None:
@@ -766,7 +793,7 @@ def test_report_publishing_tool_uses_configured_origin_room_default(tmp_path: Pa
         agent_memory_backend="file",
         trusted_auth=True,
         report_publishing=ReportPublishingConfig(
-            default_access_policy=ReportAccessPolicy.ORIGIN_ROOM,
+            default_access_policy="origin_room",
         ),
     )
     workspace_root = context.runtime_paths.storage_root / "agents" / "general" / "workspace"
@@ -831,7 +858,7 @@ def test_public_disable_does_not_block_existing_report_revocation(tmp_path: Path
         ),
     )
     with tool_runtime_context(disabled_context):
-        revoked = _tool_payload(report_tool.revoke_public_report(published["slug"]))
+        revoked = _tool_payload(report_tool.revoke_report(published["slug"]))
 
     assert published["status"] == "ok"
     assert "possesses" in published["message"]
@@ -930,40 +957,6 @@ def test_report_publishing_tool_rejects_unknown_policy_and_publisher(tmp_path: P
     assert "Unsupported report access_policy" in unsupported["message"]
     assert missing_publisher["status"] == "error"
     assert "configured publisher identity" in missing_publisher["message"]
-
-
-@pytest.mark.parametrize(
-    ("missing_field", "expected_message"),
-    [
-        ("room_id", "canonical Matrix room ID"),
-        ("agent_name", "publisher identity"),
-    ],
-)
-def test_report_publishing_tool_rejects_missing_protected_context(
-    tmp_path: Path,
-    missing_field: str,
-    expected_message: str,
-) -> None:
-    """Non-room or unidentified invocations must not create protected reports."""
-    report_tool = ReportPublishingTools()
-    context = _make_context(tmp_path, trusted_auth=True)
-    if missing_field == "room_id":
-        object.__setattr__(context.target, "room_id", "")
-    else:
-        context = replace(context, agent_name="")
-
-    with tool_runtime_context(context):
-        rejected = _tool_payload(
-            report_tool.publish_report(
-                source_type="static_site",
-                source={"path": "missing.html", "title": "Protected"},
-                confirm_public=False,
-                access_policy="origin_room",
-            ),
-        )
-
-    assert rejected["status"] == "error"
-    assert expected_message in rejected["message"]
 
 
 def test_report_publishing_tool_schema_has_no_model_controlled_identity_fields() -> None:
@@ -1136,7 +1129,7 @@ def test_report_publishing_tool_denies_revoke_for_different_requester(tmp_path: 
             ),
         )
     with tool_runtime_context(bob_context):
-        revoked = _tool_payload(report_tool.revoke_public_report(published["slug"]))
+        revoked = _tool_payload(report_tool.revoke_report(published["slug"]))
 
     assert revoked["status"] == "error"
     assert revoked["message"] == "Report is not available to the current requester."

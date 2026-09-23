@@ -153,7 +153,6 @@ origin_room_report_index  # FastAPI route (src/mindroom/api/report_publishing.py
 origin_room_report_asset  # FastAPI route (src/mindroom/api/report_publishing.py)
 _.validate_team_agents  # unused method (src/mindroom/config/main.py)
 _.validate_origin_room_report_default_has_browser_auth  # Pydantic model validator (src/mindroom/config/main.py)
-_.serialize_default_access_policy  # Pydantic field serializer (src/mindroom/config/report_publishing.py)
 _.validate_agent_judgments  # Pydantic model validator (src/mindroom/config/main.py)
 _.handle_endtag  # unused method (src/mindroom/matrix/message_builder.py)
 _._normalize_set_at  # unused method (src/mindroom/thread_tags.py)

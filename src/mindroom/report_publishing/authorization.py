@@ -1,4 +1,4 @@
-"""Typed authorization results and bounded successful-decision caching."""
+"""Origin-room publisher identity, typed authorization results, and bounded successful-decision caching."""
 
 from __future__ import annotations
 
@@ -9,9 +9,19 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from mindroom.entity_resolution import (
+    DuplicateManagedEntityIdentityError,
+    MissingManagedEntityAccountError,
+    entity_identity_registry,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
     from typing import Any
+
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.report_publishing.store import OriginRoomBinding
 
 
 class ReportAuthorizationReason(StrEnum):
@@ -22,7 +32,6 @@ class ReportAuthorizationReason(StrEnum):
     PUBLISHER_NOT_JOINED = "publisher_not_joined"
     PUBLISHER_IDENTITY_MISMATCH = "publisher_identity_mismatch"
     AUTHORIZATION_BACKEND_UNAVAILABLE = "authorization_backend_unavailable"
-    MALFORMED_REPORT = "malformed_report"
 
 
 @dataclass(frozen=True)
@@ -47,10 +56,16 @@ class ReportAuthorizationDecision:
 class OriginRoomAuthorizationKey:
     """Security-relevant identity tuple for one cached decision."""
 
-    origin_room_id: str
+    origin_room: OriginRoomBinding
     viewer_matrix_user_id: str
-    publisher_entity_name: str
-    publisher_matrix_user_id: str
+
+
+def current_publisher_matrix_user_id(config: Config, runtime_paths: RuntimePaths, entity_name: str) -> str | None:
+    """Return one configured entity's current Matrix ID, or None when it cannot publish or authorize reports."""
+    try:
+        return entity_identity_registry(config, runtime_paths).current_id(entity_name).full_id
+    except (DuplicateManagedEntityIdentityError, KeyError, MissingManagedEntityAccountError):
+        return None
 
 
 class SuccessfulReportAuthorizationCache:
@@ -112,8 +127,3 @@ class SuccessfulReportAuthorizationCache:
         finally:
             if self._in_flight.get(key) is asyncio.current_task():
                 self._in_flight.pop(key, None)
-
-    @property
-    def size(self) -> int:
-        """Return cached successful entry count."""
-        return len(self._successful)

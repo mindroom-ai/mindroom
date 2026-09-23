@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from typing import Literal
 
-from mindroom.report_access_policy import ReportAccessPolicy
+from pydantic import BaseModel, ConfigDict, Field
+
+ReportAccessPolicy = Literal["public", "origin_room"]
 
 
 class ReportPublishingConfig(BaseModel):
@@ -13,15 +15,10 @@ class ReportPublishingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     default_access_policy: ReportAccessPolicy = Field(
-        default=ReportAccessPolicy.PUBLIC,
+        default="public",
         description="Default access policy for newly published reports",
     )
     allow_public: bool = Field(
         default=True,
         description="Whether agents may create new public bearer-link reports",
     )
-
-    @field_serializer("default_access_policy")
-    def serialize_default_access_policy(self, value: ReportAccessPolicy) -> str:
-        """Serialize policy as portable YAML-safe text."""
-        return value.value

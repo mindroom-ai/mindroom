@@ -27,6 +27,7 @@ from mindroom.matrix.identity import (
     validate_email_to_matrix_mapping,
 )
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_optional_extra_for_import_retry
+from mindroom.trusted_upstream_settings import TrustedUpstreamAuthSettings, env_text, trusted_upstream_auth_settings
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -83,39 +84,12 @@ class _SupabaseClientProtocol(Protocol):
 
 
 @dataclass(frozen=True)
-class _TrustedUpstreamJwtSettings:
-    """Signed assertion settings for trusted-upstream auth."""
-
-    require_jwt: bool = False
-    header: str | None = None
-    jwks_url: str | None = None
-    audience: str | None = None
-    issuer: str | None = None
-    email_claim: str = "email"
-    user_id_claim: str | None = None
-    matrix_user_id_claim: str | None = None
-
-
-@dataclass(frozen=True)
 class _TrustedUpstreamJwtIdentity:
     """Identity claims verified from the upstream JWT."""
 
     email: str
     user_id: str | None = None
     matrix_user_id: str | None = None
-
-
-@dataclass(frozen=True)
-class _TrustedUpstreamAuthSettings:
-    """Trusted reverse-proxy/browser identity settings for hosted deployments."""
-
-    enabled: bool = False
-    user_id_header: str | None = None
-    email_header: str | None = None
-    matrix_user_id_header: str | None = None
-    email_to_matrix_user_id_template: str | None = None
-    email_domain: str | None = None
-    jwt: _TrustedUpstreamJwtSettings = field(default_factory=_TrustedUpstreamJwtSettings)
 
 
 @dataclass(frozen=True)
@@ -128,7 +102,7 @@ class _ApiAuthSettings:
     account_id: str | None
     mindroom_api_key: str | None
     public_url: str | None = None
-    trusted_upstream: _TrustedUpstreamAuthSettings = field(default_factory=_TrustedUpstreamAuthSettings)
+    trusted_upstream: TrustedUpstreamAuthSettings = field(default_factory=TrustedUpstreamAuthSettings)
 
 
 @dataclass(frozen=True)
@@ -150,44 +124,11 @@ def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None 
         account_id=account_id,
         mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
         public_url=runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
-        trusted_upstream=_build_trusted_upstream_auth_settings(runtime_paths),
+        trusted_upstream=trusted_upstream_auth_settings(runtime_paths),
     )
 
 
-def _env_text(runtime_paths: RuntimePaths, name: str) -> str | None:
-    value = runtime_paths.env_value(name)
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
-def _build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> _TrustedUpstreamAuthSettings:
-    """Read trusted-upstream auth settings from one runtime context."""
-    return _TrustedUpstreamAuthSettings(
-        enabled=runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"),
-        user_id_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER"),
-        email_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER"),
-        matrix_user_id_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER"),
-        email_to_matrix_user_id_template=_env_text(
-            runtime_paths,
-            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
-        ),
-        email_domain=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"),
-        jwt=_TrustedUpstreamJwtSettings(
-            require_jwt=runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT"),
-            header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER"),
-            jwks_url=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL"),
-            audience=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE"),
-            issuer=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER"),
-            email_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM") or "email",
-            user_id_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"),
-            matrix_user_id_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"),
-        ),
-    )
-
-
-def _build_trusted_upstream_jwt_client(settings: _TrustedUpstreamAuthSettings) -> PyJWKClient | None:
+def _build_trusted_upstream_jwt_client(settings: TrustedUpstreamAuthSettings) -> PyJWKClient | None:
     """Return a short-lived JWKS cache for strict trusted-upstream auth."""
     jwt_settings = settings.jwt
     if not settings.enabled or not jwt_settings.require_jwt or jwt_settings.jwks_url is None:
@@ -295,7 +236,7 @@ def _get_configured_header(request: Request, header_name: str | None) -> str | N
 
 
 def _validated_trusted_upstream_email_to_matrix_template(
-    settings: _TrustedUpstreamAuthSettings,
+    settings: TrustedUpstreamAuthSettings,
     *,
     require_email_header: bool,
 ) -> str | None:
@@ -323,7 +264,7 @@ def _validated_trusted_upstream_email_to_matrix_template(
 
 
 def _derive_trusted_upstream_matrix_user_id(
-    settings: _TrustedUpstreamAuthSettings,
+    settings: TrustedUpstreamAuthSettings,
     email: str | None,
     template: str | None,
 ) -> str | None:
@@ -391,7 +332,7 @@ async def _verified_trusted_upstream_jwt_claims(
 
 async def _verified_trusted_upstream_jwt_identity(
     request: Request,
-    settings: _TrustedUpstreamAuthSettings,
+    settings: TrustedUpstreamAuthSettings,
     jwt_client: PyJWKClient | None,
 ) -> _TrustedUpstreamJwtIdentity | None:
     """Return verified upstream identity claims when strict mode is enabled."""
@@ -477,7 +418,7 @@ def _verified_trusted_upstream_identity(
 
 
 def _verified_trusted_upstream_matrix_user_id(
-    settings: _TrustedUpstreamAuthSettings,
+    settings: TrustedUpstreamAuthSettings,
     matrix_user_id: str | None,
     email: str | None,
     jwt_identity: _TrustedUpstreamJwtIdentity | None,
@@ -527,7 +468,7 @@ def _verified_trusted_upstream_matrix_user_id(
 
 async def _trusted_upstream_auth_user(
     request: Request,
-    settings: _TrustedUpstreamAuthSettings,
+    settings: TrustedUpstreamAuthSettings,
     jwt_client: PyJWKClient | None = None,
 ) -> dict[str, Any] | None:
     """Return the trusted-upstream auth user for this request when configured."""
@@ -637,7 +578,7 @@ async def request_has_frontend_access(request: Request) -> bool:
     authorization = request.headers.get("authorization")
     snapshot = _bind_authenticated_request_snapshot(request)
     auth_state = cast("ApiAuthState", snapshot.auth_state)
-    if _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") and _is_connections_path(
+    if env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") and _is_connections_path(
         request.scope["path"],
     ):
         await require_connections_user(request)
@@ -835,7 +776,7 @@ def _require_connections_route_authorized(
     snapshot: ApiSnapshot,
 ) -> None:
     """Keep trusted personal users outside administrator routes when the portal is enabled."""
-    if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT"):
+    if not env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT"):
         return
     path = request.scope["path"]
     if _is_connections_path(path):
@@ -869,8 +810,8 @@ async def require_usage_service(request: Request) -> None:
     auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     settings = auth_state.settings.trusted_upstream
     jwt_settings = settings.jwt
-    audience = _env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_JWT_AUDIENCE")
-    client_id = _env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_CLIENT_ID")
+    audience = env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_JWT_AUDIENCE")
+    client_id = env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_CLIENT_ID")
     if (
         not settings.enabled
         or settings.user_id_header is None
@@ -1022,27 +963,18 @@ async def verify_user(
     return auth_user
 
 
-async def verify_report_viewer(request: Request) -> dict[str, Any]:
-    """Authenticate a browser report viewer without dashboard or API-key policy."""
-    snapshot = _bind_authenticated_request_snapshot(request)
-    auth_state = cast("ApiAuthState", snapshot.auth_state)
-    trusted_auth_user = await _trusted_upstream_auth_user(
+async def verified_report_viewer_matrix_user_id(request: Request) -> str | None:
+    """Authenticate a browser report viewer through trusted upstream auth and return its verified Matrix ID."""
+    auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
+    auth_user = await _trusted_upstream_auth_user(
         request,
         auth_state.settings.trusted_upstream,
         auth_state.trusted_upstream_jwt_client,
     )
-    if trusted_auth_user is None:
+    if auth_user is None:
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
-    request.scope["auth_user"] = trusted_auth_user
-    return trusted_auth_user
-
-
-def verified_matrix_user_id_for_auth_user(auth_user: dict[str, Any]) -> str | None:
-    """Return verified Matrix identity carried by an authenticated principal."""
-    matrix_user_id = auth_user.get("matrix_user_id")
-    if not isinstance(matrix_user_id, str):
-        return None
-    return try_parse_historical_matrix_user_id(matrix_user_id)
+    request.scope["auth_user"] = auth_user
+    return auth_user.get("matrix_user_id")
 
 
 @router.post("/api/auth/session", include_in_schema=False)

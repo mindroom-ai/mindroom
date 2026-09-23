@@ -44,6 +44,7 @@ from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
+from mindroom.trusted_upstream_settings import TrustedUpstreamAuthSettings
 from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
@@ -3803,7 +3804,7 @@ def test_frontend_login_propagates_trusted_upstream_auth_misconfiguration(
             supabase_anon_key=None,
             account_id=None,
             mindroom_api_key="test-key",
-            trusted_upstream=auth._TrustedUpstreamAuthSettings(enabled=True),
+            trusted_upstream=TrustedUpstreamAuthSettings(enabled=True),
         ),
         supabase_auth=None,
     )
@@ -4602,18 +4603,19 @@ def test_report_viewer_reverifies_prepopulated_trusted_upstream_principal(tmp_pa
     api_app = FastAPI()
     main.initialize_api_app(api_app, runtime_paths)
 
-    async def _verify_seeded_report_viewer(request: Request) -> dict[str, Any]:
+    async def _verify_seeded_report_viewer(request: Request) -> str | None:
         request.scope["auth_user"] = {
             "user_id": "spoofed",
             "auth_source": "trusted_upstream",
+            "matrix_user_id": "@spoofed:example.org",
         }
-        return await auth.verify_report_viewer(request)
+        return await auth.verified_report_viewer_matrix_user_id(request)
 
     @api_app.get("/report-viewer")
     async def _report_viewer(
-        auth_user: Annotated[dict[str, Any], Depends(_verify_seeded_report_viewer)],
-    ) -> dict[str, Any]:
-        return auth_user
+        matrix_user_id: Annotated[str | None, Depends(_verify_seeded_report_viewer)],
+    ) -> str | None:
+        return matrix_user_id
 
     with TestClient(api_app) as client:
         response = client.get("/report-viewer")

@@ -355,16 +355,12 @@ visibility = ["mindroom.bot"]
 path = "mindroom.report_publishing"
 depends_on = [
     "mindroom.durable_write",
+    "mindroom.entity_resolution",
     "mindroom.matrix.identity",
-    "mindroom.report_access_policy",
 ]
 
 [[modules]]
-path = "mindroom.report_access_policy"
-depends_on = []
-
-[[modules]]
-path = "mindroom.report_viewer_auth"
+path = "mindroom.trusted_upstream_settings"
 depends_on = []
 
 # Keep memory consumers explicit so imports are enforced rather than merely
@@ -1094,6 +1090,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.tool_system.dependencies",
+    "mindroom.trusted_upstream_settings",
 ]
 
 [[modules]]
@@ -1146,7 +1143,6 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.report_headers",
     "mindroom.logging_config",
-    "mindroom.report_access_policy",
     "mindroom.report_publishing",
 ]
 
@@ -2109,10 +2105,8 @@ depends_on = [
 path = "mindroom.orchestration.report_authorization_runtime"
 depends_on = [
     "mindroom.api.main",
-    "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.client_room_admin",
-    "mindroom.report_access_policy",
     "mindroom.report_publishing",
 ]
 
@@ -2451,12 +2445,11 @@ depends_on = [
     "mindroom.prompts",
     "mindroom.room_model_overrides",
     "mindroom.room_thread_modes",
-    "mindroom.report_access_policy",
-    "mindroom.report_viewer_auth",
     "mindroom.thread_models",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.worker_routing",
+    "mindroom.trusted_upstream_settings",
     "mindroom.workspaces",
 ]
 

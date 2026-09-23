@@ -5,28 +5,25 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.entity_resolution import (
-    DuplicateManagedEntityIdentityError,
-    MissingManagedEntityAccountError,
-    entity_identity_registry,
-)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
-from mindroom.report_access_policy import ReportAccessPolicy
 from mindroom.report_publishing.authorization import (
     OriginRoomAuthorizationKey,
     ReportAuthorizationDecision,
     ReportAuthorizationReason,
     SuccessfulReportAuthorizationCache,
+    current_publisher_matrix_user_id,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    import nio
+
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.report_publishing.store import PublishedReport
+    from mindroom.report_publishing.store import OriginRoomBinding
 
 logger = get_logger(__name__)
 
@@ -42,94 +39,55 @@ class _OriginRoomReportAuthorizer:
 
     async def authorize(
         self,
-        report: PublishedReport,
+        origin_room: OriginRoomBinding,
         viewer_matrix_user_id: str,
     ) -> ReportAuthorizationDecision:
         """Authorize one viewer against one report's exact origin room."""
-        if report.access_policy is not ReportAccessPolicy.ORIGIN_ROOM:
-            return ReportAuthorizationDecision(ReportAuthorizationReason.MALFORMED_REPORT)
-        if (
-            report.origin_room_id is None
-            or report.publisher_entity_name is None
-            or report.publisher_matrix_user_id is None
-        ):
-            return ReportAuthorizationDecision(ReportAuthorizationReason.MALFORMED_REPORT)
-
-        origin_room_id = report.origin_room_id
-        publisher_entity_name = report.publisher_entity_name
-        publisher_matrix_user_id = report.publisher_matrix_user_id
-        try:
-            expected_publisher_id = (
-                entity_identity_registry(
-                    self.config,
-                    self.runtime_paths,
-                )
-                .current_id(publisher_entity_name)
-                .full_id
-            )
-        except (
-            DuplicateManagedEntityIdentityError,
-            KeyError,
-            MissingManagedEntityAccountError,
-        ):
+        publisher_matrix_user_id = origin_room.publisher_matrix_user_id
+        current_publisher_id = current_publisher_matrix_user_id(
+            self.config,
+            self.runtime_paths,
+            origin_room.publisher_entity_name,
+        )
+        if current_publisher_id != publisher_matrix_user_id:
             return ReportAuthorizationDecision(ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH)
-        publisher_bot = self.bots.get(publisher_entity_name)
+        publisher_bot = self.bots.get(origin_room.publisher_entity_name)
         if publisher_bot is None or publisher_bot.client is None or not publisher_bot.running:
             return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE)
-        if (
-            expected_publisher_id != publisher_matrix_user_id
-            or publisher_bot.matrix_id.full_id != publisher_matrix_user_id
-        ):
+        if publisher_bot.matrix_id.full_id != publisher_matrix_user_id:
             return ReportAuthorizationDecision(ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH)
 
-        key = OriginRoomAuthorizationKey(
-            origin_room_id=origin_room_id,
-            viewer_matrix_user_id=viewer_matrix_user_id,
-            publisher_entity_name=publisher_entity_name,
-            publisher_matrix_user_id=publisher_matrix_user_id,
-        )
+        client = publisher_bot.client
         return await self.cache.authorize(
-            key,
-            lambda: self._authorize_membership(
-                publisher_bot,
-                origin_room_id=origin_room_id,
-                viewer_matrix_user_id=viewer_matrix_user_id,
-                publisher_matrix_user_id=publisher_matrix_user_id,
-            ),
+            OriginRoomAuthorizationKey(origin_room=origin_room, viewer_matrix_user_id=viewer_matrix_user_id),
+            lambda: _authorize_membership(client, origin_room, viewer_matrix_user_id),
         )
 
-    @staticmethod
-    async def _authorize_membership(
-        publisher_bot: AgentBot | TeamBot,
-        *,
-        origin_room_id: str,
-        viewer_matrix_user_id: str,
-        publisher_matrix_user_id: str,
-    ) -> ReportAuthorizationDecision:
-        client = publisher_bot.client
-        if client is None:
-            return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE)
-        reason = ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE
-        try:
-            joined_room_ids = await get_joined_rooms(client)
-            if joined_room_ids is not None:
-                if origin_room_id not in joined_room_ids:
-                    reason = ReportAuthorizationReason.PUBLISHER_NOT_JOINED
-                else:
-                    joined_members = await get_room_members(client, origin_room_id)
-                    if joined_members is not None:
-                        if publisher_matrix_user_id not in joined_members:
-                            reason = ReportAuthorizationReason.PUBLISHER_NOT_JOINED
-                        elif viewer_matrix_user_id not in joined_members:
-                            reason = ReportAuthorizationReason.VIEWER_NOT_JOINED
-                        else:
-                            reason = ReportAuthorizationReason.AUTHORIZED
-        except Exception as exc:
-            logger.warning(
-                "report_membership_lookup_failed",
-                error_type=type(exc).__name__,
-            )
-        return ReportAuthorizationDecision(reason)
+
+async def _authorize_membership(  # noqa: PLR0911 - each membership outcome is a distinct authorization decision
+    client: nio.AsyncClient,
+    origin_room: OriginRoomBinding,
+    viewer_matrix_user_id: str,
+) -> ReportAuthorizationDecision:
+    unavailable = ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE)
+    try:
+        joined_room_ids = await get_joined_rooms(client)
+        if joined_room_ids is None:
+            return unavailable
+        if origin_room.room_id not in joined_room_ids:
+            return ReportAuthorizationDecision(ReportAuthorizationReason.PUBLISHER_NOT_JOINED)
+        joined_members = await get_room_members(client, origin_room.room_id)
+    except Exception as exc:
+        # Matrix transport failures fail closed; log only the type so request URLs and room IDs stay out of logs.
+        logger.warning("report_membership_lookup_failed", error_type=type(exc).__name__)
+        return unavailable
+    if joined_members is None:
+        return unavailable
+    if origin_room.publisher_matrix_user_id not in joined_members:
+        return ReportAuthorizationDecision(ReportAuthorizationReason.PUBLISHER_NOT_JOINED)
+    if viewer_matrix_user_id not in joined_members:
+        return ReportAuthorizationDecision(ReportAuthorizationReason.VIEWER_NOT_JOINED)
+    return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZED)
 
 
 @dataclass

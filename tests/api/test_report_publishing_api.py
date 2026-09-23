@@ -8,12 +8,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mindroom.api import main
-from mindroom.report_access_policy import ReportAccessPolicy
 from mindroom.report_publishing.authorization import (
     ReportAuthorizationDecision,
     ReportAuthorizationReason,
 )
-from mindroom.report_publishing.store import PublishableReport, ReportPublishingStore
+from mindroom.report_publishing.store import OriginRoomBinding, PublishableReport, ReportPublishingStore
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
 if TYPE_CHECKING:
@@ -102,10 +101,11 @@ def _publish_origin_report(test_client: TestClient, *, static_site: bool = False
             artifact_kind=artifact_kind,
         ),
         published_by="@alice:example.org",
-        access_policy=ReportAccessPolicy.ORIGIN_ROOM,
-        origin_room_id="!origin:example.org",
-        publisher_entity_name="test_agent",
-        publisher_matrix_user_id="@mindroom_test_agent:example.org",
+        origin_room=OriginRoomBinding(
+            room_id="!origin:example.org",
+            publisher_entity_name="test_agent",
+            publisher_matrix_user_id="@mindroom_test_agent:example.org",
+        ),
     )
     return report.slug, str(runtime_paths.storage_root)
 
@@ -282,6 +282,7 @@ def test_origin_room_report_redirect_authorizes_before_trailing_slash(test_clien
 
     assert response.status_code == 301
     assert response.headers["location"] == f"{slug}/"
+    assert response.headers["cache-control"] == "no-store, max-age=0"
     authorize.assert_awaited_once()
 
 

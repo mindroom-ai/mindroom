@@ -25,9 +25,8 @@ __all__ = [
     "matrix_user_id_from_email",
     "parse_current_matrix_user_id",
     "parse_historical_matrix_user_id",
-    "parse_matrix_room_id",
     "try_parse_historical_matrix_user_id",
-    "try_parse_matrix_room_id",
+    "valid_matrix_room_id",
     "valid_matrix_server_name",
     "validate_email_to_matrix_mapping",
 ]
@@ -140,39 +139,20 @@ def try_parse_historical_matrix_user_id(value: str | None) -> str | None:
         return None
 
 
-def parse_matrix_room_id(room_id: str) -> str:
-    """Return a canonical Matrix room ID, or raise ValueError."""
+def valid_matrix_room_id(room_id: str) -> bool:
+    """Return whether one value is a canonical Matrix room ID, including domainless v12 IDs."""
     if not room_id.startswith("!"):
-        msg = f"Invalid Matrix room ID: {room_id}"
-        raise ValueError(msg)
-
+        return False
     if ":" not in room_id:
-        if _DOMAINLESS_ROOM_ID_PATTERN.fullmatch(room_id[1:]) is None:
-            msg = f"Invalid Matrix room ID: {room_id}"
-            raise ValueError(msg)
-        return room_id
-
+        return _DOMAINLESS_ROOM_ID_PATTERN.fullmatch(room_id[1:]) is not None
     localpart, server_name = room_id[1:].split(":", 1)
-    if not localpart or "\x00" in localpart or _contains_surrogate(localpart):
-        msg = f"Invalid Matrix room ID localpart: {room_id}"
-        raise ValueError(msg)
-    if not valid_matrix_server_name(server_name):
-        msg = f"Invalid Matrix room ID server name: {room_id}"
-        raise ValueError(msg)
-    if len(room_id.encode("utf-8")) > 255:
-        msg = f"Invalid Matrix room ID length: {room_id}"
-        raise ValueError(msg)
-    return room_id
-
-
-def try_parse_matrix_room_id(value: str | None) -> str | None:
-    """Return a canonical Matrix room ID when a nullable value parses."""
-    if value is None:
-        return None
-    try:
-        return parse_matrix_room_id(value)
-    except ValueError:
-        return None
+    return (
+        bool(localpart)
+        and "\x00" not in localpart
+        and not _contains_surrogate(localpart)
+        and valid_matrix_server_name(server_name)
+        and len(room_id.encode("utf-8")) <= 255
+    )
 
 
 def validate_email_to_matrix_mapping(template: str, email_domain: str | None) -> None:

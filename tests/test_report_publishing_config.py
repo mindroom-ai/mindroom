@@ -8,7 +8,6 @@ import pytest
 import yaml
 
 from mindroom.config.main import Config
-from mindroom.report_access_policy import ReportAccessPolicy
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -20,7 +19,7 @@ def _base_config() -> dict[str, object]:
         "models": {
             "default": {
                 "provider": "openai",
-                "id": "gpt-5.6",
+                "id": "gpt-6-astra",
             },
         },
         "router": {"model": "default"},
@@ -31,7 +30,7 @@ def test_report_publishing_config_preserves_public_defaults() -> None:
     """Existing deployments should keep public publication behavior."""
     config = Config.model_validate(_base_config())
 
-    assert config.report_publishing.default_access_policy is ReportAccessPolicy.PUBLIC
+    assert config.report_publishing.default_access_policy == "public"
     assert config.report_publishing.allow_public is True
 
 
@@ -47,7 +46,7 @@ def test_report_publishing_config_accepts_origin_room_and_public_disable() -> No
         },
     )
 
-    assert config.report_publishing.default_access_policy is ReportAccessPolicy.ORIGIN_ROOM
+    assert config.report_publishing.default_access_policy == "origin_room"
     assert config.report_publishing.allow_public is False
     loaded = yaml.safe_load(yaml.dump(config.authored_model_dump()))
     assert loaded["report_publishing"] == {
@@ -106,7 +105,7 @@ def test_origin_room_default_accepts_trusted_browser_auth_runtime(tmp_path: Path
         trusted_runtime_paths,
     )
 
-    assert config.report_publishing.default_access_policy is ReportAccessPolicy.ORIGIN_ROOM
+    assert config.report_publishing.default_access_policy == "origin_room"
 
 
 @pytest.mark.parametrize(

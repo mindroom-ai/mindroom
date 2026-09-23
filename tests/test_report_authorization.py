@@ -15,14 +15,13 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.orchestration.report_authorization_runtime import _OriginRoomReportAuthorizer
-from mindroom.report_access_policy import ReportAccessPolicy
 from mindroom.report_publishing.authorization import (
     OriginRoomAuthorizationKey,
     ReportAuthorizationDecision,
     ReportAuthorizationReason,
     SuccessfulReportAuthorizationCache,
 )
-from mindroom.report_publishing.store import PublishedReport
+from mindroom.report_publishing.store import OriginRoomBinding
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -43,13 +42,13 @@ def _config(tmp_path: Path) -> Config:
     return bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General")},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
         ),
         runtime_paths,
     )
 
 
-def _report(config: Config, **changes: object) -> PublishedReport:
+def _origin_room(config: Config, **changes: str) -> OriginRoomBinding:
     publisher_matrix_user_id = (
         entity_identity_registry(
             config,
@@ -58,23 +57,19 @@ def _report(config: Config, **changes: object) -> PublishedReport:
         .current_id("general")
         .full_id
     )
-    report = PublishedReport(
-        slug="pub_" + ("a" * 32),
-        source_type="test",
-        source={},
-        artifact_kind="html_file",
-        artifact_path="reports/example.html",
-        title="Example",
-        requested_by="@alice:localhost",
-        published_by="@alice:localhost",
-        published_at="2026-07-23T00:00:00Z",
-        public_url=None,
-        access_policy=ReportAccessPolicy.ORIGIN_ROOM,
-        origin_room_id="!origin:localhost",
+    origin_room = OriginRoomBinding(
+        room_id="!origin:localhost",
         publisher_entity_name="general",
         publisher_matrix_user_id=publisher_matrix_user_id,
     )
-    return replace(report, **changes)
+    return replace(origin_room, **changes)
+
+
+def _cache_key(room_id: str = "!room:localhost") -> OriginRoomAuthorizationKey:
+    return OriginRoomAuthorizationKey(
+        origin_room=OriginRoomBinding(room_id, "general", "@general:localhost"),
+        viewer_matrix_user_id="@alice:localhost",
+    )
 
 
 def _authorizer(
@@ -116,7 +111,7 @@ async def test_origin_room_authorization_allows_exact_joined_room(tmp_path: Path
     config = _config(tmp_path)
     authorizer, _client = _authorizer(config)
 
-    decision = await authorizer.authorize(_report(config), "@alice:localhost")
+    decision = await authorizer.authorize(_origin_room(config), "@alice:localhost")
 
     assert decision.reason is ReportAuthorizationReason.AUTHORIZED
 
@@ -136,11 +131,11 @@ async def test_origin_room_authorization_requires_both_joined_members(
 ) -> None:
     """Invited, left, banned, or absent identities are absent from joined_members."""
     config = _config(tmp_path)
-    publisher_id = _report(config).publisher_matrix_user_id
+    publisher_id = _origin_room(config).publisher_matrix_user_id
     concrete_members = {publisher_id if member == "publisher" else member for member in members}
     authorizer, _client = _authorizer(config, members=concrete_members)
 
-    decision = await authorizer.authorize(_report(config), "@alice:localhost")
+    decision = await authorizer.authorize(_origin_room(config), "@alice:localhost")
 
     assert decision.reason is reason
 
@@ -151,7 +146,7 @@ async def test_origin_room_authorization_rejects_other_common_room(tmp_path: Pat
     config = _config(tmp_path)
     authorizer, _client = _authorizer(config, joined_rooms=["!other:localhost"])
 
-    decision = await authorizer.authorize(_report(config), "@alice:localhost")
+    decision = await authorizer.authorize(_origin_room(config), "@alice:localhost")
 
     assert decision.reason is ReportAuthorizationReason.PUBLISHER_NOT_JOINED
 
@@ -163,7 +158,7 @@ async def test_origin_room_authorization_rejects_stored_publisher_identity_misma
     authorizer, client = _authorizer(config)
 
     decision = await authorizer.authorize(
-        _report(config, publisher_matrix_user_id="@old-general:localhost"),
+        _origin_room(config, publisher_matrix_user_id="@old-general:localhost"),
         "@alice:localhost",
     )
 
@@ -195,7 +190,7 @@ async def test_origin_room_authorization_treats_configured_publisher_outage_as_b
         runtime_paths=runtime_paths_for(config),
     )
 
-    decision = await authorizer.authorize(_report(config), "@alice:localhost")
+    decision = await authorizer.authorize(_origin_room(config), "@alice:localhost")
 
     assert decision.reason is ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE
 
@@ -206,7 +201,7 @@ async def test_origin_room_authorization_treats_removed_publisher_as_identity_mi
     original_config = _config(tmp_path)
     runtime_paths = runtime_paths_for(original_config)
     current_config = bind_runtime_paths(
-        Config(models={"default": ModelConfig(provider="openai", id="gpt-5.6")}),
+        Config(models={"default": ModelConfig(provider="openai", id="gpt-6-astra")}),
         runtime_paths,
     )
     authorizer = _OriginRoomReportAuthorizer(
@@ -215,29 +210,9 @@ async def test_origin_room_authorization_treats_removed_publisher_as_identity_mi
         runtime_paths=runtime_paths,
     )
 
-    decision = await authorizer.authorize(_report(original_config), "@alice:localhost")
+    decision = await authorizer.authorize(_origin_room(original_config), "@alice:localhost")
 
     assert decision.reason is ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH
-
-
-@pytest.mark.asyncio
-async def test_origin_room_membership_handles_client_teardown_race(tmp_path: Path) -> None:
-    """Client removal between precheck and membership lookup should stay typed."""
-    config = _config(tmp_path)
-    publisher_matrix_id = entity_identity_registry(
-        config,
-        runtime_paths_for(config),
-    ).current_id("general")
-    publisher_bot = _FakeBot(client=None, running=True, matrix_id=publisher_matrix_id)
-
-    decision = await _OriginRoomReportAuthorizer._authorize_membership(
-        publisher_bot,  # type: ignore[arg-type]
-        origin_room_id="!origin:localhost",
-        viewer_matrix_user_id="@alice:localhost",
-        publisher_matrix_user_id=publisher_matrix_id.full_id,
-    )
-
-    assert decision.reason is ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -247,7 +222,7 @@ async def test_origin_room_authorization_fails_closed_on_matrix_error(tmp_path: 
     authorizer, client = _authorizer(config)
     client.joined_members.side_effect = RuntimeError("homeserver unavailable")
 
-    decision = await authorizer.authorize(_report(config), "@alice:localhost")
+    decision = await authorizer.authorize(_origin_room(config), "@alice:localhost")
 
     assert decision.reason is ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE
 
@@ -259,12 +234,12 @@ async def test_success_cache_reuses_root_and_assets_until_expiry(tmp_path: Path)
     now = [100.0]
     cache = SuccessfulReportAuthorizationCache(ttl_seconds=20, monotonic=lambda: now[0])
     authorizer, client = _authorizer(config, cache=cache)
-    report = _report(config)
+    origin_room = _origin_room(config)
 
-    first = await authorizer.authorize(report, "@alice:localhost")
-    second = await authorizer.authorize(report, "@alice:localhost")
+    first = await authorizer.authorize(origin_room, "@alice:localhost")
+    second = await authorizer.authorize(origin_room, "@alice:localhost")
     now[0] = 121.0
-    third = await authorizer.authorize(report, "@alice:localhost")
+    third = await authorizer.authorize(origin_room, "@alice:localhost")
 
     assert first.cache_hit is False
     assert second.cache_hit is True
@@ -279,16 +254,16 @@ async def test_membership_removal_takes_effect_after_success_cache_ttl(tmp_path:
     now = [100.0]
     cache = SuccessfulReportAuthorizationCache(ttl_seconds=20, monotonic=lambda: now[0])
     authorizer, client = _authorizer(config, cache=cache)
-    report = _report(config)
+    origin_room = _origin_room(config)
 
-    initial = await authorizer.authorize(report, "@alice:localhost")
+    initial = await authorizer.authorize(origin_room, "@alice:localhost")
     client.joined_members.return_value = nio.JoinedMembersResponse(
-        [nio.RoomMember(report.publisher_matrix_user_id or "", "", "")],
+        [nio.RoomMember(origin_room.publisher_matrix_user_id, "", "")],
         "!origin:localhost",
     )
-    cached = await authorizer.authorize(report, "@alice:localhost")
+    cached = await authorizer.authorize(origin_room, "@alice:localhost")
     now[0] = 121.0
-    after_expiry = await authorizer.authorize(report, "@alice:localhost")
+    after_expiry = await authorizer.authorize(origin_room, "@alice:localhost")
 
     assert initial.authorized is True
     assert cached.authorized is True
@@ -303,17 +278,17 @@ async def test_success_cache_keys_isolate_security_identities(tmp_path: Path) ->
     authorizer, client = _authorizer(
         config,
         members={
-            _report(config).publisher_matrix_user_id or "",
+            _origin_room(config).publisher_matrix_user_id,
             "@alice:localhost",
             "@bob:localhost",
         },
     )
-    report = _report(config)
+    origin_room = _origin_room(config)
 
-    await authorizer.authorize(report, "@alice:localhost")
-    await authorizer.authorize(report, "@bob:localhost")
+    await authorizer.authorize(origin_room, "@alice:localhost")
+    await authorizer.authorize(origin_room, "@bob:localhost")
     wrong_room = await authorizer.authorize(
-        replace(report, origin_room_id="!other:localhost"),
+        replace(origin_room, room_id="!other:localhost"),
         "@alice:localhost",
     )
 
@@ -325,7 +300,7 @@ async def test_success_cache_keys_isolate_security_identities(tmp_path: Path) ->
 async def test_success_cache_coalesces_concurrent_checks() -> None:
     """Concurrent identical assets should share one in-flight membership check."""
     cache = SuccessfulReportAuthorizationCache()
-    key = OriginRoomAuthorizationKey("!room:localhost", "@alice:localhost", "general", "@general:localhost")
+    key = _cache_key()
     calls = 0
 
     async def check() -> ReportAuthorizationDecision:
@@ -344,7 +319,7 @@ async def test_success_cache_coalesces_concurrent_checks() -> None:
 async def test_success_cache_creator_cancellation_does_not_cancel_shared_check() -> None:
     """Cancelling the first waiter must not cancel a check used by another waiter."""
     cache = SuccessfulReportAuthorizationCache()
-    key = OriginRoomAuthorizationKey("!room:localhost", "@alice:localhost", "general", "@general:localhost")
+    key = _cache_key()
     check_started = asyncio.Event()
     release_check = asyncio.Event()
     calls = 0
@@ -375,7 +350,7 @@ async def test_success_cache_creator_cancellation_does_not_cancel_shared_check()
 async def test_success_cache_sibling_cancellation_does_not_cancel_shared_check() -> None:
     """Cancelling a joined waiter must not cancel the creator's check."""
     cache = SuccessfulReportAuthorizationCache()
-    key = OriginRoomAuthorizationKey("!room:localhost", "@alice:localhost", "general", "@general:localhost")
+    key = _cache_key()
     check_started = asyncio.Event()
     release_check = asyncio.Event()
     calls = 0
@@ -413,21 +388,13 @@ async def test_success_cache_is_bounded_and_never_caches_backend_errors() -> Non
 
     for index in range(3):
         await cache.authorize(
-            OriginRoomAuthorizationKey(
-                f"!room{index}:localhost",
-                "@alice:localhost",
-                "general",
-                "@general:localhost",
-            ),
+            _cache_key(f"!room{index}:localhost"),
             allowed,
         )
+    oldest = await cache.authorize(_cache_key("!room0:localhost"), allowed)
+    newest = await cache.authorize(_cache_key("!room2:localhost"), allowed)
 
-    error_key = OriginRoomAuthorizationKey(
-        "!error:localhost",
-        "@alice:localhost",
-        "general",
-        "@general:localhost",
-    )
+    error_key = _cache_key("!error:localhost")
 
     async def unavailable() -> ReportAuthorizationDecision:
         nonlocal calls
@@ -437,5 +404,6 @@ async def test_success_cache_is_bounded_and_never_caches_backend_errors() -> Non
     await cache.authorize(error_key, unavailable)
     await cache.authorize(error_key, unavailable)
 
-    assert cache.size == 2
+    assert oldest.cache_hit is False
+    assert newest.cache_hit is True
     assert calls == 2

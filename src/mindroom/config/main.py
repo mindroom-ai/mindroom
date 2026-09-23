@@ -102,14 +102,13 @@ from mindroom.matrix_identifiers import (
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
-from mindroom.report_access_policy import ReportAccessPolicy
-from mindroom.report_viewer_auth import report_viewer_auth_configuration_error
 from mindroom.room_model_overrides import resolve_room_model_override
 from mindroom.room_thread_modes import resolve_room_thread_mode_override
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
+from mindroom.trusted_upstream_settings import matrix_identity_configuration_error, trusted_upstream_auth_settings
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
@@ -1052,12 +1051,12 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_origin_room_report_default_has_browser_auth(self, info: ValidationInfo) -> Config:
         """Require trusted browser identity integration for an origin-room default."""
-        if self.report_publishing.default_access_policy is not ReportAccessPolicy.ORIGIN_ROOM:
+        if self.report_publishing.default_access_policy != "origin_room":
             return self
         runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
         if runtime_paths is None:
             return self
-        auth_error = report_viewer_auth_configuration_error(runtime_paths)
+        auth_error = matrix_identity_configuration_error(trusted_upstream_auth_settings(runtime_paths))
         if auth_error is None:
             return self
         msg = (

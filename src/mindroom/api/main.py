@@ -73,7 +73,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.report_publishing.authorization import ReportAuthorizationDecision
-    from mindroom.report_publishing.store import PublishedReport
+    from mindroom.report_publishing.store import OriginRoomBinding
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.script_runs.broker import ScriptToolBroker
     from mindroom.workers.backend import WorkerBackend
@@ -619,7 +619,7 @@ def unbind_external_trigger_runtime(api_app: FastAPI) -> None:
 
 def bind_report_authorization_runtime(
     api_app: FastAPI,
-    authorize: Callable[[PublishedReport, str], Awaitable[ReportAuthorizationDecision]],
+    authorize: Callable[[OriginRoomBinding, str], Awaitable[ReportAuthorizationDecision]],
 ) -> None:
     """Attach live Matrix report authorization to one API app."""
     config_lifecycle.app_state(api_app).report_authorization_runtime = config_lifecycle.ReportAuthorizationRuntime(

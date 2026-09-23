@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from mindroom.durable_write import write_json_file_durable
-from mindroom.matrix.identity import try_parse_historical_matrix_user_id, try_parse_matrix_room_id
-from mindroom.report_access_policy import ReportAccessPolicy
+from mindroom.matrix.identity import try_parse_historical_matrix_user_id, valid_matrix_room_id
 from mindroom.report_publishing.static_site import (
     StaticSiteSnapshotError,
     resolve_static_site_asset,
@@ -21,6 +20,8 @@ from mindroom.report_publishing.static_site import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from mindroom.config.report_publishing import ReportAccessPolicy
 
 _PUBLIC_REPORT_SLUG_RE = re.compile(r"^pub_[a-f0-9]{32}$")
 _ARTIFACT_KIND_HTML_FILE = "html_file"
@@ -55,6 +56,15 @@ class PublishableReport:
 
 
 @dataclass(frozen=True)
+class OriginRoomBinding:
+    """Exact Matrix room and publisher identity that authorize one protected report."""
+
+    room_id: str
+    publisher_entity_name: str
+    publisher_matrix_user_id: str
+
+
+@dataclass(frozen=True)
 class PublishedReport:
     """Persistent publication record for one report artifact."""
 
@@ -68,17 +78,26 @@ class PublishedReport:
     published_by: str
     published_at: str
     public_url: str | None
-    access_policy: ReportAccessPolicy = ReportAccessPolicy.PUBLIC
-    origin_room_id: str | None = None
-    publisher_entity_name: str | None = None
-    publisher_matrix_user_id: str | None = None
+    origin_room: OriginRoomBinding | None = None
     revoked_at: str | None = None
     revoked_by: str | None = None
+
+    @property
+    def access_policy(self) -> ReportAccessPolicy:
+        """Return the access policy implied by the report's origin-room binding."""
+        return "public" if self.origin_room is None else "origin_room"
 
     @property
     def is_static_site(self) -> bool:
         """Return whether this report serves a copied static site."""
         return self.artifact_kind == ARTIFACT_KIND_STATIC_SITE
+
+    @property
+    def route_path(self) -> str:
+        """Return the browser route for this report under its access policy."""
+        route = "public" if self.origin_room is None else "room"
+        suffix = "/" if self.is_static_site else ""
+        return f"/reports/{route}/{self.slug}{suffix}"
 
 
 class ReportPublishingStore:
@@ -94,18 +113,11 @@ class ReportPublishingStore:
         source: PublishableReport,
         published_by: str,
         base_url: str | None = None,
-        access_policy: ReportAccessPolicy = ReportAccessPolicy.PUBLIC,
-        origin_room_id: str | None = None,
-        publisher_entity_name: str | None = None,
-        publisher_matrix_user_id: str | None = None,
+        origin_room: OriginRoomBinding | None = None,
     ) -> PublishedReport:
         """Create a publication record for one authorized report artifact."""
-        _validate_publication_metadata(
-            access_policy=access_policy,
-            origin_room_id=origin_room_id,
-            publisher_entity_name=publisher_entity_name,
-            publisher_matrix_user_id=publisher_matrix_user_id,
-        )
+        if origin_room is not None:
+            _validate_origin_room(origin_room)
         slug = f"pub_{uuid4().hex}"
         artifact_path = self._publish_artifact(source, slug)
         report = PublishedReport(
@@ -118,17 +130,11 @@ class ReportPublishingStore:
             requested_by=source.requested_by,
             published_by=published_by,
             published_at=_utc_now(),
-            public_url=_report_url(
-                base_url,
-                slug,
-                artifact_kind=source.artifact_kind,
-                access_policy=access_policy,
-            ),
-            access_policy=access_policy,
-            origin_room_id=origin_room_id,
-            publisher_entity_name=publisher_entity_name,
-            publisher_matrix_user_id=publisher_matrix_user_id,
+            public_url=None,
+            origin_room=origin_room,
         )
+        if base_url is not None and base_url.strip():
+            report = replace(report, public_url=f"{base_url.rstrip('/')}{report.route_path}")
         report_path = self._public_report_path(slug)
         payload = _published_report_to_json(report)
         write_json_file_durable(report_path, payload, indent=2, sort_keys=True, trailing_newline=True)
@@ -220,10 +226,8 @@ def _published_report_to_json(report: PublishedReport) -> dict[str, object]:
         "published_by": report.published_by,
         "published_at": report.published_at,
         "public_url": report.public_url,
-        "access_policy": report.access_policy.value,
-        "origin_room_id": report.origin_room_id,
-        "publisher_entity_name": report.publisher_entity_name,
-        "publisher_matrix_user_id": report.publisher_matrix_user_id,
+        "access_policy": report.access_policy,
+        "origin_room": None if report.origin_room is None else asdict(report.origin_room),
         "revoked_at": report.revoked_at,
         "revoked_by": report.revoked_by,
     }
@@ -243,18 +247,6 @@ def _published_report_from_json(data: dict[str, object]) -> PublishedReport:
     if not isinstance(source, dict):
         msg = "Published report record field 'source' must be an object."
         raise ReportPublishingError(msg)
-    # LEGACY_COMPAT: Published report records without an access policy.
-    # Legacy format: Published report records omitted access_policy and were always public bearer links.
-    # Last legacy release: v2026.9.265; replacement: unreleased origin-room reports persist access_policy.
-    # Handling: Default missing policy to public so existing links keep bearer semantics; mutations rewrite it.
-    # Coverage: tests/test_report_publishing.py::test_report_publishing_store_loads_legacy_record_as_public,
-    # tests/test_report_publishing.py::test_report_publishing_store_upgrades_legacy_html_record_on_revoke.
-    raw_access_policy = data.get("access_policy", ReportAccessPolicy.PUBLIC.value)
-    try:
-        access_policy = ReportAccessPolicy(raw_access_policy)
-    except (TypeError, ValueError) as exc:
-        msg = f"Published report record has unsupported access policy '{raw_access_policy}'."
-        raise ReportPublishingError(msg) from exc
     report = PublishedReport(
         slug=_required_text(data, "slug"),
         source_type=_required_text(data, "source_type"),
@@ -266,22 +258,42 @@ def _published_report_from_json(data: dict[str, object]) -> PublishedReport:
         published_by=_required_text(data, "published_by"),
         published_at=_required_text(data, "published_at"),
         public_url=_optional_text(data, "public_url"),
-        access_policy=access_policy,
-        origin_room_id=_optional_text(data, "origin_room_id"),
-        publisher_entity_name=_optional_text(data, "publisher_entity_name"),
-        publisher_matrix_user_id=_optional_text(data, "publisher_matrix_user_id"),
+        origin_room=_origin_room_from_json(data),
         revoked_at=_optional_text(data, "revoked_at"),
         revoked_by=_optional_text(data, "revoked_by"),
     )
     _validate_public_report_slug(report.slug)
-    _validate_publication_metadata(
-        access_policy=report.access_policy,
-        origin_room_id=report.origin_room_id,
-        publisher_entity_name=report.publisher_entity_name,
-        publisher_matrix_user_id=report.publisher_matrix_user_id,
-        allow_public_incidental_metadata=True,
-    )
     return report
+
+
+def _origin_room_from_json(data: dict[str, object]) -> OriginRoomBinding | None:
+    # LEGACY_COMPAT: Published report records without an access policy.
+    # Legacy format: Published report records omitted access_policy and were always public bearer links.
+    # Last legacy release: v2026.9.265; replacement: unreleased origin-room reports persist access_policy.
+    # Handling: Default missing policy to public so existing links keep bearer semantics; mutations rewrite it.
+    # Coverage: tests/test_report_publishing.py::test_report_publishing_store_loads_legacy_record_as_public,
+    # tests/test_report_publishing.py::test_report_publishing_store_upgrades_legacy_html_record_on_revoke.
+    access_policy = data.get("access_policy", "public")
+    origin_room = data.get("origin_room")
+    if access_policy == "public":
+        if origin_room is not None:
+            msg = "Public report records must not contain origin-room authorization metadata."
+            raise ReportPublishingError(msg)
+        return None
+    if access_policy != "origin_room":
+        msg = f"Published report record has unsupported access policy '{access_policy}'."
+        raise ReportPublishingError(msg)
+    if not isinstance(origin_room, dict):
+        msg = "Origin-room report records require room and publisher identity metadata."
+        raise ReportPublishingError(msg)
+    binding_data = cast("dict[str, object]", origin_room)
+    binding = OriginRoomBinding(
+        room_id=_required_text(binding_data, "room_id"),
+        publisher_entity_name=_required_text(binding_data, "publisher_entity_name"),
+        publisher_matrix_user_id=_required_text(binding_data, "publisher_matrix_user_id"),
+    )
+    _validate_origin_room(binding)
+    return binding
 
 
 def _validate_public_report_slug(value: str) -> None:
@@ -290,69 +302,16 @@ def _validate_public_report_slug(value: str) -> None:
         raise ReportPublishingError(msg)
 
 
-def _report_url(
-    base_url: str | None,
-    slug: str,
-    *,
-    artifact_kind: str,
-    access_policy: ReportAccessPolicy,
-) -> str | None:
-    if base_url is None or not base_url.strip():
-        return None
-    route_path = report_route_path(
-        slug,
-        access_policy=access_policy,
-        trailing_slash=artifact_kind == ARTIFACT_KIND_STATIC_SITE,
-    )
-    return f"{base_url.rstrip('/')}{route_path}"
-
-
-def report_route_path(
-    slug: str,
-    *,
-    access_policy: ReportAccessPolicy,
-    trailing_slash: bool,
-) -> str:
-    """Return the browser route for one published report."""
-    route = "public" if access_policy is ReportAccessPolicy.PUBLIC else "room"
-    suffix = "/" if trailing_slash else ""
-    return f"/reports/{route}/{slug}{suffix}"
-
-
-def _validate_publication_metadata(
-    *,
-    access_policy: ReportAccessPolicy,
-    origin_room_id: str | None,
-    publisher_entity_name: str | None,
-    publisher_matrix_user_id: str | None,
-    allow_public_incidental_metadata: bool = False,
-) -> None:
-    metadata = (origin_room_id, publisher_entity_name, publisher_matrix_user_id)
-    if access_policy is ReportAccessPolicy.PUBLIC:
-        if not allow_public_incidental_metadata and any(value is not None for value in metadata):
-            msg = "Public report records must not contain origin-room authorization metadata."
-            raise ReportPublishingError(msg)
-        return
-    if any(value is None or not value.strip() for value in metadata):
-        msg = "Origin-room report records require room and publisher identity metadata."
-        raise ReportPublishingError(msg)
-    assert origin_room_id is not None
-    assert publisher_entity_name is not None
-    assert publisher_matrix_user_id is not None
-    if not _valid_matrix_room_id(origin_room_id):
+def _validate_origin_room(origin_room: OriginRoomBinding) -> None:
+    if not valid_matrix_room_id(origin_room.room_id):
         msg = "Origin-room report record contains an invalid Matrix room ID."
         raise ReportPublishingError(msg)
-    if not _valid_matrix_user_id(publisher_matrix_user_id):
+    if (
+        try_parse_historical_matrix_user_id(origin_room.publisher_matrix_user_id)
+        != origin_room.publisher_matrix_user_id
+    ):
         msg = "Origin-room report record contains an invalid publisher Matrix user ID."
         raise ReportPublishingError(msg)
-
-
-def _valid_matrix_room_id(value: str) -> bool:
-    return try_parse_matrix_room_id(value) == value
-
-
-def _valid_matrix_user_id(value: str) -> bool:
-    return try_parse_historical_matrix_user_id(value) == value
 
 
 def _required_text(data: dict[str, object], key: str) -> str:

@@ -19,6 +19,10 @@ Origin-room reports treat the exact Matrix room recorded from trusted tool runti
 - Viewer or publisher departure may remain authorized until a successful membership decision expires from the short bounded cache.
 - Concurrent static assets may reuse one successful authorization decision to avoid a Matrix request per asset.
 - Revocation is checked from persistent metadata before membership-cache use on every request and therefore takes effect immediately.
+- Sandboxed reports need a `SameSite=None` authentication cookie for nested assets, so any page the viewer visits can embed a protected asset with the viewer's credentials.
+  Such a page cannot read HTML, CSS, or image bytes, but it can execute an included script and observe whether an asset loads, which reveals membership and any data a report places in script globals.
+  Request metadata cannot distinguish the report's own opaque sandbox origin from another page, so removing this risk requires serving reports from a separate origin.
+- Membership denials are not cached, so an authenticated viewer who holds a slug can repeat requests that each cost two homeserver calls on the publisher's Matrix account.
 
 ## Out of scope
 

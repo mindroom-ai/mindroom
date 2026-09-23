@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast, get_args
 from urllib.parse import urlsplit
 
 from agno.tools import Toolkit
 
+from mindroom.config.report_publishing import ReportAccessPolicy
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
@@ -14,27 +15,22 @@ from mindroom.custom_tools.dynamic_workflow_context import (
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.custom_tools.toolkit_functions import JSON_OBJECT_SCHEMA, register_toolkit_functions
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
-from mindroom.entity_resolution import (
-    DuplicateManagedEntityIdentityError,
-    MissingManagedEntityAccountError,
-    entity_identity_registry,
-)
-from mindroom.report_access_policy import ReportAccessPolicy
+from mindroom.report_publishing.authorization import current_publisher_matrix_user_id
 from mindroom.report_publishing.store import (
     ARTIFACT_KIND_STATIC_SITE,
+    OriginRoomBinding,
     PublishableReport,
     PublishedReport,
     ReportPublishingError,
     ReportPublishingStore,
-    report_route_path,
 )
-from mindroom.report_viewer_auth import report_viewer_auth_configuration_error
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
+from mindroom.trusted_upstream_settings import matrix_identity_configuration_error, trusted_upstream_auth_settings
 from mindroom.workspaces import resolve_workspace_relative_path
 
 _DYNAMIC_WORKFLOW_RUN_SOURCE_KEYS = frozenset({"workflow_id", "run_id", "scope"})
@@ -46,7 +42,7 @@ _TOOL_DESCRIPTIONS = {
         "Publish an authorized report source through a revocable public or origin-room link. "
         "Public links require confirm_public=true. Supports source_type dynamic_workflow_run and static_site."
     ),
-    "revoke_public_report": "Revoke a previously published report link under either access policy.",
+    "revoke_report": "Revoke a previously published report link under either access policy.",
 }
 
 
@@ -59,12 +55,12 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
             "confirm_public": {"type": "boolean"},
             "access_policy": {
                 "type": ["string", "null"],
-                "enum": [ReportAccessPolicy.PUBLIC.value, ReportAccessPolicy.ORIGIN_ROOM.value, None],
+                "enum": [*get_args(ReportAccessPolicy), None],
             },
         },
         "required": ["source_type", "source", "confirm_public"],
     },
-    "revoke_public_report": {
+    "revoke_report": {
         "type": "object",
         "properties": {"slug": {"type": "string"}},
         "required": ["slug"],
@@ -84,11 +80,11 @@ class ReportPublishingTools(Toolkit):
             self,
             sync_entrypoints={
                 "publish_report": self.publish_report,
-                "revoke_public_report": self.revoke_public_report,
+                "revoke_report": self.revoke_report,
             },
             async_entrypoints={
                 "publish_report": self.apublish_report,
-                "revoke_public_report": self.arevoke_public_report,
+                "revoke_report": self.arevoke_report,
             },
             descriptions=_TOOL_DESCRIPTIONS,
             parameters=_TOOL_PARAMETERS,
@@ -118,60 +114,35 @@ class ReportPublishingTools(Toolkit):
             return self._context_error()
         try:
             resolved_access_policy = _resolve_access_policy(context, access_policy)
-        except ReportPublishingError as exc:
-            return self._payload("error", source_type=source_type, message=str(exc))
-        policy_error = _publication_policy_error(context, resolved_access_policy, confirm_public=confirm_public)
-        if policy_error is not None:
-            return self._payload(
-                "error",
-                source_type=source_type,
-                message=policy_error,
-            )
-        try:
-            origin_metadata = _origin_room_metadata(context, resolved_access_policy)
+            _check_publication_policy(context, resolved_access_policy, confirm_public=confirm_public)
+            origin_room = None if resolved_access_policy == "public" else _origin_room_binding(context)
             publishable = _resolve_publishable_source(context, source_type, source)
             report = ReportPublishingStore(context.runtime_paths.storage_root).publish_report(
                 source=publishable,
                 published_by=context.requester_id,
                 base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
-                access_policy=resolved_access_policy,
-                **origin_metadata,
+                origin_room=origin_room,
             )
-        except (
-            DuplicateManagedEntityIdentityError,
-            DynamicWorkflowError,
-            MissingManagedEntityAccountError,
-            ReportPublishingError,
-        ) as exc:
+        except (DynamicWorkflowError, ReportPublishingError) as exc:
             return self._payload("error", source_type=source_type, message=str(exc))
         access_message = (
             "Anyone who possesses this public bearer link can view the report."
-            if report.access_policy is ReportAccessPolicy.PUBLIC
+            if report.origin_room is None
             else "Access is limited to authenticated Matrix users currently joined to the origin room."
-        )
-        report_path = _report_path_for_report(report)
-        legacy_public_fields = (
-            {
-                "public_url": report.public_url,
-                "public_path": report_path,
-            }
-            if report.access_policy is ReportAccessPolicy.PUBLIC
-            else {}
         )
         return self._payload(
             "ok",
             source_type=report.source_type,
             source=report.source,
             slug=report.slug,
-            access_policy=report.access_policy.value,
+            access_policy=report.access_policy,
             report_url=report.public_url,
-            report_path=report_path,
+            report_path=_report_path_for_report(report),
             message=access_message,
             published_at=report.published_at,
-            **legacy_public_fields,
         )
 
-    def revoke_public_report(self, slug: str) -> str:
+    def revoke_report(self, slug: str) -> str:
         """Revoke a previously published report link under either access policy."""
         context = get_tool_runtime_context()
         if context is None:
@@ -188,7 +159,7 @@ class ReportPublishingTools(Toolkit):
             slug=revoked.slug,
             source_type=revoked.source_type,
             source=revoked.source,
-            access_policy=revoked.access_policy.value,
+            access_policy=revoked.access_policy,
             revoked_at=revoked.revoked_at,
         )
 
@@ -202,9 +173,9 @@ class ReportPublishingTools(Toolkit):
         """Publish an authorized report artifact through a revocable link."""
         return self.publish_report(source_type, source, confirm_public, access_policy)
 
-    async def arevoke_public_report(self, slug: str) -> str:
+    async def arevoke_report(self, slug: str) -> str:
         """Revoke a previously published report link under either access policy."""
-        return self.revoke_public_report(slug)
+        return self.revoke_report(slug)
 
 
 def _resolve_publishable_source(
@@ -295,74 +266,53 @@ def _authorize_report_for_context(context: ToolRuntimeContext, report: Published
 
 
 def _resolve_access_policy(context: ToolRuntimeContext, access_policy: str | None) -> ReportAccessPolicy:
-    configured_default = context.config.report_publishing.default_access_policy
     if access_policy is None:
-        return configured_default
-    try:
-        return ReportAccessPolicy(access_policy.strip())
-    except (AttributeError, ValueError) as exc:
+        return context.current_config.report_publishing.default_access_policy
+    if access_policy not in get_args(ReportAccessPolicy):
         msg = f"Unsupported report access_policy '{access_policy}'."
-        raise ReportPublishingError(msg) from exc
+        raise ReportPublishingError(msg)
+    return cast("ReportAccessPolicy", access_policy)
 
 
-def _publication_policy_error(
+def _check_publication_policy(
     context: ToolRuntimeContext,
     access_policy: ReportAccessPolicy,
     *,
     confirm_public: bool,
-) -> str | None:
-    if access_policy is ReportAccessPolicy.PUBLIC:
-        if not context.config.report_publishing.allow_public:
-            return "Public report publication is disabled by report_publishing.allow_public."
+) -> None:
+    if access_policy == "public":
+        if not context.current_config.report_publishing.allow_public:
+            msg = "Public report publication is disabled by report_publishing.allow_public."
+            raise ReportPublishingError(msg)
         if not confirm_public:
-            return (
-                "Set confirm_public to true to publish this bearer link; anyone who possesses it can view the report."
-            )
-        return None
-    auth_error = report_viewer_auth_configuration_error(context.runtime_paths)
+            msg = "Set confirm_public to true to publish this bearer link; anyone who possesses it can view the report."
+            raise ReportPublishingError(msg)
+        return
+    auth_error = matrix_identity_configuration_error(trusted_upstream_auth_settings(context.runtime_paths))
     if auth_error is not None:
-        return (
+        msg = (
             "Origin-room report publication requires trusted browser authentication with verified Matrix identity: "
             f"{auth_error}."
         )
-    return None
+        raise ReportPublishingError(msg)
 
 
-def _origin_room_metadata(
-    context: ToolRuntimeContext,
-    access_policy: ReportAccessPolicy,
-) -> dict[str, str | None]:
-    if access_policy is ReportAccessPolicy.PUBLIC:
-        return {
-            "origin_room_id": None,
-            "publisher_entity_name": None,
-            "publisher_matrix_user_id": None,
-        }
-    room_id = context.room_id.strip()
-    if not room_id:
-        msg = "Origin-room report publication requires a canonical Matrix room ID in trusted tool context."
-        raise ReportPublishingError(msg)
-    publisher_entity_name = context.agent_name.strip()
-    if not publisher_entity_name:
-        msg = "Origin-room report publication requires publisher identity in trusted tool context."
-        raise ReportPublishingError(msg)
-    try:
-        publisher_matrix_user_id = (
-            entity_identity_registry(
-                context.config,
-                context.runtime_paths,
-            )
-            .current_id(publisher_entity_name)
-            .full_id
-        )
-    except KeyError as exc:
+def _origin_room_binding(context: ToolRuntimeContext) -> OriginRoomBinding:
+    # Delegated and workflow agents publish through the caller's Matrix account, which owns the room membership.
+    publisher_entity_name = context.transport_agent_name or context.agent_name
+    publisher_matrix_user_id = current_publisher_matrix_user_id(
+        context.current_config,
+        context.runtime_paths,
+        publisher_entity_name,
+    )
+    if publisher_matrix_user_id is None:
         msg = "Origin-room report publication requires a configured publisher identity."
-        raise ReportPublishingError(msg) from exc
-    return {
-        "origin_room_id": room_id,
-        "publisher_entity_name": publisher_entity_name,
-        "publisher_matrix_user_id": publisher_matrix_user_id,
-    }
+        raise ReportPublishingError(msg)
+    return OriginRoomBinding(
+        room_id=context.room_id,
+        publisher_entity_name=publisher_entity_name,
+        publisher_matrix_user_id=publisher_matrix_user_id,
+    )
 
 
 def _report_path_for_report(report: PublishedReport) -> str:
@@ -370,11 +320,7 @@ def _report_path_for_report(report: PublishedReport) -> str:
         public_path = urlsplit(report.public_url).path
         if public_path:
             return public_path
-    return report_route_path(
-        report.slug,
-        access_policy=report.access_policy,
-        trailing_slash=report.is_static_site,
-    )
+    return report.route_path
 
 
 def _reject_unsupported_source_fields(
