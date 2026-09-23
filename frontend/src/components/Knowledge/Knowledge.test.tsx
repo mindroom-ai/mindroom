@@ -183,7 +183,9 @@ describe("Knowledge", () => {
     });
 
     render(<Knowledge />);
-    fireEvent.click(await screen.findByRole("button", { name: /More settings/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /More settings/ }),
+    );
     fireEvent.change(
       screen.getByRole("textbox", { name: "New exclude extensions entry" }),
       { target: { value: ".log" } },

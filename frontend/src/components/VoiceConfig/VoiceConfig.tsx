@@ -96,7 +96,8 @@ function normalizeSTTConfig(
 export function VoiceConfig() {
   const { config, isLoading, saveConfig, updateConfigRoot } = useConfigStore();
   const { schema: schemaRoot, error: schemaError } = useConfigSchema();
-  const callsConfig = config == null ? undefined : readConfigRoot(config, "calls");
+  const callsConfig =
+    config == null ? undefined : readConfigRoot(config, "calls");
   const { toast } = useToast();
 
   // Initialize local state with default values if voice config doesn't exist

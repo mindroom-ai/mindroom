@@ -1,6 +1,6 @@
 """JSON-schema annotations that let the dashboard render config fields."""
 
-from typing import TYPE_CHECKING, Any, Literal, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic.json_schema import GenerateJsonSchema, JsonDict
 from pydantic_core import core_schema
@@ -8,15 +8,15 @@ from pydantic_core import core_schema
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-type ReferenceKind = Literal["model", "agent", "room", "tool"]
-REFERENCE_KINDS = frozenset(get_args(ReferenceKind.__value__))
-HINT_KEY = "x-mindroom"
+# The dashboard's configSchema.ts mirrors these kinds and the hint key.
+type _ReferenceKind = Literal["model", "agent", "room", "tool"]
+_HINT_KEY = "x-mindroom"
 
 
 def dashboard_hint(
     *,
-    reference: ReferenceKind | None = None,
-    key_reference: ReferenceKind | None = None,
+    reference: _ReferenceKind | None = None,
+    key_reference: _ReferenceKind | None = None,
     secret: bool = False,
     multiline: bool = False,
 ) -> JsonDict:
@@ -35,7 +35,7 @@ def dashboard_hint(
         hint["secret"] = True
     if multiline:
         hint["multiline"] = True
-    return {HINT_KEY: hint}
+    return {_HINT_KEY: hint}
 
 
 class DashboardJsonSchema(GenerateJsonSchema):

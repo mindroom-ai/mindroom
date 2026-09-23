@@ -9,14 +9,17 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from mindroom.config.main import Config
-from mindroom.config.schema_hints import HINT_KEY, REFERENCE_KINDS, DashboardJsonSchema, dashboard_hint
+from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from pydantic.fields import FieldInfo
 
+# The dashboard's configSchema.ts understands exactly this hint vocabulary.
+HINT_KEY = "x-mindroom"
 _HINT_FIELDS = {"reference", "key_reference", "secret", "multiline"}
+_REFERENCE_KINDS = {"model", "agent", "room", "tool"}
 
 
 def _nested_models(annotation: object) -> list[type[BaseModel]]:
@@ -69,7 +72,7 @@ def test_schema_hints_use_known_vocabulary() -> None:
         assert set(hint) <= _HINT_FIELDS
         for key in ("reference", "key_reference"):
             if key in hint:
-                assert hint[key] in REFERENCE_KINDS
+                assert hint[key] in _REFERENCE_KINDS
 
 
 def test_dashboard_hint_omits_unset_fields() -> None:

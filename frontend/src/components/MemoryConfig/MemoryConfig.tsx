@@ -58,7 +58,11 @@ export const MEMORY_EDITOR_FIELDS = [
   "auto_flush",
 ] as const;
 
-const EMBEDDER_EDITOR_FIELDS = ["model", "credentials_service", "host"] as const;
+const EMBEDDER_EDITOR_FIELDS = [
+  "model",
+  "credentials_service",
+  "host",
+] as const;
 
 const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   backend: "mem0",
