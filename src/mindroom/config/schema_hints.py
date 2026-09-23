@@ -1,8 +1,12 @@
 """JSON-schema annotations that let the dashboard render config fields."""
 
-from typing import Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
-from pydantic.json_schema import JsonDict
+from pydantic.json_schema import GenerateJsonSchema, JsonDict
+from pydantic_core import core_schema
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 type ReferenceKind = Literal["model", "agent", "room", "tool"]
 REFERENCE_KINDS = frozenset(get_args(ReferenceKind.__value__))
@@ -32,3 +36,18 @@ def dashboard_hint(
     if multiline:
         hint["multiline"] = True
     return {HINT_KEY: hint}
+
+
+class DashboardJsonSchema(GenerateJsonSchema):
+    """JSON schema generator that also reports default-factory values.
+
+    Dashboard forms show effective defaults, and most config collections and
+    nested blocks declare theirs through ``default_factory``.
+    """
+
+    def get_default_value(self, schema: core_schema.WithDefaultSchema) -> Any:  # noqa: ANN401
+        """Call argument-free default factories; data-dependent ones stay unreported."""
+        factory = schema.get("default_factory")
+        if factory is None or schema.get("default_factory_takes_data"):
+            return super().get_default_value(schema)
+        return cast("Callable[[], object]", factory)()

@@ -8,13 +8,14 @@ from typing import Any
 from fastapi import APIRouter
 
 from mindroom.config.main import Config
+from mindroom.config.schema_hints import DashboardJsonSchema
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
 
 @cache
 def _config_json_schema() -> dict[str, Any]:
-    return Config.model_json_schema()
+    return Config.model_json_schema(schema_generator=DashboardJsonSchema)
 
 
 @router.get("/schema")

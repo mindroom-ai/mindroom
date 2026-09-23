@@ -5972,7 +5972,7 @@ depends_on = ["mindroom.cli.config", "mindroom.config.main", "mindroom.config_bu
 
 [[modules]]
 path = "mindroom.api.config_schema"
-depends_on = ["mindroom.config.main"]
+depends_on = ["mindroom.config.main", "mindroom.config.schema_hints"]
 
 [[modules]]
 path = "mindroom.config.schema_hints"

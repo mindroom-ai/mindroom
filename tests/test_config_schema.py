@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from mindroom.config.main import Config
-from mindroom.config.schema_hints import HINT_KEY, REFERENCE_KINDS, dashboard_hint
+from mindroom.config.schema_hints import HINT_KEY, REFERENCE_KINDS, DashboardJsonSchema, dashboard_hint
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -103,3 +103,14 @@ def test_secret_fields_are_annotated() -> None:
     assert defs["ModelConfig"]["properties"]["api_key"][HINT_KEY] == {"secret": True}
     assert defs["EventJournalConfig"]["properties"]["database_url"][HINT_KEY] == {"secret": True}
     assert defs["MCPServerConfig"]["properties"]["headers"][HINT_KEY] == {"secret": True}
+
+
+def test_dashboard_schema_reports_default_factory_values() -> None:
+    """Forms show effective defaults for collections and nested blocks."""
+    schema = Config.model_json_schema(schema_generator=DashboardJsonSchema)
+    defaults = schema["$defs"]["DefaultsConfig"]["properties"]
+    assert defaults["tools"]["default"] == ["scheduler"]
+    assert defaults["compaction"]["default"]["enabled"] is True
+    assert schema["properties"]["router"]["default"]["model"] == "default"
+    # Factories that read other field values have no single default to report.
+    assert "default" not in schema["$defs"]["VoiceSTTConfig"]["properties"]["credentials_service"]
