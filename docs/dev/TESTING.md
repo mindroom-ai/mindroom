@@ -15,15 +15,20 @@ The frontend uses Vitest as the test runner with React Testing Library for compo
 - `src/components/AgentList/AgentList.test.tsx` - Tests for the AgentList component
 - `src/components/AgentEditor/AgentEditor.test.tsx` - Tests for the AgentEditor component
 - `src/components/ModelConfig/ModelConfig.test.tsx` - Tests for the ModelConfig component
-- `src/components/ToolConfig/ToolConfigDialog.test.tsx` - Tests for the ToolConfigDialog component
+- `src/components/SchemaForm/SchemaForm.test.tsx` - Tests for the schema-driven config form widgets
+- `src/components/Settings/Settings.test.tsx` - Tests for the Settings page
 - `src/components/Credentials/Credentials.test.tsx` - Tests for the Credentials component
 - `src/components/Knowledge/Knowledge.test.tsx` - Tests for the Knowledge component
 - `src/components/TeamEditor/TeamEditor.test.tsx` - Tests for the TeamEditor component
 - `src/components/VoiceConfig/VoiceConfig.test.tsx` - Tests for the VoiceConfig component
 - `src/components/Integrations/Integrations.test.tsx` - Tests for the Integrations component
-- `src/types/toolConfig.test.ts` - Tests for tool configuration types
+- `src/lib/configSchema.test.ts` - Tests for configuration JSON schema classification
+- `src/components/SchemaForm/realSchema.test.tsx` - Renders every schema-driven form from `src/test/fixtures/config-schema.json`, a snapshot of the backend configuration schema
 
 The frontend test count changes frequently; use `rg --files frontend/src | rg '\.test\.tsx?$'` for the current inventory.
+
+The `generate-config-schema` pre-commit hook regenerates the schema snapshot whenever backend Python changes, and `tests/test_config_schema.py` fails if it is stale.
+Run `.venv/bin/python .github/scripts/generate_config_schema.py` to regenerate it by hand.
 
 ### Running Frontend Tests
 

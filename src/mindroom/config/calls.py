@@ -6,6 +6,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.voice import SpeechServiceConfig  # noqa: TC001 - Pydantic needs the runtime model
 from mindroom.credentials import validate_service_name
 
@@ -15,7 +16,7 @@ class RealtimeCallProfile(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    backend: Literal["realtime"]
+    backend: Literal["realtime"] = Field(description="OpenAI realtime speech-to-speech session")
     model: str = Field(description="OpenAI realtime speech-to-speech model")
     credentials_service: str = Field(description="Named credential service containing the realtime API key")
     voice: str = Field(description="Realtime model voice preset")
@@ -32,11 +33,15 @@ class LiveCallProfile(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    backend: Literal["live"]
+    backend: Literal["live"] = Field(description="OpenAI Live voice session that delegates tasks to the agent")
     model: str = Field(description="OpenAI Live speech-to-speech model")
     credentials_service: str = Field(description="Named credential service containing the Live API key")
     voice: str = Field(description="Live model voice preset")
-    agent_model: str | None = Field(default=None, description="Configured LLM alias for delegated agent turns")
+    agent_model: str | None = Field(
+        default=None,
+        description="Configured LLM alias for delegated agent turns",
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
 
     @field_validator("credentials_service")
     @classmethod
@@ -50,8 +55,12 @@ class CascadedCallProfile(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    backend: Literal["cascaded"]
-    model: str | None = Field(default=None, description="Configured LLM alias for cascaded agent turns")
+    backend: Literal["cascaded"] = Field(description="Speech-to-text, a normal agent turn, then text-to-speech")
+    model: str | None = Field(
+        default=None,
+        description="Configured LLM alias for cascaded agent turns",
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
     stt: SpeechServiceConfig = Field(description="Speech-to-text service")
     tts: SpeechServiceConfig = Field(description="Text-to-speech service")
 
@@ -72,6 +81,7 @@ class CallsConfig(BaseModel):
     agents: dict[str, str] = Field(
         default_factory=dict,
         description="Call profile name by agent name (at most one agent per room)",
+        json_schema_extra=dashboard_hint(key_reference="agent"),
     )
     livekit_service_url: str | None = Field(
         default=None,

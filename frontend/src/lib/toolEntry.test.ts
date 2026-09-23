@@ -73,6 +73,55 @@ describe("toolEntry", () => {
     ]);
   });
 
+  it("keeps lazy-loading flags from the explicit named form", () => {
+    const rawEntries: ToolEntry[] = [
+      {
+        name: "shell",
+        defer: true,
+        initial: true,
+        overrides: { extra_env_passthrough: ["GITEA_TOKEN"] },
+      },
+      { name: "browser" },
+    ];
+
+    expect(cloneToolEntries(rawEntries)).toEqual([
+      {
+        shell: {
+          extra_env_passthrough: ["GITEA_TOKEN"],
+          defer: true,
+          initial: true,
+        },
+      },
+      "browser",
+    ]);
+    expect(getToolOverrides("shell", rawEntries)).toEqual({
+      extra_env_passthrough: ["GITEA_TOKEN"],
+      defer: true,
+      initial: true,
+    });
+  });
+
+  it("removes lazy-loading flags patched to null", () => {
+    const rawEntries: ToolEntry[] = [
+      { shell: { defer: true, initial: true, future_field: "keep-me" } },
+    ];
+
+    expect(
+      setToolOverridesInEntries(
+        "shell",
+        { defer: null, initial: null },
+        rawEntries,
+      ),
+    ).toEqual([{ shell: { future_field: "keep-me" } }]);
+    expect(
+      setToolOverridesInEntries(
+        "shell",
+        { defer: null, initial: null, future_field: null },
+        rawEntries,
+      ),
+    ).toEqual(["shell"]);
+  });
+
   it("collapses a structured entry back to a plain string when overrides are cleared", () => {
     const rawEntries: ToolEntry[] = [
       { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },

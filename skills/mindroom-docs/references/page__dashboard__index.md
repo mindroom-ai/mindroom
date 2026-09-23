@@ -65,6 +65,8 @@ Configure AI agents:
 - **Rooms** - Where the agent operates
 - **Learning** - Enable or disable Agno Learning per agent (enabled by default)
 - **Learning mode** - Choose `always` (automatic extraction) or `agentic` (tool-driven)
+- **Lazy tool loading** - Open a checked tool's settings and enable **Load lazily** (`defer`) or **Load at session start** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` cannot be deferred, so they do not offer it
+- **More settings** - Every other agent field, such as `participation`, `mid_turn`, `accept_invites`, `access`, `memory_search`, `thread_exports`, and `room_thread_modes`
 
 ### Teams
 
@@ -84,6 +86,7 @@ Manage Matrix room configuration:
 - **Display name** and **Description**
 - **Room model** - Optional model override
 - **Agents in room** - Select which agents have access
+- **More settings** - Per-room `join_policy`, `listed`, `encrypted`, `invite_users`, and `admins` overrides
 
 ### External Rooms
 
@@ -99,6 +102,8 @@ Configure AI model providers:
 
 - **Add/edit models** with provider, model ID, host URL, and advanced settings
 - **Provider API keys** section for configuring credentials
+
+While a model row is being edited, its **More settings** section appears below the table, and cancelling the row edit also reverts the More settings changes made since the last save.
 
 **Runtime-supported providers:** Anthropic, Bedrock Claude, Azure OpenAI, OpenAI, Codex CLI ChatGPT authentication, Kimi Code, Google Gemini, Vertex AI Claude, Ollama, llama.cpp, Groq, OpenRouter, Cerebras, DeepSeek, Z.ai, and the internal synthetic provider.
 The dashboard preserves provider IDs already present in the configuration; not every runtime provider has a dedicated icon or preset in the add-model dropdown.
@@ -175,6 +180,7 @@ Configure voice message handling:
 - **Enable/disable** voice message support
 - **Speech-to-Text** - OpenAI transcription or a self-hosted OpenAI-compatible service
 - **Transcript intelligence** - Model selection for mention normalization and light ASR cleanup
+- **Voice Calls** - MatrixRTC call settings, named call profiles, and per-agent profile assignments
 
 ### Integrations
 
@@ -184,7 +190,31 @@ Connect external services to enable agent capabilities:
 - **Search and filter** by status (Available, Unconfigured, Configured)
 - **OAuth flows** for Google (6 endpoints), Spotify (4 endpoints), Home Assistant (7 endpoints), and more
 
+### Settings
+
+The **Settings** tab edits every top-level configuration root that has no dedicated tab.
+Sections group related roots: response defaults, history and context, tools and workers, router, personal rooms, room defaults, tool approval, prompts, MCP servers, plugins, access and identity, Matrix and runtime, and diagnostics.
+A root or field that no tab or section claims appears under **Other**, so new options are never hidden.
+The **Tools and workers** section also edits per-tool overrides for the default tools every agent inherits.
+Sections with validation errors from the last save are marked **Needs attention**.
+Changes join the same draft as every other tab and are saved with **Save**.
+
 ## Features
+
+### More Settings
+
+Tabs with hand-built editors also show a collapsible **More settings** section listing the fields they do not render themselves.
+The Agents, Teams, Rooms, Memory, Knowledge, Voice, and Models tabs use it.
+
+### Schema-Driven Forms
+
+Settings and More settings forms are generated from the configuration schema that the running backend serves at `/api/config/schema`.
+Each field shows its description and default, entity references such as model or agent names become pickers, and credential-bearing fields are masked.
+Resetting a field removes it from `config.yaml` so the default applies again, and optional blocks are added or removed with their **Configure** checkbox.
+Lists keep their order and can repeat values, such as MCP server arguments.
+Validation errors from a save appear beside the affected field, and collapsed sections that contain one open automatically.
+Changing a value clears only the errors reported for it; errors on values you have not changed stay visible until the next save.
+If the schema cannot be loaded, these forms show the error with a **Retry** button.
 
 ### Save Status
 
@@ -217,6 +247,7 @@ The dashboard communicates with the backend API at `/api/`:
 | PUT | `/api/config/save` | Save full configuration |
 | GET | `/api/config/raw` | Fetch the raw `config.yaml` source for recovery editing |
 | PUT | `/api/config/raw` | Replace the entire raw `config.yaml` source during recovery |
+| GET | `/api/config/schema` | Fetch the configuration JSON schema used by Settings and More settings |
 | GET | `/api/config/agents` | List all agents |
 | POST | `/api/config/agents` | Create new agent |
 | PUT | `/api/config/agents/{id}` | Update agent |

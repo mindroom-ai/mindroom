@@ -33,14 +33,65 @@ import {
 } from "@/types/config";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { useTools } from "@/hooks/useTools";
+import { useTools, type ToolInfo } from "@/hooks/useTools";
 import { useSkills } from "@/hooks/useSkills";
 import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
-import { ToolConfigPanel } from "./ToolConfigPanel";
+import { ToolConfigPanel } from "@/components/ToolConfig/ToolConfigPanel";
 import { ToolSelectionRow } from "./ToolSelectionRow";
+import { SchemaSection } from "@/components/SchemaForm";
+import { setObjectKey } from "@/lib/configSchema";
+
+/** AgentConfig keys this editor renders by hand; More settings shows the rest. */
+const AGENT_EDITOR_FIELDS = [
+  "display_name",
+  "role",
+  "tools",
+  "include_default_tools",
+  "skills",
+  "instructions",
+  "rooms",
+  "markdown",
+  "learning",
+  "learning_mode",
+  "model",
+  "memory_backend",
+  "compaction",
+  "private",
+  "knowledge_bases",
+  "context_files",
+  "thread_mode",
+  "num_history_runs",
+  "num_history_messages",
+  "compress_tool_results",
+  "max_tool_calls_from_history",
+  "show_tool_calls",
+  "worker_tools",
+  "allow_self_config",
+  "delegate_to",
+] as const;
+
+// Private agents derive their execution scope from private.per.
+const PRIVATE_AGENT_EDITOR_FIELDS = [...AGENT_EDITOR_FIELDS, "worker_scope"];
+
+const PRIVATE_KNOWLEDGE_EDITOR_FIELDS = [
+  "enabled",
+  "description",
+  "path",
+  "watch",
+] as const;
 
 const TOOL_VALIDATION_UNAVAILABLE_MESSAGE =
   "Tool availability preview is unavailable while agent policy preview is unavailable. Save or refresh to validate tool assignments.";
+
+/** Whether a checked tool's row opens settings: fields, overrides, or lazy loading. */
+function toolHasSettings(tool: ToolInfo, hasOverrides: boolean): boolean {
+  return (
+    hasOverrides ||
+    tool.lazy_loading_supported === true ||
+    (tool.agent_override_fields?.length ?? 0) > 0 ||
+    (tool.config_fields?.length ?? 0) > 0
+  );
+}
 
 export function AgentEditor() {
   const {
@@ -61,12 +112,12 @@ export function AgentEditor() {
 
   const [activeToolName, setActiveToolName] = useState<string | null>(null);
   const selectedAgent = agents.find((a) => a.id === selectedAgentId);
-  const defaultLearning = config?.defaults.learning ?? true;
-  const defaultLearningMode = config?.defaults.learning_mode ?? "always";
-  const defaultShowToolCalls = config?.defaults.show_tool_calls ?? true;
-  const defaultMarkdown = config?.defaults.markdown ?? true;
+  const defaultLearning = config?.defaults?.learning ?? true;
+  const defaultLearningMode = config?.defaults?.learning_mode ?? "always";
+  const defaultShowToolCalls = config?.defaults?.show_tool_calls ?? true;
+  const defaultMarkdown = config?.defaults?.markdown ?? true;
   const defaultCompressToolResults =
-    config?.defaults.compress_tool_results ?? false;
+    config?.defaults?.compress_tool_results ?? false;
   const globalMemoryBackend = config?.memory?.backend ?? "mem0";
   const knowledgeBaseNames = useMemo(
     () => Object.keys(config?.knowledge_bases || {}).sort(),
@@ -1012,6 +1063,19 @@ export function AgentEditor() {
                     </label>
                   </div>
                 </FieldGroup>
+
+                <SchemaSection
+                  title="More private knowledge settings"
+                  definition="AgentPrivateKnowledgeConfig"
+                  value={privateKnowledge}
+                  path={["agents", selectedAgent.id, "private", "knowledge"]}
+                  exclude={PRIVATE_KNOWLEDGE_EDITOR_FIELDS}
+                  onFieldChange={(key, next) =>
+                    mutatePrivateKnowledge((current) =>
+                      setObjectKey(current, key, next),
+                    )
+                  }
+                />
               </>
             )}
           </>
@@ -1177,10 +1241,10 @@ export function AgentEditor() {
                           const isChecked = field.value.includes(tool.name);
                           const hasOverrides = toolHasOverrides(tool.name);
                           const isActive = activeToolName === tool.name;
-                          const hasSettings =
-                            (tool.agent_override_fields?.length ?? 0) > 0 ||
-                            (tool.config_fields?.length ?? 0) > 0;
-                          const showSettings = hasSettings || hasOverrides;
+                          const showSettings = toolHasSettings(
+                            tool,
+                            hasOverrides,
+                          );
 
                           return (
                             <>
@@ -1209,7 +1273,12 @@ export function AgentEditor() {
                               />
                               {isChecked && isActive && showSettings && (
                                 <ToolConfigPanel
-                                  agentId={selectedAgent.id}
+                                  target={{
+                                    kind: "agent",
+                                    agentId: selectedAgent.id,
+                                    lazyLoading:
+                                      tool.lazy_loading_supported === true,
+                                  }}
                                   toolName={tool.name}
                                   toolDisplayName={tool.display_name}
                                   overrideFields={
@@ -1257,10 +1326,10 @@ export function AgentEditor() {
                           const isChecked = field.value.includes(tool.name);
                           const hasOverrides = toolHasOverrides(tool.name);
                           const isActive = activeToolName === tool.name;
-                          const hasSettings =
-                            (tool.agent_override_fields?.length ?? 0) > 0 ||
-                            (tool.config_fields?.length ?? 0) > 0;
-                          const showSettings = hasSettings || hasOverrides;
+                          const showSettings = toolHasSettings(
+                            tool,
+                            hasOverrides,
+                          );
 
                           return (
                             <>
@@ -1289,7 +1358,12 @@ export function AgentEditor() {
                               />
                               {isChecked && isActive && showSettings && (
                                 <ToolConfigPanel
-                                  agentId={selectedAgent.id}
+                                  target={{
+                                    kind: "agent",
+                                    agentId: selectedAgent.id,
+                                    lazyLoading:
+                                      tool.lazy_loading_supported === true,
+                                  }}
                                   toolName={tool.name}
                                   toolDisplayName={tool.display_name}
                                   overrideFields={
@@ -1339,10 +1413,10 @@ export function AgentEditor() {
                             tool.dashboard_configuration_supported === false;
                           const hasOverrides = toolHasOverrides(tool.name);
                           const isActive = activeToolName === tool.name;
-                          const hasSettings =
-                            (tool.agent_override_fields?.length ?? 0) > 0 ||
-                            (tool.config_fields?.length ?? 0) > 0;
-                          const showSettings = hasSettings || hasOverrides;
+                          const showSettings = toolHasSettings(
+                            tool,
+                            hasOverrides,
+                          );
 
                           return (
                             <>
@@ -1372,7 +1446,12 @@ export function AgentEditor() {
                               />
                               {isChecked && isActive && showSettings && (
                                 <ToolConfigPanel
-                                  agentId={selectedAgent.id}
+                                  target={{
+                                    kind: "agent",
+                                    agentId: selectedAgent.id,
+                                    lazyLoading:
+                                      tool.lazy_loading_supported === true,
+                                  }}
                                   toolName={tool.name}
                                   toolDisplayName={tool.display_name}
                                   overrideFields={
@@ -1612,7 +1691,7 @@ export function AgentEditor() {
         <FieldGroup
           label="Worker Tools"
           helperText={`Select which of this agent's tools to route through worker-scoped execution via the sandbox proxy${
-            config?.defaults.worker_tools != null
+            config?.defaults?.worker_tools != null
               ? ` (default: ${
                   config.defaults.worker_tools.length > 0
                     ? config.defaults.worker_tools.join(", ")
@@ -1628,15 +1707,15 @@ export function AgentEditor() {
               <div className="space-y-1 max-h-48 overflow-y-auto border rounded-lg p-2">
                 {effectiveTools.map((toolName) => {
                   const effective =
-                    field.value ?? config?.defaults.worker_tools ?? [];
+                    field.value ?? config?.defaults?.worker_tools ?? [];
                   const isChecked = effective.includes(toolName);
                   const isInherited =
                     field.value == null &&
-                    config?.defaults.worker_tools != null;
+                    config?.defaults?.worker_tools != null;
                   const toggle = () => {
                     // On first interaction when inheriting, seed from defaults
                     const current =
-                      field.value ?? config?.defaults.worker_tools ?? [];
+                      field.value ?? config?.defaults?.worker_tools ?? [];
                     const updated = isChecked
                       ? current.filter((t) => t !== toolName)
                       : [...current, toolName];
@@ -1689,7 +1768,7 @@ export function AgentEditor() {
               <Checkbox
                 id="allow_self_config"
                 checked={
-                  field.value ?? config?.defaults.allow_self_config ?? false
+                  field.value ?? config?.defaults?.allow_self_config ?? false
                 }
                 onCheckedChange={(checked) => {
                   const value = checked === true;
@@ -1711,6 +1790,7 @@ export function AgentEditor() {
       <HistoryContextSection
         control={control}
         resetKey={selectedAgentId}
+        compactionPath={["agents", selectedAgent.id, "compaction"]}
         defaults={config?.defaults}
         onFieldChange={(fieldName, value) =>
           handleFieldChange(
@@ -1721,24 +1801,24 @@ export function AgentEditor() {
         updateCompaction={updateCompaction}
         mutateCompaction={mutateCompaction}
         historyRunsHelperText={`Number of prior conversation runs to include as history context. Leave empty to use default${
-          config?.defaults.num_history_runs != null
+          config?.defaults?.num_history_runs != null
             ? ` (${config.defaults.num_history_runs})`
             : " (all)"
         }.`}
         historyMessagesHelperText={`Max messages from history (mutually exclusive with History Runs). Leave empty to use default${
-          config?.defaults.num_history_messages != null
+          config?.defaults?.num_history_messages != null
             ? ` (${config.defaults.num_history_messages})`
             : " (all)"
         }.`}
         maxToolCallsHelperText={`Max tool call messages replayed from history. Leave empty to use default${
-          config?.defaults.max_tool_calls_from_history != null
+          config?.defaults?.max_tool_calls_from_history != null
             ? ` (${config.defaults.max_tool_calls_from_history})`
             : " (no limit)"
         }.`}
         autoCompactionHelperText="Automatically compact older session history before a run when raw replay exceeds the hard context budget."
         thresholdTokensHelperText="Soft replay budget in tokens. Crossing it records planning metadata; destructive compaction waits for the hard budget."
         compactionModelPlaceholder={
-          config?.defaults.compaction?.model ?? "Default: agent model"
+          config?.defaults?.compaction?.model ?? "Default: agent model"
         }
         numHistoryRunsError={numHistoryRunsError}
         numHistoryMessagesError={numHistoryMessagesError}
@@ -1752,6 +1832,21 @@ export function AgentEditor() {
           onChange: (value) =>
             handleFieldChange("compress_tool_results", value),
         }}
+      />
+
+      <SchemaSection
+        title="More settings"
+        definition="AgentConfig"
+        value={selectedAgent}
+        path={["agents", selectedAgent.id]}
+        exclude={
+          selectedAgent.private != null
+            ? PRIVATE_AGENT_EDITOR_FIELDS
+            : AGENT_EDITOR_FIELDS
+        }
+        onFieldChange={(key, next) =>
+          updateAgent(selectedAgent.id, { [key]: next } as Partial<Agent>)
+        }
       />
     </EditorPanel>
   );

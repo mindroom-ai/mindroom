@@ -1316,6 +1316,7 @@ depends_on = [
     "mindroom.runtime_state",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.workers.runtime",
+    "mindroom.api.config_schema",
 ]
 
 [[modules]]
@@ -2370,7 +2371,7 @@ visibility = [
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
 path = "mindroom.config.memory"
-depends_on = ["mindroom.config.models", "mindroom.path_globs"]
+depends_on = ["mindroom.config.models", "mindroom.config.schema_hints", "mindroom.path_globs"]
 
 [[modules]]
 path = "mindroom.config.models"
@@ -2385,6 +2386,7 @@ depends_on = [
     "mindroom.matrix.identity",
     "mindroom.model_defaults",
     "mindroom.tool_system.worker_routing",
+    "mindroom.config.schema_hints",
 ]
 
 [[modules]]
@@ -2428,6 +2430,7 @@ depends_on = [
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
+    "mindroom.config.schema_hints",
 ]
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
@@ -5974,6 +5977,14 @@ path = "mindroom.cli.config_bundle"
 depends_on = ["mindroom.cli.config", "mindroom.config.main", "mindroom.config_bundle", "mindroom.constants"]
 
 [[modules]]
+path = "mindroom.api.config_schema"
+depends_on = ["mindroom.config.main"]
+
+[[modules]]
+path = "mindroom.config.schema_hints"
+depends_on = []
+
+[[modules]]
 path = "mindroom.api.config_reload"
 depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.config_reload", "mindroom.runtime_state"]
 
@@ -6174,7 +6185,7 @@ visibility = ["mindroom.model_loading"]
 
 [[modules]]
 path = "mindroom.config.participation"
-depends_on = ["mindroom.config.judgment"]
+depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 visibility = ["mindroom.config.agent", "mindroom.turn_policy", "mindroom.response_runner"]
 
 [[modules]]
@@ -6694,7 +6705,7 @@ visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.config.judgment"
-depends_on = []
+depends_on = ["mindroom.config.schema_hints"]
 
 [[modules]]
 path = "mindroom.judgment.execution"
@@ -6714,7 +6725,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.config.mid_turn"
-depends_on = ["mindroom.config.judgment"]
+depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 
 [[modules]]
 path = "mindroom.mid_turn"

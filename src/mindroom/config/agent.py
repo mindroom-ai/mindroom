@@ -33,6 +33,7 @@ from mindroom.config.models import (
     validate_unique_tool_entries,
 )
 from mindroom.config.participation import ParticipationConfig  # noqa: TC001
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
@@ -211,7 +212,11 @@ class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     display_name: str = Field(description="Human-readable name for the agent")
-    role: str = Field(default="", description="Description of the agent's purpose")
+    role: str = Field(
+        default="",
+        description="Description of the agent's purpose",
+        json_schema_extra=dashboard_hint(multiline=True),
+    )
     tools: list[ToolConfigEntry] = Field(
         default_factory=list,
         description="List of tool entries with optional inline per-agent overrides",
@@ -222,7 +227,11 @@ class AgentConfig(BaseModel):
     )
     skills: list[str] = Field(default_factory=list, description="List of skill names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
-    rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
+    rooms: list[str] = Field(
+        default_factory=list,
+        description="List of room IDs or names to auto-join",
+        json_schema_extra=dashboard_hint(reference="room"),
+    )
     participation: ParticipationConfig | None = Field(
         default=None,
         description="Opt-in adaptive participation in existing multi-human threads across all rooms",
@@ -241,7 +250,10 @@ class AgentConfig(BaseModel):
     )
     accept_invites: InviteAcceptancePolicy = Field(
         default=True,
-        description="Whether this agent accepts all, no, or matching inviter room invites",
+        description=(
+            "true accepts every room invite to this agent, false accepts none, and a list accepts only "
+            "invites from matching inviter Matrix IDs or glob patterns"
+        ),
     )
     markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
     learning: bool | None = Field(default=None, description="Enable Agno Learning (defaults to true when omitted)")
@@ -249,7 +261,11 @@ class AgentConfig(BaseModel):
         default=None,
         description="Learning mode for Agno Learning: always (automatic) or agentic (tool-driven)",
     )
-    model: str = Field(default="default", description="Model name")
+    model: str = Field(
+        default="default",
+        description="Configured model alias used for this agent's replies",
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
     memory_backend: MemoryBackend | None = Field(
         default=None,
         description=(
@@ -290,6 +306,7 @@ class AgentConfig(BaseModel):
     room_thread_modes: dict[str, Literal["thread", "room"]] = Field(
         default_factory=dict,
         description="Per-room thread mode overrides keyed by room alias/name or Matrix room ID",
+        json_schema_extra=dashboard_hint(key_reference="room"),
     )
     num_history_runs: int | None = Field(
         default=None,
@@ -332,6 +349,7 @@ class AgentConfig(BaseModel):
     delegate_to: list[str] = Field(
         default_factory=list,
         description="Allowed agents for run_subagent and continue_subagent, including this agent when explicitly listed",
+        json_schema_extra=dashboard_hint(reference="agent"),
     )
 
     @property
@@ -421,18 +439,36 @@ class TeamConfig(BaseModel):
     """Configuration for a team of agents."""
 
     display_name: str = Field(description="Human-readable name for the team")
-    role: str = Field(description="Description of the team's purpose")
-    agents: list[str] = Field(min_length=1, description="List of agent names that compose this team")
-    rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
+    role: str = Field(
+        description="Description of the team's purpose",
+        json_schema_extra=dashboard_hint(multiline=True),
+    )
+    agents: list[str] = Field(
+        min_length=1,
+        description="List of agent names that compose this team",
+        json_schema_extra=dashboard_hint(reference="agent"),
+    )
+    rooms: list[str] = Field(
+        default_factory=list,
+        description="List of room IDs or names to auto-join",
+        json_schema_extra=dashboard_hint(reference="room"),
+    )
     access: ResponderAccessConfig | None = Field(
         default=None,
         description="Optional membership-based conversation access policy",
     )
     accept_invites: InviteAcceptancePolicy = Field(
         default=True,
-        description="Whether this team accepts all, no, or matching inviter room invites",
+        description=(
+            "true accepts every room invite to this team, false accepts none, and a list accepts only "
+            "invites from matching inviter Matrix IDs or glob patterns"
+        ),
     )
-    model: str | None = Field(default="default", description="Default model for this team (optional)")
+    model: str | None = Field(
+        default="default",
+        description="Configured model alias used for this team's replies",
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
     mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
     compaction: CompactionOverrideConfig | None = Field(
         default=None,

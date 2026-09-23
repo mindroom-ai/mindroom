@@ -192,6 +192,12 @@ def _annotate_dashboard_configuration_support(
         tool["dashboard_configuration_supported"] = supported
 
 
+def _annotate_lazy_loading_support(tools: list[dict[str, Any]]) -> None:
+    """Expose whether an agent's entry for each tool may set defer/initial."""
+    for tool in tools:
+        tool["lazy_loading_supported"] = Config.supports_lazy_loading(tool["name"])
+
+
 def _annotate_execution_scope_support(
     tools: list[dict[str, Any]],
     *,
@@ -443,6 +449,7 @@ async def get_registered_tools(
         execution_scope_override=execution_scope_override,
     )
     _append_config_only_presets(tools)
+    _annotate_lazy_loading_support(tools)
     _annotate_execution_scope_support(
         tools,
         execution_scope=context.execution_scope,

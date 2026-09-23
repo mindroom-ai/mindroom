@@ -16,10 +16,22 @@ class ApprovalRuleConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    match: str
-    action: _ApprovalAction | None = None
-    script: str | None = None
-    timeout_days: _TimeoutDays | None = None
+    match: str = Field(description="Case-sensitive glob over exposed tool function names; the first matching rule wins")
+    action: _ApprovalAction | None = Field(
+        default=None,
+        description="Fixed decision for matching calls; set exactly one of action or script",
+    )
+    script: str | None = Field(
+        default=None,
+        description=(
+            "Config-relative Python script defining check(tool_name, arguments, agent_name) -> bool; "
+            "True requires approval"
+        ),
+    )
+    timeout_days: _TimeoutDays | None = Field(
+        default=None,
+        description="Approval expiry window in days for this rule; unset uses tool_approval.timeout_days",
+    )
 
     @field_validator("match")
     @classmethod
@@ -64,9 +76,12 @@ class ToolApprovalConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    default: _ApprovalAction = Field(default="auto_approve")
-    timeout_days: _TimeoutDays = Field(default=7.0)
-    rules: list[ApprovalRuleConfig] = Field(default_factory=list)
+    default: _ApprovalAction = Field(default="auto_approve", description="Decision for tool calls no rule matches")
+    timeout_days: _TimeoutDays = Field(default=7.0, description="Default approval expiry window in days")
+    rules: list[ApprovalRuleConfig] = Field(
+        default_factory=list,
+        description="Ordered approval rules; the first matching rule wins",
+    )
 
     @field_validator("timeout_days", mode="before")
     @classmethod

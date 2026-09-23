@@ -204,6 +204,7 @@ _.validate_agent_reply_permissions  # unused method (src/mindroom/config/main.py
 _.validate_unique_entries  # unused method (src/mindroom/config/matrix.py)
 standalone_login  # unused function (src/mindroom/api/auth.py)
 get_raw_config_source  # unused function (src/mindroom/api/main.py)
+get_config_schema  # FastAPI route (src/mindroom/api/config_schema.py)
 default_style  # TypedDict key (src/mindroom/yaml_io.py)
 default_flow_style  # TypedDict key (src/mindroom/yaml_io.py)
 allow_unicode  # TypedDict key (src/mindroom/yaml_io.py)

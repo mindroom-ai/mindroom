@@ -6,14 +6,17 @@ import {
   Team,
   Room,
   RoomConfig,
-  ModelConfig,
   KnowledgeBaseConfig,
   getDefaultPrivateConfig,
   normalizeAgentUpdates,
   normalizeTeamUpdates,
-  VoiceConfig,
-  RoomDefaultsConfig,
 } from "@/types/config";
+import {
+  getPathValue,
+  isPlainObject,
+  setPathValue,
+  type ConfigPath,
+} from "@/lib/configSchema";
 import * as configService from "@/services/configService";
 import {
   isConfigConflictDiagnostic,
@@ -41,6 +44,16 @@ export type SaveConfigResult =
   | { status: "error"; message: string; diagnostics: ConfigDiagnostic[] };
 
 type ConfigDiagnosticPath = Array<string | number>;
+
+// The save payload rebuilds these roots from the draft agent and team
+// collections; every other dirty root is copied from the draft config.
+const COLLECTION_ROOTS = new Set(["agents", "teams"]);
+
+// Schema-driven editors address roots by name, including roots the typed
+// Config interface does not model.
+export function readConfigRoot(config: Config, root: string): unknown {
+  return (config as unknown as Record<string, unknown>)[root];
+}
 
 function validationDiagnostics(
   issues: ConfigValidationIssue[],
@@ -92,18 +105,100 @@ function diagnosticsOverlapTouchedPath(
   );
 }
 
+function sameValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) {
+    return true;
+  }
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return (
+      left.length === right.length &&
+      left.every((item, index) => sameValue(item, right[index]))
+    );
+  }
+  if (isPlainObject(left) && isPlainObject(right)) {
+    const keys = Object.keys(left);
+    return (
+      keys.length === Object.keys(right).length &&
+      keys.every(
+        (key) =>
+          Object.prototype.hasOwnProperty.call(right, key) &&
+          sameValue(left[key], right[key]),
+      )
+    );
+  }
+  return false;
+}
+
+function hasSegment(value: unknown, segment: string | number): boolean {
+  return Array.isArray(value)
+    ? typeof segment === "number" && segment < value.length
+    : isPlainObject(value) &&
+        Object.prototype.hasOwnProperty.call(value, String(segment));
+}
+
+function childValue(value: unknown, segment: string | number): unknown {
+  return Array.isArray(value)
+    ? value[segment as number]
+    : (value as Record<string, unknown>)[String(segment)];
+}
+
+/**
+ * Whether the value a validation issue points at differs between before and
+ * after, the values at prefix, so editing one field keeps the errors of the
+ * others. Pydantic adds loc segments that are no key in either value: the tag
+ * of a discriminated union variant ("llm"), which changes when the variant
+ * does, and the type of a plain union member ("list[str]"), which is skipped.
+ * tests/test_config_schema.py keeps every object union discriminated.
+ */
+function issueValueChanged(
+  { loc, type }: ConfigValidationIssue,
+  prefix: ConfigDiagnosticPath,
+  before: unknown,
+  after: unknown,
+): boolean {
+  if (pathStartsWith(prefix, loc)) {
+    return !sameValue(before, after);
+  }
+  if (!pathStartsWith(loc, prefix)) {
+    return false;
+  }
+  const rest = loc.slice(prefix.length);
+  let from = before;
+  let to = after;
+  for (let index = 0; index < rest.length; index += 1) {
+    const segment = rest[index];
+    const inFrom = hasSegment(from, segment);
+    const inTo = hasSegment(to, segment);
+    if (!inFrom && !inTo) {
+      if (!isPlainObject(from) || !isPlainObject(to)) {
+        continue;
+      }
+      // A missing key stays missing while both containers exist.
+      if (type === "missing" && index === rest.length - 1) {
+        return false;
+      }
+      if (
+        Object.values(from).includes(segment) !==
+        Object.values(to).includes(segment)
+      ) {
+        return true;
+      }
+      continue;
+    }
+    from = inFrom ? childValue(from, segment) : undefined;
+    to = inTo ? childValue(to, segment) : undefined;
+  }
+  return !sameValue(from, to);
+}
+
 function retainedDraftDiagnostics(
   diagnostics: ConfigDiagnostic[],
-  touchedPaths: ConfigDiagnosticPath[] = [],
+  isStale: (issue: ConfigValidationIssue) => boolean = () => false,
 ): ConfigDiagnostic[] {
-  const filteredDiagnostics = diagnostics.filter((diagnostic) => {
-    if (diagnostic.kind !== "validation") {
-      return true;
-    }
-    return !touchedPaths.some((path) =>
-      diagnosticsOverlapTouchedPath(diagnostic.issue.loc, path),
-    );
-  });
+  const filteredDiagnostics = diagnostics.filter(
+    (diagnostic) =>
+      diagnostic.kind !== "validation" || !isStale(diagnostic.issue),
+  );
 
   const hasValidationErrors =
     diagnosticsContainValidationErrors(filteredDiagnostics);
@@ -177,16 +272,22 @@ function nextDraftVersion(draftVersion: number): number {
   return draftVersion + 1;
 }
 
+/**
+ * Mark the roots of touchedPaths dirty. Validation issues under touchedPaths
+ * are cleared unless isStale narrows that to the issues whose value changed.
+ */
 function markDraftDirty<T extends object>(
   state: Pick<ConfigState, "draftVersion" | "diagnostics" | "dirtyRoots">,
   changes: T,
   touchedPaths: ConfigDiagnosticPath[] = [],
+  isStale: (issue: ConfigValidationIssue) => boolean = (issue) =>
+    touchedPaths.some((path) => diagnosticsOverlapTouchedPath(issue.loc, path)),
 ): T &
   Pick<ConfigState, "isDirty" | "diagnostics" | "draftVersion" | "dirtyRoots"> {
   return {
     ...changes,
     isDirty: true,
-    diagnostics: retainedDraftDiagnostics(state.diagnostics, touchedPaths),
+    diagnostics: retainedDraftDiagnostics(state.diagnostics, isStale),
     draftVersion: nextDraftVersion(state.draftVersion),
     dirtyRoots: mergeDirtyRoots(state.dirtyRoots, touchedPaths),
   };
@@ -411,18 +512,6 @@ function agentPoliciesDiagnostic(blocking: boolean): ConfigDiagnostic {
   };
 }
 
-type MemoryEmbedderUpdate = {
-  provider: string;
-  model: string;
-  host?: string;
-};
-
-function isMemoryEmbedderUpdate(
-  update: object,
-): update is MemoryEmbedderUpdate {
-  return "provider" in update && "model" in update;
-}
-
 const rawToolEntriesByConfig = new WeakMap<Config, Map<string, ToolEntry[]>>();
 const rawDefaultToolEntriesByConfig = new WeakMap<
   Config,
@@ -539,10 +628,9 @@ function normalizeConfigToolEntries(rawConfig: configService.RawConfig): {
   const normalizedDefaults = rawDefaults
     ? {
         ...rawDefaults,
-        tools:
-          rawDefaults.tools === undefined
-            ? undefined
-            : normalizeToolEntries(rawDefaultToolEntries),
+        ...(rawDefaultToolEntries === undefined
+          ? {}
+          : { tools: normalizeToolEntries(rawDefaultToolEntries) }),
       }
     : undefined;
 
@@ -614,25 +702,26 @@ interface ConfigState {
   addAgentToRoom: (roomId: string, agentId: string) => void;
   removeAgentFromRoom: (roomId: string, agentId: string) => void;
   updateRoomModels: (roomModels: Record<string, string>) => void;
-  updateMemoryConfig: (
-    memoryConfig: MemoryEmbedderUpdate | Config["memory"],
-  ) => void;
+  updateMemoryConfig: (memoryConfig: Config["memory"]) => void;
   updateKnowledgeBase: (
     baseName: string,
     baseConfig: KnowledgeBaseConfig,
   ) => void;
   deleteKnowledgeBase: (baseName: string) => void;
-  updateModel: (modelId: string, updates: Partial<ModelConfig>) => void;
   deleteModel: (modelId: string) => void;
-  updateToolConfig: (toolId: string, config: unknown) => void;
-  updateVoiceConfig: (voiceConfig: VoiceConfig) => void;
-  updateRoomDefaults: (roomDefaults: RoomDefaultsConfig) => void;
+  /** Set one config value by key path; undefined removes it. Not for agents or teams. */
+  updateConfigValue: (path: ConfigPath, value: unknown) => void;
   getAgentToolOverrides: (
     agentId: string,
     toolName: string,
   ) => ToolOverrides | null;
   updateAgentToolOverrides: (
     agentId: string,
+    toolName: string,
+    overrides: ToolOverrides | null,
+  ) => void;
+  getDefaultToolOverrides: (toolName: string) => ToolOverrides | null;
+  updateDefaultToolOverrides: (
     toolName: string,
     overrides: ToolOverrides | null,
   ) => void;
@@ -1054,30 +1143,19 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         {} as Record<string, Omit<Team, "id">>,
       );
 
-      const roomModels = config.room_models ?? {};
-      const roomsObject = config.rooms ?? {};
-
       const updatedConfig: Config = {
         ...baseConfig,
-        ...(dirtyRootSet.has("defaults") ? { defaults: config.defaults } : {}),
-        ...(dirtyRootSet.has("memory") ? { memory: config.memory } : {}),
-        ...(dirtyRootSet.has("knowledge_bases")
-          ? { knowledge_bases: config.knowledge_bases }
-          : {}),
-        ...(dirtyRootSet.has("models") ? { models: config.models } : {}),
-        ...(dirtyRootSet.has("tools") ? { tools: config.tools } : {}),
-        ...(dirtyRootSet.has("voice") ? { voice: config.voice } : {}),
-        ...(dirtyRootSet.has("room_defaults")
-          ? { room_defaults: config.room_defaults }
-          : {}),
+        ...Object.fromEntries(
+          dirtyRoots
+            .filter((root) => !COLLECTION_ROOTS.has(root))
+            .map((root) => [root, readConfigRoot(config, root)]),
+        ),
         ...(dirtyRootSet.has("agents") ? { agents: currentAgentsObject } : {}),
         ...(dirtyRootSet.has("teams") ? { teams: currentTeamsObject } : {}),
-        ...(dirtyRootSet.has("rooms") ? { rooms: roomsObject } : {}),
-        ...(dirtyRootSet.has("room_models")
-          ? {
-              room_models:
-                Object.keys(roomModels).length > 0 ? roomModels : undefined,
-            }
+        // Room model overrides disappear from config.yaml once the last one is removed.
+        ...(dirtyRootSet.has("room_models") &&
+        Object.keys(config.room_models ?? {}).length === 0
+          ? { room_models: undefined }
           : {}),
       };
       const payloadAgentsObject = dirtyRootSet.has("agents")
@@ -1093,16 +1171,23 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
               },
             ]),
           );
+      const defaultTools = updatedConfig.defaults?.tools;
       const payloadDefaultTools = dirtyRootSet.has("defaults")
-        ? (currentRawDefaultToolEntries ?? updatedConfig.defaults.tools)
-        : (baseRawDefaultToolEntries ?? updatedConfig.defaults.tools);
+        ? defaultTools &&
+          rebuildToolEntries(defaultTools, currentRawDefaultToolEntries)
+        : (baseRawDefaultToolEntries ?? defaultTools);
+      // Authored configs may omit defaults entirely.
       const payload: configService.ConfigSavePayload = {
         ...updatedConfig,
         agents: payloadAgentsObject,
-        defaults: {
-          ...updatedConfig.defaults,
-          tools: payloadDefaultTools,
-        },
+        ...(updatedConfig.defaults == null
+          ? {}
+          : {
+              defaults: {
+                ...updatedConfig.defaults,
+                tools: payloadDefaultTools,
+              },
+            }),
       };
 
       const { generation } = await configService.saveConfig(
@@ -1130,7 +1215,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             ]),
           );
       const updatedRawDefaultToolEntries = dirtyRootSet.has("defaults")
-        ? currentRawDefaultToolEntries
+        ? payloadDefaultTools
         : baseRawDefaultToolEntries;
       rememberRawToolEntries(
         updatedConfig,
@@ -1457,7 +1542,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           nextAgents,
           state.teams,
         ),
-        ...markDraftDirty(state, {}, touchedPaths),
+        ...markDraftDirty(state, {}, touchedPaths, (issue) =>
+          issueValueChanged(
+            issue,
+            ["agents", agentId],
+            currentAgent,
+            nextAgent,
+          ),
+        ),
       };
     });
     if (shouldRefreshAgentPolicies && get().config != null) {
@@ -1524,9 +1616,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   // Create a new agent
   createAgent: (agentData) => {
     const id = agentData.display_name.toLowerCase().replace(/\s+/g, "_");
-    const defaultLearning = get().config?.defaults.learning ?? true;
+    const defaultLearning = get().config?.defaults?.learning ?? true;
     const defaultLearningMode =
-      get().config?.defaults.learning_mode ?? "always";
+      get().config?.defaults?.learning_mode ?? "always";
     const newAgent: Agent = {
       id,
       ...agentData,
@@ -1606,8 +1698,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const touchedPaths = Object.keys(normalizedUpdates).map(
         (key) => ["teams", teamId, key] as ConfigDiagnosticPath,
       );
+      const nextTeam = { ...currentTeam, ...normalizedUpdates };
       const nextTeams = state.teams.map((team) =>
-        team.id === teamId ? { ...team, ...normalizedUpdates } : team,
+        team.id === teamId ? nextTeam : team,
       );
       return {
         teams: nextTeams,
@@ -1617,7 +1710,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           state.agents,
           nextTeams,
         ),
-        ...markDraftDirty(state, {}, touchedPaths),
+        ...markDraftDirty(state, {}, touchedPaths, (issue) =>
+          issueValueChanged(issue, ["teams", teamId], currentTeam, nextTeam),
+        ),
       };
     });
   },
@@ -2005,35 +2100,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateMemoryConfig: (memoryConfig) => {
     set((state) => {
       if (!state.config) return state;
-      if (isMemoryEmbedderUpdate(memoryConfig)) {
-        const nextConfig = {
-          ...state.config,
-          memory: {
-            ...state.config.memory,
-            embedder: {
-              provider: memoryConfig.provider,
-              config: {
-                model: memoryConfig.model,
-                ...(memoryConfig.host ? { host: memoryConfig.host } : {}),
-              },
-            },
-          },
-        };
-        preserveRawToolEntries(state.config, nextConfig);
-        return {
-          config: nextConfig,
-          ...markDraftDirty(state, {}, [["memory"]]),
-        };
-      }
-
-      const nextConfig = {
-        ...state.config,
-        memory: memoryConfig,
-      };
+      const currentMemory = state.config.memory;
+      const nextConfig = { ...state.config, memory: memoryConfig };
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["memory"]]),
+        ...markDraftDirty(state, {}, [["memory"]], (issue) =>
+          issueValueChanged(issue, ["memory"], currentMemory, memoryConfig),
+        ),
       };
     });
   },
@@ -2042,21 +2116,26 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   updateKnowledgeBase: (baseName, baseConfig) => {
     set((state) => {
       if (!state.config) return state;
-      const existingBaseConfig = state.config.knowledge_bases?.[baseName] || {};
+      const currentBaseConfig = state.config.knowledge_bases?.[baseName];
+      const nextBaseConfig = { ...(currentBaseConfig || {}), ...baseConfig };
       const nextConfig = {
         ...state.config,
         knowledge_bases: {
           ...(state.config.knowledge_bases || {}),
-          [baseName]: {
-            ...existingBaseConfig,
-            ...baseConfig,
-          },
+          [baseName]: nextBaseConfig,
         },
       };
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["knowledge_bases", baseName]]),
+        ...markDraftDirty(state, {}, [["knowledge_bases", baseName]], (issue) =>
+          issueValueChanged(
+            issue,
+            ["knowledge_bases", baseName],
+            currentBaseConfig,
+            nextBaseConfig,
+          ),
+        ),
       };
     });
   },
@@ -2104,28 +2183,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     });
   },
 
-  // Update a model configuration
-  updateModel: (modelId, updates) => {
-    set((state) => {
-      if (!state.config) return state;
-      const nextConfig = {
-        ...state.config,
-        models: {
-          ...state.config.models,
-          [modelId]: {
-            ...state.config.models[modelId],
-            ...updates,
-          },
-        },
-      };
-      preserveRawToolEntries(state.config, nextConfig);
-      return {
-        config: nextConfig,
-        ...markDraftDirty(state, {}, [["models", modelId]]),
-      };
-    });
-  },
-
   // Delete a model configuration
   deleteModel: (modelId) => {
     set((state) => {
@@ -2143,51 +2200,42 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     });
   },
 
-  // Update tool configuration
-  updateToolConfig: (toolId, config) => {
+  updateConfigValue: (path, value) => {
     set((state) => {
       if (!state.config) return state;
-      const nextConfig = {
-        ...state.config,
-        tools: {
-          ...state.config.tools,
-          [toolId]: config,
-        },
-      };
+      const [root] = path;
+      let nextConfig = setPathValue(state.config, path, value);
+      // Blocks emptied by removing their last key fall back to their defaults
+      // instead of persisting as empty mappings. Nested entries the loaded
+      // config authors, such as a room declared without settings, stay.
+      for (
+        let depth = path.length - 1;
+        value === undefined && depth > 0;
+        depth--
+      ) {
+        const block: ConfigPath = [root, ...path.slice(1, depth)];
+        const emptied = getPathValue(nextConfig, block);
+        if (
+          !isPlainObject(emptied) ||
+          Object.keys(emptied).length > 0 ||
+          (depth > 1 && getPathValue(state.loadedConfig, block) !== undefined)
+        ) {
+          break;
+        }
+        nextConfig = setPathValue(nextConfig, block, undefined);
+      }
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["tools", toolId]]),
-      };
-    });
-  },
-
-  updateVoiceConfig: (voiceConfig) => {
-    set((state) => {
-      if (!state.config) return state;
-      const nextConfig = {
-        ...state.config,
-        voice: voiceConfig,
-      };
-      preserveRawToolEntries(state.config, nextConfig);
-      return {
-        config: nextConfig,
-        ...markDraftDirty(state, {}, [["voice"]]),
-      };
-    });
-  },
-
-  updateRoomDefaults: (roomDefaults) => {
-    set((state) => {
-      if (!state.config) return state;
-      const nextConfig = {
-        ...state.config,
-        room_defaults: roomDefaults,
-      };
-      preserveRawToolEntries(state.config, nextConfig);
-      return {
-        config: nextConfig,
-        ...markDraftDirty(state, {}, [["room_defaults"]]),
+        rooms: deriveRooms(nextConfig, state.agents, state.teams),
+        ...markDraftDirty(state, {}, [[...path]], (issue) =>
+          issueValueChanged(
+            issue,
+            [root],
+            readConfigRoot(state.config!, root),
+            readConfigRoot(nextConfig, root),
+          ),
+        ),
       };
     });
   },
@@ -2213,6 +2261,30 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     setRememberedRawToolEntries(config, agentId, nextRawEntries);
     set((state) => ({
       ...markDraftDirty(state, {}, [["agents", agentId, "tools"]]),
+    }));
+  },
+
+  getDefaultToolOverrides: (toolName) =>
+    getToolOverridesFromEntries(
+      toolName,
+      getRememberedRawDefaultToolEntries(get().config),
+    ),
+
+  updateDefaultToolOverrides: (toolName, overrides) => {
+    const config = get().config;
+    if (!config) {
+      return;
+    }
+    rawDefaultToolEntriesByConfig.set(
+      config,
+      setToolOverridesInEntries(
+        toolName,
+        overrides,
+        getRememberedRawDefaultToolEntries(config),
+      ),
+    );
+    set((state) => ({
+      ...markDraftDirty(state, {}, [["defaults", "tools"]]),
     }));
   },
 
