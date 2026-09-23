@@ -156,7 +156,7 @@ def locally_allowed(
         ),
         None,
     )
-    if entry is None:
+    if entry is None or (entry.name == "memory" and view.memory_backend == "none"):
         return False
     return _configured_tool_allowed(config, owner, entry, tool_name, origin, construction)
 
