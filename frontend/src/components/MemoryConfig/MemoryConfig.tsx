@@ -14,7 +14,6 @@ import {
 } from "@/components/ui/select";
 import { useConfigStore } from "@/store/configStore";
 import { SchemaSection } from "@/components/SchemaForm";
-import { setObjectKey } from "@/lib/configSchema";
 
 const EMBEDDER_PROVIDERS = [
   { value: "openai", label: "OpenAI" },
@@ -202,7 +201,7 @@ export function MemoryConfig() {
   const {
     config,
     updateMemoryConfig,
-    updateConfigRoot,
+    updateConfigValue,
     saveConfig,
     isDirty,
     isLoading,
@@ -561,22 +560,10 @@ export function MemoryConfig() {
             value={config?.memory?.embedder?.config}
             path={["memory", "embedder", "config"]}
             exclude={EMBEDDER_EDITOR_FIELDS}
-            onFieldChange={(key, next) => {
-              // Edit the authored config directly so untouched defaults stay unwritten.
-              const memory = config?.memory;
-              updateConfigRoot(
-                "memory",
-                setObjectKey(
-                  memory,
-                  "embedder",
-                  setObjectKey(
-                    memory?.embedder,
-                    "config",
-                    setObjectKey(memory?.embedder?.config, key, next),
-                  ),
-                ),
-              );
-            }}
+            // Edit the authored config directly so untouched defaults stay unwritten.
+            onFieldChange={(key, next) =>
+              updateConfigValue(["memory", "embedder", "config", key], next)
+            }
           />
 
           {localConfig.backend === "file" && (
@@ -1040,10 +1027,7 @@ export function MemoryConfig() {
             path={["memory"]}
             exclude={MEMORY_EDITOR_FIELDS}
             onFieldChange={(key, next) =>
-              updateConfigRoot(
-                "memory",
-                setObjectKey(config?.memory, key, next),
-              )
+              updateConfigValue(["memory", key], next)
             }
           />
         </div>

@@ -65,7 +65,7 @@ const ROOT: JsonSchema = {
 };
 
 describe("Settings", () => {
-  const updateConfigRoot = vi.fn();
+  const updateConfigValue = vi.fn();
   const saveConfig = vi.fn();
 
   beforeEach(() => {
@@ -74,27 +74,32 @@ describe("Settings", () => {
     vi.mocked(useConfigStore).mockReturnValue({
       config: {
         models: { default: {}, fast: {} },
-        agents: { helper: { rooms: [] } },
         defaults: { markdown: true },
         router: { model: "default" },
       },
+      agents: [{ id: "helper" }],
+      rooms: [],
       diagnostics: [],
       isDirty: true,
       isLoading: false,
       saveConfig,
-      updateConfigRoot,
+      updateConfigValue,
     } as never);
-    vi.mocked(useConfigSchema).mockReturnValue({ schema: ROOT, error: null });
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: ROOT,
+      error: null,
+      retry: vi.fn(),
+    });
     vi.mocked(useTools).mockReturnValue({ tools: [] } as never);
   });
 
-  it("edits a settings root through updateConfigRoot", () => {
+  it("edits a settings root through updateConfigValue", () => {
     render(<Settings />);
     fireEvent.click(screen.getByRole("button", { name: "Router" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Model" }), {
       target: { value: "fast" },
     });
-    expect(updateConfigRoot).toHaveBeenCalledWith("router", { model: "fast" });
+    expect(updateConfigValue).toHaveBeenCalledWith(["router", "model"], "fast");
   });
 
   it("enables optional roots with their required fields", () => {
@@ -103,7 +108,7 @@ describe("Settings", () => {
     fireEvent.click(
       screen.getByRole("checkbox", { name: "Configure personal rooms" }),
     );
-    expect(updateConfigRoot).toHaveBeenCalledWith("personal_rooms", {
+    expect(updateConfigValue).toHaveBeenCalledWith(["personal_rooms"], {
       agent: "helper",
     });
   });
@@ -117,14 +122,19 @@ describe("Settings", () => {
     );
   });
 
-  it("reports an unavailable schema", () => {
+  it("reports an unavailable schema and retries on request", () => {
+    const retry = vi.fn();
     vi.mocked(useConfigSchema).mockReturnValue({
       schema: null,
       error: "API call failed: 500",
+      retry,
     });
     render(<Settings />);
     expect(
       screen.getByText("Settings are unavailable: API call failed: 500"),
     ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalled();
   });
 });

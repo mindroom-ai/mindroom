@@ -286,6 +286,33 @@ export function classifySchemaNode(
   return node;
 }
 
+/** A starting number inside every bound the schema declares. */
+function initialNumber(node: SchemaNode): number {
+  const { minimum, maximum, exclusiveMinimum, exclusiveMaximum } = node.schema;
+  const fits = (value: number) =>
+    (minimum == null || value >= minimum) &&
+    (maximum == null || value <= maximum) &&
+    (exclusiveMinimum == null || value > exclusiveMinimum) &&
+    (exclusiveMaximum == null || value < exclusiveMaximum);
+  const lower = minimum ?? exclusiveMinimum;
+  const upper = maximum ?? exclusiveMaximum;
+  const candidates = [
+    0,
+    minimum,
+    exclusiveMinimum != null ? exclusiveMinimum + 1 : undefined,
+    maximum,
+    exclusiveMaximum != null ? exclusiveMaximum - 1 : undefined,
+    lower != null && upper != null && !node.integer
+      ? (lower + upper) / 2
+      : undefined,
+  ];
+  return (
+    candidates.find((value): value is number => value != null && fits(value)) ??
+    lower ??
+    0
+  );
+}
+
 export function initialValue(
   node: SchemaNode,
   root: JsonSchema,
@@ -301,12 +328,7 @@ export function initialValue(
     case "boolean":
       return false;
     case "number":
-      return (
-        node.schema.minimum ??
-        (node.schema.exclusiveMinimum != null
-          ? node.schema.exclusiveMinimum + 1
-          : 0)
-      );
+      return initialNumber(node);
     case "string":
       return node.hint.reference != null
         ? (references[node.hint.reference][0] ?? "")
@@ -416,4 +438,31 @@ export function hasEmptyDefault(node: SchemaNode): boolean {
     return value.length === 0;
   }
   return isPlainObject(value) && Object.keys(value).length === 0;
+}
+
+/** Copy an object with the value at a key path set, or removed when next is undefined. */
+export function setPathValue<T extends object>(
+  value: T | null | undefined,
+  path: readonly string[],
+  next: unknown,
+): T;
+export function setPathValue(
+  value: unknown,
+  path: readonly string[],
+  next: unknown,
+): Record<string, unknown>;
+export function setPathValue(
+  value: unknown,
+  path: readonly string[],
+  next: unknown,
+): Record<string, unknown> {
+  const [key, ...rest] = path;
+  if (key === undefined) {
+    throw new Error("A config path needs at least one key");
+  }
+  if (rest.length === 0) {
+    return setObjectKey(value, key, next);
+  }
+  const child = isPlainObject(value) ? value[key] : undefined;
+  return setObjectKey(value, key, setPathValue(child, rest, next));
 }

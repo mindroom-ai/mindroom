@@ -118,6 +118,8 @@ describe("ToolConfigPanel", () => {
       "openclaw",
       "shell",
       {
+        defer: null,
+        initial: null,
         extra_env_passthrough: ["GITEA_TOKEN"],
         shell_path_prepend: ["/run/wrappers/bin"],
       },
@@ -130,6 +132,8 @@ describe("ToolConfigPanel", () => {
       "openclaw",
       "shell",
       {
+        defer: null,
+        initial: null,
         extra_env_passthrough: null,
         shell_path_prepend: ["/run/wrappers/bin"],
       },
@@ -168,7 +172,7 @@ describe("ToolConfigPanel", () => {
     expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
       "openclaw",
       "discord",
-      null,
+      { defer: null, initial: null, bot_token: null },
     );
   });
 
@@ -245,7 +249,11 @@ describe("ToolConfigPanel", () => {
       expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
         "openclaw",
         "shell",
-        { defer: true, extra_env_passthrough: ["GITEA_TOKEN"] },
+        {
+          defer: true,
+          initial: null,
+          extra_env_passthrough: ["GITEA_TOKEN"],
+        },
       );
     });
 
@@ -260,7 +268,7 @@ describe("ToolConfigPanel", () => {
       expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
         "openclaw",
         "browser",
-        { defer: true },
+        { defer: true, initial: null },
       );
     });
 
@@ -286,7 +294,7 @@ describe("ToolConfigPanel", () => {
       expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
         "openclaw",
         "shell",
-        { defer: true, initial: true },
+        { defer: true, initial: true, extra_env_passthrough: null },
       );
     });
 
@@ -301,7 +309,7 @@ describe("ToolConfigPanel", () => {
       expect(mockStore.updateAgentToolOverrides).toHaveBeenLastCalledWith(
         "openclaw",
         "browser",
-        null,
+        { defer: null, initial: null },
       );
     });
   });

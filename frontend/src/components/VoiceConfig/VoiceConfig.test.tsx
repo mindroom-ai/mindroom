@@ -4,12 +4,12 @@ import { VoiceConfig } from "./VoiceConfig";
 import { useConfigStore } from "@/store/configStore";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
 import type { ConfigDiagnostic } from "@/lib/configValidation";
-import { Config } from "@/types/config";
+import { Agent, Config, Room } from "@/types/config";
 import type { SaveConfigResult } from "@/store/configStore";
 
 vi.mock("@/store/configStore");
 vi.mock("@/hooks/useConfigSchema", () => ({
-  useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null, retry: vi.fn() })),
 }));
 
 const { mockToast, mockToaster } = vi.hoisted(() => ({
@@ -25,15 +25,17 @@ vi.mock("@/components/ui/toaster", () => ({
 
 describe("VoiceConfig", () => {
   const mockSaveConfig = vi.fn();
-  const mockUpdateConfigRoot = vi.fn();
+  const mockUpdateConfigValue = vi.fn();
   type MockStoreState = {
     config: Config;
+    agents: Agent[];
+    rooms: Room[];
     diagnostics: ConfigDiagnostic[];
     syncStatus: "synced" | "syncing" | "error" | "disconnected";
     isDirty: boolean;
     isLoading: boolean;
     saveConfig: () => Promise<SaveConfigResult>;
-    updateConfigRoot: typeof mockUpdateConfigRoot;
+    updateConfigValue: typeof mockUpdateConfigValue;
   };
   type MockedStoreHook = {
     (): MockStoreState;
@@ -66,12 +68,14 @@ describe("VoiceConfig", () => {
   const setMockStore = (config: Partial<Config>) => {
     mockStoreState = {
       config: config as Config,
+      agents: [],
+      rooms: [],
       diagnostics: [],
       syncStatus: "synced",
       isDirty: false,
       isLoading: false,
       saveConfig: mockSaveConfig,
-      updateConfigRoot: mockUpdateConfigRoot,
+      updateConfigValue: mockUpdateConfigValue,
     };
     mockedUseConfigStore.mockReturnValue(mockStoreState);
     mockedUseConfigStore.getState = vi.fn(() => mockStoreState);
@@ -131,7 +135,7 @@ describe("VoiceConfig", () => {
     fireEvent.change(hostInput, { target: { value: "" } });
 
     await waitFor(() => {
-      expect(mockUpdateConfigRoot).toHaveBeenCalledWith("voice", {
+      expect(mockUpdateConfigValue).toHaveBeenCalledWith(["voice"], {
         enabled: true,
         visible_router_echo: true,
         stt: {
@@ -165,7 +169,7 @@ describe("VoiceConfig", () => {
 
     await waitFor(() => {
       expect(mockSaveConfig).toHaveBeenCalled();
-      expect(mockUpdateConfigRoot).toHaveBeenLastCalledWith("voice", {
+      expect(mockUpdateConfigValue).toHaveBeenLastCalledWith(["voice"], {
         enabled: true,
         visible_router_echo: true,
         stt: {
@@ -294,7 +298,7 @@ describe("VoiceConfig", () => {
     fireEvent.click(visibleRouterEchoToggle);
 
     await waitFor(() => {
-      expect(mockUpdateConfigRoot).toHaveBeenCalledWith("voice", {
+      expect(mockUpdateConfigValue).toHaveBeenCalledWith(["voice"], {
         enabled: true,
         visible_router_echo: true,
         stt: {
@@ -346,19 +350,21 @@ describe("VoiceConfig", () => {
         },
       },
       error: null,
+      retry: vi.fn(),
     });
 
     render(<VoiceConfig />);
     fireEvent.click(screen.getByRole("checkbox", { name: "Enabled" }));
 
-    expect(mockUpdateConfigRoot).toHaveBeenCalledWith("calls", {
-      enabled: true,
-    });
+    expect(mockUpdateConfigValue).toHaveBeenCalledWith(
+      ["calls", "enabled"],
+      true,
+    );
 
-    mockUpdateConfigRoot.mockClear();
+    mockUpdateConfigValue.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "Save Call Settings" }));
     await waitFor(() => expect(mockSaveConfig).toHaveBeenCalled());
     // Saving calls must not write the voice form's defaults.
-    expect(mockUpdateConfigRoot).not.toHaveBeenCalled();
+    expect(mockUpdateConfigValue).not.toHaveBeenCalled();
   });
 });

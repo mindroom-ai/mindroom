@@ -6,6 +6,7 @@ import {
   ReferenceOptionsProvider,
   SchemaField,
   SchemaFields,
+  SchemaUnavailable,
 } from "@/components/SchemaForm";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,7 +23,6 @@ import {
   classifySchemaNode,
   fieldLabel,
   rootPropertySchema,
-  setObjectKey,
   type JsonSchema,
 } from "@/lib/configSchema";
 import { cn } from "@/lib/utils";
@@ -44,7 +44,7 @@ function SettingsEntryView({
   root: JsonSchema;
   value: unknown;
   showHeading: boolean;
-  onChange: (next: unknown) => void;
+  onChange: (path: string[], next: unknown) => void;
 }) {
   const schema = rootPropertySchema(root, entry.root);
   const node = classifySchemaNode(schema, root);
@@ -57,7 +57,7 @@ function SettingsEntryView({
         value={value}
         path={[entry.root]}
         include={entry.keys}
-        onFieldChange={(key, next) => onChange(setObjectKey(value, key, next))}
+        onFieldChange={(key, next) => onChange([entry.root, key], next)}
       />
     );
     if (!showHeading || entry.keys != null) {
@@ -84,15 +84,15 @@ function SettingsEntryView({
       root={root}
       value={value}
       path={[entry.root]}
-      onChange={onChange}
+      onChange={(next) => onChange([entry.root], next)}
     />
   );
 }
 
 export function Settings() {
-  const { config, isDirty, isLoading, saveConfig, updateConfigRoot } =
+  const { config, isDirty, isLoading, saveConfig, updateConfigValue } =
     useConfigStore();
-  const { schema: root, error } = useConfigSchema();
+  const { schema: root, error, retry } = useConfigSchema();
   const { tools } = useTools();
   const { toast } = useToast();
   const sections = useMemo(
@@ -143,9 +143,7 @@ export function Settings() {
       </div>
 
       {error != null && (
-        <p className="rounded-lg border border-dashed px-4 py-3 text-sm text-muted-foreground">
-          Settings are unavailable: {error}
-        </p>
+        <SchemaUnavailable subject="Settings" error={error} onRetry={retry} />
       )}
       {root != null && active != null && (
         <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-[13rem_minmax(0,1fr)]">
@@ -199,7 +197,7 @@ export function Settings() {
                           ? undefined
                           : readConfigRoot(config, entry.root)
                       }
-                      onChange={(next) => updateConfigRoot(entry.root, next)}
+                      onChange={updateConfigValue}
                     />
                   ))}
                 </div>

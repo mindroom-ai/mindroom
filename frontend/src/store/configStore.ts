@@ -12,7 +12,7 @@ import {
   normalizeAgentUpdates,
   normalizeTeamUpdates,
 } from "@/types/config";
-import { setObjectKey } from "@/lib/configSchema";
+import { setPathValue } from "@/lib/configSchema";
 import * as configService from "@/services/configService";
 import {
   isConfigConflictDiagnostic,
@@ -632,8 +632,8 @@ interface ConfigState {
   deleteKnowledgeBase: (baseName: string) => void;
   updateModel: (modelId: string, updates: Partial<ModelConfig>) => void;
   deleteModel: (modelId: string) => void;
-  /** Replace one top-level config root; undefined removes it. Not for agents or teams. */
-  updateConfigRoot: (root: string, value: unknown) => void;
+  /** Set one config value by key path; undefined removes it. Not for agents or teams. */
+  updateConfigValue: (path: string[], value: unknown) => void;
   getAgentToolOverrides: (
     agentId: string,
     toolName: string,
@@ -2151,15 +2151,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     });
   },
 
-  updateConfigRoot: (root, value) => {
+  updateConfigValue: (path, value) => {
     set((state) => {
       if (!state.config) return state;
-      const nextConfig = setObjectKey(state.config, root, value);
+      const nextConfig = setPathValue(state.config, path, value);
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
         rooms: deriveRooms(nextConfig, state.agents, state.teams),
-        ...markDraftDirty(state, {}, [[root]]),
+        ...markDraftDirty(state, {}, [path]),
       };
     });
   },

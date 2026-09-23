@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { API_ENDPOINTS, fetchJSON } from "@/lib/api";
 import { isPlainObject, type JsonSchema } from "@/lib/configSchema";
@@ -29,9 +29,11 @@ function loadConfigSchema(): Promise<JsonSchema> {
 export function useConfigSchema(): {
   schema: JsonSchema | null;
   error: string | null;
+  retry: () => void;
 } {
   const [schema, setSchema] = useState<JsonSchema | null>(cachedSchema);
   const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (schema != null) {
@@ -42,6 +44,7 @@ export function useConfigSchema(): {
       (loaded) => {
         if (active) {
           setSchema(loaded);
+          setError(null);
         }
       },
       (loadError: unknown) => {
@@ -57,7 +60,12 @@ export function useConfigSchema(): {
     return () => {
       active = false;
     };
-  }, [schema]);
+  }, [schema, attempt]);
 
-  return { schema, error };
+  const retry = useCallback(() => {
+    setError(null);
+    setAttempt((current) => current + 1);
+  }, []);
+
+  return { schema, error, retry };
 }

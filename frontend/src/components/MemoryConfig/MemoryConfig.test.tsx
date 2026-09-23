@@ -8,7 +8,7 @@ import { Config } from "@/types/config";
 // Mock the store
 vi.mock("@/store/configStore");
 vi.mock("@/hooks/useConfigSchema", () => ({
-  useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null, retry: vi.fn() })),
 }));
 
 describe("MemoryConfig", () => {
@@ -24,7 +24,7 @@ describe("MemoryConfig", () => {
   };
 
   const mockUpdateMemoryConfig = vi.fn();
-  const mockUpdateConfigRoot = vi.fn();
+  const mockUpdateConfigValue = vi.fn();
   const mockSaveConfig = vi.fn();
 
   beforeEach(() => {
@@ -526,9 +526,11 @@ describe("MemoryConfig", () => {
   it("edits memory settings the page does not render through More settings", () => {
     (useConfigStore as any).mockReturnValue({
       config: mockConfig,
+      agents: [],
+      rooms: [],
       diagnostics: [],
       updateMemoryConfig: mockUpdateMemoryConfig,
-      updateConfigRoot: mockUpdateConfigRoot,
+      updateConfigValue: mockUpdateConfigValue,
       saveConfig: mockSaveConfig,
       isDirty: false,
     });
@@ -561,6 +563,7 @@ describe("MemoryConfig", () => {
         },
       },
       error: null,
+      retry: vi.fn(),
     });
 
     render(<MemoryConfig />);
@@ -568,10 +571,10 @@ describe("MemoryConfig", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "Configure LLM" }));
 
     // Only the edited key is written; untouched memory defaults stay unset.
-    expect(mockUpdateConfigRoot).toHaveBeenLastCalledWith("memory", {
-      ...mockConfig.memory,
-      llm: {},
-    });
+    expect(mockUpdateConfigValue).toHaveBeenLastCalledWith(
+      ["memory", "llm"],
+      {},
+    );
     expect(mockUpdateMemoryConfig).not.toHaveBeenCalled();
   });
 });

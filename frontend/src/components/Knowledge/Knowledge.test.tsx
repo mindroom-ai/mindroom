@@ -11,7 +11,7 @@ vi.mock("@/store/configStore", () => ({
   useConfigStore: vi.fn(),
 }));
 vi.mock("@/hooks/useConfigSchema", () => ({
-  useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null, retry: vi.fn() })),
 }));
 
 const mockToast = vi.fn();
@@ -20,7 +20,7 @@ vi.mock("@/components/ui/use-toast", () => ({
 }));
 
 const mockUpdateKnowledgeBase = vi.fn();
-const mockUpdateConfigRoot = vi.fn();
+const mockUpdateConfigValue = vi.fn();
 const mockDeleteKnowledgeBase = vi.fn();
 const mockSaveConfig = vi
   .fn<() => Promise<SaveConfigResult>>()
@@ -144,9 +144,11 @@ function mockStore(
     config: {
       knowledge_bases: knowledgeBases,
     } as unknown as Config,
+    agents: [],
+    rooms: [],
     diagnostics: [],
     updateKnowledgeBase: mockUpdateKnowledgeBase,
-    updateConfigRoot: mockUpdateConfigRoot,
+    updateConfigValue: mockUpdateConfigValue,
     deleteKnowledgeBase: mockDeleteKnowledgeBase,
     saveConfig: mockSaveConfig,
     isDirty: options.isDirty ?? false,
@@ -156,7 +158,11 @@ function mockStore(
 describe("Knowledge", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(useConfigSchema).mockReturnValue({ schema: null, error: null });
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: null,
+      error: null,
+      retry: vi.fn(),
+    });
   });
 
   it("edits knowledge base filters through More settings", async () => {
@@ -181,6 +187,7 @@ describe("Knowledge", () => {
         },
       },
       error: null,
+      retry: vi.fn(),
     });
 
     render(<Knowledge />);
@@ -195,13 +202,10 @@ describe("Knowledge", () => {
       screen.getByRole("button", { name: "Add exclude extensions entry" }),
     );
 
-    expect(mockUpdateConfigRoot).toHaveBeenCalledWith("knowledge_bases", {
-      docs: {
-        path: "./knowledge_docs/docs",
-        watch: true,
-        exclude_extensions: [".log"],
-      },
-    });
+    expect(mockUpdateConfigValue).toHaveBeenCalledWith(
+      ["knowledge_bases", "docs", "exclude_extensions"],
+      [".log"],
+    );
   });
 
   it("does not auto-select the first base when multiple bases are configured", async () => {

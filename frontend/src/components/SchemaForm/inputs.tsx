@@ -399,8 +399,9 @@ function NumberInput({
       value={draft}
       disabled={disabled}
       placeholder={summary == null ? undefined : `Default: ${summary}`}
-      min={node.schema.minimum ?? node.schema.exclusiveMinimum}
-      max={node.schema.maximum ?? node.schema.exclusiveMaximum}
+      // Exclusive bounds have no HTML equivalent; the backend enforces them.
+      min={node.schema.minimum}
+      max={node.schema.maximum}
       step={node.integer ? 1 : "any"}
       onChange={(event) => {
         const text = event.target.value;

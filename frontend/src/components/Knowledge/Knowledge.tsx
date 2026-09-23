@@ -17,7 +17,6 @@ import { apiErrorMessageFromPayload, API_ENDPOINTS } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useConfigStore } from "@/store/configStore";
 import { SchemaSection } from "@/components/SchemaForm";
-import { setObjectKey } from "@/lib/configSchema";
 import type { KnowledgeBaseConfig, KnowledgeGitConfig } from "@/types/config";
 import { useToast } from "@/components/ui/use-toast";
 import { Badge } from "@/components/ui/badge";
@@ -274,7 +273,7 @@ export function Knowledge() {
   const {
     config,
     updateKnowledgeBase,
-    updateConfigRoot,
+    updateConfigValue,
     deleteKnowledgeBase,
     saveConfig,
     isDirty,
@@ -1772,13 +1771,9 @@ export function Knowledge() {
                     path={["knowledge_bases", selectedBase]}
                     exclude={KNOWLEDGE_BASE_EDITOR_FIELDS}
                     onFieldChange={(key, next) =>
-                      updateConfigRoot(
-                        "knowledge_bases",
-                        setObjectKey(
-                          knowledgeBases,
-                          selectedBase,
-                          setObjectKey(selectedBaseConfig, key, next),
-                        ),
+                      updateConfigValue(
+                        ["knowledge_bases", selectedBase, key],
+                        next,
                       )
                     }
                   />

@@ -225,6 +225,19 @@ describe("initialValue", () => {
     expect(initialValue(node, ROOT, REFERENCES)).toEqual({});
   });
 
+  it("starts numbers inside every declared bound", () => {
+    const start = (schema: JsonSchema) =>
+      initialValue(classifySchemaNode(schema, ROOT), ROOT, REFERENCES);
+    expect(start({ type: "number" })).toBe(0);
+    expect(start({ type: "integer", minimum: 1 })).toBe(1);
+    expect(start({ type: "integer", exclusiveMinimum: 0 })).toBe(1);
+    expect(
+      start({ type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1 }),
+    ).toBe(0.5);
+    expect(start({ type: "number", exclusiveMinimum: 0, maximum: 1 })).toBe(1);
+    expect(start({ type: "number", maximum: -5 })).toBe(-5);
+  });
+
   it("starts collections empty", () => {
     expect(
       initialValue(

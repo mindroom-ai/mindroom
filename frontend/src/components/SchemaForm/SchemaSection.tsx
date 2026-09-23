@@ -8,6 +8,7 @@ import { useConfigStore } from "@/store/configStore";
 
 import { useOpenOnError, type SchemaPath } from "./inputs";
 import { SchemaFields, schemaFieldKeys } from "./SchemaField";
+import { SchemaUnavailable } from "./SchemaUnavailable";
 
 export interface SchemaSectionProps {
   title: string;
@@ -31,7 +32,7 @@ export function SchemaSection({
   exclude,
   defaultOpen = false,
 }: SchemaSectionProps) {
-  const { schema: root, error } = useConfigSchema();
+  const { schema: root, error, retry } = useConfigSchema();
   const { diagnostics } = useConfigStore();
   const schema = root?.$defs?.[definition];
   const keys =
@@ -48,11 +49,7 @@ export function SchemaSection({
   const [open, setOpen] = useOpenOnError(defaultOpen, hasErrors);
 
   if (error != null) {
-    return (
-      <p className="rounded-lg border border-dashed px-4 py-3 text-sm text-muted-foreground">
-        {title} are unavailable: {error}
-      </p>
-    );
+    return <SchemaUnavailable subject={title} error={error} onRetry={retry} />;
   }
   // A backend without this definition has no fields to add here.
   if (root == null || schema == null || keys.length === 0) {

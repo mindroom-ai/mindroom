@@ -22,9 +22,13 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/use-toast";
 import { showSaveFailureToastIfNeeded } from "@/components/shared";
 import { readConfigRoot, useConfigStore } from "@/store/configStore";
-import { SchemaFields, SchemaSection } from "@/components/SchemaForm";
+import {
+  SchemaFields,
+  SchemaSection,
+  SchemaUnavailable,
+} from "@/components/SchemaForm";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
-import { definitionSchema, setObjectKey } from "@/lib/configSchema";
+import { definitionSchema } from "@/lib/configSchema";
 import { VoiceConfig as VoiceConfigType } from "@/types/config";
 
 /** VoiceConfig keys this page renders by hand; More settings shows the rest. */
@@ -94,8 +98,12 @@ function normalizeSTTConfig(
 }
 
 export function VoiceConfig() {
-  const { config, isLoading, saveConfig, updateConfigRoot } = useConfigStore();
-  const { schema: schemaRoot, error: schemaError } = useConfigSchema();
+  const { config, isLoading, saveConfig, updateConfigValue } = useConfigStore();
+  const {
+    schema: schemaRoot,
+    error: schemaError,
+    retry: retrySchema,
+  } = useConfigSchema();
   const callsConfig =
     config == null ? undefined : readConfigRoot(config, "calls");
   const { toast } = useToast();
@@ -114,7 +122,7 @@ export function VoiceConfig() {
     const newConfig = { ...voiceConfig, ...updates };
     setVoiceConfig(newConfig);
 
-    updateConfigRoot("voice", newConfig);
+    updateConfigValue(["voice"], newConfig);
   };
 
   const handleSTTChange = (updates: Partial<VoiceConfigType["stt"]>) => {
@@ -152,7 +160,7 @@ export function VoiceConfig() {
   const providerLabel = isCompatibleProvider ? "OpenAI-compatible" : "OpenAI";
 
   const handleSave = async () => {
-    updateConfigRoot("voice", {
+    updateConfigValue(["voice"], {
       ...voiceConfig,
       stt: normalizeSTTConfig(voiceConfig.stt),
     });
@@ -435,14 +443,7 @@ export function VoiceConfig() {
             path={["voice", "stt"]}
             exclude={STT_EDITOR_FIELDS}
             onFieldChange={(key, next) =>
-              updateConfigRoot(
-                "voice",
-                setObjectKey(
-                  config?.voice,
-                  "stt",
-                  setObjectKey(config?.voice?.stt, key, next),
-                ),
-              )
+              updateConfigValue(["voice", "stt", key], next)
             }
           />
 
@@ -453,7 +454,7 @@ export function VoiceConfig() {
             path={["voice"]}
             exclude={VOICE_EDITOR_FIELDS}
             onFieldChange={(key, next) =>
-              updateConfigRoot("voice", setObjectKey(config?.voice, key, next))
+              updateConfigValue(["voice", key], next)
             }
           />
 
@@ -479,9 +480,11 @@ export function VoiceConfig() {
         </CardHeader>
         <CardContent className="space-y-6">
           {schemaError != null && (
-            <p className="text-sm text-muted-foreground">
-              Call settings are unavailable: {schemaError}
-            </p>
+            <SchemaUnavailable
+              subject="Call settings"
+              error={schemaError}
+              onRetry={retrySchema}
+            />
           )}
           {schemaRoot?.$defs?.CallsConfig != null && (
             <SchemaFields
@@ -490,7 +493,7 @@ export function VoiceConfig() {
               value={callsConfig}
               path={["calls"]}
               onFieldChange={(key, next) =>
-                updateConfigRoot("calls", setObjectKey(callsConfig, key, next))
+                updateConfigValue(["calls", key], next)
               }
             />
           )}

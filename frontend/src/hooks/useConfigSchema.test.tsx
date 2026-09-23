@@ -1,7 +1,7 @@
-import { renderHook, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useConfigSchema } from "./useConfigSchema";
+const SCHEMA = { type: "object", properties: {}, $defs: {} };
 
 function jsonResponse(payload: unknown): Response {
   return new Response(JSON.stringify(payload), {
@@ -9,32 +9,43 @@ function jsonResponse(payload: unknown): Response {
   });
 }
 
-// The hook caches the schema per module, so these cases run in order.
+// The hook caches per module, so each test loads a fresh module instance.
+async function loadHook() {
+  vi.resetModules();
+  return (await import("./useConfigSchema")).useConfigSchema;
+}
+
 describe("useConfigSchema", () => {
-  it("rejects a response that is not a configuration schema, then retries", async () => {
+  beforeEach(() => {
+    vi.mocked(fetch).mockReset();
+  });
+
+  it("rejects a response that is not a configuration schema and retries on request", async () => {
+    const useConfigSchema = await loadHook();
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ has_key: false }));
-    const failed = renderHook(() => useConfigSchema());
+    const { result } = renderHook(() => useConfigSchema());
     await waitFor(() =>
-      expect(failed.result.current.error).toBe(
+      expect(result.current.error).toBe(
         "Unexpected configuration schema response.",
       ),
     );
-    expect(failed.result.current.schema).toBeNull();
+    expect(result.current.schema).toBeNull();
 
-    const schema = { type: "object", properties: {}, $defs: {} };
-    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(schema));
-    const loaded = renderHook(() => useConfigSchema());
-    await waitFor(() => expect(loaded.result.current.schema).toEqual(schema));
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(SCHEMA));
+    act(() => result.current.retry());
+    await waitFor(() => expect(result.current.schema).toEqual(SCHEMA));
+    expect(result.current.error).toBeNull();
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  it("serves later callers from the cache", () => {
-    const cached = renderHook(() => useConfigSchema());
-    expect(cached.result.current.schema).toEqual({
-      type: "object",
-      properties: {},
-      $defs: {},
-    });
-    expect(fetch).not.toHaveBeenCalled();
+  it("serves later callers from the cache", async () => {
+    const useConfigSchema = await loadHook();
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(SCHEMA));
+    const first = renderHook(() => useConfigSchema());
+    await waitFor(() => expect(first.result.current.schema).toEqual(SCHEMA));
+
+    const later = renderHook(() => useConfigSchema());
+    expect(later.result.current.schema).toEqual(SCHEMA);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

@@ -23,20 +23,16 @@ export function ReferenceOptionsProvider({
 }
 
 export function useReferenceOptions(): ReferenceOptions {
-  const { config } = useConfigStore();
+  // Agents and rooms come from the draft collections, which hold unsaved edits.
+  const { config, agents, rooms } = useConfigStore();
   const extra = useContext(ExtraReferenceOptions);
+  const models = config?.models;
 
   return useMemo(() => {
-    const agents = config?.agents ?? {};
-    const teams = config?.teams ?? {};
     const configured: ReferenceOptions = {
-      model: Object.keys(config?.models ?? {}),
-      agent: Object.keys(agents),
-      room: [
-        ...Object.keys(config?.rooms ?? {}),
-        ...Object.values(agents).flatMap((agent) => agent.rooms ?? []),
-        ...Object.values(teams).flatMap((team) => team.rooms ?? []),
-      ],
+      model: Object.keys(models ?? {}),
+      agent: agents.map((agent) => agent.id),
+      room: rooms.map((room) => room.id),
       tool: [],
     };
     return Object.fromEntries(
@@ -45,5 +41,5 @@ export function useReferenceOptions(): ReferenceOptions {
         [...new Set([...configured[kind], ...(extra[kind] ?? [])])].sort(),
       ]),
     ) as ReferenceOptions;
-  }, [config, extra]);
+  }, [models, agents, rooms, extra]);
 }

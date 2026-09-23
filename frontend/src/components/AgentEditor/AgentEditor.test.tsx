@@ -27,7 +27,7 @@ vi.mock("@/components/ui/toaster", () => ({
 }));
 
 vi.mock("@/hooks/useConfigSchema", () => ({
-  useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null, retry: vi.fn() })),
 }));
 
 // Mock useTools hook
@@ -2045,6 +2045,7 @@ describe("AgentEditor", () => {
         },
       },
       error: null,
+      retry: vi.fn(),
     });
 
     render(<AgentEditor />);

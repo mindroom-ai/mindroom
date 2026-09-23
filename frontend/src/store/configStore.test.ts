@@ -2107,7 +2107,7 @@ describe("configStore", () => {
       await useConfigStore.getState().loadConfig();
       useConfigStore
         .getState()
-        .updateConfigRoot("router", { model: "default" });
+        .updateConfigValue(["router"], { model: "default" });
       useConfigStore
         .getState()
         .updateAgent("test", { tools: ["shell", "browser"] });
@@ -2650,7 +2650,7 @@ describe("configStore", () => {
       (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
 
       const savePromise = useConfigStore.getState().saveConfig();
-      useConfigStore.getState().updateConfigRoot("voice", {
+      useConfigStore.getState().updateConfigValue(["voice"], {
         enabled: true,
         visible_router_echo: true,
         stt: {
@@ -6073,7 +6073,7 @@ describe("configStore", () => {
     });
   });
 
-  describe("updateConfigRoot", () => {
+  describe("updateConfigValue", () => {
     const baseConfig = {
       agents: {
         helper: {
@@ -6129,7 +6129,7 @@ describe("configStore", () => {
     it("marks the root dirty and saves its new value", async () => {
       await loadBaseConfig();
 
-      useConfigStore.getState().updateConfigRoot("router", {
+      useConfigStore.getState().updateConfigValue(["router"], {
         model: "default",
         accept_invites: false,
       });
@@ -6156,17 +6156,55 @@ describe("configStore", () => {
         }),
       });
       await useConfigStore.getState().loadConfig();
-      useConfigStore.getState().updateConfigRoot("router", { model: "fast" });
+      useConfigStore
+        .getState()
+        .updateConfigValue(["router"], { model: "fast" });
 
       const payload = await savedPayload();
       expect(payload.router).toEqual({ model: "fast" });
       expect(payload).not.toHaveProperty("defaults");
     });
 
+    it("clears only the diagnostics of the edited field", async () => {
+      await loadBaseConfig();
+      const siblingIssue = {
+        kind: "validation" as const,
+        issue: {
+          loc: ["defaults", "max_preload_chars"],
+          msg: "Input should be greater than or equal to 1",
+          type: "greater_than_equal",
+        },
+      };
+      useConfigStore.setState({
+        diagnostics: [
+          {
+            kind: "validation",
+            issue: {
+              loc: ["defaults", "markdown"],
+              msg: "Input should be a valid boolean",
+              type: "bool_type",
+            },
+          },
+          siblingIssue,
+        ],
+      });
+
+      useConfigStore
+        .getState()
+        .updateConfigValue(["defaults", "markdown"], false);
+
+      const state = useConfigStore.getState();
+      expect(state.config?.defaults?.markdown).toBe(false);
+      expect(state.dirtyRoots).toEqual(["defaults"]);
+      expect(state.diagnostics).toEqual([siblingIssue]);
+    });
+
     it("removes a root when given undefined", async () => {
       await loadBaseConfig();
 
-      useConfigStore.getState().updateConfigRoot("personal_rooms", undefined);
+      useConfigStore
+        .getState()
+        .updateConfigValue(["personal_rooms"], undefined);
 
       expect(await savedPayload()).not.toHaveProperty("personal_rooms");
     });
@@ -6176,7 +6214,7 @@ describe("configStore", () => {
       const defaults = useConfigStore.getState().config!.defaults!;
       expect(defaults.tools).toEqual(["gmail", "file", "scheduler"]);
 
-      useConfigStore.getState().updateConfigRoot("defaults", {
+      useConfigStore.getState().updateConfigValue(["defaults"], {
         ...defaults,
         tools: ["gmail", "scheduler", "shell"],
       });
@@ -6190,6 +6228,55 @@ describe("configStore", () => {
   });
 
   describe("tool overrides", () => {
+    it("clears lazy-loading flags patched to null and keeps other overrides", async () => {
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          agents: {
+            coder: {
+              display_name: "Coder",
+              role: "Codes",
+              tools: [
+                { shell: { defer: true, initial: true, sandbox: "tight" } },
+              ],
+              skills: [],
+              instructions: [],
+              rooms: [],
+            },
+          },
+          models: { default: { provider: "ollama", id: "test-model" } },
+          defaults: { markdown: true },
+        }),
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          agent_policies: { coder: makeAgentPolicy("coder") },
+        }),
+      });
+      await useConfigStore.getState().loadConfig();
+
+      useConfigStore.getState().updateAgentToolOverrides("coder", "shell", {
+        defer: null,
+        initial: null,
+      });
+      expect(
+        useConfigStore.getState().getAgentToolOverrides("coder", "shell"),
+      ).toEqual({ sandbox: "tight" });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+      await useConfigStore.getState().saveConfig();
+      const saveCall = (global.fetch as any).mock.calls.find(
+        ([url]: [string]) => url === "/api/config/save",
+      );
+      expect(JSON.parse(saveCall[1].body).agents.coder.tools).toEqual([
+        { shell: { sandbox: "tight" } },
+      ]);
+    });
+
     it("normalizes structured tool entries on load and exposes remembered overrides", async () => {
       const mockConfig = {
         agents: {

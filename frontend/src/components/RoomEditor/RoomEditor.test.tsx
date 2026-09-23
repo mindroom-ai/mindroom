@@ -8,7 +8,7 @@ import { Room, Agent, Config } from "@/types/config";
 // Mock the store
 vi.mock("@/store/configStore");
 vi.mock("@/hooks/useConfigSchema", () => ({
-  useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null, retry: vi.fn() })),
 }));
 
 describe("RoomEditor", () => {
@@ -292,7 +292,7 @@ describe("RoomEditor", () => {
   });
 
   it("edits per-room Matrix settings through More settings", () => {
-    const mockUpdateConfigRoot = vi.fn();
+    const mockUpdateConfigValue = vi.fn();
     (useConfigStore as any).mockReturnValue({
       rooms: [mockRoom],
       agents: mockAgents,
@@ -303,7 +303,7 @@ describe("RoomEditor", () => {
       diagnostics: [],
       selectedRoomId: "lobby",
       updateRoom: mockUpdateRoom,
-      updateConfigRoot: mockUpdateConfigRoot,
+      updateConfigValue: mockUpdateConfigValue,
       deleteRoom: mockDeleteRoom,
       saveConfig: mockSaveConfig,
       isDirty: false,
@@ -326,6 +326,7 @@ describe("RoomEditor", () => {
         },
       },
       error: null,
+      retry: vi.fn(),
     });
 
     render(<RoomEditor />);
@@ -334,9 +335,9 @@ describe("RoomEditor", () => {
       target: { value: "true" },
     });
 
-    expect(mockUpdateConfigRoot).toHaveBeenCalledWith("rooms", {
-      lobby: { description: "Main discussion room", encrypted: true },
-      dev: {},
-    });
+    expect(mockUpdateConfigValue).toHaveBeenCalledWith(
+      ["rooms", "lobby", "encrypted"],
+      true,
+    );
   });
 });

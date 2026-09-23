@@ -14,7 +14,7 @@ import {
 // Mock the store
 vi.mock("@/store/configStore");
 vi.mock("@/hooks/useConfigSchema", () => ({
-  useConfigSchema: vi.fn(() => ({ schema: null, error: null })),
+  useConfigSchema: vi.fn(() => ({ schema: null, error: null, retry: vi.fn() })),
 }));
 
 describe("TeamEditor", () => {
@@ -1071,6 +1071,7 @@ describe("TeamEditor", () => {
         },
       },
       error: null,
+      retry: vi.fn(),
     });
 
     render(<TeamEditor />);

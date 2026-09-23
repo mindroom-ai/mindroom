@@ -196,11 +196,9 @@ function renderFixture(
   diagnostics: ConfigDiagnostic[] = [],
 ) {
   vi.mocked(useConfigStore).mockReturnValue({
-    config: {
-      models: { default: {}, sonnet: {} },
-      agents: { helper: { rooms: ["lobby"] } },
-      rooms: { dev: {} },
-    },
+    config: { models: { default: {}, sonnet: {} } },
+    agents: [{ id: "helper" }],
+    rooms: [{ id: "dev" }, { id: "lobby" }],
     diagnostics,
   } as never);
   const onValue = vi.fn();
@@ -514,10 +512,16 @@ describe("SchemaSection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(useConfigStore).mockReturnValue({
-      config: { models: {}, agents: {} },
+      config: { models: {} },
+      agents: [],
+      rooms: [],
       diagnostics: [],
     } as never);
-    vi.mocked(useConfigSchema).mockReturnValue({ schema: ROOT, error: null });
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: ROOT,
+      error: null,
+      retry: vi.fn(),
+    });
   });
 
   const renderSection = (exclude: readonly string[]) =>
@@ -546,7 +550,9 @@ describe("SchemaSection", () => {
 
   it("opens and flags the section when a rendered field has an error", () => {
     vi.mocked(useConfigStore).mockReturnValue({
-      config: { models: {}, agents: {} },
+      config: { models: {} },
+      agents: [],
+      rooms: [],
       diagnostics: [
         {
           kind: "validation",
@@ -595,6 +601,7 @@ describe("SchemaSection", () => {
     vi.mocked(useConfigSchema).mockReturnValue({
       schema: null,
       error: "API call failed: 500",
+      retry: vi.fn(),
     });
     renderSection([]);
     expect(

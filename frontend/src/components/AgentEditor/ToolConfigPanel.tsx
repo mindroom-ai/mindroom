@@ -95,13 +95,13 @@ function normalizePersistedValue(
 
 type DraftValues = Record<string, string | string[]>;
 type EnabledFields = Record<string, boolean>;
-type LazyFlags = { defer?: true; initial?: true };
 
-// Tool entries keep lazy-loading flags beside the override values.
-function lazyFlags(defer: boolean, initial: boolean): LazyFlags {
+// Tool entries keep lazy-loading flags beside the override values; a null
+// entry in the merge patch below removes the flag.
+function lazyFlagPatch(defer: boolean, initial: boolean) {
   return {
-    ...(defer ? { defer: true } : {}),
-    ...(defer && initial ? { initial: true } : {}),
+    defer: defer ? true : null,
+    initial: defer && initial ? true : null,
   };
 }
 
@@ -172,29 +172,24 @@ export function ToolConfigPanel({
     );
   }
 
+  // Send a merge patch: null removes a key, and keys this panel does not
+  // manage stay as authored.
   const commitOverrides = (
     nextEnabled: EnabledFields,
     nextDraft: DraftValues,
-    flags: LazyFlags = lazyFlags(deferEnabled, initialEnabled),
+    flags = lazyFlagPatch(deferEnabled, initialEnabled),
   ) => {
-    const overrides: Record<string, unknown> = { ...flags };
+    const patch: Record<string, unknown> = { ...flags };
     for (const field of fields ?? []) {
-      if (nextEnabled[field.name]) {
-        overrides[field.name] = normalizePersistedValue(
-          field,
-          nextDraft[field.name] ?? "",
-        );
-      }
+      patch[field.name] = nextEnabled[field.name]
+        ? normalizePersistedValue(field, nextDraft[field.name] ?? "")
+        : null;
     }
-    updateAgentToolOverrides(
-      agentId,
-      toolName,
-      Object.keys(overrides).length > 0 ? overrides : null,
-    );
+    updateAgentToolOverrides(agentId, toolName, patch);
   };
 
   const setLazyLoading = (defer: boolean, initial: boolean) =>
-    commitOverrides(enabledFields, draftValues, lazyFlags(defer, initial));
+    commitOverrides(enabledFields, draftValues, lazyFlagPatch(defer, initial));
 
   const toggleField = (fieldName: string, checked: boolean) => {
     const field = fields?.find((f) => f.name === fieldName);
