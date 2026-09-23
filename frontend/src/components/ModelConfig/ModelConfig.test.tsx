@@ -809,38 +809,43 @@ describe("ModelConfig", () => {
       });
     });
 
-    it.each(["saved", "stale"] as const)(
-      "keeps committed More settings edits when the row edit is cancelled after a %s save",
-      async (status) => {
-        mockStore.saveConfig.mockResolvedValueOnce({ status });
-        const updateConfigValue = vi.fn();
-        const { rerender } = render(<ModelConfig />);
-        fireEvent.click(screen.getByText("openai_local"));
-        const edited = withEditedExtraKwargs();
-        vi.mocked(useConfigStore).mockReturnValue({
-          ...edited,
-          updateConfigValue,
-        } as never);
-        rerender(<ModelConfig />);
+    it("reverts only the More settings edits made since the last save", () => {
+      const updateConfigValue = vi.fn();
+      const { rerender } = render(<ModelConfig />);
+      fireEvent.click(screen.getByText("openai_local"));
+      // A save committed the edited model, whatever its result status, and
+      // a later edit changed it again.
+      const committed = withEditedExtraKwargs().config;
+      const draft = {
+        ...committed,
+        models: {
+          ...committed.models,
+          openai_local: {
+            ...committed.models.openai_local,
+            extra_kwargs: {
+              base_url: "http://proxy:8080/v1",
+              temperature: 0.5,
+            },
+          },
+        },
+      };
+      vi.mocked(useConfigStore).mockReturnValue({
+        ...mockStore,
+        config: draft,
+        loadedConfig: committed,
+        updateConfigValue,
+      } as never);
+      rerender(<ModelConfig />);
 
-        fireEvent.click(
-          screen.getByRole("button", { name: "Save All Changes" }),
-        );
-        await waitFor(() => expect(mockStore.saveConfig).toHaveBeenCalled());
-        // Both results commit the draft, which becomes the loaded config.
-        vi.mocked(useConfigStore).mockReturnValue({
-          ...edited,
-          loadedConfig: edited.config,
-          updateConfigValue,
-        } as never);
-        rerender(<ModelConfig />);
-        const row = screen.getByDisplayValue("openai_local").closest("tr");
-        if (!row) throw new Error("row not found");
-        fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+      const row = screen.getByDisplayValue("openai_local").closest("tr");
+      if (!row) throw new Error("row not found");
+      fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
 
-        expect(updateConfigValue).not.toHaveBeenCalled();
-      },
-    );
+      expect(updateConfigValue).toHaveBeenCalledWith(
+        ["models", "openai_local"],
+        committed.models.openai_local,
+      );
+    });
 
     it("keeps the edited row when another row's Edit button is clicked", async () => {
       const updateConfigValue = vi.fn();

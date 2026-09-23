@@ -2240,7 +2240,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         value === undefined && depth > 0;
         depth--
       ) {
-        const block = path.slice(0, depth) as unknown as ConfigPath;
+        const block: ConfigPath = [root, ...path.slice(1, depth)];
         const emptied = getPathValue(nextConfig, block);
         if (
           !isPlainObject(emptied) ||

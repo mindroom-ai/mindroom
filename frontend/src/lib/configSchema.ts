@@ -395,7 +395,7 @@ export function hasEmptyDefault(node: SchemaNode): boolean {
 
 export type ConfigPath = readonly [string, ...string[]];
 
-/** Copy an object with the value at a key path set, or removed when next is undefined. */
+/** Read the value at a key path, or undefined when a segment is missing. */
 export function getPathValue(value: unknown, path: ConfigPath): unknown {
   return path.reduce<unknown>(
     (node, key) => (isPlainObject(node) ? node[key] : undefined),
@@ -403,6 +403,7 @@ export function getPathValue(value: unknown, path: ConfigPath): unknown {
   );
 }
 
+/** Copy an object with the value at a key path set, or removed when next is undefined. */
 export function setPathValue<T extends object>(
   value: T | null | undefined,
   path: ConfigPath,
