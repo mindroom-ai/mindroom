@@ -111,6 +111,7 @@ from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
+    TEAM_THINKING_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingPresentation,
@@ -133,6 +134,7 @@ from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.completion import (
     admit_job_completion,
+    background_wait_edit,
     background_wait_notice,
     completion_envelope,
     completion_prompt,
@@ -1502,14 +1504,9 @@ class ResponseRunner:
         """Run and classify one claimed continuation for either lifecycle entry path."""
         tool_trace: list[ToolTraceEntry] = []
 
-        async def report_wait(presentation: StreamingPresentation) -> None:
+        async def report_wait(presentation: StreamingPresentation, notice: str | None) -> None:
             await self.deps.delivery_gateway.edit_text(
-                EditTextRequest(
-                    target=target,
-                    event_id=claimed.response_event_id,
-                    new_text=presentation.response_text.strip(),
-                    tool_trace=list(presentation.tool_trace),
-                ),
+                background_wait_edit(target, claimed.response_event_id, presentation, notice),
             )
 
         with background_wait_notice(report_wait):
@@ -2794,16 +2791,11 @@ class ResponseRunner:
                 await run_coroutine_until_complete(settle())
             return None
 
-        async def report_wait(presentation: StreamingPresentation) -> None:
+        async def report_wait(presentation: StreamingPresentation, notice: str | None) -> None:
             event_id = early_placeholder.placeholder_event_id or request.existing_event_id
             if event_id is not None and not _is_silent_schedule_response(request):
                 await self.deps.delivery_gateway.edit_text(
-                    EditTextRequest(
-                        target=target,
-                        event_id=event_id,
-                        new_text=presentation.response_text.strip(),
-                        tool_trace=list(presentation.tool_trace),
-                    ),
+                    background_wait_edit(target, event_id, presentation, notice),
                 )
 
         with background_wait_notice(report_wait):
@@ -4243,7 +4235,7 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=session_scope,
             execution_identity=retry_execution_identity,
-            placeholder_message=(None if _is_silent_schedule_response(request) else "🤝 Team Response: Thinking..."),
+            placeholder_message=(None if _is_silent_schedule_response(request) else TEAM_THINKING_PLACEHOLDER),
             early_placeholder_state=placeholder_state,
         )
         if request is None:

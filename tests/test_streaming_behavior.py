@@ -780,6 +780,7 @@ class TestStreamingBehavior:
         )
         assert clean_partial_reply_text("Draft [error]") == "Draft"
         assert clean_partial_reply_text(_PROGRESS_PLACEHOLDER) == ""
+        assert clean_partial_reply_text("🤝 Team Response: Thinking...") == ""
         assert clean_partial_reply_text("...") == ""
 
     @pytest.mark.parametrize(

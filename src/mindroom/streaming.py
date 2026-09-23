@@ -9,6 +9,7 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
+from html import escape
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -74,6 +75,7 @@ __all__ = [
     "PROGRESS_PLACEHOLDER",
     "RESTART_INTERRUPTED_RESPONSE_NOTE",
     "SYNC_RESTART_CANCEL_MSG",
+    "TEAM_THINKING_PLACEHOLDER",
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
     "FinalTextTransform",
@@ -99,6 +101,7 @@ __all__ = [
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
+TEAM_THINKING_PLACEHOLDER = "🤝 Team Response: Thinking..."
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,7 +308,7 @@ def clean_partial_reply_text(text: str) -> str:
     if _STREAM_ERROR_RESPONSE_NOTE in cleaned:
         cleaned = cleaned.split(_STREAM_ERROR_RESPONSE_NOTE, 1)[0].rstrip()
 
-    if cleaned == _PROGRESS_PLACEHOLDER or not cleaned or not any(char.isalnum() for char in cleaned):
+    if cleaned in {_PROGRESS_PLACEHOLDER, TEAM_THINKING_PLACEHOLDER} or not any(char.isalnum() for char in cleaned):
         return ""
     return cleaned
 
@@ -581,6 +584,7 @@ class StreamingResponse:
     transport_is_current: Callable[[], Awaitable[bool]] | None = None
     canonical_final_body_candidate: str | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
+    _background_wait_notice: str | None = field(default=None, init=False, repr=False)
     # Reuse only the last Markdown render; mentions and delivery metadata stay fresh.
     _render_markdown: Callable[[str], str] = field(
         default_factory=lambda: lru_cache(maxsize=1)(markdown_to_html),
@@ -793,6 +797,7 @@ class StreamingResponse:
     ) -> StreamTransportOutcome:
         """Send the terminal update and return immutable transport facts."""
         self._warmup_state.clear_for_terminal_transition()
+        self._background_wait_notice = None
         canonical_final_body_candidate = self.canonical_final_body_candidate
         if canonical_final_body_candidate is None and self.accumulated_text.strip():
             canonical_final_body_candidate = self.accumulated_text
@@ -1141,6 +1146,10 @@ class StreamingResponse:
     ) -> _StreamingDeliverySnapshot | None:
         """Freeze all mutable stream state needed for one formatting pass."""
         warmup_suffix_lines = self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
+        if self._background_wait_notice is not None:
+            warmup_suffix_lines.append(
+                RenderedWarmupLine(self._background_wait_notice, escape(self._background_wait_notice)),
+            )
         if not self.accumulated_text.strip() and not allow_empty_progress and not warmup_suffix_lines:
             return None
 
@@ -1614,15 +1623,17 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
 
     async for chunk in response_stream:
         if isinstance(chunk, BackgroundWaitChunk):
-            await _apply_visible_text_chunk(
-                streaming,
+            streaming._background_wait_notice = chunk.content
+            streaming._mark_nonadditive_text_mutation()
+            completion = _queue_delivery_request(
                 delivery_queue,
-                chunk.content,
-                apply_chunk=streaming._append_incremental_text,
                 force_refresh=True,
                 boundary_refresh=True,
                 wait_for_capture=True,
+                allow_empty_progress=True,
             )
+            if completion is not None:
+                await completion
             continue
         if isinstance(chunk, str):
             text_chunk = chunk

@@ -215,15 +215,15 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(monkeypat
 @pytest.mark.parametrize("quiet", [False, True])
 async def test_collected_wait_updates_owner_before_requesting_next_chunk(*, quiet: bool) -> None:
     """A nonstream Matrix response must expose wait progress before its generator parks."""
-    notices: list[str] = []
+    notices: list[tuple[str, str | None]] = []
 
-    async def notice(presentation: StreamingPresentation) -> None:
-        notices.append(presentation.response_text)
+    async def notice(presentation: StreamingPresentation, notice: str | None) -> None:
+        notices.append((presentation.response_text, notice))
 
     async def stream() -> AsyncGenerator[object, None]:
         yield "Independent work done."
         yield BackgroundWaitChunk(" Waiting for background work")
-        assert notices == ["Independent work done. Waiting for background work"]
+        assert notices == [("Independent work done.", " Waiting for background work")]
         yield " Result received."
 
     with background_wait_notice(notice):

@@ -5,11 +5,17 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.constants import (
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_STREAMING,
+    STREAM_WARMUP_SUFFIX_KEY,
+)
+from mindroom.delivery_gateway import EditTextRequest
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.hooks import MessageEnvelope
@@ -17,6 +23,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_job_completion import ToolJobCompletion
 from mindroom.tool_jobs.control import current_human_message_signal, job_owns_execution
 from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
@@ -28,14 +35,14 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
 
 
-_WAIT_NOTICE: ContextVar[Callable[[StreamingPresentation], Awaitable[None]] | None] = ContextVar(
+_WAIT_NOTICE: ContextVar[Callable[[StreamingPresentation, str | None], Awaitable[None]] | None] = ContextVar(
     "background_wait_notice",
     default=None,
 )
 
 
 @contextmanager
-def background_wait_notice(callback: Callable[[StreamingPresentation], Awaitable[None]]) -> Iterator[None]:
+def background_wait_notice(callback: Callable[[StreamingPresentation, str | None], Awaitable[None]]) -> Iterator[None]:
     """Bind blocking wait progress to the current serialized response's placeholder."""
     token = _WAIT_NOTICE.set(callback)
     try:
@@ -44,11 +51,33 @@ def background_wait_notice(callback: Callable[[StreamingPresentation], Awaitable
         _WAIT_NOTICE.reset(token)
 
 
-async def report_background_wait(presentation: StreamingPresentation) -> None:
+async def report_background_wait(presentation: StreamingPresentation, notice: str | None) -> None:
     """Report blocking wait progress through its response owner when present."""
     callback = _WAIT_NOTICE.get()
     if callback is not None:
-        await callback(presentation)
+        await callback(presentation, notice)
+
+
+def background_wait_edit(
+    target: MessageTarget,
+    event_id: str,
+    presentation: StreamingPresentation,
+    notice: str | None,
+) -> EditTextRequest:
+    """Render active wait progress separately from recoverable answer text."""
+    body = presentation.response_text.strip()
+    visible = body or "Thinking..."
+    return EditTextRequest(
+        target=target,
+        event_id=event_id,
+        new_text=f"{visible}\n\n{notice}" if notice else visible,
+        tool_trace=list(presentation.tool_trace),
+        extra_content={
+            "msgtype": "m.notice",
+            STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+            STREAM_WARMUP_SUFFIX_KEY: notice or "",
+        },
+    )
 
 
 def completion_source_id(job_id: str, generation: int) -> str:
@@ -155,7 +184,7 @@ async def join_conversation_jobs(
     attempted: set[tuple[str, int]],
     *,
     agent_names: Sequence[str] | None = None,
-) -> AsyncIterator[str | _ReadyJobContinuation]:
+) -> AsyncIterator[BackgroundWaitChunk | _ReadyJobContinuation]:
     """Wait outside the model, yielding visible progress and at most one ready prompt."""
     context = get_tool_runtime_context()
     if context is None or job_owns_execution():
@@ -189,8 +218,9 @@ async def join_conversation_jobs(
             return
         ready = [job for job in jobs if job.status not in {"running", "cancel_requested"}]
         if not ready:
-            yield "\n\n⏳ Waiting for background work…\n\n"
+            yield BackgroundWaitChunk("⏳ Waiting for background work…")
             await _wait_for_ready_jobs(runtime, jobs, human)
+            yield BackgroundWaitChunk(None)
             if human.is_set():
                 return
             ready = [job for job in await pending() if job.status not in {"running", "cancel_requested"}]
@@ -241,9 +271,8 @@ async def join_approval_jobs[RunT](
             break
         prompt = None
         async for joined in join_conversation_jobs(attempted, agent_names=agent_names):
-            if isinstance(joined, str):
-                current = presentation()
-                await report_background_wait(replace(current, response_text=current.response_text + joined))
+            if isinstance(joined, BackgroundWaitChunk):
+                await report_background_wait(presentation(), joined.content)
             else:
                 prompt = joined.prompt
         if prompt is None:

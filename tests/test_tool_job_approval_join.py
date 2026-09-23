@@ -93,8 +93,8 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
         await release.wait()
         return "retained actual result"
 
-    async def notice(presentation: StreamingPresentation) -> None:
-        notices.append(presentation.response_text)
+    async def notice(presentation: StreamingPresentation, notice: str | None) -> None:
+        notices.append(presentation.response_text + (notice or ""))
         waiting.set()
 
     model = DelegationModel(
@@ -315,9 +315,10 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
         executions += 1
         return "approved action"
 
-    async def report_wait(presentation: StreamingPresentation) -> None:
+    async def report_wait(presentation: StreamingPresentation, _notice: str | None) -> None:
         notices.append(presentation)
-        waiting.set()
+        if _notice is not None:
+            waiting.set()
 
     model = DelegationModel(
         id="test",
@@ -462,9 +463,10 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
         await releases[calls - 1].wait()
         return "actual result"
 
-    async def report_wait(presentation: StreamingPresentation) -> None:
+    async def report_wait(presentation: StreamingPresentation, _notice: str | None) -> None:
         notices.append(presentation)
-        waiting.set()
+        if _notice is not None:
+            waiting.set()
 
     model = DelegationModel(
         id="test",
@@ -502,7 +504,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
         requester_id=owner.requester_id,
     )
     prefix = StreamingPresentation(
-        "Earlier team answer.\n\n🔧 `original_tool` [1]",
+        "🤝 **Team Response** (Leader):\n\nEarlier team answer.\n\n🔧 `original_tool` [1]",
         tool_trace=(ToolTraceEntry("tool_call_completed", "original_tool", result_preview="earlier result"),),
     )
     if recovered:
@@ -543,7 +545,8 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
             turn_recorder=recorder,
         ):
             if isinstance(chunk, BackgroundWaitChunk):
-                waiting.set()
+                if chunk.content is not None:
+                    waiting.set()
             elif isinstance(chunk, StructuredStreamChunk):
                 rendered = chunk.content
                 final_trace[:] = chunk.tool_trace or []
@@ -609,6 +612,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
                 releases[1].set()
             answer = await asyncio.wait_for(pending, 2)
             assert "Final result received." in answer
+            assert answer.count("**Team Response**") == 1
             assert answer.count("Independent work done.") == 1
             assert recorder.assistant_text.count("Independent work done.") == 1
             assert "Final result received." in recorder.assistant_text

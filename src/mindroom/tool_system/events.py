@@ -48,9 +48,9 @@ class ToolTraceEntry:
 
 @dataclass(frozen=True, slots=True)
 class BackgroundWaitChunk:
-    """Append and flush progress before the response waits for background work."""
+    """Set transient wait progress, or clear it with None, without changing the answer."""
 
-    content: str
+    content: str | None
 
 
 @dataclass(slots=True)

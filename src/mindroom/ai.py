@@ -598,9 +598,10 @@ async def collect_streamed_response_content(  # noqa: C901 - Explicit stream eve
             elif isinstance(chunk, BackgroundWaitChunk):
                 await report_background_wait(
                     StreamingPresentation(
-                        response_text=presentation.final_text() + chunk.content,
+                        response_text=presentation.final_text(),
                         tool_trace=tuple(deepcopy(presentation.tool_trace)) if presentation.show_tool_calls else (),
                     ),
+                    chunk.content,
                 )
             elif isinstance(chunk, RunContentEvent):
                 presentation.append_text(chunk.content)
@@ -1546,6 +1547,7 @@ async def ai_response(  # noqa: C901, PLR0915
         Agent response string
 
     """
+    ctx = replace(ctx, background_tool_jobs=background_tool_jobs_enabled(config, runtime_paths))
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     if collect_streamed_response or ctx.initial_presentation is not None:
@@ -1580,9 +1582,7 @@ async def ai_response(  # noqa: C901, PLR0915
             ),
             show_tool_calls=show_tool_calls,
             tool_trace_collector=tool_trace_collector,
-            suppress_quiet_attempts=(
-                ctx.allow_no_report_response and background_tool_jobs_enabled(config, runtime_paths)
-            ),
+            suppress_quiet_attempts=(ctx.allow_no_report_response and ctx.background_tool_jobs),
         )
 
     session_id = _require_turn_session_id(ctx)
@@ -1750,7 +1750,7 @@ async def ai_response(  # noqa: C901, PLR0915
                         show_tool_calls=show_tool_calls,
                         initial_presentation=StreamingPresentation(
                             response_text=run.prior_response_text,
-                            tool_trace=tuple(run.turn_state.prior_completed_tools),
+                            tool_trace=run.prior_response_tools,
                         ),
                     ),
                     runtime_model_name=prepared_run.runtime_model_name,
@@ -1784,7 +1784,7 @@ async def ai_response(  # noqa: C901, PLR0915
             response_text=_extract_response_content(
                 response,
                 show_tool_calls=show_tool_calls,
-                tool_index_offset=len(run.turn_state.prior_completed_tools) if run.prior_response_text else 0,
+                tool_index_offset=len(run.prior_response_tools),
             ),
             replayable_text=_extract_replayable_response_text(response),
             has_visible_content=bool(response.content),
@@ -1814,7 +1814,7 @@ async def ai_response(  # noqa: C901, PLR0915
     )
     try:
         return await run_blocking_response_turn(
-            replace(ctx, background_tool_jobs=background_tool_jobs_enabled(config, runtime_paths)),
+            ctx,
             adapter,
             TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
             continuation=_initial_agent_continuation(
@@ -2083,6 +2083,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         Streaming chunks/events as they become available
 
     """
+    ctx = replace(ctx, background_tool_jobs=background_tool_jobs_enabled(config, runtime_paths))
     agent_name = ctx.entity_label
     logger.info("AI streaming request", agent=agent_name, room_id=ctx.room_id)
     session_id = _require_turn_session_id(ctx)
@@ -2375,7 +2376,11 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
         # Only the owning attempt can supply terminal-only text. Nested tool
         # completions must not reset this attempt's record of streamed content.
-        if not state.assistant_text and state.canonical_final_body_candidate:
+        if (
+            (ctx.background_tool_jobs or ctx.initial_presentation is not None)
+            and not state.assistant_text
+            and state.canonical_final_body_candidate
+        ):
             yield RunContentEvent(content=state.canonical_final_body_candidate)
 
         metadata_content: dict[str, Any] | None = None
@@ -2446,7 +2451,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         persist_standalone_replay=callbacks.persist_standalone_replay,
     )
     response_stream = stream_response_turn(
-        replace(ctx, background_tool_jobs=background_tool_jobs_enabled(config, runtime_paths)),
+        ctx,
         adapter,
         TurnSinks(
             turn_recorder=turn_recorder,

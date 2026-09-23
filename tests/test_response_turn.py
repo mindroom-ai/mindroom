@@ -975,6 +975,27 @@ def test_tool_only_agent_and_team_presentations_respect_quiet_delivery(
     ]
 
 
+@pytest.mark.parametrize("background_jobs", [False, True])
+def test_quiet_recording_preserves_disabled_driver_behavior(*, background_jobs: bool) -> None:
+    """Only managed joins normalize a quiet attempt's replay text."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+
+    async def attempt(_run: TurnRunState, _continuation: DynamicContinuationRunState) -> CompletedAttempt:
+        return CompletedAttempt(response_text="", replayable_text="  ")
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(allow_no_report_response=True, background_tool_jobs=background_jobs),
+            _blocking_adapter(log, attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        ),
+    )
+    assert result == ""
+    assert recorder.completed_calls[-1]["assistant_text"] == ("" if background_jobs else "  ")
+
+
 def test_blocking_completion_skips_collector_without_metadata_content() -> None:
     """No collector update happens when the attempt resolved without metadata."""
     log = _AdapterLog()

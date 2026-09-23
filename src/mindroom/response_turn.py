@@ -343,6 +343,7 @@ class TurnRunState:
     empty_response_retried: bool = False
     attempted_job_outcomes: set[tuple[str, int]] = field(default_factory=set)
     prior_response_text: str = ""
+    prior_response_tools: tuple[ToolTraceEntry, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -879,6 +880,7 @@ def _advance_turn_continuation(
     if preserve_response:
         prior_assistant_text = run.turn_state.assistant_text_for(resolution.replayable_text)
         run.prior_response_text = append_stream_text(run.prior_response_text, resolution.response_text, separate=True)
+        run.prior_response_tools += resolution.completed_tools
     release_attempt_entity(run.scope_context)
     advanced = continuation.advance(
         continuation_prompt=next_prompt or continuation.original_prompt,
@@ -1168,7 +1170,7 @@ async def _settle_joined_blocking_attempt(
     joined_continuation = None
     if continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
         async for joined in join_conversation_jobs(run.attempted_job_outcomes, agent_names=ctx.tool_job_agent_names):
-            if isinstance(joined, str):
+            if isinstance(joined, BackgroundWaitChunk):
                 initial = ctx.initial_presentation
                 visible_text = (
                     append_stream_text(initial.response_text, response_text, separate=True)
@@ -1177,9 +1179,10 @@ async def _settle_joined_blocking_attempt(
                 )
                 await report_background_wait(
                     StreamingPresentation(
-                        response_text=visible_text + joined,
+                        response_text=visible_text,
                         tool_trace=initial.tool_trace if initial is not None else (),
                     ),
+                    joined.content,
                 )
             else:
                 joined_continuation = _advance_job_continuation(
@@ -1318,13 +1321,18 @@ def _settle_completed_attempt(
             response_text = decision.limit_message
     elif ctx.allow_no_report_response and (
         not resolution.replayable_text.strip()
-        or (run.turn_state.prior_assistant_text and is_silent_schedule_no_report_response(resolution.replayable_text))
+        or (
+            ctx.background_tool_jobs
+            and run.turn_state.prior_assistant_text
+            and is_silent_schedule_no_report_response(resolution.replayable_text)
+        )
     ):
         # Tool presentation and team fallback chrome are not semantic prose.
         # The tool records remain part of the completed turn, but quiet
         # delivery has no final assistant body to publish.
         response_text = tool_marker_text(response_text) if ctx.background_tool_jobs else ""
-        recorded_text = ""
+        if ctx.background_tool_jobs:
+            recorded_text = ""
     return _CompletionSettle(
         keep_going=False,
         continuation=continuation,
@@ -1435,8 +1443,8 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                             run.attempted_job_outcomes,
                             agent_names=ctx.tool_job_agent_names,
                         ):
-                            if isinstance(joined, str):
-                                yield BackgroundWaitChunk(joined)
+                            if isinstance(joined, BackgroundWaitChunk):
+                                yield joined
                             else:
                                 continuation = _advance_job_continuation(
                                     ctx,

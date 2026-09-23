@@ -11,6 +11,8 @@ import nio
 
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix.visible_body import visible_body_from_content
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedAttempt,
@@ -21,7 +23,12 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.streaming import StreamingPresentation
-from mindroom.tool_jobs.completion import background_wait_notice, join_conversation_jobs, report_background_wait
+from mindroom.tool_jobs.completion import (
+    background_wait_edit,
+    background_wait_notice,
+    join_conversation_jobs,
+    report_background_wait,
+)
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -97,7 +104,7 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
         with tool_runtime_context(context):
             if streaming:
                 async for _ in stream_response_turn(
-                    _ctx(allow_no_report_response=True),
+                    _ctx(allow_no_report_response=True, background_tool_jobs=True),
                     _streaming_adapter(_AdapterLog(), stream_attempt),
                     TurnSinks(turn_recorder=recorder),
                     continuation=_continuation(),
@@ -105,7 +112,7 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
                     pass
             else:
                 answer = await run_blocking_response_turn(
-                    _ctx(allow_no_report_response=True),
+                    _ctx(allow_no_report_response=True, background_tool_jobs=True),
                     _blocking_adapter(_AdapterLog(), attempt),
                     TurnSinks(turn_recorder=recorder),
                     continuation=_continuation(),
@@ -284,9 +291,9 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
         await runtime.start(JobSpec("quiet", "tool", 0), owner=owner, operation=operation, human_signal=signal)
         with tool_runtime_context(context), human_message_signal_context(signal):
             stream = join_conversation_jobs(attempted)
-            assert "Waiting" in await anext(stream)
+            assert "Waiting" in (await anext(stream)).content
             signal.notify()
-            assert [item async for item in stream] == []
+            assert [item.content async for item in stream] == [None]
             assert (await runtime.lookup("quiet", owner=owner, depth=0)).status == "running"
             signal.clear()
             finish.set()
@@ -566,14 +573,40 @@ async def test_blocking_join_updates_existing_response_placeholder(tmp_path: Pat
         return True
 
     async def response(_target: object, _state: object) -> None:
-        await report_background_wait(StreamingPresentation("Waiting for background work"))
+        await report_background_wait(StreamingPresentation("Independent answer."), "Waiting for background work")
 
     with patch.object(type(runner.deps.delivery_gateway), "edit_text", edit):
         await runner._run_locked_response_lifecycle(request, response_kind="test", locked_operation=response)
     assert len(edits) == 1
     assert edits[0].event_id == "$placeholder"
     assert "Waiting" in edits[0].new_text
+    assert edits[0].extra_content == {
+        "msgtype": "m.notice",
+        "io.mindroom.stream_status": "streaming",
+        "io.mindroom.warmup_suffix": "Waiting for background work",
+    }
     assert edits[0].delivery_turn_id is None
+
+
+def test_blocking_wait_preserves_formatted_mention_on_recovery(tmp_path: Path) -> None:
+    """Wait metadata must recover the body actually published after mention resolution."""
+    bot = _bot(tmp_path)
+    request = background_wait_edit(_target(), "$response", StreamingPresentation("Ping @general"), "Waiting")
+    content = format_message_with_mentions(
+        bot.config,
+        bot.runtime_paths,
+        request.new_text,
+        extra_content=request.extra_content,
+    )
+    recovered = visible_body_from_content(
+        content,
+        "",
+        sender_id=bot.matrix_id.full_id,
+        trusted_sender_ids={bot.matrix_id.full_id},
+    )
+    expected = content["body"].removesuffix("\n\nWaiting")
+    assert expected != "Ping @general"
+    assert recovered == expected
 
 
 @pytest.mark.asyncio
@@ -696,7 +729,7 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
         await finish.wait()
         return BackgroundOutcome("completed", "retained result")
 
-    async def progress(_presentation: StreamingPresentation) -> None:
+    async def progress(_presentation: StreamingPresentation, _notice: str | None) -> None:
         waiting.set()
 
     async def attempt(_run: TurnRunState, _state: DynamicContinuationRunState) -> CompletedAttempt:

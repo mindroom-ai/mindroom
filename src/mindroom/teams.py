@@ -697,7 +697,11 @@ class _TeamStreamPresentation:
             per_member=self.per_member,
             consensus=self.consensus,
         )
-        body = _format_team_header(self.display_names) + "\n\n".join(parts) if parts else ""
+        body = "\n\n".join(parts)
+        if body and not self.prefix_response_text:
+            body = _format_team_header(self.display_names) + body
+        elif self.prefix_response_text:
+            body = body.lstrip("\n")
         return append_stream_text(self.prefix_response_text, body, separate=True)
 
 
@@ -905,9 +909,12 @@ def _format_terminal_team_response(
     response: TeamRunOutput | RunOutput,
     *,
     team_display_names: list[str],
+    include_header: bool = True,
 ) -> str:
     """Render the final user-visible text for one terminal team fallback output."""
-    return _format_team_header(team_display_names) + _team_response_text(response)
+    header = _format_team_header(team_display_names) if include_header else ""
+    body = _team_response_text(response)
+    return header + (body if include_header else body.lstrip("\n"))
 
 
 def _register_team_notice_storage(
@@ -3106,6 +3113,7 @@ async def team_response(  # noqa: C901, PLR0915
         ctx,
         entity_label=team_name,
         tool_job_agent_names=tuple(requested_agent_names),
+        background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
         transient_enrichment_items=append_knowledge_availability_enrichment(
             ctx.transient_enrichment_items,
             unavailable_bases,
@@ -3283,7 +3291,7 @@ async def team_response(  # noqa: C901, PLR0915
                         response_text=_prepend_team_response_prefix(run.prior_response_text, initial_presentation),
                         tool_trace=(
                             *(initial_presentation.tool_trace if initial_presentation is not None else ()),
-                            *run.turn_state.prior_completed_tools,
+                            *run.prior_response_tools,
                         ),
                     )
                 return replace(
@@ -3375,7 +3383,11 @@ async def team_response(  # noqa: C901, PLR0915
                     and is_silent_schedule_no_report_response(raw_response_text)
                     and not _has_visible_team_member_output(response)
                 )
-                else _format_terminal_team_response(response, team_display_names=team_members.display_names)
+                else _format_terminal_team_response(
+                    response,
+                    team_display_names=team_members.display_names,
+                    include_header=not (run.prior_response_text or ctx.initial_presentation),
+                )
             )
         else:
             response_text = _format_team_header(team_members.display_names) + team_response_text
@@ -3433,10 +3445,7 @@ async def team_response(  # noqa: C901, PLR0915
         discard_empty_run=discard_team_empty_run,
     )
     response_text = await run_blocking_response_turn(
-        replace(
-            ctx,
-            background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
-        ),
+        ctx,
         adapter,
         TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
         continuation=_initial_team_continuation(
@@ -3590,6 +3599,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
         ctx,
         entity_label=team_label,
         tool_job_agent_names=tuple(requested_agent_names),
+        background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
         transient_enrichment_items=append_knowledge_availability_enrichment(
             ctx.transient_enrichment_items,
             unavailable_bases,
@@ -3906,7 +3916,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     )
                     return
                 replayable_text = response_text if event_has_visible else ""
-                if emitted_output:
+                if emitted_output and (ctx.background_tool_jobs or ctx.initial_presentation is not None):
                     # The aggregate terminal output must not replace the live
                     # document with a prose-only rendering that drops its trace.
                     _append_team_output_text(
@@ -4075,8 +4085,8 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     completed_tool_executions.append(event.tool)
                 presentation.complete_tool("team", event.tool)
             elif isinstance(event, TeamRunCompletedEvent):
-                # Real Agno team streams never yield a terminal run output;
-                # this event is the stream's usage/identity source instead.
+                # Record usage and identity even for providers that omit the
+                # aggregate terminal output after their stream events.
                 if event.team_id in (None, "", bound_team_id):
                     completed_run_event = event
                     holder.attempt_run_id = event.run_id or attempt_run_id
@@ -4197,10 +4207,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
         discard_empty_run=discard_team_empty_run,
     )
     response_stream = stream_response_turn(
-        replace(
-            ctx,
-            background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
-        ),
+        ctx,
         adapter,
         TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
         continuation=_initial_team_continuation(
