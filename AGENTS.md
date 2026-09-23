@@ -295,7 +295,6 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
 | `tool_jobs/completion.py` | Internal completion admission and transient waiting presentation |
 | `tool_jobs/user_stop.py` | Conversation Stop ordering and restoration of durable cancellation intent |
-| `tool_job_completion.py` | Immutable job-generation references for internal completion events |
 | `tool_system/construction.py` | Selected toolkit factory and digested constructor identity |
 | `tool_system/filters.py` | Shared include/exclude function policy |
 | `custom_tools/job.py` | Reserved job discovery/control tool and native delegation-wait projection |
