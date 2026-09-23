@@ -70,6 +70,7 @@ from mindroom.config.runtime_overlays import (
     apply_runtime_approved_egress_overlay,
     strip_runtime_approved_egress_overlay_from_dump,
 )
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.voice import VoiceConfig
 from mindroom.config.yaml_includes import (
@@ -425,16 +426,22 @@ class Config(BaseModel):
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     rooms: dict[str, RoomConfig] = Field(default_factory=dict, description="Managed Matrix room metadata")
-    room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
+    room_models: dict[str, str] = Field(
+        default_factory=dict,
+        description="Room-specific model overrides",
+        json_schema_extra=dashboard_hint(key_reference="room", reference="model"),
+    )
     room_thread_summary_models: dict[str, str] = Field(
         default_factory=dict,
         description="Room-specific model overrides for automatic thread summaries",
+        json_schema_extra=dashboard_hint(key_reference="room", reference="model"),
     )
     plugins: list[PluginEntryConfig] = Field(default_factory=list, description="Plugin entries")
     debug: DebugConfig = Field(default_factory=DebugConfig, description="Debug and diagnostic settings")
     prompts: dict[str, str] = Field(
         default_factory=dict,
         description="Built-in prompt overrides keyed by the uppercase global name from mindroom.prompts",
+        json_schema_extra=dashboard_hint(multiline=True),
     )
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")

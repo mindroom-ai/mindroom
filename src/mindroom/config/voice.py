@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.credentials import validate_service_name
 from mindroom.model_defaults import OPENAI_TRANSCRIPTION
 
@@ -36,7 +37,11 @@ class SpeechServiceConfig(BaseModel):
         description="Speech provider adapter (OpenAI or an OpenAI-compatible endpoint)",
     )
     model: str = Field(description="Provider speech model name")
-    api_key: str | None = Field(default=None, description="Optional service-specific API key")
+    api_key: str | None = Field(
+        default=None,
+        description="Optional service-specific API key",
+        json_schema_extra=dashboard_hint(secret=True),
+    )
     credentials_service: str | None = Field(
         default=None,
         description="Optional named credential service containing the speech API key",
@@ -110,7 +115,11 @@ class VoiceSTTConfig(SpeechServiceConfig):
 class _VoiceLLMConfig(BaseModel):
     """Configuration for voice transcript normalization."""
 
-    model: str = Field(default="default", description="Model for mention normalization and light ASR cleanup")
+    model: str = Field(
+        default="default",
+        description="Model for mention normalization and light ASR cleanup",
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
 
 
 class VoiceConfig(BaseModel):

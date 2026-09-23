@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.runtime_env_policy import is_runtime_database_url_env_name
 
 if TYPE_CHECKING:
@@ -127,6 +128,7 @@ class EventJournalConfig(BaseModel):
         description=(
             "PostgreSQL connection URL for the durable Matrix event journal. Prefer database_url_env for secrets."
         ),
+        json_schema_extra=dashboard_hint(secret=True),
     )
     database_url_env: str = Field(
         default="MINDROOM_EVENT_CACHE_DATABASE_URL",

@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
+from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import duplicate_items
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.matrix_identifiers import split_concrete_matrix_user_ids
@@ -51,9 +52,22 @@ class ResponderAccessConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    current_room_members: bool | None = None
-    members_of_rooms: list[str] | None = None
-    users: list[str] = Field(default_factory=list)
+    current_room_members: bool | None = Field(
+        default=None,
+        description="Allow joined members of the current room; the router defaults to true",
+    )
+    members_of_rooms: list[str] | None = Field(
+        default=None,
+        description=(
+            "Allow joined members of these managed rooms; unset infers the responder's configured rooms "
+            "and an empty list disables inferred grants"
+        ),
+        json_schema_extra=dashboard_hint(reference="room"),
+    )
+    users: list[str] = Field(
+        default_factory=list,
+        description="Allow these Matrix user IDs or glob patterns",
+    )
 
     @field_validator("members_of_rooms", "users")
     @classmethod
@@ -70,11 +84,20 @@ class RoomDefaultsConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    join_policy: RoomJoinPolicy = "invite"
-    listed: bool = False
-    encrypted: bool = False
-    invite_users: list[str] = Field(default_factory=list)
-    admins: list[str] = Field(default_factory=list)
+    join_policy: RoomJoinPolicy = Field(default="invite", description="How people may join managed rooms")
+    listed: bool = Field(default=False, description="Publish managed rooms in the server room directory")
+    encrypted: bool = Field(
+        default=False,
+        description="Enable end-to-end encryption in managed rooms; enabling it on a room is irreversible",
+    )
+    invite_users: list[str] = Field(
+        default_factory=list,
+        description="Matrix users invited to every managed room",
+    )
+    admins: list[str] = Field(
+        default_factory=list,
+        description="Matrix users granted administrator power in every managed room",
+    )
 
     @field_validator("invite_users", "admins")
     @classmethod

@@ -3028,6 +3028,14 @@ def test_get_raw_config_source_returns_current_invalid_file(
     assert response.json() == {"source": invalid_source, "uses_includes": False}
 
 
+def test_get_config_schema_returns_annotated_config_schema(test_client: TestClient) -> None:
+    """Dashboard editors render forms from the configuration JSON schema."""
+    response = test_client.get("/api/config/schema")
+
+    assert response.status_code == 200
+    assert response.json() == Config.model_json_schema()
+
+
 def test_get_raw_config_source_returns_replacement_text_for_non_utf8_invalid_file(
     test_client: TestClient,
     temp_config_file: Path,

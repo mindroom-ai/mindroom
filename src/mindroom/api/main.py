@@ -22,6 +22,7 @@ from mindroom.api.computers import active_computer_worker_keys, rebind_computer_
 from mindroom.api.computers import router as computers_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
 from mindroom.api.config_reload import router as config_reload_router
+from mindroom.api.config_schema import router as config_schema_router
 from mindroom.api.connections import router as connections_router
 
 # Import routers
@@ -755,6 +756,7 @@ app.include_router(matrix_router, dependencies=[Depends(verify_user)])
 app.include_router(thread_exports_router, dependencies=[Depends(verify_user)])
 app.include_router(response_activity_router)  # Aggregate operational probe, like health/readiness.
 app.include_router(config_reload_router)  # Requires its own operator bearer key.
+app.include_router(config_schema_router, dependencies=[Depends(verify_user)])
 app.include_router(oauth_router)
 app.include_router(schedules_router, dependencies=[Depends(verify_user)])
 app.include_router(knowledge_router, dependencies=[Depends(verify_user)])
