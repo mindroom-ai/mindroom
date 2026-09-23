@@ -20,6 +20,7 @@ import { useConfigSchema } from "@/hooks/useConfigSchema";
 import { useTools } from "@/hooks/useTools";
 import {
   classifySchemaNode,
+  fieldLabel,
   rootPropertySchema,
   setObjectKey,
   type JsonSchema,
@@ -36,18 +37,20 @@ function SettingsEntryView({
   entry,
   root,
   value,
+  showHeading,
   onChange,
 }: {
   entry: SettingsEntry;
   root: JsonSchema;
   value: unknown;
+  showHeading: boolean;
   onChange: (next: unknown) => void;
 }) {
   const schema = rootPropertySchema(root, entry.root);
   const node = classifySchemaNode(schema, root);
   // Plain object roots render their keys directly instead of one nested block.
   if (entry.keys != null || (node.kind === "object" && !node.nullable)) {
-    return (
+    const fields = (
       <SchemaFields
         schema={schema}
         root={root}
@@ -56,6 +59,22 @@ function SettingsEntryView({
         include={entry.keys}
         onFieldChange={(key, next) => onChange(setObjectKey(value, key, next))}
       />
+    );
+    if (!showHeading || entry.keys != null) {
+      return fields;
+    }
+    return (
+      <div className="space-y-4">
+        <div>
+          <h3 className="text-sm font-semibold">{fieldLabel(entry.root)}</h3>
+          {node.description && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {node.description}
+            </p>
+          )}
+        </div>
+        {fields}
+      </div>
     );
   }
   return (
@@ -174,6 +193,7 @@ export function Settings() {
                       key={`${entry.root}:${entry.keys?.join(",") ?? "*"}`}
                       entry={entry}
                       root={root}
+                      showHeading={active.entries.length > 1}
                       value={
                         config == null
                           ? undefined
