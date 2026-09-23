@@ -173,6 +173,10 @@ const ROOT: JsonSchema = {
           additionalProperties: { type: "string" },
           "x-mindroom": { key_reference: "room", reference: "model" },
         },
+        aliases: {
+          type: "object",
+          additionalProperties: { type: "array", items: { type: "string" } },
+        },
         participation: {
           anyOf: [{ $ref: "#/$defs/ParticipationConfig" }, { type: "null" }],
           default: null,
@@ -535,6 +539,14 @@ describe("SchemaFields", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Reset Welcome" }));
     expect(lastValue()).toEqual({});
+  });
+
+  it("keeps a map entry whose list is emptied", () => {
+    const { lastValue } = renderFixture({
+      aliases: { "@alice:x": ["@tg_1:x"] },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Remove @tg_1:x" }));
+    expect(lastValue()).toEqual({ aliases: { "@alice:x": [] } });
   });
 
   it("renames map keys in place", () => {

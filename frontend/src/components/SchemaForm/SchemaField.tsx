@@ -268,6 +268,9 @@ export function SchemaField({
       root={root}
       value={value}
       path={path}
+      // Required and nullable fields distinguish an emptied value from an
+      // absent one; optional fields fall back to their default.
+      keepEmpty={required || node.nullable}
       onChange={onChange}
     />
   );
@@ -358,6 +361,7 @@ function ValueEditor({
   root,
   value,
   path,
+  keepEmpty,
   onChange,
 }: {
   name: string;
@@ -366,6 +370,8 @@ function ValueEditor({
   root: JsonSchema;
   value: unknown;
   path: SchemaPath;
+  /** Write an emptied block or collection instead of removing its key. */
+  keepEmpty: boolean;
   onChange: (next: unknown) => void;
 }) {
   switch (node.kind) {
@@ -380,7 +386,7 @@ function ValueEditor({
             const updated = setObjectKey(value, key, next);
             // An emptied optional block falls back to its defaults.
             onChange(
-              Object.keys(updated).length === 0 && !node.nullable
+              Object.keys(updated).length === 0 && !keepEmpty
                 ? undefined
                 : updated,
             );
@@ -405,7 +411,7 @@ function ValueEditor({
           path={path}
           onChange={(items) =>
             onChange(
-              items.length === 0 && !node.nullable && hasEmptyDefault(node)
+              items.length === 0 && !keepEmpty && hasEmptyDefault(node)
                 ? undefined
                 : items,
             )
@@ -429,7 +435,7 @@ function ValueEditor({
           onChange={(entries) =>
             onChange(
               Object.keys(entries).length === 0 &&
-                !node.nullable &&
+                !keepEmpty &&
                 hasEmptyDefault(node)
                 ? undefined
                 : entries,
@@ -921,16 +927,16 @@ function UnionEditor({
         <ValueEditor
           name={name}
           label={label}
-          // Nullable keeps an emptied variant value instead of reverting to the
-          // union default, so the chosen variant stays selected.
           node={{
             ...selectedNode,
-            nullable: true,
             hint: { ...selectedNode.hint, ...node.hint },
           }}
           root={root}
           value={effective}
           path={path}
+          // An emptied variant value stays instead of reverting to the union
+          // default, so the chosen variant stays selected.
+          keepEmpty
           onChange={onChange}
         />
       )}
