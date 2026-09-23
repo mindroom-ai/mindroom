@@ -505,8 +505,9 @@ Sharing another room with the publisher agent grants no access to the origin-roo
 The origin room ID and publisher identities come from trusted tool runtime context and are never model-controlled arguments.
 Delegated and workflow agents record the calling agent's Matrix account as the publisher because that account owns the room membership.
 The browser route re-reads report metadata and revocation state for every document or asset request.
-Successful Matrix membership checks are cached for at most 20 seconds and in at most 1024 entries, so departure may take up to 20 seconds to affect access.
-Revocation bypasses that membership cache and takes effect immediately.
+Membership comes from the publisher account's synced room state, the same membership source agents use to decide whom they answer, so departure takes effect at that account's next sync.
+A lazily loaded member list is completed with one homeserver request and reused until the next membership change.
+Revocation takes effect immediately.
 Viewers need no dashboard access, administrative UI, API key, general MindRoom API permission, report-management UI, or publishing-tool access.
 The browser may authenticate through a trusted reverse proxy, SSO layer, or another existing verified identity provider that maps to Matrix identity.
 MindRoom does not add a report login UI or reuse the Matrix client browser session.

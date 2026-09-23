@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
-    from mindroom.report_publishing.authorization import ReportAuthorizationDecision
+    from mindroom.report_publishing.authorization import ReportAuthorizationReason
     from mindroom.report_publishing.store import OriginRoomBinding
     from mindroom.response_activity import ResponseIdentity
     from mindroom.response_admission import ResponseAdmissionGate
@@ -123,7 +123,7 @@ class ExternalTriggerRuntime:
 class ReportAuthorizationRuntime:
     """Runtime callback for live origin-room report authorization."""
 
-    authorize: Callable[[OriginRoomBinding, str], Awaitable[ReportAuthorizationDecision]]
+    authorize: Callable[[OriginRoomBinding, str], Awaitable[ReportAuthorizationReason]]
 
 
 @dataclass

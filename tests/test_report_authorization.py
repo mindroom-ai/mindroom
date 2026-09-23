@@ -1,8 +1,7 @@
-"""Tests for exact-room report authorization and bounded caching."""
+"""Tests for exact-room report authorization against synced Matrix membership."""
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -15,17 +14,17 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.orchestration.report_authorization_runtime import _OriginRoomReportAuthorizer
-from mindroom.report_publishing.authorization import (
-    OriginRoomAuthorizationKey,
-    ReportAuthorizationDecision,
-    ReportAuthorizationReason,
-    SuccessfulReportAuthorizationCache,
-)
+from mindroom.report_publishing.authorization import ReportAuthorizationReason
 from mindroom.report_publishing.store import OriginRoomBinding
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.matrix.identity import MatrixID
+
+_ORIGIN_ROOM_ID = "!origin:localhost"
+_VIEWER_ID = "@alice:localhost"
 
 
 @dataclass
@@ -34,7 +33,7 @@ class _FakeBot:
 
     client: AsyncMock | None
     running: bool
-    matrix_id: object
+    matrix_id: MatrixID
 
 
 def _config(tmp_path: Path) -> Config:
@@ -48,122 +47,109 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
+def _publisher_id(config: Config) -> MatrixID:
+    return entity_identity_registry(config, runtime_paths_for(config)).current_id("general")
+
+
 def _origin_room(config: Config, **changes: str) -> OriginRoomBinding:
-    publisher_matrix_user_id = (
-        entity_identity_registry(
-            config,
-            runtime_paths_for(config),
-        )
-        .current_id("general")
-        .full_id
-    )
     origin_room = OriginRoomBinding(
-        room_id="!origin:localhost",
+        room_id=_ORIGIN_ROOM_ID,
         publisher_entity_name="general",
-        publisher_matrix_user_id=publisher_matrix_user_id,
+        publisher_matrix_user_id=_publisher_id(config).full_id,
     )
     return replace(origin_room, **changes)
 
 
-def _cache_key(room_id: str = "!room:localhost") -> OriginRoomAuthorizationKey:
-    return OriginRoomAuthorizationKey(
-        origin_room=OriginRoomBinding(room_id, "general", "@general:localhost"),
-        viewer_matrix_user_id="@alice:localhost",
-    )
+def _room(config: Config, members: set[str], *, members_synced: bool = True) -> nio.MatrixRoom:
+    room = nio.MatrixRoom(_ORIGIN_ROOM_ID, _publisher_id(config).full_id)
+    for user_id in members:
+        room.add_member(user_id, None, None)
+    room.members_synced = members_synced
+    return room
 
 
 def _authorizer(
     config: Config,
-    *,
-    joined_rooms: list[str] | None = None,
-    members: set[str] | None = None,
-    cache: SuccessfulReportAuthorizationCache | None = None,
+    rooms: dict[str, nio.MatrixRoom],
 ) -> tuple[_OriginRoomReportAuthorizer, AsyncMock]:
-    publisher_matrix_id = entity_identity_registry(
-        config,
-        runtime_paths_for(config),
-    ).current_id("general")
     client = AsyncMock(spec=nio.AsyncClient)
-    if joined_rooms is None:
-        client.joined_rooms.return_value = nio.JoinedRoomsResponse(["!origin:localhost"])
-    else:
-        client.joined_rooms.return_value = nio.JoinedRoomsResponse(joined_rooms)
-    joined_members = members or {publisher_matrix_id.full_id, "@alice:localhost"}
-    client.joined_members.return_value = nio.JoinedMembersResponse(
-        [nio.RoomMember(user_id, "", "") for user_id in joined_members],
-        "!origin:localhost",
+    client.rooms = rooms
+    bot = _FakeBot(client=client, running=True, matrix_id=_publisher_id(config))
+    authorizer = _OriginRoomReportAuthorizer(
+        config=config,
+        bots={"general": bot},  # type: ignore[dict-item]
+        runtime_paths=runtime_paths_for(config),
     )
-    bot = _FakeBot(client=client, running=True, matrix_id=publisher_matrix_id)
-    return (
-        _OriginRoomReportAuthorizer(
-            config=config,
-            bots={"general": bot},  # type: ignore[dict-item]
-            runtime_paths=runtime_paths_for(config),
-            cache=cache or SuccessfulReportAuthorizationCache(),
-        ),
-        client,
-    )
+    return authorizer, client
 
 
 @pytest.mark.asyncio
 async def test_origin_room_authorization_allows_exact_joined_room(tmp_path: Path) -> None:
     """Viewer and publisher currently joined to exact origin room should pass."""
     config = _config(tmp_path)
-    authorizer, _client = _authorizer(config)
+    room = _room(config, {_publisher_id(config).full_id, _VIEWER_ID})
+    authorizer, client = _authorizer(config, {_ORIGIN_ROOM_ID: room})
 
-    decision = await authorizer.authorize(_origin_room(config), "@alice:localhost")
+    reason = await authorizer.authorize(_origin_room(config), _VIEWER_ID)
 
-    assert decision.reason is ReportAuthorizationReason.AUTHORIZED
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("members", "reason"),
-    [
-        ({"publisher"}, ReportAuthorizationReason.VIEWER_NOT_JOINED),
-        ({"@alice:localhost"}, ReportAuthorizationReason.PUBLISHER_NOT_JOINED),
-    ],
-)
-async def test_origin_room_authorization_requires_both_joined_members(
-    tmp_path: Path,
-    members: set[str],
-    reason: ReportAuthorizationReason,
-) -> None:
-    """Invited, left, banned, or absent identities are absent from joined_members."""
-    config = _config(tmp_path)
-    publisher_id = _origin_room(config).publisher_matrix_user_id
-    concrete_members = {publisher_id if member == "publisher" else member for member in members}
-    authorizer, _client = _authorizer(config, members=concrete_members)
-
-    decision = await authorizer.authorize(_origin_room(config), "@alice:localhost")
-
-    assert decision.reason is reason
+    assert reason is ReportAuthorizationReason.AUTHORIZED
+    client.joined_members.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_origin_room_authorization_rejects_other_common_room(tmp_path: Path) -> None:
-    """Sharing another room with publisher must not authorize origin room."""
+async def test_origin_room_authorization_rejects_invited_viewer(tmp_path: Path) -> None:
+    """An invite is not current joined membership."""
     config = _config(tmp_path)
-    authorizer, _client = _authorizer(config, joined_rooms=["!other:localhost"])
+    room = _room(config, {_publisher_id(config).full_id})
+    room.add_member(_VIEWER_ID, None, None, invited=True)
+    authorizer, _client = _authorizer(config, {_ORIGIN_ROOM_ID: room})
 
-    decision = await authorizer.authorize(_origin_room(config), "@alice:localhost")
+    reason = await authorizer.authorize(_origin_room(config), _VIEWER_ID)
 
-    assert decision.reason is ReportAuthorizationReason.PUBLISHER_NOT_JOINED
+    assert reason is ReportAuthorizationReason.VIEWER_NOT_JOINED
+
+
+@pytest.mark.asyncio
+async def test_origin_room_authorization_applies_synced_departure_immediately(tmp_path: Path) -> None:
+    """A synced leave should revoke access on the next request without a cache window."""
+    config = _config(tmp_path)
+    room = _room(config, {_publisher_id(config).full_id, _VIEWER_ID})
+    authorizer, _client = _authorizer(config, {_ORIGIN_ROOM_ID: room})
+
+    before = await authorizer.authorize(_origin_room(config), _VIEWER_ID)
+    room.remove_member(_VIEWER_ID)
+    after = await authorizer.authorize(_origin_room(config), _VIEWER_ID)
+
+    assert before is ReportAuthorizationReason.AUTHORIZED
+    assert after is ReportAuthorizationReason.VIEWER_NOT_JOINED
+
+
+@pytest.mark.asyncio
+async def test_origin_room_authorization_rejects_room_the_publisher_left(tmp_path: Path) -> None:
+    """Sharing another room with the publisher must not authorize the origin room."""
+    config = _config(tmp_path)
+    other_room = nio.MatrixRoom("!other:localhost", _publisher_id(config).full_id)
+    other_room.add_member(_VIEWER_ID, None, None)
+    authorizer, _client = _authorizer(config, {"!other:localhost": other_room})
+
+    reason = await authorizer.authorize(_origin_room(config), _VIEWER_ID)
+
+    assert reason is ReportAuthorizationReason.PUBLISHER_NOT_JOINED
 
 
 @pytest.mark.asyncio
 async def test_origin_room_authorization_rejects_stored_publisher_identity_mismatch(tmp_path: Path) -> None:
     """Stored publisher identity must match current configured runtime identity."""
     config = _config(tmp_path)
-    authorizer, client = _authorizer(config)
+    room = _room(config, {_publisher_id(config).full_id, _VIEWER_ID})
+    authorizer, _client = _authorizer(config, {_ORIGIN_ROOM_ID: room})
 
-    decision = await authorizer.authorize(
+    reason = await authorizer.authorize(
         _origin_room(config, publisher_matrix_user_id="@old-general:localhost"),
-        "@alice:localhost",
+        _VIEWER_ID,
     )
 
-    assert decision.reason is ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH
-    client.joined_members.assert_not_awaited()
+    assert reason is ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH
 
 
 @pytest.mark.asyncio
@@ -174,14 +160,10 @@ async def test_origin_room_authorization_treats_configured_publisher_outage_as_b
 ) -> None:
     """Configured publisher runtime outages should produce a retryable failure."""
     config = _config(tmp_path)
-    publisher_matrix_id = entity_identity_registry(
-        config,
-        runtime_paths_for(config),
-    ).current_id("general")
     publisher_bot = _FakeBot(
         client=None if runtime_state == "client_missing" else AsyncMock(spec=nio.AsyncClient),
         running=runtime_state != "stopped",
-        matrix_id=publisher_matrix_id,
+        matrix_id=_publisher_id(config),
     )
     bots = {} if runtime_state == "missing" else {"general": publisher_bot}
     authorizer = _OriginRoomReportAuthorizer(
@@ -190,9 +172,9 @@ async def test_origin_room_authorization_treats_configured_publisher_outage_as_b
         runtime_paths=runtime_paths_for(config),
     )
 
-    decision = await authorizer.authorize(_origin_room(config), "@alice:localhost")
+    reason = await authorizer.authorize(_origin_room(config), _VIEWER_ID)
 
-    assert decision.reason is ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE
+    assert reason is ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -210,200 +192,39 @@ async def test_origin_room_authorization_treats_removed_publisher_as_identity_mi
         runtime_paths=runtime_paths,
     )
 
-    decision = await authorizer.authorize(_origin_room(original_config), "@alice:localhost")
+    reason = await authorizer.authorize(_origin_room(original_config), _VIEWER_ID)
 
-    assert decision.reason is ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH
+    assert reason is ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_origin_room_authorization_completes_partial_membership_once(tmp_path: Path) -> None:
+    """A lazily loaded member list is completed authoritatively and reused until membership changes."""
+    config = _config(tmp_path)
+    publisher_id = _publisher_id(config).full_id
+    room = _room(config, {publisher_id}, members_synced=False)
+    authorizer, client = _authorizer(config, {_ORIGIN_ROOM_ID: room})
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        [nio.RoomMember(publisher_id, "", ""), nio.RoomMember(_VIEWER_ID, "", "")],
+        _ORIGIN_ROOM_ID,
+    )
+
+    first = await authorizer.authorize(_origin_room(config), _VIEWER_ID)
+    second = await authorizer.authorize(_origin_room(config), _VIEWER_ID)
+
+    assert first is ReportAuthorizationReason.AUTHORIZED
+    assert second is ReportAuthorizationReason.AUTHORIZED
+    client.joined_members.assert_awaited_once_with(_ORIGIN_ROOM_ID)
 
 
 @pytest.mark.asyncio
 async def test_origin_room_authorization_fails_closed_on_matrix_error(tmp_path: Path) -> None:
     """Matrix transport failures must never become successful authorization."""
     config = _config(tmp_path)
-    authorizer, client = _authorizer(config)
+    room = _room(config, {_publisher_id(config).full_id, _VIEWER_ID}, members_synced=False)
+    authorizer, client = _authorizer(config, {_ORIGIN_ROOM_ID: room})
     client.joined_members.side_effect = RuntimeError("homeserver unavailable")
 
-    decision = await authorizer.authorize(_origin_room(config), "@alice:localhost")
+    reason = await authorizer.authorize(_origin_room(config), _VIEWER_ID)
 
-    assert decision.reason is ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE
-
-
-@pytest.mark.asyncio
-async def test_success_cache_reuses_root_and_assets_until_expiry(tmp_path: Path) -> None:
-    """Successful static asset checks should reuse one short membership decision."""
-    config = _config(tmp_path)
-    now = [100.0]
-    cache = SuccessfulReportAuthorizationCache(ttl_seconds=20, monotonic=lambda: now[0])
-    authorizer, client = _authorizer(config, cache=cache)
-    origin_room = _origin_room(config)
-
-    first = await authorizer.authorize(origin_room, "@alice:localhost")
-    second = await authorizer.authorize(origin_room, "@alice:localhost")
-    now[0] = 121.0
-    third = await authorizer.authorize(origin_room, "@alice:localhost")
-
-    assert first.cache_hit is False
-    assert second.cache_hit is True
-    assert third.cache_hit is False
-    assert client.joined_members.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_membership_removal_takes_effect_after_success_cache_ttl(tmp_path: Path) -> None:
-    """Viewer departure may use cached success only until bounded TTL expires."""
-    config = _config(tmp_path)
-    now = [100.0]
-    cache = SuccessfulReportAuthorizationCache(ttl_seconds=20, monotonic=lambda: now[0])
-    authorizer, client = _authorizer(config, cache=cache)
-    origin_room = _origin_room(config)
-
-    initial = await authorizer.authorize(origin_room, "@alice:localhost")
-    client.joined_members.return_value = nio.JoinedMembersResponse(
-        [nio.RoomMember(origin_room.publisher_matrix_user_id, "", "")],
-        "!origin:localhost",
-    )
-    cached = await authorizer.authorize(origin_room, "@alice:localhost")
-    now[0] = 121.0
-    after_expiry = await authorizer.authorize(origin_room, "@alice:localhost")
-
-    assert initial.authorized is True
-    assert cached.authorized is True
-    assert cached.cache_hit is True
-    assert after_expiry.reason is ReportAuthorizationReason.VIEWER_NOT_JOINED
-
-
-@pytest.mark.asyncio
-async def test_success_cache_keys_isolate_security_identities(tmp_path: Path) -> None:
-    """Room, viewer, and publisher identity changes must not share cached authority."""
-    config = _config(tmp_path)
-    authorizer, client = _authorizer(
-        config,
-        members={
-            _origin_room(config).publisher_matrix_user_id,
-            "@alice:localhost",
-            "@bob:localhost",
-        },
-    )
-    origin_room = _origin_room(config)
-
-    await authorizer.authorize(origin_room, "@alice:localhost")
-    await authorizer.authorize(origin_room, "@bob:localhost")
-    wrong_room = await authorizer.authorize(
-        replace(origin_room, room_id="!other:localhost"),
-        "@alice:localhost",
-    )
-
-    assert client.joined_members.await_count == 2
-    assert wrong_room.reason is ReportAuthorizationReason.PUBLISHER_NOT_JOINED
-
-
-@pytest.mark.asyncio
-async def test_success_cache_coalesces_concurrent_checks() -> None:
-    """Concurrent identical assets should share one in-flight membership check."""
-    cache = SuccessfulReportAuthorizationCache()
-    key = _cache_key()
-    calls = 0
-
-    async def check() -> ReportAuthorizationDecision:
-        nonlocal calls
-        calls += 1
-        await asyncio.sleep(0)
-        return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZED)
-
-    decisions = await asyncio.gather(*(cache.authorize(key, check) for _ in range(5)))
-
-    assert calls == 1
-    assert all(decision.authorized for decision in decisions)
-
-
-@pytest.mark.asyncio
-async def test_success_cache_creator_cancellation_does_not_cancel_shared_check() -> None:
-    """Cancelling the first waiter must not cancel a check used by another waiter."""
-    cache = SuccessfulReportAuthorizationCache()
-    key = _cache_key()
-    check_started = asyncio.Event()
-    release_check = asyncio.Event()
-    calls = 0
-
-    async def check() -> ReportAuthorizationDecision:
-        nonlocal calls
-        calls += 1
-        check_started.set()
-        await release_check.wait()
-        return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZED)
-
-    creator = asyncio.create_task(cache.authorize(key, check))
-    await check_started.wait()
-    creator.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await creator
-
-    sibling = asyncio.create_task(cache.authorize(key, check))
-    await asyncio.sleep(0)
-    release_check.set()
-    decision = await sibling
-
-    assert decision.authorized is True
-    assert calls == 1
-
-
-@pytest.mark.asyncio
-async def test_success_cache_sibling_cancellation_does_not_cancel_shared_check() -> None:
-    """Cancelling a joined waiter must not cancel the creator's check."""
-    cache = SuccessfulReportAuthorizationCache()
-    key = _cache_key()
-    check_started = asyncio.Event()
-    release_check = asyncio.Event()
-    calls = 0
-
-    async def check() -> ReportAuthorizationDecision:
-        nonlocal calls
-        calls += 1
-        check_started.set()
-        await release_check.wait()
-        return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZED)
-
-    creator = asyncio.create_task(cache.authorize(key, check))
-    await check_started.wait()
-    sibling = asyncio.create_task(cache.authorize(key, check))
-    await asyncio.sleep(0)
-
-    sibling.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await sibling
-    release_check.set()
-    decision = await creator
-
-    assert decision.authorized is True
-    assert calls == 1
-
-
-@pytest.mark.asyncio
-async def test_success_cache_is_bounded_and_never_caches_backend_errors() -> None:
-    """Cache should evict old success and retry unavailable backends."""
-    cache = SuccessfulReportAuthorizationCache(max_entries=2)
-    calls = 0
-
-    async def allowed() -> ReportAuthorizationDecision:
-        return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZED)
-
-    for index in range(3):
-        await cache.authorize(
-            _cache_key(f"!room{index}:localhost"),
-            allowed,
-        )
-    oldest = await cache.authorize(_cache_key("!room0:localhost"), allowed)
-    newest = await cache.authorize(_cache_key("!room2:localhost"), allowed)
-
-    error_key = _cache_key("!error:localhost")
-
-    async def unavailable() -> ReportAuthorizationDecision:
-        nonlocal calls
-        calls += 1
-        return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE)
-
-    await cache.authorize(error_key, unavailable)
-    await cache.authorize(error_key, unavailable)
-
-    assert oldest.cache_hit is False
-    assert newest.cache_hit is True
-    assert calls == 2
+    assert reason is ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE

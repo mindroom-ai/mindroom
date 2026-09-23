@@ -2105,8 +2105,7 @@ depends_on = [
 path = "mindroom.orchestration.report_authorization_runtime"
 depends_on = [
     "mindroom.api.main",
-    "mindroom.logging_config",
-    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.room_membership",
     "mindroom.report_publishing",
 ]
 
@@ -2863,7 +2862,6 @@ visibility = [
     "mindroom.matrix.rooms",
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.orchestration.external_trigger_runtime",
-    "mindroom.orchestration.report_authorization_runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.orchestrator",
 ]

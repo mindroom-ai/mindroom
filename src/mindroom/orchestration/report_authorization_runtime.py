@@ -2,46 +2,34 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.logging_config import get_logger
-from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
-from mindroom.report_publishing.authorization import (
-    OriginRoomAuthorizationKey,
-    ReportAuthorizationDecision,
-    ReportAuthorizationReason,
-    SuccessfulReportAuthorizationCache,
-    current_publisher_matrix_user_id,
-)
+from mindroom.matrix.room_membership import cached_joined_member_ids, ensure_room_membership_synced
+from mindroom.report_publishing.authorization import ReportAuthorizationReason, current_publisher_matrix_user_id
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
-
-    import nio
 
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.report_publishing.store import OriginRoomBinding
 
-logger = get_logger(__name__)
 
-
-@dataclass
+@dataclass(frozen=True)
 class _OriginRoomReportAuthorizer:
-    """Authorize reports against current entity identity and joined membership."""
+    """Authorize reports against current entity identity and the publisher's synced room membership."""
 
     config: Config
     bots: Mapping[str, AgentBot | TeamBot]
     runtime_paths: RuntimePaths
-    cache: SuccessfulReportAuthorizationCache = field(default_factory=SuccessfulReportAuthorizationCache)
 
-    async def authorize(
+    async def authorize(  # noqa: PLR0911 - each identity and membership outcome is a distinct decision
         self,
         origin_room: OriginRoomBinding,
         viewer_matrix_user_id: str,
-    ) -> ReportAuthorizationDecision:
+    ) -> ReportAuthorizationReason:
         """Authorize one viewer against one report's exact origin room."""
         publisher_matrix_user_id = origin_room.publisher_matrix_user_id
         current_publisher_id = current_publisher_matrix_user_id(
@@ -50,44 +38,26 @@ class _OriginRoomReportAuthorizer:
             origin_room.publisher_entity_name,
         )
         if current_publisher_id != publisher_matrix_user_id:
-            return ReportAuthorizationDecision(ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH)
+            return ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH
         publisher_bot = self.bots.get(origin_room.publisher_entity_name)
         if publisher_bot is None or publisher_bot.client is None or not publisher_bot.running:
-            return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE)
+            return ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE
         if publisher_bot.matrix_id.full_id != publisher_matrix_user_id:
-            return ReportAuthorizationDecision(ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH)
+            return ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH
 
         client = publisher_bot.client
-        return await self.cache.authorize(
-            OriginRoomAuthorizationKey(origin_room=origin_room, viewer_matrix_user_id=viewer_matrix_user_id),
-            lambda: _authorize_membership(client, origin_room, viewer_matrix_user_id),
-        )
-
-
-async def _authorize_membership(  # noqa: PLR0911 - each membership outcome is a distinct authorization decision
-    client: nio.AsyncClient,
-    origin_room: OriginRoomBinding,
-    viewer_matrix_user_id: str,
-) -> ReportAuthorizationDecision:
-    unavailable = ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE)
-    try:
-        joined_room_ids = await get_joined_rooms(client)
-        if joined_room_ids is None:
-            return unavailable
-        if origin_room.room_id not in joined_room_ids:
-            return ReportAuthorizationDecision(ReportAuthorizationReason.PUBLISHER_NOT_JOINED)
-        joined_members = await get_room_members(client, origin_room.room_id)
-    except Exception as exc:
-        # Matrix transport failures fail closed; log only the type so request URLs and room IDs stay out of logs.
-        logger.warning("report_membership_lookup_failed", error_type=type(exc).__name__)
-        return unavailable
-    if joined_members is None:
-        return unavailable
-    if origin_room.publisher_matrix_user_id not in joined_members:
-        return ReportAuthorizationDecision(ReportAuthorizationReason.PUBLISHER_NOT_JOINED)
-    if viewer_matrix_user_id not in joined_members:
-        return ReportAuthorizationDecision(ReportAuthorizationReason.VIEWER_NOT_JOINED)
-    return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZED)
+        # nio drops left rooms from its joined-room projection.
+        room = client.rooms.get(origin_room.room_id)
+        if room is None:
+            return ReportAuthorizationReason.PUBLISHER_NOT_JOINED
+        if not await ensure_room_membership_synced(client, room, sender_id=viewer_matrix_user_id):
+            return ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE
+        joined_member_ids = cached_joined_member_ids(room)
+        if publisher_matrix_user_id not in joined_member_ids:
+            return ReportAuthorizationReason.PUBLISHER_NOT_JOINED
+        if viewer_matrix_user_id not in joined_member_ids:
+            return ReportAuthorizationReason.VIEWER_NOT_JOINED
+        return ReportAuthorizationReason.AUTHORIZED
 
 
 @dataclass

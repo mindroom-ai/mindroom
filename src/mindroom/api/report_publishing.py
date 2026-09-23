@@ -139,16 +139,15 @@ async def _origin_room_report_asset_response(
             publisher_entity_name=origin_room.publisher_entity_name,
         )
         raise HTTPException(status_code=503, detail="Report authorization is temporarily unavailable.")
-    decision = await runtime.authorize(origin_room, viewer_matrix_user_id)
+    reason = await runtime.authorize(origin_room, viewer_matrix_user_id)
     _log_report_authorization(
-        outcome=decision.reason.value,
+        outcome=reason.value,
         asset_path=asset_path,
-        cache_hit=decision.cache_hit,
         publisher_entity_name=origin_room.publisher_entity_name,
     )
-    if decision.backend_unavailable:
+    if reason is ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE:
         raise HTTPException(status_code=503, detail="Report authorization is temporarily unavailable.")
-    if not decision.authorized:
+    if reason is not ReportAuthorizationReason.AUTHORIZED:
         raise HTTPException(status_code=404, detail=_NOT_FOUND_DETAIL)
 
     if report.is_static_site and redirect_static_site_to_slash:
@@ -184,7 +183,6 @@ def _log_report_authorization(
     *,
     outcome: str,
     asset_path: str | None,
-    cache_hit: bool | None = None,
     publisher_entity_name: str | None = None,
 ) -> None:
     logger.info(
@@ -192,6 +190,5 @@ def _log_report_authorization(
         access_policy="origin_room",
         outcome=outcome,
         request_type=_request_type(asset_path),
-        cache_hit=cache_hit,
         publisher_entity_name=publisher_entity_name,
     )

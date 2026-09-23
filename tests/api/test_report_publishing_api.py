@@ -8,10 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mindroom.api import main
-from mindroom.report_publishing.authorization import (
-    ReportAuthorizationDecision,
-    ReportAuthorizationReason,
-)
+from mindroom.report_publishing.authorization import ReportAuthorizationReason
 from mindroom.report_publishing.store import OriginRoomBinding, PublishableReport, ReportPublishingStore
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
@@ -114,7 +111,7 @@ def _bind_authorization(
     test_client: TestClient,
     reason: ReportAuthorizationReason = ReportAuthorizationReason.AUTHORIZED,
 ) -> AsyncMock:
-    authorize = AsyncMock(return_value=ReportAuthorizationDecision(reason))
+    authorize = AsyncMock(return_value=reason)
     main.bind_report_authorization_runtime(test_client.app, authorize)
     return authorize
 
@@ -408,7 +405,7 @@ def test_report_routes_never_cross_access_policies(test_client: TestClient) -> N
     authorize.assert_not_awaited()
 
 
-def test_origin_room_revocation_is_immediate_despite_cached_authorization(test_client: TestClient) -> None:
+def test_origin_room_revocation_is_immediate(test_client: TestClient) -> None:
     """Every request should re-read revocation before using membership authority."""
     use_trusted_upstream_runtime(test_client.app)
     slug, _storage_root = _publish_origin_report(test_client, static_site=True)
