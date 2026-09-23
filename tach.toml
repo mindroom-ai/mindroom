@@ -5701,7 +5701,7 @@ visibility = ["mindroom.mcp_gateway.store"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.server"
-depends_on = ["mindroom.bounded_bytes", "mindroom.logging_config", "mindroom.mcp_gateway.execution", "mindroom.mcp_gateway.types"]
+depends_on = ["mindroom.bounded_bytes", "mindroom.logging_config", "mindroom.mcp_gateway.execution", "mindroom.mcp_gateway.types", "mindroom.timing"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.execution"

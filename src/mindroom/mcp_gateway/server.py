@@ -31,6 +31,7 @@ from mindroom.mcp_gateway.types import (
     GatewayErrorResponse,
     GatewayPrincipal,
 )
+from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -43,6 +44,7 @@ _MAX_REQUEST_ID_BYTES = 128
 _MAX_PROTOCOL_VERSION_BYTES = 64
 _RESPONSE_ENVELOPE_BYTES = 256
 _PRINCIPAL_SCOPE_KEY = "mcp_gateway_principal"
+_OPERATION_NAMES = frozenset({"search_tools", "get_tool", "invoke_tool"})
 _PRIVATE_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
 logger = get_logger(__name__)
 
@@ -119,6 +121,15 @@ def _result(payload: Mapping[str, object]) -> types.CallToolResult:
             _error(GatewayErrorCode.RESULT_TOO_LARGE, "The tool response exceeds the gateway response limit."),
         )
     return result
+
+
+def _logged_error_code(result: types.CallToolResult) -> str | None:
+    """Return an allowlisted error code without copying provider-controlled values."""
+    if not result.isError:
+        return None
+    error = (result.structuredContent or {}).get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) and code in GatewayErrorCode else "unknown"
 
 
 def _request_payload(body: bytes) -> object:
@@ -291,18 +302,14 @@ class GatewayServer:
         started = time.monotonic()
         name = request.params.name
         # Client-controlled names, arguments, IDs, and error messages are not log fields.
-        operation = name if name in {"search_tools", "get_tool", "invoke_tool"} else "unknown"
-        with bound_log_context(operation=operation):
+        with bound_log_context(operation=name if name in _OPERATION_NAMES else "unknown"):
             result = await self._call_tool(name, request.params.arguments or {})
-            error = (result.structuredContent or {}).get("error")
-            code = error.get("code") if isinstance(error, dict) else None
-            error_code = code if isinstance(code, str) and code in GatewayErrorCode else "unknown"
             log = logger.warning if result.isError else logger.info
             log(
                 "mcp_gateway_call_completed",
                 outcome="error" if result.isError else "success",
-                error_code=error_code if result.isError else None,
-                duration_ms=round((time.monotonic() - started) * 1000, 2),
+                error_code=_logged_error_code(result),
+                duration_ms=elapsed_ms_since(started),
             )
             identity = self._request_identity()
             if not result.isError and self._record_activity is not None and identity is not None:
@@ -310,7 +317,7 @@ class GatewayServer:
             return types.ServerResult(result)
 
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:  # noqa: PLR0911
-        if name not in {"search_tools", "get_tool", "invoke_tool"}:
+        if name not in _OPERATION_NAMES:
             return _result(_error(GatewayErrorCode.TOOL_NOT_FOUND, "Unknown gateway operation."))
         schema = next(tool.inputSchema for tool in _meta_tools() if tool.name == name)
         if not Draft202012Validator(schema).is_valid(arguments):
@@ -385,31 +392,10 @@ class GatewayServer:
         started = time.monotonic()
         status_code: int | None = None
 
-        async def observed_send(message: Message) -> None:
+        async def private_send(message: Message) -> None:
             nonlocal status_code
             if message["type"] == "http.response.start":
                 status_code = message["status"]
-            await send(message)
-
-        with bound_log_context(request_id=uuid4().hex):
-            try:
-                await self._handle_http_request(scope, receive, observed_send)
-            finally:
-                principal = scope.get(_PRINCIPAL_SCOPE_KEY)
-                log = logger.warning if status_code is None or status_code >= 400 else logger.info
-                log(
-                    "mcp_gateway_http_completed",
-                    status_code=status_code,
-                    requester_id=principal.requester_id if isinstance(principal, GatewayPrincipal) else None,
-                    duration_ms=round((time.monotonic() - started) * 1000, 2),
-                )
-
-    async def _handle_http_request(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Validate each request before it enters the SDK's stateless transport."""
-        request = Request(scope, receive)
-
-        async def private_send(message: Message) -> None:
-            if message["type"] == "http.response.start":
                 message["headers"] = [
                     *message.get("headers", []),
                     (b"cache-control", b"private, no-store"),
@@ -417,6 +403,22 @@ class GatewayServer:
                 ]
             await send(message)
 
+        with bound_log_context(request_id=uuid4().hex):
+            try:
+                await self._handle_http_request(scope, receive, private_send)
+            finally:
+                principal = scope.get(_PRINCIPAL_SCOPE_KEY)
+                log = logger.warning if status_code is None or status_code >= 400 else logger.info
+                log(
+                    "mcp_gateway_http_completed",
+                    status_code=status_code,
+                    requester_id=principal.requester_id if isinstance(principal, GatewayPrincipal) else None,
+                    duration_ms=elapsed_ms_since(started),
+                )
+
+    async def _handle_http_request(self, scope: Scope, receive: Receive, private_send: Send) -> None:
+        """Validate each request before it enters the SDK's stateless transport."""
+        request = Request(scope, receive)
         try:
             principal = await self._authenticate(request)
             scope[_PRINCIPAL_SCOPE_KEY] = principal
