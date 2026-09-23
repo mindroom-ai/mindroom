@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 def _make_runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("", encoding="utf-8")
@@ -153,6 +153,31 @@ async def test_run_shell_command_accepts_shell_command_string(tmp_path: Path) ->
     result = await entrypoint("echo $HOME")
     assert result
     assert not result.startswith("Error:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "if shopt -q login_shell; then echo login; else echo plain; fi",
+        ["if shopt -q login_shell; then echo login; else echo plain; fi"],
+    ],
+)
+async def test_implicit_shell_does_not_run_login_startup(tmp_path: Path, command: str | list[str]) -> None:
+    """Ordinary commands must not pay for or acquire side effects from login profiles."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+    assert await entrypoint(command) == "plain"
+
+
+@pytest.mark.asyncio
+async def test_explicit_login_shell_remains_available(tmp_path: Path) -> None:
+    """Callers opting into login initialization still get it."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+    assert await entrypoint(["bash", "-lc", "shopt -q login_shell && echo login"]) == "login"
 
 
 @pytest.mark.asyncio
@@ -915,7 +940,7 @@ async def test_env_passthrough_preserved(tmp_path: Path) -> None:
     """Runtime env values from .env should be visible in shell commands."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("MY_TEST_VAR=async-shell-works\n", encoding="utf-8")
@@ -951,7 +976,7 @@ async def test_login_bash_preserves_runtime_path_after_profile_reset(tmp_path: P
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(

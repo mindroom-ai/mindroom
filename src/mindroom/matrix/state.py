@@ -5,10 +5,15 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import monotonic
 
 from pydantic import BaseModel, Field, field_serializer
 
 from mindroom import constants, yaml_io
+from mindroom.matrix.legacy_state import normalize_legacy_matrix_state
+
+_MATRIX_STATE_STAT_TTL_SECONDS = 1.0
+_matrix_state_write_generation = 0
 
 
 class MatrixAccount(BaseModel):
@@ -47,10 +52,10 @@ class MatrixState(BaseModel):
     def load(cls, runtime_paths: constants.RuntimePaths) -> "MatrixState":
         """Load state from file.
 
-        Reads come from a process-wide cache keyed by the state file's
-        ``(path, st_mtime_ns, st_size)`` so repeated calls against an unchanged
-        file skip the YAML parse. A deep copy is returned so callers may safely
-        mutate the result before ``save`` without polluting the cache.
+        Reads come from a process-wide cache keyed by the state file path,
+        in-process write generation, and a short-TTL file signature. A deep
+        copy is returned so callers may safely mutate the result before
+        ``save`` without polluting the cache.
         """
         return matrix_state_for_runtime(runtime_paths).model_copy(deep=True)
 
@@ -119,7 +124,7 @@ class MatrixState(BaseModel):
 
 
 def matrix_state_for_runtime(runtime_paths: constants.RuntimePaths) -> MatrixState:
-    """Return persisted Matrix state for one runtime, cached by file mtime/size.
+    """Return persisted Matrix state cached by write generation and file signature.
 
     The returned object is shared across callers; **read-only callers** should
     prefer this helper for the lowest overhead. Callers that intend to mutate
@@ -144,8 +149,32 @@ def load_rooms(runtime_paths: constants.RuntimePaths) -> dict[str, MatrixRoom]:
 
 
 def _room_aliases(runtime_paths: constants.RuntimePaths) -> dict[str, str]:
-    """Get mapping of room aliases to room IDs."""
-    return matrix_state_for_runtime(runtime_paths).get_room_aliases()
+    """Return a read-only alias map with the same freshness as cached state."""
+    state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
+    return _room_aliases_cached(
+        *_matrix_state_cache_key(state_file),
+        current_domain=_current_runtime_domain(runtime_paths),
+    )
+
+
+@lru_cache(maxsize=64)
+def _room_aliases_cached(
+    state_file: Path,
+    write_generation: int,
+    mtime_ns: int | None,
+    size: int | None,
+    *,
+    current_domain: str,
+) -> dict[str, str]:
+    """Build the alias map once per persisted state snapshot."""
+    state = _load_matrix_state_file_cached(
+        state_file,
+        write_generation,
+        mtime_ns,
+        size,
+        current_domain=current_domain,
+    )
+    return state.get_room_aliases()
 
 
 def get_room_id(room_key: str, runtime_paths: constants.RuntimePaths) -> str | None:
@@ -176,24 +205,35 @@ def get_room_alias_from_id(room_id: str, runtime_paths: constants.RuntimePaths) 
     return None
 
 
-def _matrix_state_cache_key(state_file: Path) -> tuple[Path, int | None, int | None]:
-    """Return one cache key that invalidates when the state file changes."""
-    if not state_file.exists():
-        return state_file, None, None
-    stat = state_file.stat()
-    return state_file, stat.st_mtime_ns, stat.st_size
+def _matrix_state_cache_key(state_file: Path) -> tuple[Path, int, int | None, int | None]:
+    """Return a key with eager local invalidation and bounded external staleness."""
+    stat_ttl_bucket = int(monotonic() / _MATRIX_STATE_STAT_TTL_SECONDS)
+    mtime_ns, size = _matrix_state_file_signature(state_file, stat_ttl_bucket)
+    return state_file, _matrix_state_write_generation, mtime_ns, size
+
+
+@lru_cache(maxsize=64)
+def _matrix_state_file_signature(state_file: Path, stat_ttl_bucket: int) -> tuple[int | None, int | None]:
+    """Stat one state file at most once per TTL bucket."""
+    del stat_ttl_bucket
+    try:
+        stat = state_file.stat()
+    except OSError:
+        return None, None
+    return stat.st_mtime_ns, stat.st_size
 
 
 @lru_cache(maxsize=64)
 def _load_matrix_state_file_cached(
     state_file: Path,
+    write_generation: int,
     mtime_ns: int | None,
     size: int | None,
     *,
     current_domain: str,
 ) -> MatrixState:
-    """Load Matrix state through a file-change-sensitive cache."""
-    del mtime_ns, size
+    """Load Matrix state through a local-write and external-file-sensitive cache."""
+    del write_generation, mtime_ns, size
     return _load_matrix_state_file(state_file, current_domain=current_domain)
 
 
@@ -207,16 +247,6 @@ def _current_runtime_domain(runtime_paths: constants.RuntimePaths) -> str:
     return server_part.split(":", 1)[0]
 
 
-def _migrate_accounts_to_current_schema(state: MatrixState, *, current_domain: str) -> bool:
-    """Normalize persisted accounts to the current on-disk schema."""
-    changed = False
-    for account in state.accounts.values():
-        if account.domain is None:
-            account.domain = current_domain
-            changed = True
-    return changed
-
-
 def _load_matrix_state_file(state_file: Path, *, current_domain: str) -> MatrixState:
     """Load one Matrix state file from disk."""
     if not state_file.exists():
@@ -224,15 +254,16 @@ def _load_matrix_state_file(state_file: Path, *, current_domain: str) -> MatrixS
     with state_file.open(encoding="utf-8") as f:
         data = yaml_io.safe_load(f) or {}
     state = MatrixState.model_validate(data)
-    migrated = _migrate_accounts_to_current_schema(state, current_domain=current_domain)
-    normalized_data = state.model_dump(mode="json")
-    if migrated or data != normalized_data:
+    normalized_data = normalize_legacy_matrix_state(state, data, current_domain=current_domain)
+    if normalized_data is not None:
         _write_matrix_state_file(state_file, normalized_data)
     return state
 
 
 def _write_matrix_state_file(state_file: Path, data: dict[str, object]) -> None:
     """Atomically persist Matrix state without cross-process advisory locking."""
+    global _matrix_state_write_generation
+
     state_file.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:
@@ -249,6 +280,7 @@ def _write_matrix_state_file(state_file: Path, data: dict[str, object]) -> None:
             temp_file.flush()
             os.fsync(temp_file.fileno())
         temp_path.replace(state_file)
+        _matrix_state_write_generation += 1
         _fsync_directory(state_file.parent)
     finally:
         if temp_path is not None and temp_path.exists():

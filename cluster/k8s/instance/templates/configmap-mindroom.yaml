@@ -1,17 +1,13 @@
 {{- $config := .Files.Get "default-config.yaml" | fromYaml -}}
-{{- $authorization := get $config "authorization" | default (dict) -}}
-{{- $_ := set $authorization "global_users" (.Values.authorizationGlobalUsers | default (list)) -}}
-{{- $_ := set $config "authorization" $authorization -}}
-{{- $matrixRoomAccessValues := .Values.matrixRoomAccess | default (dict) -}}
-{{- if $matrixRoomAccessValues -}}
-{{- $matrixRoomAccess := dict -}}
-{{- $_ := set $matrixRoomAccess "mode" ($matrixRoomAccessValues.mode | default "single_user_private") -}}
-{{- $_ := set $matrixRoomAccess "multi_user_join_rule" ($matrixRoomAccessValues.multiUserJoinRule | default "public") -}}
-{{- $_ := set $matrixRoomAccess "publish_to_room_directory" ($matrixRoomAccessValues.publishToRoomDirectory | default false) -}}
-{{- $_ := set $matrixRoomAccess "invite_only_rooms" ($matrixRoomAccessValues.inviteOnlyRooms | default (list)) -}}
-{{- $_ := set $matrixRoomAccess "reconcile_existing_rooms" ($matrixRoomAccessValues.reconcileExistingRooms | default false) -}}
-{{- $_ := set $config "matrix_room_access" $matrixRoomAccess -}}
-{{- end -}}
+{{- $_ := set $config "administrators" (.Values.administrators | default (list)) -}}
+{{- $roomDefaultValues := .Values.roomDefaults | default (dict) -}}
+{{- $roomDefaults := dict -}}
+{{- $_ := set $roomDefaults "join_policy" ($roomDefaultValues.joinPolicy | default "invite") -}}
+{{- $_ := set $roomDefaults "listed" ($roomDefaultValues.listed | default false) -}}
+{{- $_ := set $roomDefaults "encrypted" ($roomDefaultValues.encrypted | default false) -}}
+{{- $_ := set $roomDefaults "invite_users" ($roomDefaultValues.inviteUsers | default (list)) -}}
+{{- $_ := set $roomDefaults "admins" ($roomDefaultValues.admins | default (list)) -}}
+{{- $_ := set $config "room_defaults" $roomDefaults -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

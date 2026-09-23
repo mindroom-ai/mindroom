@@ -70,13 +70,6 @@ if TYPE_CHECKING:
             required=False,
             default=False,
         ),
-        ConfigField(
-            name="async_tools",
-            label="Async Tools (Deprecated)",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
     ],
     dependencies=["httpx"],
     docs_url="https://docs.agno.com/tools/toolkits/others/brandfetch",

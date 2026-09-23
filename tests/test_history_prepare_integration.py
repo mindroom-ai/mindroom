@@ -25,16 +25,14 @@ from mindroom.execution_preparation import (
     _build_matrix_prompt_with_history,
     _PreparedExecutionContext,
 )
-from mindroom.history.compaction import _build_summary_input
 from mindroom.history.prompt_tokens import (
     estimate_agent_static_tokens,
 )
-from mindroom.history.runtime import (
-    open_scope_session_context,
-)
+from mindroom.history.session_context import open_scope_session_context
 from mindroom.history.storage import (
     update_scope_seen_event_ids,
 )
+from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.memory import MemoryPromptParts
@@ -45,6 +43,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_turn_context,
     make_visible_message,
+    seed_session,
 )
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
@@ -96,7 +95,7 @@ def test_session_storage_strips_prompt_roles_before_persisting_history(tmp_path:
         ],
     )
 
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     assert session.runs is not None
     assert [(message.role, message.content) for message in session.runs[0].messages or []] == [
@@ -532,7 +531,7 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
     assert prepared_run.prompt_text == "\n\n".join(
         (
             render_msg_tag(sender="@alice:localhost", body="Original question", event_id="$root"),
-            "Prior diagnosis",
+            "\n\nPrior diagnosis",
             "Current message:\n"
             + render_msg_tag(sender="@alice:localhost", body="What was that?", event_id="$current"),
         ),
@@ -595,7 +594,7 @@ async def test_prepare_agent_and_prompt_skips_thread_fallback_for_summary_only_r
         runs=[],
         summary=SessionSummary(summary="Compacted summary", updated_at=datetime.now(UTC)),
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
     live_agent = _agent()
     thread_history = [
         make_visible_message(sender="@alice:localhost", body="Original context", event_id="$root"),
@@ -700,7 +699,8 @@ async def test_native_agno_replays_recent_raw_history_without_persisting_replay(
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    storage.upsert_session(
+    seed_session(
+        storage,
         _session(
             "session-1",
             runs=[
@@ -752,7 +752,7 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
         summary=SessionSummary(summary="stored summary", updated_at=datetime.now(UTC)),
     )
     update_scope_seen_event_ids(session, HistoryScope(kind="agent", scope_id="test_agent"), ["event-1"])
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     recording_model = RecordingModel(id="recording-model", provider="fake")
     live_agent = _agent(model=recording_model, db=storage, num_history_runs=1)
@@ -918,7 +918,7 @@ async def test_prepare_agent_and_prompt_keeps_transient_memory_out_of_replay_and
     persisted_contents = [str(message.content) for run in persisted.runs or [] for message in run.messages or []]
     assert persisted_contents == ["First prompt", "ok", "Second prompt", "ok", "Third prompt", "ok"]
 
-    summary_input, included_runs = _build_summary_input(
+    summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=persisted.runs or [],
         max_input_tokens=10_000,

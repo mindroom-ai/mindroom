@@ -6,6 +6,7 @@ export interface ConfigValidationIssue {
 
 export interface GlobalConfigDiagnostic {
   kind: "global";
+  code?: "config_conflict";
   message: string;
   blocking: boolean;
 }
@@ -16,8 +17,13 @@ export interface ValidationConfigDiagnostic {
 }
 
 export type ConfigDiagnostic =
-  | GlobalConfigDiagnostic
-  | ValidationConfigDiagnostic;
+  GlobalConfigDiagnostic | ValidationConfigDiagnostic;
+
+export function isConfigConflictDiagnostic(
+  diagnostic: ConfigDiagnostic,
+): diagnostic is GlobalConfigDiagnostic & { code: "config_conflict" } {
+  return diagnostic.kind === "global" && diagnostic.code === "config_conflict";
+}
 
 export function getConfigValidationIssues(
   diagnostics: ConfigDiagnostic[],

@@ -7,6 +7,7 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from inspect import isawaitable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, Mock, patch
@@ -14,30 +15,39 @@ from unittest.mock import AsyncMock, Mock, patch
 import nio
 import pytest
 import yaml
-from agno.factory import RequestContext
 from agno.run.agent import RunOutput, RunStatus
 from agno.tools import Toolkit
-from agno.workflow import Workflow, WorkflowFactory
-from agno.workflow.types import StepInput, StepOutput
+from agno.tools.function import Function
 
 import mindroom.tools  # noqa: F401
-from mindroom.approval_manager import SentApprovalEvent, initialize_approval_store
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.dynamic_workflow import _MINIMAL_SPEC_EXAMPLE, DynamicWorkflowTools
-from mindroom.dynamic_workflows.agno_adapter import build_agno_workflow_factory
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError, execute_workflow_spec
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
-from mindroom.tool_approval import ToolCallWorkflowOrigin, _matching_tool_approval_rule, _shutdown_approval_store
+from mindroom.tool_approval import _matching_tool_approval_rule
+from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.access_schema_support import with_responder_access
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -86,7 +96,7 @@ def _workflow_spec(**overrides: object) -> dict[str, object]:
                 "id": "writer",
                 "kind": "ephemeral_agent",
                 "name": "Report Writer",
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-5",
                 "tools": [],
             },
         ],
@@ -103,7 +113,7 @@ def _workflow_spec(**overrides: object) -> dict[str, object]:
             "max_runtime_seconds": 1800,
             "max_concurrent_agents": 4,
             "max_total_agents": 16,
-            "models": ["claude-sonnet-4-6"],
+            "models": ["claude-sonnet-5"],
             "tools": [],
             "data": {
                 "matrix_history": "none",
@@ -132,11 +142,11 @@ def _make_context(tmp_path: Path) -> ToolRuntimeContext:
     config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"])},
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         runtime_paths,
     )
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
             room_id="!room:localhost",
@@ -147,8 +157,8 @@ def _make_context(tmp_path: Path) -> ToolRuntimeContext:
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=AsyncMock(),
-        event_cache=make_event_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
         room=None,
         storage_path=None,
     )
@@ -162,7 +172,7 @@ def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> Tool
                 "general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"]),
                 "specialist": AgentConfig(display_name="Specialist Agent"),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         runtime_paths,
     )
@@ -173,7 +183,7 @@ def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> Tool
     for agent_name in room_agents:
         room.add_member(registry.current_id(agent_name).full_id, config.agents[agent_name].display_name, None)
     room.members_synced = True
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
             room_id="!room:localhost",
@@ -184,8 +194,8 @@ def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> Tool
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=AsyncMock(),
-        event_cache=make_event_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
         room=room,
         storage_path=None,
     )
@@ -202,7 +212,7 @@ def _make_private_context(tmp_path: Path, *, requester_id: str) -> ToolRuntimeCo
                     private=AgentPrivateConfig(per="user_agent", root="mind_data"),
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         runtime_paths,
     )
@@ -429,10 +439,36 @@ def test_run_workflow_persists_failed_run_when_completion_persistence_fails(tmp_
     assert "not JSON serializable" in str(loaded.error)
 
 
-def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: Path) -> None:
-    """Workflow runs should validate declared input schema before executing any step."""
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("reject_policy", [False, True], ids=["input", "policy"])
+@pytest.mark.asyncio
+async def test_service_records_validation_failure_before_execution(
+    tmp_path: Path,
+    use_async: bool,
+    reject_policy: bool,
+) -> None:
+    """Policy and input failures should persist without executing participants."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
-    service = DynamicWorkflowService(store)
+    executions: list[str] = []
+
+    def execute(**_kwargs: object) -> str:
+        executions.append("executed")
+        return "unexpected execution"
+
+    async def aexecute(**kwargs: object) -> str:
+        return execute(**kwargs)
+
+    def validate_policy(_spec: dict[str, object]) -> None:
+        if reject_policy:
+            msg = "Participant is no longer allowed."
+            raise DynamicWorkflowError(msg)
+
+    service = DynamicWorkflowService(
+        store,
+        participant_executor=execute,
+        async_participant_executor=aexecute,
+        spec_validator=validate_policy,
+    )
     store.create_workflow(
         spec=_workflow_spec(),
         scope="agent",
@@ -441,7 +477,8 @@ def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: 
         reason="initial design",
     )
 
-    run = service.run_workflow(
+    run_workflow = service.arun_workflow if use_async else service.run_workflow
+    result = run_workflow(
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -449,6 +486,7 @@ def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: 
         requested_by="general",
         base_url="https://acme.mindroom.chat",
     )
+    run = await result if isawaitable(result) else result
 
     loaded = store.get_workflow_run(
         workflow_id="competitor-research-report",
@@ -456,9 +494,99 @@ def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: 
         owner_id="general",
         run_id=run.run_id,
     )
+    assert run == loaded
     assert loaded.status == "failed"
-    assert loaded.error == "Input field 'topic' is required."
+    assert loaded.error == (
+        "Participant is no longer allowed." if reject_policy else "Input field 'topic' is required."
+    )
     assert loaded.steps == []
+    assert loaded.completed_at is not None
+    assert executions == []
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_service_uses_revision_pinned_when_run_started(tmp_path: Path, use_async: bool) -> None:
+    """An update after admission must not replace the run's spec or input schema."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(
+        spec=_workflow_spec(
+            workflow=[{"id": "write", "type": "transform_step", "template": "Original {input.topic}."}],
+        ),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+    )
+    started = store.start_workflow_run(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "report"},
+        requested_by="general",
+    )
+    store.update_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        patch={
+            "name": "Updated report",
+            "inputs": {"required": ["new_field"], "properties": {"new_field": {"type": "string"}}},
+            "workflow": [{"id": "write", "type": "transform_step", "template": "Updated {input.new_field}."}],
+        },
+        updated_by="general",
+        reason="Update report inputs",
+    )
+    validated_names: list[str] = []
+    service = DynamicWorkflowService(store, spec_validator=lambda spec: validated_names.append(str(spec["name"])))
+    run_workflow = service.arun_workflow if use_async else service.run_workflow
+
+    with patch.object(store, "start_workflow_run", return_value=started):
+        result = run_workflow(
+            workflow_id="competitor-research-report",
+            scope="agent",
+            owner_id="general",
+            input_data={"topic": "report"},
+            requested_by="general",
+        )
+        run = await result if isawaitable(result) else result
+
+    loaded = store.get_workflow_run(
+        workflow_id=run.workflow_id,
+        scope=run.scope,
+        owner_id=run.owner_id,
+        run_id=run.run_id,
+    )
+    assert run == loaded
+    assert run.status == "completed"
+    assert run.revision == "000001"
+    assert run.outputs == {"report_html": "Original report."}
+    assert validated_names == ["Competitor Research Report"]
+    assert "Competitor Research Report" in store.run_report_html_artifact_path(run).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_service_propagates_run_start_failure(tmp_path: Path, use_async: bool) -> None:
+    """Admission errors must escape without attempting to persist a failed run."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    service = DynamicWorkflowService(store)
+    run_workflow = service.arun_workflow if use_async else service.run_workflow
+
+    async def start_run() -> None:
+        result = run_workflow(
+            workflow_id="missing-workflow",
+            scope="agent",
+            owner_id="general",
+            input_data={},
+            requested_by="general",
+        )
+        if isawaitable(result):
+            await result
+
+    with pytest.raises(DynamicWorkflowError, match="YAML mapping was not found"):
+        await start_run()
+
+    assert not (tmp_path / "mindroom_data").exists()
 
 
 def test_validate_workflow_spec_rejects_invalid_input_schema_type(tmp_path: Path) -> None:
@@ -597,7 +725,7 @@ def test_validate_workflow_spec_normalizes_tool_grants(tmp_path: Path) -> None:
                     "id": "writer",
                     "kind": "ephemeral_agent",
                     "name": "Report Writer",
-                    "model": "claude-sonnet-4-6",
+                    "model": "claude-sonnet-5",
                     "tools": [" shell ", "website", "shell"],
                 },
             ],
@@ -647,7 +775,7 @@ def test_validate_workflow_tool_policy_rejects_unknown_tool(tmp_path: Path) -> N
 
 @pytest.mark.parametrize(
     "restricted_tool",
-    ["compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "memory", "self_config"],
+    ["compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "invite_router", "memory", "self_config"],
 )
 def test_validate_workflow_tool_policy_rejects_each_restricted_tool(tmp_path: Path, restricted_tool: str) -> None:
     """Every agent-infrastructure tool must be rejected as a participant grant."""
@@ -1186,72 +1314,6 @@ async def test_service_async_run_fails_at_deadline_when_cancellation_is_suppress
 
 
 @pytest.mark.asyncio
-async def test_async_run_timeout_expires_pending_approval_card(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A participant blocked on approval must fail at the runtime cap and expire its card."""
-    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock(return_value=True)
-    approval_store = initialize_approval_store(
-        runtime_paths,
-        sender=sender,
-        editor=editor,
-        transport_sender=lambda: "@mindroom_router:localhost",
-    )
-
-    async def blocked_executor(**_kwargs: object) -> object:
-        return await approval_store.request_approval(
-            tool_name="run_shell_command",
-            arguments={"command": "ls"},
-            agent_name="general",
-            room_id="!room:localhost",
-            requester_id="@user:localhost",
-            approver_user_id="@user:localhost",
-            timeout_seconds=600,
-            workflow_id="competitor-research-report",
-            participant_id="writer",
-        )
-
-    service = DynamicWorkflowService(store, async_participant_executor=blocked_executor)
-    monkeypatch.setattr("mindroom.dynamic_workflows.service.workflow_runtime_seconds", lambda _spec: 0.1)
-    store.create_workflow(
-        spec=_workflow_spec(),
-        scope="agent",
-        owner_id="general",
-        created_by="general",
-        reason="initial design",
-    )
-
-    try:
-        run = await service.arun_workflow(
-            workflow_id="competitor-research-report",
-            scope="agent",
-            owner_id="general",
-            input_data={"topic": "Agno factories"},
-            requested_by="general",
-            base_url="https://acme.mindroom.chat",
-        )
-
-        assert run.status == "failed"
-        assert "max_runtime_seconds" in str(run.error)
-        # The cancelled approval wait finishes its cleanup in the background.
-        async with asyncio.timeout(5):
-            while True:
-                if editor.await_count:
-                    break
-                await asyncio.sleep(0)
-        assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
-        assert editor.await_args.args[2]["status"] == "expired"
-        assert editor.await_args.args[2]["workflow_id"] == "competitor-research-report"
-        assert editor.await_args.args[2]["participant_id"] == "writer"
-    finally:
-        await _shutdown_approval_store()
-
-
-@pytest.mark.asyncio
 async def test_service_async_run_persists_cancelled_status(tmp_path: Path) -> None:
     """Cancelling an async workflow run should not leave the run stuck as running."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
@@ -1407,7 +1469,12 @@ def test_get_workflow_run_wraps_json_decoder_errors(tmp_path: Path) -> None:
     assert str(tmp_path) not in str(exc_info.value)
 
 
-def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(
+    tmp_path: Path,
+    use_async: bool,
+) -> None:
     """Failed workflow execution should still persist a run record and error report."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
     service = DynamicWorkflowService(store)
@@ -1431,7 +1498,8 @@ def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(t
     ]
     revision_path.write_text(yaml.safe_dump(revision, sort_keys=False), encoding="utf-8")
 
-    run = service.run_workflow(
+    run_workflow = service.arun_workflow if use_async else service.run_workflow
+    result = run_workflow(
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -1439,6 +1507,7 @@ def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(t
         requested_by="general",
         base_url="https://acme.mindroom.chat",
     )
+    run = await result if isawaitable(result) else result
 
     loaded = store.get_workflow_run(
         workflow_id="competitor-research-report",
@@ -1453,7 +1522,9 @@ def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(t
     assert "unknown prior step" in report_html
 
 
-def test_run_workflow_records_failed_run_when_active_revision_is_missing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_run_workflow_records_failed_run_when_active_revision_is_missing(tmp_path: Path, use_async: bool) -> None:
     """Revision load failures after run creation should not leave run records stuck as running."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
     service = DynamicWorkflowService(store)
@@ -1469,7 +1540,8 @@ def test_run_workflow_records_failed_run_when_active_revision_is_missing(tmp_pat
     )
     revision_path.unlink()
 
-    run = service.run_workflow(
+    run_workflow = service.arun_workflow if use_async else service.run_workflow
+    result = run_workflow(
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -1477,6 +1549,7 @@ def test_run_workflow_records_failed_run_when_active_revision_is_missing(tmp_pat
         requested_by="general",
         base_url="https://acme.mindroom.chat",
     )
+    run = await result if isawaitable(result) else result
 
     loaded = store.get_workflow_run(
         workflow_id="competitor-research-report",
@@ -1487,133 +1560,6 @@ def test_run_workflow_records_failed_run_when_active_revision_is_missing(tmp_pat
     assert loaded.status == "failed"
     assert loaded.error == "YAML mapping was not found."
     assert loaded.artifacts["report_html"].endswith("/report.html")
-
-
-def test_declarative_spec_compiles_to_agno_workflow_factory(tmp_path: Path) -> None:
-    """Dynamic Workflow specs should compile to real Agno WorkflowFactory objects."""
-    factory = build_agno_workflow_factory(
-        _workflow_spec(),
-        db_file=tmp_path / "dynamic-workflow-agno.db",
-    )
-
-    workflow = factory.resolve(RequestContext(user_id="@user:localhost", input={"topic": "Agno factories"}), Workflow)
-
-    assert isinstance(factory, WorkflowFactory)
-    assert factory.id == "competitor-research-report"
-    assert workflow.id == "competitor-research-report"
-    assert workflow.name == "Competitor Research Report"
-    assert workflow.metadata == {
-        "mindroom_dynamic_workflow": True,
-        "workflow_id": "competitor-research-report",
-    }
-
-
-def test_agno_workflow_factory_step_executor_renders_declared_output(tmp_path: Path) -> None:
-    """Agno factory steps should execute declared Dynamic Workflow step behavior."""
-    factory = build_agno_workflow_factory(
-        _workflow_spec(
-            workflow=[
-                {
-                    "id": "research",
-                    "type": "transform_step",
-                    "template": "Research brief for {input.topic}.",
-                },
-            ],
-            outputs=[{"id": "brief", "type": "text", "from_step": "research"}],
-        ),
-        db_file=tmp_path / "dynamic-workflow-agno.db",
-    )
-    workflow = factory.resolve(RequestContext(user_id="@user:localhost", input={"topic": "Agno factories"}), Workflow)
-
-    output = workflow.steps[0].execute(StepInput(input={"topic": "Agno factories"}))
-
-    assert isinstance(output, StepOutput)
-    assert output.success is True
-    assert output.content == "Research brief for Agno factories."
-
-
-def test_agno_workflow_factory_step_executor_runs_participant(tmp_path: Path) -> None:
-    """Agno factory agent steps should use the supplied participant executor."""
-
-    def participant_executor(
-        *,
-        participant: dict[str, object],
-        prompt: str,
-        input_data: dict[str, object],
-        step_outputs: dict[str, object],
-    ) -> str:
-        assert participant["id"] == "writer"
-        assert prompt == "Write about Agno factories."
-        assert input_data == {"topic": "Agno factories"}
-        assert step_outputs == {}
-        return "Executed by Agno factory participant."
-
-    factory = build_agno_workflow_factory(
-        _workflow_spec(
-            workflow=[
-                {
-                    "id": "write",
-                    "type": "agent_step",
-                    "participant": "writer",
-                    "prompt": "Write about {input.topic}.",
-                },
-            ],
-            outputs=[{"id": "report", "type": "text", "from_step": "write"}],
-        ),
-        db_file=tmp_path / "dynamic-workflow-agno.db",
-        participant_executor=participant_executor,
-    )
-    workflow = factory.resolve(RequestContext(user_id="@user:localhost", input={"topic": "Agno factories"}), Workflow)
-
-    output = workflow.steps[0].execute(StepInput(input={"topic": "Agno factories"}))
-
-    assert isinstance(output, StepOutput)
-    assert output.success is True
-    assert output.content == "Executed by Agno factory participant."
-
-
-def test_agno_workflow_run_fails_and_stops_when_step_execution_fails(tmp_path: Path) -> None:
-    """Agno workflow runs should not continue after a Dynamic Workflow step failure."""
-    prompts: list[str] = []
-
-    def participant_executor(
-        *,
-        participant: dict[str, object],
-        prompt: str,
-        input_data: dict[str, object],
-        step_outputs: dict[str, object],
-    ) -> str:
-        del participant, input_data, step_outputs
-        prompts.append(prompt)
-        msg = "provider auth failed"
-        raise DynamicWorkflowExecutionError(msg)
-
-    factory = build_agno_workflow_factory(
-        _workflow_spec(
-            workflow=[
-                {
-                    "id": "write",
-                    "type": "agent_step",
-                    "participant": "writer",
-                    "prompt": "Write about {input.topic}.",
-                },
-                {
-                    "id": "after",
-                    "type": "transform_step",
-                    "template": "Should not run for {input.topic}.",
-                },
-            ],
-            outputs=[{"id": "result", "type": "text", "from_step": "after"}],
-        ),
-        db_file=tmp_path / "dynamic-workflow-agno.db",
-        participant_executor=participant_executor,
-    )
-    workflow = factory.resolve(RequestContext(user_id="@user:localhost", input={"topic": "Agno factories"}), Workflow)
-
-    with pytest.raises(DynamicWorkflowExecutionError, match="provider auth failed"):
-        workflow.run(input={"topic": "Agno factories"}, user_id="@user:localhost")
-
-    assert prompts == ["Write about Agno factories."]
 
 
 def test_dynamic_workflow_tool_uses_runtime_context(tmp_path: Path) -> None:
@@ -1719,8 +1665,8 @@ def test_dynamic_workflow_tool_rejects_ephemeral_model_outside_caller_policy(tmp
         Config(
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
-                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -1740,7 +1686,7 @@ def test_dynamic_workflow_tool_rejects_ephemeral_model_outside_caller_policy(tmp
                             "tools": [],
                         },
                     ],
-                    permissions={"models": ["claude-opus-4-8"], "tools": []},
+                    permissions={"models": ["claude-opus-5"], "tools": []},
                 ),
             ),
         )
@@ -1757,8 +1703,8 @@ def test_dynamic_workflow_tool_enforces_permission_models_for_default_participan
         Config(
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
-                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -1777,7 +1723,7 @@ def test_dynamic_workflow_tool_enforces_permission_models_for_default_participan
                             "tools": [],
                         },
                     ],
-                    permissions={"models": ["claude-opus-4-8"], "tools": []},
+                    permissions={"models": ["claude-opus-5"], "tools": []},
                 ),
             ),
         )
@@ -1794,8 +1740,8 @@ def test_dynamic_workflow_tool_defaults_ephemeral_model_to_caller_runtime_model(
         Config(
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="opus")},
             models={
-                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -1814,7 +1760,7 @@ def test_dynamic_workflow_tool_defaults_ephemeral_model_to_caller_runtime_model(
                             "tools": [],
                         },
                     ],
-                    permissions={"models": ["claude-sonnet-4-6"], "tools": []},
+                    permissions={"models": ["claude-sonnet-5"], "tools": []},
                 ),
             ),
         )
@@ -1868,6 +1814,31 @@ def test_dynamic_workflow_tool_rejects_unavailable_room_agent_during_validation(
     assert "not available to this requester in this room" in result["message"]
 
 
+@pytest.mark.usefixtures("enforce_turn_authorization")
+def test_dynamic_workflow_validation_uses_current_authorization_after_reload(tmp_path: Path) -> None:
+    """A long-lived tool context must reject room agents revoked by a config reload."""
+    tool = DynamicWorkflowTools()
+    context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
+    current_config = context.config.model_copy(deep=True)
+    with_responder_access(current_config, "specialist", users=[])
+    context = replace(context, config_provider=lambda: current_config)
+    spec = _workflow_spec(
+        participants=[
+            {
+                "id": "writer",
+                "kind": "room_agent",
+                "agent": "specialist",
+            },
+        ],
+    )
+
+    with tool_runtime_context(context):
+        result = _tool_payload(tool.validate_workflow(spec))
+
+    assert result["status"] == "error"
+    assert "not available to this requester in this room" in result["message"]
+
+
 def test_dynamic_workflow_tool_uses_cached_client_room_when_context_room_is_missing(tmp_path: Path) -> None:
     """Room-agent validation should use the client's cached current room before falling back to an empty room."""
     tool = DynamicWorkflowTools()
@@ -1899,8 +1870,8 @@ def test_dynamic_workflow_tool_revalidates_saved_revision_policy_before_run(tmp_
         Config(
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
-                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -2001,8 +1972,8 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
                 ),
             },
             models={
-                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "large": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
+                "large": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
             room_models={"lobby": "large"},
             knowledge_bases={"reference": {"path": str(tmp_path / "knowledge")}},
@@ -2010,12 +1981,9 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
         context.runtime_paths,
     )
     runtime_paths = runtime_paths_for(config)
-    (runtime_paths.storage_root / "matrix_state.yaml").write_text(
-        yaml.safe_dump(
-            {"rooms": {"lobby": {"room_id": "!room:localhost", "alias": "#lobby:localhost", "name": "Lobby"}}},
-        ),
-        encoding="utf-8",
-    )
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("lobby", room_id="!room:localhost", alias="#lobby:localhost", name="Lobby")
+    state.save(runtime_paths=runtime_paths)
     persist_entity_accounts(config, runtime_paths)
     context = replace(context, config=config, runtime_paths=runtime_paths)
     parent_loop = asyncio.new_event_loop()
@@ -2107,6 +2075,63 @@ def test_participant_run_config_requires_approval_for_granted_tools(tmp_path: Pa
     assert context.config.tool_approval.default == "auto_approve"
 
 
+def test_dynamic_workflow_uses_shared_automation_approval_policy(tmp_path: Path) -> None:
+    """The extracted helper preserves the participant approval overlay exactly."""
+    context = _make_context(tmp_path)
+    shared = build_automation_approval_config(
+        context.config,
+        function_owners={"read_url": frozenset({"website"})},
+        preapproved_toolkits=frozenset({"website"}),
+        never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
+    )
+
+    assert shared.tool_approval.default == "require_approval"
+    assert [(rule.match, rule.action) for rule in shared.tool_approval.rules] == [("read_url", "auto_approve")]
+
+
+def test_non_resumable_participant_rejects_gated_functions(tmp_path: Path) -> None:
+    """Ephemeral participants must clearly reject grants that require approval."""
+    context = _make_context(tmp_path)
+    toolkit = Toolkit(
+        name="mixed",
+        tools=[
+            Function(name="safe", entrypoint=lambda: "safe"),
+            Function(name="dangerous", entrypoint=lambda: "dangerous"),
+        ],
+    )
+    run_config = context.config.model_copy(
+        update={
+            "tool_approval": context.config.tool_approval.model_copy(
+                update={
+                    "default": "require_approval",
+                    "rules": [ApprovalRuleConfig(match="safe", action="auto_approve")],
+                },
+            ),
+        },
+    )
+
+    with pytest.raises(DynamicWorkflowExecutionError, match=r"dangerous.*cannot suspend"):
+        dynamic_workflow_module._reject_nonresumable_toolkits(
+            {"mixed": toolkit},
+            run_config,
+        )
+
+
+def test_non_resumable_participant_rejects_native_confirmation(tmp_path: Path) -> None:
+    """A tool-authored Agno confirmation cannot enter an embedded participant with no resume owner."""
+    context = _make_context(tmp_path)
+    toolkit = Toolkit(
+        name="native",
+        tools=[Function(name="native_confirmation", entrypoint=lambda: None, requires_confirmation=True)],
+    )
+
+    with pytest.raises(DynamicWorkflowExecutionError, match=r"native_confirmation.*cannot suspend"):
+        dynamic_workflow_module._reject_nonresumable_toolkits(
+            {"native": toolkit},
+            context.config,
+        )
+
+
 def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> None:
     """Tools listed in the dynamic_workflow allowed_tools config skip per-call approval."""
     context = _make_context(tmp_path)
@@ -2118,7 +2143,7 @@ def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> No
                     tools=[{"dynamic_workflow": {"allowed_tools": ["website"]}}],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         context.runtime_paths,
     )
@@ -2145,7 +2170,7 @@ def test_participant_run_config_wildcard_pre_approves_all_granted_tools(tmp_path
                     tools=[{"dynamic_workflow": {"allowed_tools": ["*"]}}],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         context.runtime_paths,
     )
@@ -2172,7 +2197,7 @@ def test_participant_run_config_does_not_pre_approve_colliding_function_names(tm
                     tools=[{"dynamic_workflow": {"allowed_tools": ["python"]}}],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         context.runtime_paths,
     )
@@ -2203,7 +2228,7 @@ def test_participant_run_config_never_pre_approves_system_mutating_tools(tmp_pat
                     tools=[{"dynamic_workflow": {"allowed_tools": ["*", "scheduler"]}}],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         context.runtime_paths,
     )
@@ -2230,7 +2255,7 @@ def test_participant_run_config_preserves_operator_rule_precedence(tmp_path: Pat
                     tools=[{"dynamic_workflow": {"allowed_tools": ["*"]}}],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
             tool_approval={"rules": [{"match": "run_shell_command", "action": "require_approval"}]},
         ),
         context.runtime_paths,
@@ -2261,7 +2286,7 @@ def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> Non
                     worker_tools=["shell"],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         context.runtime_paths,
     )
@@ -2273,11 +2298,11 @@ def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> Non
                 "id": "writer",
                 "kind": "ephemeral_agent",
                 "name": "Report Writer",
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-5",
                 "tools": ["website", "shell"],
             },
         ],
-        permissions={"models": ["claude-sonnet-4-6"], "tools": ["website", "shell"]},
+        permissions={"models": ["claude-sonnet-5"], "tools": ["website", "shell"]},
     )
     sentinel_toolkits = {name: Toolkit(name=f"fake_{name}") for name in ("website", "shell")}
 
@@ -2317,62 +2342,14 @@ def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> Non
     assert build_calls["shell"]["worker_tools"] == ["shell"]
 
 
-def test_ephemeral_participant_tool_bridge_carries_workflow_origin(tmp_path: Path) -> None:
-    """The participant's tool hook bridge must carry workflow + participant provenance for approval cards."""
-    context = _make_context(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow", "website"]),
-            },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
-        ),
-        context.runtime_paths,
-    )
-    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
-    tool = DynamicWorkflowTools()
-    spec = _workflow_spec(
-        participants=[
-            {
-                "id": "writer",
-                "kind": "ephemeral_agent",
-                "model": "claude-sonnet-4-6",
-                "tools": ["website"],
-            },
-        ],
-        permissions={"models": ["claude-sonnet-4-6"], "tools": ["website"]},
-    )
-    bridge_mock = Mock(return_value=None)
-    agent_mock = Mock(return_value=_fake_stream_agent(content="done"))
-    with (
-        tool_runtime_context(context),
-        patch(
-            "mindroom.agents.build_agent_toolkit",
-            side_effect=lambda name, **_kwargs: Toolkit(name=f"fake_{name}"),
-        ),
-        patch.object(dynamic_workflow_module, "build_tool_hook_bridge", bridge_mock),
-        patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=SimpleNamespace()),
-        patch.object(dynamic_workflow_module, "Agent", agent_mock),
-    ):
-        create_payload = _tool_payload(tool.create_workflow(spec))
-        run_payload = _tool_payload(tool.run_workflow("competitor-research-report", {"topic": "Agno"}))
-
-    assert create_payload["status"] == "ok"
-    assert run_payload["status"] == "completed"
-    assert bridge_mock.call_args.kwargs["workflow_origin"] == ToolCallWorkflowOrigin(
-        workflow_id="competitor-research-report",
-        participant_id="writer",
-    )
-
-
 def test_ephemeral_participant_without_grants_runs_with_empty_tools(tmp_path: Path) -> None:
     """Tool-less participants (empty or missing tools key) must keep running with tools=[]."""
     context = _make_context(tmp_path)
     tool = DynamicWorkflowTools()
     spec = _workflow_spec(
         participants=[
-            {"id": "writer", "kind": "ephemeral_agent", "model": "claude-sonnet-4-6", "tools": []},
-            {"id": "editor", "kind": "ephemeral_agent", "model": "claude-sonnet-4-6"},
+            {"id": "writer", "kind": "ephemeral_agent", "model": "claude-sonnet-5", "tools": []},
+            {"id": "editor", "kind": "ephemeral_agent", "model": "claude-sonnet-5"},
         ],
         workflow=[
             {"id": "write", "type": "agent_step", "participant": "writer", "prompt": "Write."},

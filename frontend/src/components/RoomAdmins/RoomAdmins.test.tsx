@@ -36,7 +36,7 @@ describe("isConcreteMatrixUserId", () => {
 
 describe("RoomAdmins", () => {
   const mockSaveConfig = vi.fn();
-  const mockUpdateMatrixRoomAccess = vi.fn();
+  const mockUpdateRoomDefaults = vi.fn();
   type MockStoreState = {
     config: Config;
     diagnostics: ConfigDiagnostic[];
@@ -44,7 +44,7 @@ describe("RoomAdmins", () => {
     isDirty: boolean;
     isLoading: boolean;
     saveConfig: () => Promise<SaveConfigResult>;
-    updateMatrixRoomAccess: typeof mockUpdateMatrixRoomAccess;
+    updateRoomDefaults: typeof mockUpdateRoomDefaults;
   };
   type MockedStoreHook = {
     (): MockStoreState;
@@ -55,9 +55,9 @@ describe("RoomAdmins", () => {
   let mockStoreState: MockStoreState;
 
   const createConfig = (): Partial<Config> => ({
-    matrix_room_access: {
-      mode: "multi_user",
-      room_admins: ["@alice:example.com"],
+    room_defaults: {
+      join_policy: "invite",
+      admins: ["@alice:example.com"],
     },
   });
 
@@ -69,10 +69,16 @@ describe("RoomAdmins", () => {
       isDirty,
       isLoading: false,
       saveConfig: mockSaveConfig,
-      updateMatrixRoomAccess: mockUpdateMatrixRoomAccess,
+      updateRoomDefaults: mockUpdateRoomDefaults,
     };
     mockedUseConfigStore.mockReturnValue(mockStoreState);
     mockedUseConfigStore.getState = vi.fn(() => mockStoreState);
+  };
+
+  const expandRoomAdmins = () => {
+    fireEvent.click(
+      screen.getByRole("button", { name: /Room Admins, \d+ admins?/ }),
+    );
   };
 
   beforeEach(() => {
@@ -85,15 +91,29 @@ describe("RoomAdmins", () => {
     setMockStore(createConfig());
   });
 
-  it("lists configured room admins", () => {
+  it("starts collapsed with an admin count and reveals the editor", () => {
     render(<RoomAdmins />);
 
-    expect(screen.getByText("Room Admins")).toBeInTheDocument();
+    const disclosure = screen.getByRole("button", {
+      name: "Room Admins, 1 admin",
+    });
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    expect(
+      screen.queryByPlaceholderText("@alice:example.com"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(disclosure);
+
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("@alice:example.com")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Matrix users automatically granted admin power/),
+    ).toBeInTheDocument();
   });
 
   it("adds a new admin and preserves other access settings", async () => {
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.change(screen.getByPlaceholderText("@alice:example.com"), {
       target: { value: "@bob:example.com" },
@@ -101,9 +121,9 @@ describe("RoomAdmins", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
 
     await waitFor(() => {
-      expect(mockUpdateMatrixRoomAccess).toHaveBeenCalledWith({
-        mode: "multi_user",
-        room_admins: ["@alice:example.com", "@bob:example.com"],
+      expect(mockUpdateRoomDefaults).toHaveBeenCalledWith({
+        join_policy: "invite",
+        admins: ["@alice:example.com", "@bob:example.com"],
       });
     });
   });
@@ -112,6 +132,7 @@ describe("RoomAdmins", () => {
     setMockStore(createConfig(), false);
 
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
@@ -120,6 +141,7 @@ describe("RoomAdmins", () => {
     setMockStore(null as unknown as Partial<Config>);
 
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.change(screen.getByPlaceholderText("@alice:example.com"), {
       target: { value: "@bob:example.com" },
@@ -127,13 +149,14 @@ describe("RoomAdmins", () => {
 
     expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-    expect(mockUpdateMatrixRoomAccess).not.toHaveBeenCalled();
+    expect(mockUpdateRoomDefaults).not.toHaveBeenCalled();
   });
 
-  it("adds an admin when the config has no matrix_room_access section", async () => {
+  it("adds an admin when the config has no room_defaults section", async () => {
     setMockStore({});
 
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.change(screen.getByPlaceholderText("@alice:example.com"), {
       target: { value: "@bob:example.com" },
@@ -141,14 +164,15 @@ describe("RoomAdmins", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
 
     await waitFor(() => {
-      expect(mockUpdateMatrixRoomAccess).toHaveBeenCalledWith({
-        room_admins: ["@bob:example.com"],
+      expect(mockUpdateRoomDefaults).toHaveBeenCalledWith({
+        admins: ["@bob:example.com"],
       });
     });
   });
 
   it("rejects invalid Matrix user IDs", async () => {
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.change(screen.getByPlaceholderText("@alice:example.com"), {
       target: { value: "not-a-user-id" },
@@ -160,11 +184,12 @@ describe("RoomAdmins", () => {
         expect.objectContaining({ title: "Invalid Matrix user ID" }),
       );
     });
-    expect(mockUpdateMatrixRoomAccess).not.toHaveBeenCalled();
+    expect(mockUpdateRoomDefaults).not.toHaveBeenCalled();
   });
 
   it("rejects duplicate admins", async () => {
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.change(screen.getByPlaceholderText("@alice:example.com"), {
       target: { value: "@alice:example.com" },
@@ -176,26 +201,28 @@ describe("RoomAdmins", () => {
         expect.objectContaining({ title: "Already a room admin" }),
       );
     });
-    expect(mockUpdateMatrixRoomAccess).not.toHaveBeenCalled();
+    expect(mockUpdateRoomDefaults).not.toHaveBeenCalled();
   });
 
   it("removes an admin", async () => {
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.click(
       screen.getByRole("button", { name: "Remove @alice:example.com" }),
     );
 
     await waitFor(() => {
-      expect(mockUpdateMatrixRoomAccess).toHaveBeenCalledWith({
-        mode: "multi_user",
-        room_admins: [],
+      expect(mockUpdateRoomDefaults).toHaveBeenCalledWith({
+        join_policy: "invite",
+        admins: [],
       });
     });
   });
 
   it("saves and shows a confirmation toast", async () => {
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
@@ -219,6 +246,7 @@ describe("RoomAdmins", () => {
     });
 
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 

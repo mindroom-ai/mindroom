@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import sys
+import sysconfig
 import threading
 import time
 import venv
@@ -131,16 +136,90 @@ def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerSta
     return local_worker_state_paths_for_root(Path(state_root))
 
 
-def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
-    """Create the persistent directories and venv for one worker runtime root."""
+def _ensure_local_worker_directories(paths: LocalWorkerStatePaths) -> None:
     paths.workspace.mkdir(parents=True, exist_ok=True)
     paths.cache_dir.mkdir(parents=True, exist_ok=True)
     paths.metadata_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
+    """Create the persistent directories and venv for one worker runtime root."""
+    _ensure_local_worker_directories(paths)
     if (paths.venv_dir / "bin" / "python").exists():
         return
 
-    builder = venv.EnvBuilder(with_pip=True, system_site_packages=True)
-    builder.create(paths.venv_dir)
+    try:
+        _create_local_worker_venv(paths.venv_dir)
+    except Exception:
+        # Creation writes the interpreter before seeding pip. A failed seed must
+        # leave the next request able to retry without deleting user packages.
+        (paths.venv_dir / "bin" / "python").unlink(missing_ok=True)
+        raise
+
+
+def _create_local_worker_venv(venv_dir: Path) -> None:
+    """Seed pip from the interpreter's bundled wheel without index access."""
+    uv_path = shutil.which("uv")
+    bundled_pip_dir = Path(sysconfig.get_path("stdlib")) / "ensurepip" / "_bundled"
+    if uv_path is None or not any(bundled_pip_dir.glob("pip-*.whl")):
+        venv.EnvBuilder(with_pip=True, system_site_packages=True).create(venv_dir)
+        return
+    _create_uv_worker_venv(venv_dir, uv_path=uv_path, bundled_pip_dir=bundled_pip_dir)
+
+
+def _ensure_local_script_worker_state(paths: LocalWorkerStatePaths) -> None:
+    """Create run-scoped worker state with a fast unseeded uv virtualenv."""
+    _ensure_local_worker_directories(paths)
+    if (paths.venv_dir / "bin" / "python").exists():
+        return
+
+    uv_path = shutil.which("uv")
+    if uv_path is None:
+        msg = "uv is required to prepare run-scoped script workers."
+        raise WorkerBackendError(msg)
+    _create_uv_worker_venv(paths.venv_dir, uv_path=uv_path)
+
+
+def _create_uv_worker_venv(
+    venv_dir: Path,
+    *,
+    uv_path: str,
+    bundled_pip_dir: Path | None = None,
+) -> None:
+    """Create a worker environment with optional offline pip seeding."""
+    env = dict(os.environ)
+    env.pop("UV_VENV_SEED", None)
+    # Worker-owned packages must not alias other environments or the uv cache.
+    seed_args = (
+        [
+            "--seed",
+            "--no-index",
+            "--find-links",
+            str(bundled_pip_dir),
+            "--allow-existing",
+            "--link-mode",
+            "copy",
+        ]
+        if bundled_pip_dir is not None
+        else []
+    )
+    subprocess.run(
+        [
+            uv_path,
+            "venv",
+            "--no-project",
+            "--no-config",
+            "--offline",
+            "--no-python-downloads",
+            "--system-site-packages",
+            "--python",
+            sys.executable,
+            *seed_args,
+            str(venv_dir),
+        ],
+        check=True,
+        env=env,
+    )
 
 
 def ensure_local_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
@@ -149,8 +228,18 @@ def ensure_local_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
         _ensure_local_worker_state(paths)
 
 
+def ensure_local_script_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
+    """Create run-scoped worker state under the shared initialization lock."""
+    with _shared_worker_initialization_lock(paths):
+        _ensure_local_script_worker_state(paths)
+
+
 def _shared_worker_initialization_lock(paths: LocalWorkerStatePaths) -> threading.Lock:
-    lock_key = str(paths.root)
+    return _shared_worker_initialization_lock_for_root(paths.root)
+
+
+def _shared_worker_initialization_lock_for_root(state_root: Path) -> threading.Lock:
+    lock_key = str(state_root)
     with _SHARED_INITIALIZATION_LOCK:
         worker_lock = _SHARED_INITIALIZATION_LOCKS.get(lock_key)
         if worker_lock is None:
@@ -163,6 +252,7 @@ class _LocalWorkerBackend:
     """Persistent local worker backend used by the sandbox runner."""
 
     backend_name = "local_sandbox_runner"
+    cleanup_locator: str | None = None
 
     def __init__(
         self,

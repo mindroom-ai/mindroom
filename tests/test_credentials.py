@@ -410,6 +410,59 @@ class TestCredentialsManager:
             mode = stat.S_IMODE(directory_path.stat().st_mode)
             assert mode == 0o700
 
+    def test_fresh_scoped_credentials_use_durable_directory_creation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Every newly introduced scoped-directory entry must use the durable creator."""
+        manager = CredentialsManager(tmp_path / "credentials")
+        created: list[Path] = []
+        real_create = credentials_module.create_directory_durable
+
+        def record_create(path: Path, *, mode: int) -> None:
+            created.append(path)
+            real_create(path, mode=mode)
+
+        monkeypatch.setattr(credentials_module, "create_directory_durable", record_create)
+
+        scoped_manager = manager.for_primary_runtime_scope("@user:example.test", "agent")
+
+        assert created == [
+            scoped_manager.base_path.parent.parent,
+            scoped_manager.base_path.parent,
+            scoped_manager.base_path,
+        ]
+
+    def test_existing_scoped_directory_retries_interrupted_durable_creation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Manager retry must republish an existing scope directory after creator failure."""
+        manager = CredentialsManager(tmp_path / "credentials")
+        scoped_root = tmp_path / "private_oauth"
+        attempted: list[Path] = []
+        real_create = credentials_module.create_directory_durable
+        failed_once = False
+
+        def fail_after_create(path: Path, *, mode: int) -> None:
+            nonlocal failed_once
+            attempted.append(path)
+            real_create(path, mode=mode)
+            if path == scoped_root and not failed_once:
+                failed_once = True
+                msg = "scope publication interrupted"
+                raise OSError(msg)
+
+        monkeypatch.setattr(credentials_module, "create_directory_durable", fail_after_create)
+
+        with pytest.raises(OSError, match="scope publication interrupted"):
+            manager.for_primary_runtime_scope("@user:example.test", "agent")
+        manager.for_primary_runtime_scope("@user:example.test", "agent")
+
+        assert attempted.count(scoped_root) == 2
+
     def test_encrypted_scoped_credentials_harden_existing_parent_directories(
         self,
         tmp_path: Path,
@@ -588,7 +641,7 @@ class TestCredentialsManager:
 
         shared_credentials = manager.load_credentials("google")
         worker_credentials = manager.for_worker(
-            "v1:tenant-123:user:@alice:example.org",
+            "v1:tenant-123:user:~@alice:example.org",
         ).load_credentials("google")
 
         assert shared_credentials is None
@@ -666,6 +719,71 @@ class TestCredentialsManager:
 
         assert loaded_credentials == {"api_key": "global-ui-key", "_source": "ui"}
 
+    @pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
+    def test_scoped_helpers_keep_resolved_worker_manager(
+        self,
+        temp_credentials_dir: Path,
+        worker_scope: str,
+    ) -> None:
+        """An already resolved worker store must survive subsequent credential operations."""
+        manager = CredentialsManager(temp_credentials_dir)
+        pinned_manager = manager.for_worker("authorized-worker")
+        identity = ToolExecutionIdentity("matrix", "general", "@alice:example.org", None, None, None, None)
+        worker_target = _worker_target(worker_scope, "general", identity)
+        manager.save_credentials("weather", {"api_key": "shared-key", "shared_only": True})
+        pinned_manager.save_credentials("weather", {"api_key": "pinned-key"})
+
+        assert load_scoped_credentials(
+            "weather",
+            credentials_manager=manager,
+            worker_target=worker_target,
+            worker_credentials_manager=pinned_manager,
+            allowed_shared_services=frozenset({"weather"}),
+        ) == {"api_key": "pinned-key", "shared_only": True}
+
+        save_scoped_credentials(
+            "weather",
+            {"api_key": "updated-key"},
+            credentials_manager=manager,
+            worker_target=worker_target,
+            worker_credentials_manager=pinned_manager,
+        )
+        assert pinned_manager.load_credentials("weather") == {"api_key": "updated-key"}
+
+        credentials_module.delete_scoped_credentials(
+            "weather",
+            credentials_manager=manager,
+            worker_target=worker_target,
+            worker_credentials_manager=pinned_manager,
+        )
+        assert pinned_manager.load_credentials("weather") is None
+        assert manager.load_credentials("weather") == {"api_key": "shared-key", "shared_only": True}
+
+    @pytest.mark.parametrize("allow_shared", [False, True])
+    def test_scoped_load_can_filter_shared_mirror(
+        self,
+        temp_credentials_dir: Path,
+        allow_shared: bool,
+    ) -> None:
+        """Dashboard reads must filter a shared layer even when the runtime uses a mirror."""
+        manager = CredentialsManager(temp_credentials_dir, shared_base_path=temp_credentials_dir / "mirror")
+        identity = ToolExecutionIdentity("matrix", "general", "@alice:example.org", None, None, None, None)
+        worker_target = _worker_target("shared", "general", identity)
+        manager.shared_manager().save_credentials("weather", {"api_key": "shared-key", "shared_only": True})
+        assert worker_target.worker_key is not None
+        manager.for_worker(worker_target.worker_key).save_credentials("weather", {"api_key": "worker-key"})
+
+        credentials = load_scoped_credentials(
+            "weather",
+            credentials_manager=manager,
+            worker_target=worker_target,
+            allowed_shared_services=frozenset({"weather"}) if allow_shared else None,
+            allow_shared_mirror=False,
+        )
+
+        expected = {"api_key": "worker-key", "shared_only": True} if allow_shared else {"api_key": "worker-key"}
+        assert credentials == expected
+
     def test_load_scoped_credentials_shared_scope_keeps_env_fallback(
         self,
         temp_credentials_dir: Path,
@@ -739,7 +857,7 @@ class TestCredentialsManager:
             tenant_id="tenant-123",
             account_id="account-456",
         )
-        worker_key = "v1:tenant-123:user:@alice:example.org"
+        worker_key = "v1:tenant-123:user:~@alice:example.org"
         worker_manager = base_manager.for_worker(worker_key)
         base_manager.save_credentials("openweather", {"api_key": "shared-ui-key", "_source": "ui", "base": "yes"})
         sync_shared_credentials_to_worker(
@@ -968,12 +1086,22 @@ class TestCredentialsManager:
     def test_sync_shared_credentials_to_worker_empty_allowlist_mirrors_nothing(
         self,
         temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """An explicit empty worker allowlist should deny all shared credential mirroring."""
+        """An empty allowlist should skip the shared store while cleaning stale mirrors."""
         manager = CredentialsManager(temp_credentials_dir)
         manager.save_credentials("google", {"api_key": "env-key", "_source": "env"})
         worker_shared_manager = manager.for_worker("worker-a").shared_manager()
         worker_shared_manager.save_credentials("google", {"api_key": "stale-key", "_source": "env"})
+
+        def fail_shared_store_lookup(_manager: CredentialsManager) -> CredentialsManager:
+            pytest.fail("empty allowlist must not open the shared credential store")
+
+        monkeypatch.setattr(
+            credentials_module,
+            "_shared_credentials_manager",
+            fail_shared_store_lookup,
+        )
 
         sync_shared_credentials_to_worker(
             "worker-a",
@@ -1278,7 +1406,7 @@ class TestGlobalCredentialsManager:
         """Dedicated workers should be able to configure a distinct shared credential mirror path."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         storage_path = (tmp_path / "worker-root").resolve()
@@ -1329,7 +1457,7 @@ class TestGlobalCredentialsManager:
         """Distinct runtime credential mirrors should not reuse the same cached manager."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         first_runtime_paths = constants_mod.resolve_runtime_paths(
@@ -1354,7 +1482,7 @@ class TestGlobalCredentialsManager:
         """Changing the explicit storage root should invalidate the cached manager."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         first_root = tmp_path / "one"
@@ -1379,7 +1507,7 @@ class TestGlobalCredentialsManager:
         base_manager = CredentialsManager(root / "credentials")
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         execution_identity = ToolExecutionIdentity(
@@ -1512,7 +1640,7 @@ class TestSharedIntegrationCredentialTagging:
         worker_manager = CredentialsManager(
             base_path=worker_root / "credentials",
             shared_base_path=worker_root / ".shared_credentials",
-            current_worker_key="v1:tenant-123:user:@alice:example.org",
+            current_worker_key="v1:tenant-123:user:~@alice:example.org",
             current_worker_root=worker_root,
         )
         execution_identity = ToolExecutionIdentity(

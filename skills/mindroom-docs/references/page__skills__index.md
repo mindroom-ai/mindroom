@@ -63,6 +63,12 @@ If `metadata.openclaw` is present, MindRoom filters skills using these rules:
 
 Skills without `metadata.openclaw` are always eligible.
 
+## Installing and managing skills
+
+Install a user skill manually at `~/.mindroom/skills/<name>/SKILL.md`, or use the dashboard Skills page to create, view, edit, and delete user skills.
+Bundled and plugin-provided skills are visible but read-only in the dashboard.
+Add a bundled, plugin, or user skill name to the agent's `skills:` allowlist before that agent can use it.
+
 ## Skill locations and precedence
 
 MindRoom resolves skills for each agent from these locations, in this order:
@@ -70,19 +76,23 @@ MindRoom resolves skills for each agent from these locations, in this order:
 1. Bundled skills: `skills/` at the repository root (if present)
 2. Plugin-provided skill directories (see [Plugins](https://docs.mindroom.chat/plugins/))
 3. User skills: `~/.mindroom/skills/`
-4. Agent workspace skills: `<storage>/agents/<agent>/workspace/skills/`
+4. Agent workspace skills: `<resolved workspace>/skills/`
+
+For agents without `private`, this is `<storage>/agents/<agent>/workspace/skills/`.
+Private instances use `<storage>/private_instances/<scope-directory>/<agent>/<private.root>/skills/`; see [Private Instances](https://docs.mindroom.chat/configuration/agents/#private-instances).
 
 If multiple skills share the same name, the last one wins (agent workspace > user > plugin > bundled).
 
-Agent workspace skills are only available to the owning agent at runtime. They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
+Agent workspace skills are only available to the owning agent or private instance at runtime.
+They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
 
 ## Authoring skills as an agent
 
 Agents never need write access to a global skill root to create skills.
 The bundled, plugin, and user roots can be read-only at runtime, for example in container or Kubernetes deployments where the image filesystem and `~/.mindroom` are not writable.
-An agent can always author skills in its own workspace at `<workspace>/skills/<skill-name>/SKILL.md`, using the same `SKILL.md` format described above.
+An agent with a canonical workspace and authorized workspace-rooted file or shell tools can author skills at `<workspace>/skills/<skill-name>/SKILL.md`, using the same `SKILL.md` format described above.
 Workspace-rooted file tools address this location as the relative path `skills/<skill-name>/SKILL.md`.
-Agents with a workspace receive this guidance in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which can be overridden via the root `prompts` block (see [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides)).
+Agents with the required workspace and authoring access receive this guidance in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which can be overridden via the root `prompts` block (see [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides)).
 A new or edited workspace skill is picked up on the agent's next run without a config change.
 
 ## Configuring skills
@@ -102,7 +112,7 @@ agents:
 
 The `skills:` list is an allowlist for bundled, plugin, and user skills.
 If `skills` is empty or unset, the agent gets no bundled, plugin, or user skills.
-Workspace skills under `<storage>/agents/<agent>/workspace/skills/` are still auto-loaded for that agent.
+Workspace skills under `<resolved workspace>/skills/` are still auto-loaded for that agent or private instance.
 This lets an agent create or receive skills in its own workspace without editing `config.yaml`.
 
 Workspace auto-loading is a runtime capability, not a proactive behavior policy.
@@ -126,7 +136,7 @@ Agents that have shell or file execution permissions can still read and execute 
 | --- | --- | --- |
 | Definition | Markdown + YAML | Python code |
 | Location | File system | Code/plugins |
-| Filtering | Automatic by requirements | Always available |
+| Filtering | Automatic by requirements | Configured per agent; may be deferred or disabled |
 | Instructions | Rich markdown | Docstrings |
 | Invocation | Model via skill tools | Model only |
 

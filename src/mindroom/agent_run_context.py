@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.hooks import EnrichmentItem
-from mindroom.knowledge import format_knowledge_availability_notice
+from mindroom.knowledge.utils import format_knowledge_availability_notice
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from mindroom.knowledge import KnowledgeAvailabilityDetail
+    from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 
 
 def append_knowledge_availability_enrichment(

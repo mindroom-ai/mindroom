@@ -11,6 +11,7 @@ from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
+    from contextvars import Context
 
 logger = get_logger(__name__)
 _MAX_BACKGROUND_TASK_CANCEL_ROUNDS = 3
@@ -21,6 +22,60 @@ _background_tasks: set[asyncio.Task[Any]] = set()
 _background_task_owners: dict[asyncio.Task[Any], object] = {}
 
 
+async def run_coroutine_until_complete[Result](
+    coroutine: Coroutine[Any, Any, Result],
+    *,
+    on_cancelled: Callable[[], None] | None = None,
+) -> Result:
+    """Finish one accepted coroutine before propagating cancellation."""
+    worker_task = asyncio.create_task(coroutine)
+    return await wait_for_future_until_complete(worker_task, on_cancel=on_cancelled)
+
+
+async def wait_for_future_until_complete[Result](  # noqa: C901
+    future: asyncio.Future[Result],
+    *,
+    on_cancel: Callable[[], None] | None = None,
+    chain_cancelled_result: bool = True,
+) -> Result:
+    """Drain an accepted future before propagating cancellation from its waiter."""
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError as cancellation:
+        if on_cancel is not None:
+            on_cancel()
+        result_error: Exception | asyncio.CancelledError | None = None
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError as exc:
+                if not future.done() and on_cancel is not None:
+                    on_cancel()
+                result_error = exc if future.done() else None
+            except Exception as exc:
+                result_error = exc
+            if result_error is not None:
+                break
+        if result_error is None:
+            try:
+                future.result()
+            except (Exception, asyncio.CancelledError) as exc:
+                result_error = exc
+        if result_error is not None and (
+            chain_cancelled_result or not isinstance(result_error, asyncio.CancelledError)
+        ):
+            raise cancellation from result_error
+        raise
+
+
+async def run_blocking_until_complete[Result](
+    operation: Callable[..., Result],
+    *args: object,
+) -> Result:
+    """Finish one blocking operation before propagating cancellation."""
+    return await run_coroutine_until_complete(asyncio.to_thread(operation, *args))
+
+
 def create_background_task(
     coro: Coroutine[Any, Any, Any],
     name: str | None = None,
@@ -28,6 +83,7 @@ def create_background_task(
     *,
     owner: object | None = None,
     log_exceptions: bool = True,
+    context: Context | None = None,
 ) -> asyncio.Task[Any]:
     """Create a background task that won't block the main execution.
 
@@ -37,12 +93,14 @@ def create_background_task(
         error_handler: Optional error handler function
         owner: Optional logical owner used for scoped shutdown waits
         log_exceptions: Whether unhandled task exceptions should be logged automatically
+        context: Execution context for the task. ``None`` preserves asyncio's normal
+            caller-context inheritance.
 
     Returns:
         The created task
 
     """
-    task: asyncio.Task[Any] = asyncio.create_task(coro)
+    task: asyncio.Task[Any] = asyncio.create_task(coro, context=context)
     if name:
         task.set_name(name)
 
@@ -92,7 +150,11 @@ async def _cancel_and_drain_background_tasks(
         if not pending_tasks:
             return
         for task in pending_tasks:
-            request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
+            request_task_cancel(
+                task,
+                cancel_source=shutdown_intent.cancel_source,
+                process_shutdown=shutdown_intent.stop_reason == "shutdown",
+            )
         done, _pending = await asyncio.wait(
             pending_tasks,
             timeout=_BACKGROUND_TASK_CANCEL_ROUND_TIMEOUT_SECONDS,

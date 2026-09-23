@@ -13,7 +13,8 @@ MindRoom supports three memory backends:
 Set the global default backend with `memory.backend`.
 Override the backend per agent with `agents.<name>.memory_backend`.
 When an agent uses `memory_backend: file`, its file memory lives in its canonical workspace root.
-When an agent uses `memory_backend: none`, MindRoom skips prompt memory lookup, automatic memory persistence, and the explicit `memory` tool for that agent.
+When an agent uses `memory_backend: none`, MindRoom skips prompt memory lookup, automatic memory persistence, and the explicit `memory` tool for that agent's solo turns.
+Team memory has a separate backend selection rule described below.
 Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root.
 `private` changes where private files live.
 It does not switch the memory backend by itself.
@@ -32,6 +33,15 @@ Optional:
 
 Notes:
 - Team IDs are sorted agent names joined by `+`.
+
+Team memory selects one backend from the participating members' effective backends:
+
+- All members use `file`: the team uses file memory.
+- All members use `none`: team memory is disabled.
+- Every other combination uses Mem0, including `file` plus `none` even though neither member uses Mem0 alone.
+
+In the Mem0 case, team extraction and retrieval use the configured Mem0 model and embedder, and team records are stored under each participating member's distinct effective storage root.
+A member's `none` setting still disables its solo memory, but does not prevent this separate team scope from retaining conversation memory.
 
 ## Backend: `mem0`
 
@@ -83,7 +93,8 @@ memory:
       host: http://localhost:11434
 ```
 
-Supported embedder providers: `openai`, `ollama`, `huggingface`, `sentence_transformers`.
+Supported Mem0 embedder providers: `openai`, `ollama`, `huggingface`, `sentence_transformers`.
+Semantic knowledge and file-memory indexes support the narrower [semantic embedder provider set](knowledge.md#embedder-configuration).
 
 ### Memory LLM
 
@@ -94,7 +105,7 @@ memory:
   llm:
     provider: ollama    # ollama, openai, or anthropic
     config:
-      model: llama3.2
+      model: gemma4
 ```
 
 Supported LLM providers: `ollama` (default), `openai`, `anthropic`.
@@ -154,14 +165,22 @@ memory:
 It does not relocate canonical agent file memory (which always lives under the agent's workspace root).
 It can affect team file memory when the resolution determines the configured path should be used.
 `memory.search` controls how `search_memories` reads file-backed agent memory.
-`mode: keyword` scans markdown files directly.
-`mode: semantic` builds a lazy per-agent or per-requester vector index under `mindroom_data/memory_search_db/` and uses `memory.embedder`.
-`include` contains root-relative glob patterns below the effective file-memory root.
-The default `memory/**/*.md` searches dated memory files and excludes `MEMORY.md`.
-Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by search.
+`mode: keyword` searches structured entries with persisted IDs in `MEMORY.md` and both structured entries and eligible plain-text snippets in `memory/**/*.md`.
+`mode: semantic` builds a lazy per-agent or per-requester vector index under `<storage-root>/knowledge_db/<generated-file-memory-storage-key>/` and uses `memory.embedder`.
+The generated file-memory identity includes the effective memory root and scope; see [Knowledge storage](knowledge.md#storage).
+`include` contains root-relative glob patterns for semantic search below the effective file-memory root.
+The default semantic include `memory/**/*.md` searches dated memory files and excludes `MEMORY.md`.
+Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by semantic search.
 MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids duplicate retrieval.
+That preload is introduced by a header naming the file's absolute path and stating that it is inlined automatically every turn, so the agent does not re-read it to recall its own memory.
+`max_entrypoint_lines` caps how much of the file is inlined; when it truncates, the preload ends with a marker reporting the included and total line counts, the active cap, and the path to read for the omitted lines.
+Ordinary `MEMORY.md` prose is available through preload, not keyword snippets; read the file directly for omitted lines, or use semantic search with `include_entrypoint: true` once the index is ready.
+Semantic fallback uses the same keyword entries and snippets rather than the semantic include patterns.
 Semantic mode applies to the agent's own file-memory scope.
 Team-visible file memory is still keyword searched.
+File memory is already searchable on demand through `search_memories`.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+The knowledge surface is semantic-only and does not provide keyword fallback, team-visible memory, or memory IDs, so use `search_memories` when those capabilities matter.
 
 Per-agent override example:
 
@@ -217,7 +236,7 @@ Agent file memory is stored under each agent's canonical workspace root:
 - `agents/<agent>/workspace/MEMORY.md`
 - `agents/<agent>/workspace/memory/YYYY-MM-DD.md`
 
-Team file memory is mirrored under each participating agent's storage directory:
+When all participating team members use the `file` backend, team file memory is mirrored under each member's storage directory:
 
 - `agents/<agent>/memory_files/team_<sorted_members>/MEMORY.md`
 - `agents/<agent>/memory_files/team_<sorted_members>/memory/YYYY-MM-DD.md`
@@ -285,6 +304,8 @@ agents:
 ```
 
 This exposes `add_memory`, `search_memories`, `list_memories`, `get_memory`, `update_memory`, and `delete_memory`.
+Persisted IDs and file-backed `file:<path>:<line>` IDs support read, update, and delete operations.
+Semantic file-memory results use read-only `semantic:<source_file>:<rank>` locators.
 
 ## Agno Learning
 

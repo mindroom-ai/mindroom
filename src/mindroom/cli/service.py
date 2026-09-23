@@ -21,7 +21,8 @@ service_app = typer.Typer(
     name="service",
     help="""Install and manage MindRoom as a background user service.
 
-MindRoom runs through `uv tool run` and starts automatically at login.
+MindRoom runs the version installed by this command through `uv tool run` and starts automatically at login.
+Rerun `mindroom service install` after upgrading MindRoom.
 
 Supported platforms:
 - macOS: launchd (`~/Library/LaunchAgents/`)
@@ -114,7 +115,10 @@ def install_service(
         log_hint = f"View logs: [cyan]{result.log_dir}/[/cyan]"
     _console.print(
         Panel(
-            f"[green]{result.message}[/green]\n\nCheck status: [cyan]mindroom service status[/cyan]\n{log_hint}",
+            f"[green]{result.message}[/green]\n\n"
+            "The service is pinned to this MindRoom version.\n"
+            "After upgrading, rerun [cyan]mindroom service install[/cyan].\n\n"
+            f"Check status: [cyan]mindroom service status[/cyan]\n{log_hint}",
             title="Service Installed",
             border_style="green",
         ),

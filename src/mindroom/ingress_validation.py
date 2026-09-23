@@ -5,12 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-import nio
-
-from mindroom.authorization import get_effective_sender_id_for_reply_permissions, is_authorized_sender
+from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedIngress, is_text_dispatch_event
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
@@ -28,9 +26,12 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.event_info import reply_to_event_id_from_content
 from mindroom.matrix.media import is_audio_message_event
+from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 
 if TYPE_CHECKING:
+    import nio
+
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.commands.parsing import Command
     from mindroom.constants import RuntimePaths
@@ -38,7 +39,6 @@ if TYPE_CHECKING:
         DispatchEvent,
         DispatchIngressMetadata,
         DispatchPayloadMetadata,
-        TextDispatchEvent,
     )
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
@@ -48,8 +48,8 @@ if TYPE_CHECKING:
 class _SenderReplyPolicy(Protocol):
     """Minimal reply-permission surface needed at the ingress boundary."""
 
-    def can_reply_to_sender(self, sender_id: str) -> bool:
-        """Return whether this agent may reply to one effective requester."""
+    def can_reply_to_sender_in_room(self, sender_id: str, room_id: str) -> bool:
+        """Return whether this agent may reply to one requester in a room."""
         ...
 
 
@@ -79,31 +79,42 @@ class IngressValidator:
         """Return the effective requester for reply-permission checks."""
         source_dict = cast("dict[str, Any] | None", source if isinstance(source, dict) else None)
         content = source_dict.get("content") if source_dict is not None else None
+        requester_id: str
         if isinstance(content, dict):
             original_sender = content.get(ORIGINAL_SENDER_KEY)
             if not isinstance(original_sender, str):
-                return get_effective_sender_id_for_reply_permissions(
+                requester_id = get_effective_sender_id_for_reply_permissions(
                     sender,
                     source_dict,
                     self.deps.runtime.config,
                     self.deps.runtime_paths,
                 )
-            source_kind = source_kind_from_content(content)
-            trusted_requester = requester_id_from_trusted_original_sender(
-                original_sender=original_sender,
-                original_sender_entity_name=self.managed_entity_name_for_sender(original_sender),
-                source_kind=source_kind,
-                sender_trusts_original_sender=self.should_trust_original_sender_metadata(
-                    sender=sender,
+            else:
+                source_kind = source_kind_from_content(content)
+                trusted_requester = requester_id_from_trusted_original_sender(
+                    original_sender=original_sender,
+                    original_sender_entity_name=self.managed_entity_name_for_sender(original_sender),
+                    original_sender_is_human=is_human_requester_id(
+                        original_sender,
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
+                    ),
                     source_kind=source_kind,
-                ),
+                    sender_trusts_original_sender=self._should_trust_original_sender_metadata(
+                        sender=sender,
+                        source_kind=source_kind,
+                    ),
+                )
+                requester_id = trusted_requester if trusted_requester is not None else sender
+        else:
+            requester_id = get_effective_sender_id_for_reply_permissions(
+                sender,
+                source_dict,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
             )
-            if trusted_requester is not None:
-                return trusted_requester
-            return sender
-        return get_effective_sender_id_for_reply_permissions(
-            sender,
-            source_dict,
+        return resolve_human_requester_alias(
+            requester_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
@@ -117,7 +128,7 @@ class IngressValidator:
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         return registry.current_entity_name_for_user_id(sender_id, include_router=include_router)
 
-    def should_trust_original_sender_metadata(
+    def _should_trust_original_sender_metadata(
         self,
         *,
         sender: str,
@@ -133,12 +144,12 @@ class IngressValidator:
     @staticmethod
     def event_source_kind(event: DispatchEvent, content: dict[str, Any]) -> str | None:
         """Return canonical source-kind metadata for one dispatch event."""
-        source_kind = event.source_kind_override if isinstance(event, PreparedTextEvent) else None
+        source_kind = event.source_kind_override if isinstance(event, PreparedIngress) else None
         return source_kind if source_kind is not None else source_kind_from_content(content)
 
     def trusted_human_original_sender_for_event(self, event: DispatchEvent) -> str | None:
         """Return trusted human original-sender metadata from one dispatch event."""
-        if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
+        if not is_text_dispatch_event(event):
             return None
         if not self.sender_is_trusted_for_ingress_metadata(event.sender):
             return None
@@ -146,13 +157,13 @@ class IngressValidator:
         if not isinstance(content, dict):
             return None
         source_kind = self.event_source_kind(event, content)
-        return self.trusted_human_original_sender(
+        return self._trusted_human_original_sender(
             sender=event.sender,
             content=content,
             source_kind=source_kind,
         )
 
-    def trusted_human_original_sender(
+    def _trusted_human_original_sender(
         self,
         *,
         sender: str,
@@ -163,9 +174,13 @@ class IngressValidator:
         original_sender = content.get(ORIGINAL_SENDER_KEY)
         if not isinstance(original_sender, str) or not original_sender:
             return None
-        if self.managed_entity_name_for_sender(original_sender) is not None:
+        if not is_human_requester_id(
+            original_sender,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        ):
             return None
-        if not self.should_trust_original_sender_metadata(
+        if not self._should_trust_original_sender_metadata(
             sender=sender,
             source_kind=source_kind,
         ):
@@ -178,7 +193,7 @@ class IngressValidator:
 
     def is_trusted_internal_relay_event(self, event: DispatchEvent) -> bool:
         """Return whether one agent-authored relay should bypass user-turn coalescing."""
-        if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
+        if not is_text_dispatch_event(event):
             return False
         content = event.source.get("content") if isinstance(event.source, dict) else None
         if not isinstance(content, dict):
@@ -187,7 +202,7 @@ class IngressValidator:
             return False
         return self.trusted_human_original_sender_for_event(event) is not None
 
-    def is_trusted_router_relay_event(self, event: DispatchEvent) -> bool:
+    def _is_trusted_router_relay_event(self, event: DispatchEvent) -> bool:
         """Return whether one trusted internal relay originated from the router."""
         if not self.is_trusted_internal_relay_event(event):
             return False
@@ -196,7 +211,7 @@ class IngressValidator:
 
     def router_relay_original_event_id(self, event: DispatchEvent) -> str | None:
         """Return the routed human event one trusted router relay explicitly replies to."""
-        if not self.is_trusted_router_relay_event(event):
+        if not self._is_trusted_router_relay_event(event):
             return None
         content = event.source.get("content") if isinstance(event.source, dict) else None
         if not isinstance(content, dict):
@@ -216,7 +231,7 @@ class IngressValidator:
             return False
         content_dict = cast("dict[str, Any]", content)
         return (
-            self.trusted_human_original_sender(
+            self._trusted_human_original_sender(
                 sender=sender,
                 content=content_dict,
                 source_kind=source_kind_from_content(content_dict),
@@ -227,7 +242,7 @@ class IngressValidator:
     def is_display_only_router_voice_echo(self, event: DispatchEvent) -> bool:
         """Return whether one ingress event is the router's display-only voice transcript echo."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
-        return is_visible_router_voice_echo_content(content) and self.is_trusted_router_relay_event(event)
+        return is_visible_router_voice_echo_content(content) and self._is_trusted_router_relay_event(event)
 
     def should_use_trusted_router_relay_context(
         self,
@@ -238,7 +253,7 @@ class IngressValidator:
     ) -> bool:
         """Return whether dispatch context should use trusted router relay semantics."""
         if ingress_metadata is None:
-            return self.is_trusted_router_relay_event(event)
+            return self._is_trusted_router_relay_event(event)
         if ingress_metadata.source_kind != TRUSTED_INTERNAL_RELAY_SOURCE_KIND:
             return False
         sender_agent_name = self.managed_entity_name_for_sender(event.sender)
@@ -249,11 +264,15 @@ class IngressValidator:
             return (
                 original_sender is not None
                 and original_sender != ""
-                and self.managed_entity_name_for_sender(original_sender) is None
+                and is_human_requester_id(
+                    original_sender,
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                )
             )
         return self.is_trusted_internal_relay_event(event)
 
-    def precheck_event(
+    async def precheck_event(
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent | MatrixMediaEvent,
@@ -276,22 +295,13 @@ class IngressValidator:
         if not is_edit and self.deps.turn_store.is_handled(event.event_id):
             return None
 
-        if not is_authorized_sender(
-            requester_user_id,
-            self.deps.runtime.config,
-            room.room_id,
-            self.deps.runtime_paths,
-        ):
-            self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
-            return None
-
-        if not self.deps.turn_policy.can_reply_to_sender(requester_user_id):
-            self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
+        if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+            await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
             return None
 
         return requester_user_id
 
-    def command_control_input(self, event: TextDispatchEvent, *, source_kind: str) -> Command | None:
+    def command_control_input(self, event: PreparedIngress, *, source_kind: str) -> Command | None:
         """Return the parsed command when one text event is a control input, not conversation."""
         if source_kind_bypasses_coalescing(source_kind):
             return None

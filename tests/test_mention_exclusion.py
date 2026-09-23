@@ -7,19 +7,19 @@ from unittest.mock import AsyncMock, Mock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamResolution
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     dispatch_context_result,
     install_generate_response_mock,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     install_send_response_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
@@ -49,7 +49,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
     domain = config.get_domain(runtime_paths_for(config))
 
     # Create GeneralAgent bot
-    general_bot = AgentBot(
+    general_bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="general",
             user_id=f"@mindroom_general:{domain}",
@@ -67,7 +67,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
     general_bot.client = AsyncMock(spec=nio.AsyncClient)
     general_bot.client.user_id = f"@mindroom_general:{domain}"
     general_bot.client.rooms = {}
-    install_runtime_cache_support(general_bot)
+    install_runtime_journal_support(general_bot)
     sync_bot_runtime_state(general_bot)
 
     # Create a test room
@@ -139,7 +139,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
     domain = config.get_domain(runtime_paths_for(config))
 
     # Create GeneralAgent bot
-    general_bot = AgentBot(
+    general_bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="general",
             user_id=f"@mindroom_general:{domain}",
@@ -157,7 +157,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
     general_bot.client = AsyncMock(spec=nio.AsyncClient)
     general_bot.client.user_id = f"@mindroom_general:{domain}"
     general_bot.client.rooms = {}
-    install_runtime_cache_support(general_bot)
+    install_runtime_journal_support(general_bot)
     sync_bot_runtime_state(general_bot)
 
     # Mock response tracker

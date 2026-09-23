@@ -15,11 +15,11 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
-from mindroom.memory import build_memory_enhanced_prompt as public_build_memory_enhanced_prompt
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
 from mindroom.memory import delete_agent_memory as public_delete_agent_memory
 from mindroom.memory import get_agent_memory as public_get_agent_memory
@@ -27,6 +27,7 @@ from mindroom.memory import list_all_agent_memories as public_list_all_agent_mem
 from mindroom.memory import search_agent_memories as public_search_agent_memories
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
+from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.timing import timing_scope
 from mindroom.tool_system.worker_routing import (
@@ -172,22 +173,6 @@ async def delete_agent_memory(
     )
 
 
-async def _build_memory_enhanced_prompt(
-    prompt: str,
-    agent_name: str,
-    storage_path: Path,
-    config: Config,
-) -> str:
-    return await public_build_memory_enhanced_prompt(
-        prompt,
-        agent_name,
-        storage_path,
-        config,
-        runtime_paths_for(config),
-        get_tool_execution_identity(),
-    )
-
-
 async def build_memory_prompt_parts(
     prompt: str,
     agent_name: str,
@@ -263,14 +248,15 @@ def config(storage_path: Path) -> Config:
 def test_semantic_memory_index_is_a_runtime_config_overlay(storage_path: Path, config: Config) -> None:
     """Synthetic file-memory indexes must not leak into authored config serialization."""
     root = storage_path / "workspace"
-    base_id = "file_memory_agent_general_test"
 
-    knowledge_config = semantic_file_search._memory_knowledge_config(
-        config,
-        base_id=base_id,
+    resolution = resolve_file_memory_knowledge(
+        scope_user_id="agent_general",
         root=root,
+        config=config,
         search_config=config.memory.search,
     )
+    knowledge_config = resolution.config
+    base_id = resolution.base_id
 
     assert knowledge_config.knowledge_bases[base_id].path == str(root.resolve())
     assert knowledge_config.runtime_knowledge_base_overlay(base_id) is knowledge_config.knowledge_bases[base_id]
@@ -309,7 +295,7 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
     runtime_paths = runtime_paths_for(config)
 
     class FakeKnowledge:
-        def search(self, *, query: str, max_results: int) -> list[object]:
+        async def asearch(self, *, query: str, max_results: int) -> list[object]:
             assert query == "semantic memory"
             assert max_results == 5
             return [
@@ -322,7 +308,7 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
 
     access_base_ids: list[str] = []
 
-    def resolve_access(
+    async def resolve_access(
         base_id: str,
         access_config: Config,
         access_runtime_paths: object,
@@ -348,7 +334,7 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
         return [memory_file.resolve()]
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
-    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access, raising=False)
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
     monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler(), raising=False)
 
     results = await semantic_file_search.search_semantic_file_memories(
@@ -367,7 +353,7 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
 
 
 class _FakeSemanticTimingKnowledge:
-    def search(self, *, query: str, max_results: int) -> list[object]:
+    async def asearch(self, *, query: str, max_results: int) -> list[object]:
         assert query == "semantic memory"
         assert max_results == 5
         return [
@@ -392,7 +378,7 @@ async def test_semantic_memory_search_emits_nested_query_timings(
     runtime_paths = runtime_paths_for(config)
     fake_knowledge = _FakeSemanticTimingKnowledge()
 
-    def resolve_access(*_args: object, **_kwargs: object) -> object:
+    async def resolve_access(*_args: object, **_kwargs: object) -> object:
         return SimpleNamespace(knowledge=fake_knowledge, availability=KnowledgeAvailability.READY)
 
     emitted: list[tuple[str, str | None]] = []
@@ -401,7 +387,7 @@ async def test_semantic_memory_search_emits_nested_query_timings(
         emitted.append((label, timing_scope.get()))
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", lambda *_args, **_kwargs: [memory_file.resolve()])
-    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
     monkeypatch.setattr(semantic_file_search, "emit_elapsed_timing", emit_timing)
 
     token = timing_scope.set("scope-123")
@@ -446,11 +432,11 @@ async def test_semantic_memory_missing_knowledge_index_schedules_refresh_and_rai
     def list_files(*_args: object, **_kwargs: object) -> list[Path]:
         return [memory_file.resolve()]
 
-    def resolve_access(*_args: object, **_kwargs: object) -> KnowledgeBaseAccessResolution:
+    async def resolve_access(*_args: object, **_kwargs: object) -> KnowledgeBaseAccessResolution:
         return KnowledgeBaseAccessResolution(knowledge=None, availability=KnowledgeAvailability.INITIALIZING)
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
-    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
     monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
     with pytest.raises(semantic_file_search.SemanticFileMemoryIndexUnavailableError) as excinfo:
@@ -488,7 +474,7 @@ async def test_semantic_memory_cold_failed_index_carries_classified_cause(
     def list_files(*_args: object, **_kwargs: object) -> list[Path]:
         return [memory_file.resolve()]
 
-    def resolve_access(*_args: object, **_kwargs: object) -> KnowledgeBaseAccessResolution:
+    async def resolve_access(*_args: object, **_kwargs: object) -> KnowledgeBaseAccessResolution:
         return KnowledgeBaseAccessResolution(
             knowledge=None,
             availability=KnowledgeAvailability.REFRESH_FAILED,
@@ -498,7 +484,7 @@ async def test_semantic_memory_cold_failed_index_carries_classified_cause(
         )
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
-    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
     monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
     with pytest.raises(semantic_file_search.SemanticFileMemoryIndexUnavailableError) as excinfo:
@@ -642,16 +628,16 @@ async def test_file_backend_user_scoped_workers_share_agent_memory_across_reques
     with tool_execution_identity(alice_identity):
         await add_agent_memory("Alice-authored shared agent memory", "general", storage_path, config)
         alice_results = await search_agent_memories("Alice-authored shared", "general", storage_path, config, limit=5)
-        alice_prompt = await _build_memory_enhanced_prompt("What do you remember?", "general", storage_path, config)
+        alice_parts = await build_memory_prompt_parts("What do you remember?", "general", storage_path, config)
 
     with tool_execution_identity(bob_identity):
         bob_results = await search_agent_memories("Alice-authored shared", "general", storage_path, config, limit=5)
-        bob_prompt = await _build_memory_enhanced_prompt("What do you remember?", "general", storage_path, config)
+        bob_parts = await build_memory_prompt_parts("What do you remember?", "general", storage_path, config)
 
     assert any(result.get("memory") == "Alice-authored shared agent memory" for result in alice_results)
     assert any(result.get("memory") == "Alice-authored shared agent memory" for result in bob_results)
-    assert "Alice-authored shared agent memory" in alice_prompt
-    assert "Alice-authored shared agent memory" in bob_prompt
+    assert "Alice-authored shared agent memory" in alice_parts.session_preamble
+    assert "Alice-authored shared agent memory" in bob_parts.session_preamble
 
     memory_file = agent_workspace_root_path(storage_path, "general") / "MEMORY.md"
     assert memory_file.exists()
@@ -679,9 +665,9 @@ async def test_file_backend_worker_scope_prompt_reads_daily_memory_from_base_sto
 
     with tool_execution_identity(alice_identity):
         append_agent_daily_memory("Worker daily note", "general", storage_path, config)
-        prompt = await _build_memory_enhanced_prompt("daily note", "general", storage_path, config)
+        prompt_parts = await build_memory_prompt_parts("daily note", "general", storage_path, config)
 
-    assert "Worker daily note" in prompt
+    assert "Worker daily note" in prompt_parts.transient_turn_context
 
 
 @pytest.mark.asyncio
@@ -822,6 +808,61 @@ async def test_file_backend_semantic_search_reads_daily_memory_root(storage_path
 
 
 @pytest.mark.asyncio
+async def test_semantic_search_ids_are_read_only_crud_locators(storage_path: Path, config: Config) -> None:
+    """A semantic result ID must not be advertised as a round-trippable CRUD ID."""
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+    semantic_id = "semantic:memory/notes.md:1"
+
+    with patch(
+        "mindroom.memory._file_backend.search_semantic_file_memories",
+        return_value=[
+            {
+                "id": semantic_id,
+                "memory": "Read-only semantic match.",
+                "user_id": "agent_general",
+                "score": 1.0,
+                "metadata": {"source_file": "memory/notes.md", "semantic": True, "search_mode": "semantic"},
+            },
+        ],
+    ):
+        results = await search_agent_memories("semantic match", "general", storage_path, config, limit=5)
+
+    assert results[0]["id"] == semantic_id
+    assert await get_agent_memory(semantic_id, "general", storage_path, config) is None
+    with pytest.raises(MemoryNotFoundError):
+        await update_agent_memory(semantic_id, "replacement", "general", storage_path, config)
+    with pytest.raises(MemoryNotFoundError):
+        await delete_agent_memory(semantic_id, "general", storage_path, config)
+
+
+@pytest.mark.asyncio
+async def test_keyword_search_uses_fixed_memory_corpus_not_semantic_include_patterns(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Keyword mode searches MEMORY.md and memory/**/*.md regardless of semantic includes."""
+    config.memory.backend = "file"
+    config.memory.search.mode = "keyword"
+    config.memory.search.include = ["notes/**/*.md"]
+    config.agents["general"].memory_backend = "file"
+    workspace = agent_workspace_root_path(storage_path, "general")
+    notes_file = workspace / "notes" / "custom.md"
+    memory_file = workspace / "memory" / "daily.md"
+    notes_file.parent.mkdir(parents=True)
+    memory_file.parent.mkdir(parents=True)
+    notes_file.write_text("customincludeuniquemarker\n", encoding="utf-8")
+    memory_file.write_text("fixedkeyworduniquemarker\n", encoding="utf-8")
+
+    custom_results = await search_agent_memories("customincludeuniquemarker", "general", storage_path, config)
+    memory_results = await search_agent_memories("fixedkeyworduniquemarker", "general", storage_path, config)
+
+    assert custom_results == []
+    assert [result["memory"] for result in memory_results] == ["fixedkeyworduniquemarker"]
+
+
+@pytest.mark.asyncio
 async def test_file_backend_semantic_search_falls_back_to_keyword_on_index_error(
     storage_path: Path,
     config: Config,
@@ -859,9 +900,13 @@ async def test_file_backend_cold_failed_index_degrades_instead_of_healthy_fallba
     """A never-built index kept down by an auth failure is not a healthy keyword fallback."""
     config.memory.backend = "file"
     config.memory.search.mode = "semantic"
+    config.memory.search.include = ["notes/**/*.md"]
     config.agents["general"].memory_backend = "file"
 
     await add_agent_memory("Keyword fallback memory", "general", storage_path, config)
+    custom_note = agent_workspace_root_path(storage_path, "general") / "notes" / "custom.md"
+    custom_note.parent.mkdir(parents=True)
+    custom_note.write_text("Custom semantic-only path.\n", encoding="utf-8")
 
     with patch(
         "mindroom.memory._file_backend.search_semantic_file_memories",
@@ -882,6 +927,7 @@ async def test_file_backend_cold_failed_index_degrades_instead_of_healthy_fallba
 
     assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
     assert any(result.get("memory") == "Keyword fallback memory" for result in outcome.results)
+    assert all(result.get("memory") != "Custom semantic-only path." for result in outcome.results)
 
 
 @pytest.mark.asyncio
@@ -1120,7 +1166,7 @@ async def test_private_template_file_memory_is_visible_on_first_prompt(
     )
 
     with tool_execution_identity(identity):
-        prompt = await _build_memory_enhanced_prompt(
+        prompt_parts = await build_memory_prompt_parts(
             "What do you remember?",
             "general",
             storage_path,
@@ -1140,7 +1186,7 @@ async def test_private_template_file_memory_is_visible_on_first_prompt(
         / "MEMORY.md"
     )
     assert memory_file.exists()
-    assert "First-turn memory." in prompt
+    assert "First-turn memory." in prompt_parts.session_preamble
     assert any(result.get("memory") == "Private note." for result in note_results)
 
 
@@ -1182,7 +1228,7 @@ async def test_private_file_memory_only_reads_memory_files(
         soul_results = await search_agent_memories("Template soul", "general", storage_path, config, limit=5)
         runbook_results = await search_agent_memories("Runbook secret", "general", storage_path, config, limit=5)
         note_results = await search_agent_memories("Private note", "general", storage_path, config, limit=5)
-        prompt = await _build_memory_enhanced_prompt(
+        prompt_parts = await build_memory_prompt_parts(
             "What should I remember about the runbook and private note?",
             "general",
             storage_path,
@@ -1192,9 +1238,10 @@ async def test_private_file_memory_only_reads_memory_files(
     assert not any(result.get("memory") == "Template soul secret." for result in soul_results)
     assert not any(result.get("memory") == "Runbook secret." for result in runbook_results)
     assert any(result.get("memory") == "Private note." for result in note_results)
-    assert "Private note." in prompt
-    assert "Template soul secret." not in prompt
-    assert "Runbook secret." not in prompt
+    assert "Private note." in prompt_parts.transient_turn_context
+    for prompt_text in (prompt_parts.session_preamble, prompt_parts.transient_turn_context):
+        assert "Template soul secret." not in prompt_text
+        assert "Runbook secret." not in prompt_text
 
 
 @pytest.mark.asyncio
@@ -1435,7 +1482,7 @@ async def test_file_backend_mixed_private_team_member_crud_is_rejected(
 
 
 @pytest.mark.asyncio
-async def test_file_backend_prompt_includes_entrypoint(storage_path: Path, config: Config) -> None:
+async def test_file_backend_prompt_parts_include_entrypoint(storage_path: Path, config: Config) -> None:
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")
 
@@ -1443,10 +1490,9 @@ async def test_file_backend_prompt_includes_entrypoint(storage_path: Path, confi
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nKey facts:\n- Project uses FastAPI.\n", encoding="utf-8")
 
-    enhanced = await _build_memory_enhanced_prompt("How do we build the API?", "general", storage_path, config)
-    assert "[File memory entrypoint (agent)]" in enhanced
-    assert "Project uses FastAPI." in enhanced
-    assert "How do we build the API?" in enhanced
+    prompt_parts = await build_memory_prompt_parts("How do we build the API?", "general", storage_path, config)
+    assert "[File memory entrypoint (agent)]" in prompt_parts.session_preamble
+    assert "Project uses FastAPI." in prompt_parts.session_preamble
 
 
 @pytest.mark.asyncio
@@ -1483,9 +1529,9 @@ async def test_file_backend_prompt_preserves_curated_entrypoint_lines_with_struc
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nCurated fact.\n- [id=m1] Structured fact.\n", encoding="utf-8")
 
-    enhanced = await _build_memory_enhanced_prompt("What should I remember?", "general", storage_path, config)
-    assert "Curated fact." in enhanced
-    assert "- [id=m1] Structured fact." in enhanced
+    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", storage_path, config)
+    assert "Curated fact." in prompt_parts.session_preamble
+    assert "- [id=m1] Structured fact." in prompt_parts.session_preamble
 
 
 @pytest.mark.asyncio
@@ -1501,10 +1547,89 @@ async def test_file_backend_prompt_respects_max_entrypoint_lines(storage_path: P
         encoding="utf-8",
     )
 
-    enhanced = await _build_memory_enhanced_prompt("What should I remember?", "general", storage_path, config)
-    assert "# Memory\nCurated fact." in enhanced
-    assert "Structured fact." not in enhanced
-    assert "Trailing fact." not in enhanced
+    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", storage_path, config)
+    assert "# Memory\nCurated fact." in prompt_parts.session_preamble
+    assert "Structured fact." not in prompt_parts.session_preamble
+    assert "Trailing fact." not in prompt_parts.session_preamble
+
+
+@pytest.mark.asyncio
+async def test_file_backend_entrypoint_preamble_announces_automatic_preload(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """The preamble must tell the agent its MEMORY.md is already inlined, and where it lives."""
+    config.memory.backend = "file"
+    config.memory.file.path = str(storage_path / "memory-files")
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    memory_path = workspace / "MEMORY.md"
+    memory_path.write_text("# Memory\nCurated fact.\n", encoding="utf-8")
+
+    prompt_parts = await build_memory_prompt_parts(
+        "What should I remember?",
+        "general",
+        storage_path,
+        config,
+    )
+
+    assert "is inlined below automatically every turn" in prompt_parts.session_preamble
+    assert str(memory_path) in prompt_parts.session_preamble
+    assert "truncated" not in prompt_parts.session_preamble
+
+
+@pytest.mark.asyncio
+async def test_file_backend_entrypoint_preamble_reports_truncated_lines(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A capped MEMORY.md preload must say how much was withheld and where to read it."""
+    config.memory.backend = "file"
+    config.memory.file.path = str(storage_path / "memory-files")
+    config.memory.file.max_entrypoint_lines = 2
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    memory_path = workspace / "MEMORY.md"
+    memory_path.write_text("# Memory\nCurated fact.\nThird fact.\nFourth fact.\n", encoding="utf-8")
+
+    prompt_parts = await build_memory_prompt_parts(
+        "What should I remember?",
+        "general",
+        storage_path,
+        config,
+    )
+
+    assert "[Memory entrypoint truncated - showing the first 2 of 4 lines" in prompt_parts.session_preamble
+    assert "memory.file.max_entrypoint_lines=2" in prompt_parts.session_preamble
+    assert str(memory_path) in prompt_parts.session_preamble
+
+
+@pytest.mark.asyncio
+async def test_file_backend_entrypoint_reports_truncation_when_preloaded_head_is_blank(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Truncation must be reported even when the preloaded lines carry no text."""
+    config.memory.backend = "file"
+    config.memory.file.path = str(storage_path / "memory-files")
+    config.memory.file.max_entrypoint_lines = 2
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    memory_path = workspace / "MEMORY.md"
+    memory_path.write_text("\n\n# Memory\nCurated fact.\nThird fact.\n", encoding="utf-8")
+
+    prompt_parts = await build_memory_prompt_parts(
+        "What should I remember?",
+        "general",
+        storage_path,
+        config,
+    )
+
+    assert "[Memory entrypoint truncated - showing the first 2 of 5 lines" in prompt_parts.session_preamble
+    assert str(memory_path) in prompt_parts.session_preamble
 
 
 @pytest.mark.asyncio
@@ -1902,13 +2027,13 @@ async def test_worker_scoped_file_memory_uses_canonical_agent_workspace(
 
     with tool_execution_identity(alice_identity):
         await add_agent_memory("New worker memory", "general", storage_path, config)
-        prompt = await _build_memory_enhanced_prompt("worker memory", "general", storage_path, config)
+        prompt_parts = await build_memory_prompt_parts("worker memory", "general", storage_path, config)
 
     content = (canonical_workspace / "MEMORY.md").read_text(encoding="utf-8")
 
     assert "Existing worker memory." in content
     assert "New worker memory" in content
-    assert "Existing worker memory." in prompt
+    assert "Existing worker memory." in prompt_parts.session_preamble
     assert not (storage_path / "memory_files" / "agent_general").exists()
 
 
@@ -1921,8 +2046,8 @@ async def test_workspace_entrypoint_loaded_in_prompt(storage_path: Path, config:
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
 
-    enhanced = await _build_memory_enhanced_prompt("What language?", "general", storage_path, config)
-    assert "I prefer Python over JavaScript." in enhanced
+    prompt_parts = await build_memory_prompt_parts("What language?", "general", storage_path, config)
+    assert "I prefer Python over JavaScript." in prompt_parts.session_preamble
     assert (workspace / "MEMORY.md").read_text(encoding="utf-8").startswith("# Memory")
 
 

@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+import json
+import os
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
+from mindroom import yaml_io
 from mindroom.constants import runtime_env_values
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    WORKER_COMPUTER_ENABLED_ENV,
     credentials_encryption_key_value,
     is_worker_backend_config_env_name,
 )
@@ -30,9 +36,16 @@ from mindroom.workers.backends.kubernetes_pod_names import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+
+
+class _WorkerSeccompProfile(TypedDict):
+    """Validated Kubernetes wire mapping for the main worker's Localhost profile."""
+
+    type: Literal["Localhost"]
+    localhostProfile: str
+
 
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
@@ -48,6 +61,10 @@ _DEFAULT_MEMORY_REQUEST = "256Mi"
 _DEFAULT_MEMORY_LIMIT = "1Gi"
 _DEFAULT_CPU_REQUEST = "100m"
 _DEFAULT_CPU_LIMIT = "500m"
+_SCRIPT_RESOURCE_PROFILE_NAMES = frozenset({"small", "standard", "large"})
+_DEFAULT_SCRIPT_RESOURCE_PROFILE = "small"
+_IN_CLUSTER_TOKEN_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
+_IN_CLUSTER_CERT_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
 
 _DEFAULT_AGENT_VAULT_VAULT_NAME_PREFIX = "agent-vault"
 _DEFAULT_AGENT_VAULT_API_URL = "http://agent-vault:14321"
@@ -60,6 +77,7 @@ _IMAGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["image"]
 _IMAGE_PULL_POLICY_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["image_pull_policy"]
 _PORT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["port"]
 _SERVICE_ACCOUNT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["service_account"]
+_RUNTIME_CLASS_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["runtime_class_name"]
 _STORAGE_PVC_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_pvc"]
 _STORAGE_MOUNT_PATH_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_mount_path"]
 _STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
@@ -82,8 +100,11 @@ _MEMORY_REQUEST_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["memory_reques
 _MEMORY_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["memory_limit"]
 _CPU_REQUEST_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_request"]
 _CPU_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_limit"]
+_SCRIPT_RESOURCE_PROFILES_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["script_resource_profiles_json"]
+_DEFAULT_SCRIPT_RESOURCE_PROFILE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["default_script_resource_profile"]
 _ENABLE_SERVICE_LINKS_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["enable_service_links"]
 _AUTH_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["auth_secret_name"]
+_SECCOMP_PROFILE_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["seccomp_profile_json"]
 _AGENT_VAULT_ENABLED_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_enabled"]
 _AGENT_VAULT_VAULT_NAME_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_vault_name_prefix"]
 _AGENT_VAULT_CLI_IMAGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_cli_image"]
@@ -113,6 +134,107 @@ _EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
 )
 _EXTRA_VOLUME_SOURCE_KEYS = frozenset({"secret", "configMap", "emptyDir", "projected"})
 _EXTRA_VOLUME_ALLOWED_KEYS = frozenset({"name", *_EXTRA_VOLUME_SOURCE_KEYS})
+_DNS_SUBDOMAIN_RE = re.compile(
+    r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*",
+)
+
+
+def _default_script_resource_profiles() -> dict[str, dict[str, dict[str, str]]]:
+    return {
+        "small": {
+            "requests": {"cpu": "100m", "memory": "256Mi"},
+            "limits": {"cpu": "500m", "memory": "1Gi"},
+        },
+        "standard": {
+            "requests": {"cpu": "250m", "memory": "512Mi"},
+            "limits": {"cpu": "1", "memory": "2Gi"},
+        },
+        "large": {
+            "requests": {"cpu": "500m", "memory": "2Gi"},
+            "limits": {"cpu": "2", "memory": "8Gi"},
+        },
+    }
+
+
+def _normalized_script_resource_profiles(value: object) -> dict[str, dict[str, dict[str, str]]]:
+    if not isinstance(value, dict) or set(value) != _SCRIPT_RESOURCE_PROFILE_NAMES:
+        msg = f"{_SCRIPT_RESOURCE_PROFILES_JSON_ENV} must define exactly small, standard, and large."
+        raise WorkerBackendError(msg)
+    value_mapping = cast("dict[str, object]", value)
+    normalized: dict[str, dict[str, dict[str, str]]] = {}
+    for profile_name in sorted(_SCRIPT_RESOURCE_PROFILE_NAMES):
+        profile = value_mapping[profile_name]
+        if not isinstance(profile, dict) or set(profile) != {"requests", "limits"}:
+            msg = f"{_SCRIPT_RESOURCE_PROFILES_JSON_ENV}.{profile_name} must define requests and limits."
+            raise WorkerBackendError(msg)
+        profile_mapping = cast("dict[str, object]", profile)
+        normalized_profile: dict[str, dict[str, str]] = {}
+        for resource_kind in ("requests", "limits"):
+            quantities = profile_mapping[resource_kind]
+            if (
+                not isinstance(quantities, dict)
+                or set(quantities) != {"cpu", "memory"}
+                or any(not isinstance(quantity, str) or not quantity.strip() for quantity in quantities.values())
+            ):
+                msg = (
+                    f"{_SCRIPT_RESOURCE_PROFILES_JSON_ENV}.{profile_name}.{resource_kind} "
+                    "must define non-empty cpu and memory quantities."
+                )
+                raise WorkerBackendError(msg)
+            normalized_profile[resource_kind] = dict(cast("dict[str, str]", quantities))
+        normalized[profile_name] = normalized_profile
+    return normalized
+
+
+def _read_script_resource_profiles_env(env: Mapping[str, str]) -> dict[str, dict[str, dict[str, str]]]:
+    raw = read_env(env, _SCRIPT_RESOURCE_PROFILES_JSON_ENV)
+    if not raw:
+        return _default_script_resource_profiles()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        msg = f"{_SCRIPT_RESOURCE_PROFILES_JSON_ENV} must contain a JSON object."
+        raise WorkerBackendError(msg) from exc
+    return _normalized_script_resource_profiles(parsed)
+
+
+def _normalized_seccomp_profile(value: object) -> _WorkerSeccompProfile | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"type", "localhostProfile"}:
+        msg = f"{_SECCOMP_PROFILE_JSON_ENV} must define exactly type and localhostProfile."
+        raise WorkerBackendError(msg)
+    profile = cast("dict[str, object]", value)
+    profile_type = profile["type"]
+    profile_path = profile["localhostProfile"]
+    if profile_type != "Localhost":
+        msg = f"{_SECCOMP_PROFILE_JSON_ENV}.type must be Localhost."
+        raise WorkerBackendError(msg)
+    if not isinstance(profile_path, str):
+        msg = f"{_SECCOMP_PROFILE_JSON_ENV}.localhostProfile must be a relative path."
+        raise WorkerBackendError(msg)
+    path_parts = profile_path.split("/")
+    if (
+        not profile_path
+        or profile_path.startswith("/")
+        or "\\" in profile_path
+        or any(part in {"", ".", ".."} for part in path_parts)
+    ):
+        msg = f"{_SECCOMP_PROFILE_JSON_ENV}.localhostProfile must be a relative path without traversal segments."
+        raise WorkerBackendError(msg)
+    return {"type": "Localhost", "localhostProfile": profile_path}
+
+
+def _read_seccomp_profile_env(env: Mapping[str, str]) -> _WorkerSeccompProfile | None:
+    raw = read_env(env, _SECCOMP_PROFILE_JSON_ENV)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        msg = f"{_SECCOMP_PROFILE_JSON_ENV} must contain a JSON object."
+        raise WorkerBackendError(msg) from exc
+    return _normalized_seccomp_profile(parsed)
 
 
 def is_kubernetes_worker_backend_config_env_name(name: str) -> bool:
@@ -269,10 +391,50 @@ class KubernetesWorkerBackendConfig:
     resource_limits: dict[str, str]
     enable_service_links: bool
     auth_secret_name: str | None
+    seccomp_profile: _WorkerSeccompProfile | None = None
+    script_resource_profiles: dict[str, dict[str, dict[str, str]]] = field(
+        default_factory=_default_script_resource_profiles,
+    )
+    default_script_resource_profile: str = _DEFAULT_SCRIPT_RESOURCE_PROFILE
     reconcile_pod_templates: bool = True
     agent_vault: KubernetesAgentVaultConfig | None = None
     extra_containers: tuple[dict[str, object], ...] = ()
     extra_volumes: tuple[dict[str, object], ...] = ()
+    runtime_class_name: str | None = None
+
+    def __post_init__(self) -> None:
+        """Reject storage prefixes that are not strict relative descendants."""
+        parts = self.storage_subpath_prefix.split("/")
+        if (
+            not self.storage_subpath_prefix
+            or self.storage_subpath_prefix.startswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            msg = f"{_STORAGE_SUBPATH_PREFIX_ENV} must be a relative path without traversal segments."
+            raise WorkerBackendError(msg)
+        normalized_profiles = _normalized_script_resource_profiles(self.script_resource_profiles)
+        if self.default_script_resource_profile not in normalized_profiles:
+            msg = f"{_DEFAULT_SCRIPT_RESOURCE_PROFILE_ENV} must be one of: small, standard, large."
+            raise WorkerBackendError(msg)
+        object.__setattr__(self, "script_resource_profiles", normalized_profiles)
+        object.__setattr__(self, "seccomp_profile", _normalized_seccomp_profile(self.seccomp_profile))
+        runtime_class_name = self.runtime_class_name.strip() if self.runtime_class_name is not None else None
+        if runtime_class_name and (
+            len(runtime_class_name) > 253 or _DNS_SUBDOMAIN_RE.fullmatch(runtime_class_name) is None
+        ):
+            msg = f"{_RUNTIME_CLASS_NAME_ENV} must be a valid Kubernetes DNS subdomain."
+            raise WorkerBackendError(msg)
+        object.__setattr__(self, "runtime_class_name", runtime_class_name or None)
+
+    def resources_for_profile(self, profile_name: str | None) -> tuple[dict[str, str], dict[str, str]]:
+        """Return main-worker resources or one bounded script profile."""
+        if profile_name is None:
+            return dict(self.resource_requests), dict(self.resource_limits)
+        profile = self.script_resource_profiles.get(profile_name)
+        if profile is None:
+            msg = "Worker resource profile must be one of: small, standard, large."
+            raise WorkerBackendError(msg)
+        return dict(profile["requests"]), dict(profile["limits"])
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> KubernetesWorkerBackendConfig:
@@ -306,6 +468,7 @@ class KubernetesWorkerBackendConfig:
             worker_port=read_int_env(env, _PORT_ENV, _DEFAULT_WORKER_PORT),
             service_account_name=read_env(env, _SERVICE_ACCOUNT_ENV, _DEFAULT_SERVICE_ACCOUNT_NAME)
             or _DEFAULT_SERVICE_ACCOUNT_NAME,
+            runtime_class_name=read_env(env, _RUNTIME_CLASS_NAME_ENV) or None,
             storage_pvc_name=storage_pvc_name,
             storage_mount_path=read_env(env, _STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH)
             or _DEFAULT_STORAGE_MOUNT_PATH,
@@ -329,6 +492,16 @@ class KubernetesWorkerBackendConfig:
             resource_limits=resource_limits,
             enable_service_links=read_bool_env(env, _ENABLE_SERVICE_LINKS_ENV, default=False),
             auth_secret_name=read_env(env, _AUTH_SECRET_NAME_ENV) or None,
+            seccomp_profile=_read_seccomp_profile_env(env),
+            script_resource_profiles=_read_script_resource_profiles_env(env),
+            default_script_resource_profile=(
+                read_env(
+                    env,
+                    _DEFAULT_SCRIPT_RESOURCE_PROFILE_ENV,
+                    _DEFAULT_SCRIPT_RESOURCE_PROFILE,
+                )
+                or _DEFAULT_SCRIPT_RESOURCE_PROFILE
+            ),
             reconcile_pod_templates=read_bool_env(env, _RECONCILE_POD_TEMPLATES_ENV, default=True),
             agent_vault=KubernetesAgentVaultConfig.from_env(env),
         )
@@ -351,8 +524,12 @@ def kubernetes_backend_config_signature(
     extra_volumes_json = stable_signature_json(config.extra_volumes)
     resource_requests_json = stable_signature_json(config.resource_requests)
     resource_limits_json = stable_signature_json(config.resource_limits)
-    return (
+    script_resource_profiles_json = stable_signature_json(config.script_resource_profiles)
+    client_identity = _kubernetes_client_identity(runtime_paths)
+    signature = (
         "kubernetes",
+        runtime_paths.env_value(WORKER_COMPUTER_ENABLED_ENV, default="") or "",
+        stable_signature_json(config.seccomp_profile),
         config.namespace,
         config.image,
         config.image_pull_policy,
@@ -367,6 +544,7 @@ def kubernetes_backend_config_signature(
         str(config.idle_timeout_seconds),
         str(config.ready_timeout_seconds),
         config.name_prefix,
+        client_identity,
         config.node_name or "",
         str(config.colocate_with_control_plane_node),
         extra_env_json,
@@ -377,6 +555,8 @@ def kubernetes_backend_config_signature(
         config.owner_deployment_name or "",
         resource_requests_json,
         resource_limits_json,
+        script_resource_profiles_json,
+        config.default_script_resource_profile,
         str(config.enable_service_links),
         config.auth_secret_name or "",
         str(config.reconcile_pod_templates),
@@ -385,6 +565,120 @@ def kubernetes_backend_config_signature(
         auth_token or "",
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",
     )
+    if config.runtime_class_name is not None:
+        return (*signature, f"runtime-class:{config.runtime_class_name}")
+    return signature
+
+
+def kubernetes_backend_cleanup_signature(
+    runtime_paths: RuntimePaths,
+    *,
+    storage_root: Path | None = None,
+) -> tuple[str, ...]:
+    """Return the stable fields needed to find and retire an existing Kubernetes worker."""
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    return (
+        "kubernetes",
+        config.namespace,
+        config.name_prefix,
+        config.storage_pvc_name,
+        config.storage_subpath_prefix,
+        config.auth_secret_name or "",
+        _kubernetes_cleanup_client_identity(runtime_paths),
+        str(storage_root.expanduser().resolve()) if storage_root is not None else "",
+    )
+
+
+def _kubernetes_cleanup_client_identity(runtime_paths: RuntimePaths) -> str:
+    """Return a Kubernetes cleanup identity that ignores mutable user credentials."""
+    in_cluster_identity = _in_cluster_client_identity()
+    if in_cluster_identity is not None:
+        return in_cluster_identity
+
+    contexts: dict[str, dict[str, object]] = {}
+    clusters: dict[str, dict[str, object]] = {}
+    current_context: str | None = None
+    for kubeconfig_path in resolve_kubeconfig_paths(runtime_paths):
+        try:
+            document = yaml_io.safe_load(kubeconfig_path.read_bytes())
+        except OSError:
+            continue
+        if not isinstance(document, dict):
+            continue
+        configured_context = document.get("current-context")
+        if isinstance(configured_context, str):
+            current_context = configured_context
+        _merge_named_kubeconfig_entries(contexts, document.get("contexts"), "context")
+        _merge_named_kubeconfig_entries(clusters, document.get("clusters"), "cluster")
+
+    context = contexts.get(current_context or "")
+    cluster_name = context.get("cluster") if context is not None else None
+    cluster = clusters.get(cluster_name) if isinstance(cluster_name, str) else None
+    cluster_server = cluster.get("server") if cluster is not None else None
+    if not isinstance(cluster_server, str) or not cluster_server:
+        return _kubernetes_client_identity(runtime_paths)
+    return "kubeconfig-cluster:" + stable_signature_json({"server": cluster_server})
+
+
+def _merge_named_kubeconfig_entries(
+    destination: dict[str, dict[str, object]],
+    entries: object,
+    value_key: str,
+) -> None:
+    """Merge named kubeconfig entries with the client's first-name-wins semantics."""
+    if not isinstance(entries, list):
+        return
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_mapping = cast("dict[str, object]", entry)
+        name = entry_mapping.get("name")
+        value = entry_mapping.get(value_key)
+        if isinstance(name, str) and isinstance(value, dict) and name not in destination:
+            destination[name] = cast("dict[str, object]", value)
+
+
+def _kubernetes_client_identity(runtime_paths: RuntimePaths) -> str:
+    """Return a non-secret cache fingerprint for the selected Kubernetes control plane."""
+    in_cluster_identity = _in_cluster_client_identity()
+    if in_cluster_identity is not None:
+        return in_cluster_identity
+    identities: list[str] = []
+    for kubeconfig_path in resolve_kubeconfig_paths(runtime_paths):
+        try:
+            kubeconfig_digest = hashlib.sha256(kubeconfig_path.read_bytes()).hexdigest()
+        except OSError:
+            kubeconfig_digest = "unavailable"
+        identities.append(f"{kubeconfig_path}:{kubeconfig_digest}")
+    return "kubeconfig:" + os.pathsep.join(identities)
+
+
+def _in_cluster_client_identity() -> str | None:
+    """Return the in-cluster identity only when its required credentials are available."""
+    service_host = os.environ.get("KUBERNETES_SERVICE_HOST")
+    service_port = os.environ.get("KUBERNETES_SERVICE_PORT")
+    if service_host and service_port and _in_cluster_credentials_available():
+        return f"in-cluster:{service_host}:{service_port}"
+    return None
+
+
+def _in_cluster_credentials_available() -> bool:
+    """Return whether the Kubernetes client can read its required service-account files."""
+    try:
+        for path in (_IN_CLUSTER_TOKEN_PATH, _IN_CLUSTER_CERT_PATH):
+            with path.open("rb") as credential_file:
+                if not credential_file.read(1):
+                    return False
+    except OSError:
+        return False
+    return True
+
+
+def resolve_kubeconfig_paths(runtime_paths: RuntimePaths) -> tuple[Path, ...]:
+    """Resolve the ordered files selected by the Kubernetes client."""
+    raw_paths = runtime_env_values(runtime_paths).get("KUBECONFIG")
+    configured_paths = raw_paths.split(os.pathsep) if raw_paths else [str(Path.home() / ".kube" / "config")]
+    return tuple(Path(path).expanduser().resolve() for path in configured_paths if path)
 
 
 def credentials_encryption_key_hash(encryption_key: str | None) -> str | None:

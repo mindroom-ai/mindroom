@@ -7,7 +7,7 @@ import hashlib
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from html import escape
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -16,33 +16,55 @@ from pydantic import BaseModel, Field
 
 from mindroom import model_loading
 from mindroom.ai_runtime import cached_agent_run
+from mindroom.authorization import (
+    ReplyMembershipPendingError,
+    classify_responder_candidates_from_cached_room,
+    is_sender_allowed_for_responder,
+)
 from mindroom.entity_resolution import current_internal_sender_ids, resolve_room_scoped_model_override
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
+from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history, with_delivered_response
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.room_history_reads import fetch_thread_messages_from_source
+from mindroom.model_defaults import (
+    CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
+    GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
+    OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
+)
 from mindroom.model_instance_checks import isinstance_of_loaded
+from mindroom.requester_identity import is_human_requester_id
 from mindroom.thread_tag_vocabulary import (
     claim_vocabulary_check,
     format_tag_vocabulary_with_counts,
     load_tag_vocabulary_snapshot,
     maybe_rebuild_tag_vocabulary,
 )
-from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, coerce_tag_name, set_thread_tags_if_empty
+from mindroom.thread_tags import (
+    AUTOMATIC_THREAD_TAG_EXCLUSIONS,
+    RESOLVED_THREAD_TAG,
+    coerce_tag_name,
+    get_thread_tags,
+    set_thread_tags_if_empty,
+)
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Callable, Collection, Sequence
 
     import nio
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+    from mindroom.matrix.conversation_reads import ConversationReader
+    from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 logger = get_logger(__name__)
 _VERTEXAI_CLAUDE_CLASS = ("agno.models.vertexai.claude", "Claude")
-THREAD_SUMMARY_MAX_LENGTH = 300
+_GOOGLE_GEMINI_CLASS = ("mindroom.google_gemini", "MindRoomGoogleGemini")
+_THREAD_SUMMARY_MAX_LENGTH = 300
 _MAX_INITIAL_TAGS = 3
 _MARKDOWN_LINK_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)|\[([^\]]+)\]\([^)]+\)")
 _MARKDOWN_CODE_BLOCK_RE = re.compile(r"```(?:[^\n`]*)\n?(.*?)```", re.DOTALL)
@@ -65,6 +87,16 @@ class ThreadSummaryWriteError(RuntimeError):
     """Raised when a manual thread summary cannot be written."""
 
 
+class _TruncatedThreadHistoryError(RuntimeError):
+    """One thread is longer than a single projected page.
+
+    Summaries record the number of messages they were given as the size of the
+    thread, and every later pass compares against that number. A page of a
+    longer conversation is not that number, and no caller can tell by looking,
+    so the loader refuses rather than returning something countable-looking.
+    """
+
+
 @dataclass(frozen=True)
 class _ThreadSummaryWriteResult:
     """Successful manual thread summary write details."""
@@ -78,7 +110,7 @@ class _ThreadSummary(BaseModel):
     """Structured thread summary response."""
 
     summary: str = Field(
-        max_length=THREAD_SUMMARY_MAX_LENGTH,
+        max_length=_THREAD_SUMMARY_MAX_LENGTH,
         description="One-line summary of the thread conversation",
     )
 
@@ -100,6 +132,28 @@ class _SupportsTemperature(Protocol):
     temperature: float | None
 
 
+@runtime_checkable
+class _IdentifiedModel(Protocol):
+    """Protocol for model instances exposing their provider request ID."""
+
+    id: str
+
+
+def _summary_model_requires_provider_temperature(model: object) -> bool:
+    """Return whether a summary model requires its provider sampling default."""
+    return isinstance_of_loaded(model, _VERTEXAI_CLAUDE_CLASS) or (
+        isinstance(model, _IdentifiedModel)
+        and (
+            model.id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
+            or model.id.casefold().endswith(OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
+            or (
+                isinstance_of_loaded(model, _GOOGLE_GEMINI_CLASS)
+                and model.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
+            )
+        )
+    )
+
+
 def _configure_summary_model_temperature(
     model: object,
     *,
@@ -108,8 +162,7 @@ def _configure_summary_model_temperature(
 ) -> None:
     """Prepare the summary model's temperature setting for one request."""
     if isinstance(model, _SupportsTemperature):
-        if isinstance_of_loaded(model, _VERTEXAI_CLAUDE_CLASS):
-            # Vertex Claude's rawPredict helper rejects a temperature field entirely.
+        if _summary_model_requires_provider_temperature(model):
             model.temperature = None
         else:
             model.temperature = summary_temperature
@@ -125,7 +178,7 @@ def _configure_summary_model_temperature(
     )
 
 
-def normalize_thread_summary_text(raw_text: str) -> str:
+def _normalize_thread_summary_text(raw_text: str) -> str:
     """Strip common markdown formatting and collapse the result to one plain-text line."""
     normalized = raw_text.strip()
     if not normalized:
@@ -153,7 +206,7 @@ def _thread_summary_lock(room_id: str, thread_id: str) -> asyncio.Lock:
     return _thread_locks[_thread_summary_cache_key(room_id, thread_id)]
 
 
-def update_last_summary_count(room_id: str, thread_id: str, message_count: int) -> None:
+def _update_last_summary_count(room_id: str, thread_id: str, message_count: int) -> None:
     """Record the latest summarized message count for one thread monotonically."""
     cache_key = _thread_summary_cache_key(room_id, thread_id)
     existing_count = _last_summary_counts.get(cache_key, 0)
@@ -256,18 +309,22 @@ def should_queue_thread_summary(
 
 
 async def _load_thread_history(
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     room_id: str,
     thread_id: str,
-) -> list[ResolvedVisibleMessage]:
-    """Load fresh authoritative history without inherited turn memoization."""
-    return list(
-        await conversation_cache.get_fresh_strict_thread_history(
-            room_id,
-            thread_id,
-            caller_label="thread_summary_background",
-        ),
-    )
+) -> ThreadHistoryResult:
+    """Load complete thread history from the conversation projection.
+
+    Returns the result rather than a plain list because summaries count what
+    they are given and write that count down as the size of the thread. A
+    bounded page of a longer conversation is not that number, and the only way
+    a caller can tell is `is_full_history`.
+    """
+    history = await complete_thread_history(conversation_reader, room_id, thread_id)
+    if not history.is_full_history:
+        msg = f"Thread {room_id}/{thread_id} is longer than one projected page"
+        raise _TruncatedThreadHistoryError(msg)
+    return history
 
 
 def _recover_last_summary_count(
@@ -286,6 +343,177 @@ def _recover_last_summary_count(
             continue
         best_count = max(best_count, count)
     return best_count
+
+
+def _parse_summary_generated_at(metadata: dict[str, object]) -> datetime | None:
+    """Return the ISO-8601 ``generated_at`` recorded on one summary, when usable."""
+    raw = metadata.get("generated_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+        return parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _recover_pin_state(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    trusted_sender_ids: Collection[str],
+    human_sender_allowed: Callable[[str], bool] | None = None,
+    thread_id: str | None = None,
+) -> bool:
+    """Return the newest durable pin decision recorded in summary metadata.
+
+    A later ``pinned: false`` summary releases a thread that an earlier summary
+    pinned, so the newest decision has to win. Summaries that omit the key state
+    no intent and are ignored entirely.
+
+    Pin intent follows Matrix event time, so a cold client's later pin wins
+    even if it never loaded an earlier release with a skewed ``generated_at``.
+    An edit reasserts the pin metadata in its replacement content at edit time.
+    ``generated_at`` breaks equal event-time ties because history position can
+    reflect a backward scan rather than send order. It remains the separate
+    display clock used by summary readers and writers.
+    """
+    newest_decision: tuple[int, datetime, int] | None = None
+    pinned = False
+    for position, message in enumerate(thread_history):
+        metadata = _summary_pin_metadata(
+            message,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+            thread_id=thread_id,
+        )
+        if metadata is None:
+            continue
+        recorded = metadata.get("pinned")
+        if not isinstance(recorded, bool):
+            continue
+        generated_at = _parse_summary_generated_at(metadata)
+        if generated_at is None:
+            continue
+        event_timestamp = message.edited_timestamp if message.edited_timestamp is not None else message.timestamp
+        decision = (event_timestamp, generated_at, position)
+        if newest_decision is None or decision > newest_decision:
+            newest_decision = decision
+            pinned = recorded
+    return pinned
+
+
+def _human_summary_authorizer(
+    client: nio.AsyncClient,
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    entity_name: str,
+    membership_index: AgentReplyMembershipIndex,
+) -> Callable[[str], bool]:
+    """Reuse tool requester authority across responders sharing a room title."""
+
+    def allowed(sender: str) -> bool:
+        if not is_human_requester_id(sender, config, runtime_paths):
+            return False
+        pending = False
+        try:
+            if is_sender_allowed_for_responder(
+                sender,
+                entity_name,
+                room_id,
+                config,
+                runtime_paths,
+                membership_index,
+                require_resolved_membership=True,
+            ):
+                return True
+        except ReplyMembershipPendingError:
+            pending = True
+        room = client.rooms.get(room_id)
+        if room is None:
+            raise ReplyMembershipPendingError
+        candidates = classify_responder_candidates_from_cached_room(
+            room,
+            sender,
+            config,
+            runtime_paths,
+            membership_index,
+            require_complete_discovery=True,
+        )
+        if candidates.allowed:
+            return True
+        pending = pending or bool(candidates.pending)
+        if pending:
+            raise ReplyMembershipPendingError
+        return False
+
+    return allowed
+
+
+def _summary_pin_metadata(
+    message: ResolvedVisibleMessage,
+    *,
+    trusted_sender_ids: Collection[str],
+    human_sender_allowed: Callable[[str], bool] | None,
+    thread_id: str | None,
+) -> dict[str, object] | None:
+    """Accept human manual pins without trusting their scheduling metadata."""
+    trusted = _thread_summary_metadata(message, trusted_sender_ids=trusted_sender_ids)
+    if trusted is not None:
+        return trusted
+    metadata = message.content.get("io.mindroom.thread_summary")
+    if (
+        human_sender_allowed is None
+        or thread_id is None
+        or message.thread_id != thread_id
+        or message.content.get("msgtype") != "m.notice"
+        or not isinstance(metadata, dict)
+        or type(metadata.get("version")) is not int
+        or metadata.get("version") != 1
+        or metadata.get("model") != "manual"
+        or metadata.get("pinned") is not True
+    ):
+        return None
+    summary = metadata.get("summary")
+    if (
+        not isinstance(summary, str)
+        or not summary.strip()
+        or len(summary) > _THREAD_SUMMARY_MAX_LENGTH
+        or message.body != summary
+        or _parse_summary_generated_at(metadata) is None
+        or not human_sender_allowed(message.sender)
+    ):
+        return None
+    return metadata
+
+
+def _next_summary_generated_at(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    trusted_sender_ids: Collection[str],
+    human_sender_allowed: Callable[[str], bool],
+    thread_id: str,
+) -> datetime:
+    """Order new summaries after authorized predecessors despite clock skew."""
+    generated_at = datetime.now(UTC)
+    try:
+        for message in thread_history:
+            metadata = _summary_pin_metadata(
+                message,
+                trusted_sender_ids=trusted_sender_ids,
+                human_sender_allowed=human_sender_allowed,
+                thread_id=thread_id,
+            )
+            predecessor = _parse_summary_generated_at(metadata) if metadata is not None else None
+            if predecessor is not None and predecessor >= generated_at:
+                generated_at = predecessor + timedelta(milliseconds=1)
+    except ReplyMembershipPendingError as exc:
+        msg = "Summary authorization awaits room membership; retry after membership is available."
+        raise ThreadSummaryWriteError(msg) from exc
+    except OverflowError as exc:
+        msg = "The existing summary timestamp is too large to replace."
+        raise ThreadSummaryWriteError(msg) from exc
+    return generated_at
 
 
 def _recover_initial_enrichment_complete(
@@ -434,6 +662,95 @@ async def _generate_summary(
     return None
 
 
+async def _thread_is_resolved(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+) -> bool:
+    """Return whether a thread carries the resolved lifecycle tag.
+
+    Fails open, matching ``_refresh_tag_vocabulary`` and the history load in this
+    module: this is a best-effort background read, and the cost of being wrong is
+    one summary on a resolved thread. Letting a transport error escape instead
+    would abort the pass before it advances the baseline, so a persistently
+    failing room-state read would re-run the full state and history reads on
+    every turn.
+    """
+    try:
+        tags_state = await get_thread_tags(client, room_id, thread_id)
+    except Exception as exc:
+        # Keep the type and traceback: this catch is broad, and intermittent
+        # Matrix failures are otherwise indistinguishable from each other.
+        logger.exception(
+            "Thread tag read failed; continuing with automatic summary",
+            room_id=room_id,
+            thread_id=thread_id,
+            error_type=type(exc).__name__,
+        )
+        return False
+    return tags_state is not None and RESOLVED_THREAD_TAG in tags_state.tags
+
+
+async def _summary_delivery_timestamp(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    *,
+    trusted_sender_ids: Collection[str],
+    human_sender_allowed: Callable[[str], bool],
+    projected_history: Sequence[ResolvedVisibleMessage],
+) -> datetime | None:
+    """Order a new summary after source history, or suppress it for a new pin.
+
+    The gate before generation cannot cover the generation window itself. The
+    per-thread lock is process-local, so another runtime can write a manual pin
+    while this process is waiting on the model, and the finished automatic
+    summary would then land on top of a title the user just fixed.
+
+    Reads from source rather than through the projection. A projected read is
+    strict about staleness but still answers from local state, so it cannot
+    observe a pin another runtime just wrote — which is the only case this
+    guard exists for. Costs one homeserver read per generated summary, so once
+    per interval rather than per turn.
+
+    A failed re-read suppresses delivery because a pin may have landed while
+    the model ran. The caller records the completed generation attempt so the
+    next eligible pass retries at the normal interval without a retry storm.
+    """
+    try:
+        thread_history = await fetch_thread_messages_from_source(
+            client,
+            room_id,
+            thread_id,
+            trusted_sender_ids=trusted_sender_ids,
+        )
+    except Exception:
+        logger.exception(
+            "Pin re-check before summary delivery failed; discarding automatic summary",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        return None
+    try:
+        if _recover_pin_state(
+            thread_history,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+            thread_id=thread_id,
+        ):
+            return None
+    except ReplyMembershipPendingError:
+        # The model already ran, so this deferred delivery advances the same
+        # retry baseline as any other unsuccessful generation attempt.
+        return None
+    return _next_summary_generated_at(
+        [*projected_history, *thread_history],
+        trusted_sender_ids=trusted_sender_ids,
+        human_sender_allowed=human_sender_allowed,
+        thread_id=thread_id,
+    )
+
+
 @timed("maybe_generate_thread_summary")
 async def _timed_generate_summary(
     thread_history: Sequence[ResolvedVisibleMessage],
@@ -542,9 +859,41 @@ async def _deliver_generated_summary(
     normalized_summary: str,
     message_count: int,
     model_name: str,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
+    *,
+    trusted_sender_ids: Collection[str],
+    human_sender_allowed: Callable[[str], bool],
+    thread_history: Sequence[ResolvedVisibleMessage],
 ) -> None:
-    """Apply initial tags, then independently deliver the generated summary."""
+    """Apply initial tags, then independently deliver the generated summary.
+
+    Re-reads pin state first. The gate before generation cannot cover the
+    generation window, and the per-thread lock is process-local, so another
+    runtime can write a manual pin while this process waits on the model. That
+    check belongs here rather than in the caller because it is a delivery-time
+    question: a superseded summary should apply neither its tags nor its title.
+    """
+    try:
+        generated_at = await _summary_delivery_timestamp(
+            client,
+            room_id,
+            thread_id,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+            projected_history=thread_history,
+        )
+    except ThreadSummaryWriteError:
+        logger.exception("Cannot order automatic thread summary", room_id=room_id, thread_id=thread_id)
+        return
+    if generated_at is None:
+        logger.info(
+            "Skipping automatic thread summary delivery after pin re-check",
+            room_id=room_id,
+            thread_id=thread_id,
+            message_count=message_count,
+        )
+        return
+
     initial_enrichment_complete: bool | None = None
     if isinstance(generated, _ThreadEnrichment):
         initial_enrichment_complete = await _apply_initial_tags(
@@ -555,33 +904,44 @@ async def _deliver_generated_summary(
         )
 
     try:
-        await send_thread_summary_event(
+        await _send_thread_summary_event(
             client,
             room_id,
             thread_id,
             normalized_summary,
             message_count,
             model_name,
-            conversation_cache,
+            conversation_reader,
             initial_enrichment_complete=initial_enrichment_complete,
+            generated_at=generated_at,
         )
     except Exception:
         logger.exception("Thread summary send failed", room_id=room_id, thread_id=thread_id)
 
 
-async def send_thread_summary_event(
+async def _send_thread_summary_event(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
     summary: str,
     message_count: int,
     model_name: str,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     *,
     initial_enrichment_complete: bool | None = None,
+    pinned: bool | None = None,
+    generated_at: datetime | None = None,
 ) -> str | None:
-    """Send a thread summary as a standard Matrix notice event."""
-    normalized_summary = normalize_thread_summary_text(summary)
+    """Send a thread summary as a standard Matrix notice event.
+
+    ``pinned`` records an explicit decision about whether this summary should
+    stop automatic re-summarization. It defaults to ``None``, which omits the
+    key entirely and leaves any existing pin decision untouched. Only callers
+    acting on a user's intent should pass a boolean: writers that summarize as a
+    side effect must not disturb pin state on
+    a thread the user already pinned.
+    """
+    normalized_summary = _normalize_thread_summary_text(summary)
     if not normalized_summary:
         logger.warning(
             "Refusing to send empty normalized thread summary",
@@ -592,15 +952,14 @@ async def send_thread_summary_event(
         return None
 
     truncated_summary = (
-        normalized_summary[: THREAD_SUMMARY_MAX_LENGTH - 3] + "..."
-        if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH
+        normalized_summary[: _THREAD_SUMMARY_MAX_LENGTH - 3] + "..."
+        if len(normalized_summary) > _THREAD_SUMMARY_MAX_LENGTH
         else normalized_summary
     )
     try:
-        latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
-            room_id,
-            thread_id,
-            caller_label="thread_summary_send",
+        latest_thread_event_id = await conversation_reader.latest_thread_event_id(
+            room_id=room_id,
+            thread_id=thread_id,
         )
     except Exception as exc:
         logger.warning(
@@ -614,11 +973,13 @@ async def send_thread_summary_event(
         "version": 1,
         "summary": truncated_summary,
         "message_count": message_count,
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": (generated_at or datetime.now(UTC)).isoformat(),
         "model": model_name,
     }
     if initial_enrichment_complete is not None:
         summary_metadata["initial_enrichment_complete"] = initial_enrichment_complete
+    if pinned is not None:
+        summary_metadata["pinned"] = pinned
 
     content = build_message_content(
         truncated_summary,
@@ -631,11 +992,6 @@ async def send_thread_summary_event(
     )
     delivered = await send_message_result(client, room_id, content)
     if delivered is not None:
-        conversation_cache.notify_outbound_message(
-            room_id,
-            delivered.event_id,
-            delivered.content_sent,
-        )
         logger.info(
             "Sent thread summary",
             room_id=room_id,
@@ -655,45 +1011,73 @@ async def set_manual_thread_summary(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
+    entity_name: str,
+    membership_index: AgentReplyMembershipIndex,
+    pin: bool = True,
 ) -> _ThreadSummaryWriteResult:
-    """Write one validated manual summary for a canonical thread root."""
+    """Write one validated manual summary for a canonical thread root.
+
+    Pins the thread by default so the written title survives automatic
+    re-summarization. ``pin=False`` writes the summary and releases any pin an
+    earlier manual write established.
+    """
     if not isinstance(summary, str) or not summary.strip():
         msg = "summary must be a non-empty string."
         raise ThreadSummaryWriteError(msg)
 
-    normalized_summary = normalize_thread_summary_text(summary)
+    normalized_summary = _normalize_thread_summary_text(summary)
     if not normalized_summary:
         msg = "summary must be a non-empty string."
         raise ThreadSummaryWriteError(msg)
-    if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH:
-        msg = f"summary must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization."
+    if len(normalized_summary) > _THREAD_SUMMARY_MAX_LENGTH:
+        msg = f"summary must be {_THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization."
         raise ThreadSummaryWriteError(msg)
 
     async with _thread_summary_lock(room_id, thread_id):
         try:
             thread_history = await _load_thread_history(
-                conversation_cache,
+                conversation_reader,
                 room_id,
                 thread_id,
             )
+        except _TruncatedThreadHistoryError as exc:
+            msg = "Thread history is longer than one page, so its message count cannot be established."
+            raise ThreadSummaryWriteError(msg) from exc
         except Exception as exc:
             msg = "Failed to fetch thread history for the target thread."
             raise ThreadSummaryWriteError(msg) from exc
 
+        trusted_sender_ids = current_internal_sender_ids(config, runtime_paths)
+        human_sender_allowed = _human_summary_authorizer(
+            client,
+            room_id,
+            config,
+            runtime_paths,
+            entity_name,
+            membership_index,
+        )
+        generated_at = _next_summary_generated_at(
+            thread_history,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+            thread_id=thread_id,
+        )
         message_count = _count_non_summary_thread_messages(
             thread_history,
-            trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
+            trusted_sender_ids=trusted_sender_ids,
         )
         try:
-            event_id = await send_thread_summary_event(
+            event_id = await _send_thread_summary_event(
                 client,
                 room_id,
                 thread_id,
                 normalized_summary,
                 message_count,
                 "manual",
-                conversation_cache,
+                conversation_reader,
+                pinned=pin,
+                generated_at=generated_at,
             )
         except Exception as exc:
             msg = "Failed to send thread summary event."
@@ -702,7 +1086,7 @@ async def set_manual_thread_summary(
             msg = "Failed to send thread summary event."
             raise ThreadSummaryWriteError(msg)
 
-        update_last_summary_count(room_id, thread_id, message_count)
+        _update_last_summary_count(room_id, thread_id, message_count)
         return _ThreadSummaryWriteResult(
             event_id=event_id,
             message_count=message_count,
@@ -710,44 +1094,138 @@ async def set_manual_thread_summary(
         )
 
 
-async def maybe_generate_thread_summary(
+async def _countable_thread_history(
+    conversation_reader: ConversationReader,
+    room_id: str,
+    thread_id: str,
+) -> ThreadHistoryResult | None:
+    """Return history an automatic pass may count, or nothing.
+
+    An automatic pass moves the durable baseline on every outcome it reaches,
+    so it must not run at all on a count it cannot trust. Both reasons it
+    cannot are handled the same way -- the history is unavailable, or it is a
+    page of a longer thread -- because both leave the pass with no number worth
+    recording.
+    """
+    try:
+        return await _load_thread_history(conversation_reader, room_id, thread_id)
+    except _TruncatedThreadHistoryError:
+        logger.info(
+            "Skipping thread summary for a thread longer than one projected page",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        return None
+    except Exception:
+        logger.exception(
+            "Authoritative thread history load failed",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        return None
+
+
+def _skip_pinned_thread(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    room_id: str,
+    thread_id: str,
+    message_count: int,
+    trusted_sender_ids: Collection[str],
+    human_sender_allowed: Callable[[str], bool],
+) -> bool:
+    """Defer unknown authority and advance the baseline only for proven pins."""
+    try:
+        pinned = _recover_pin_state(
+            thread_history,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+            thread_id=thread_id,
+        )
+    except ReplyMembershipPendingError:
+        return True
+    if pinned:
+        logger.debug(
+            "Skipping automatic thread summary for a pinned thread",
+            room_id=room_id,
+            thread_id=thread_id,
+            message_count=message_count,
+        )
+        # Keep the cheap pre-check from loading history on every pinned turn.
+        _update_last_summary_count(room_id, thread_id, message_count)
+    return pinned
+
+
+async def maybe_generate_thread_summary(  # noqa: PLR0911
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    conversation_cache: ConversationCacheProtocol,
-    entity_name: str | None = None,
+    conversation_reader: ConversationReader,
+    delivered_response: DeliveredResponse,
+    entity_name: str,
+    membership_index: AgentReplyMembershipIndex,
 ) -> None:
     """Generate an early summary, then one-shot initial tags on its first refresh."""
     refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
     async with _thread_summary_lock(room_id, thread_id):
-        # This background task inherits the response turn's ContextVars, so it
-        # must bypass per-turn memoization to observe the delivered response.
-        try:
-            thread_history = await _load_thread_history(conversation_cache, room_id, thread_id)
-        except Exception:
-            logger.exception(
-                "Authoritative thread history load failed",
-                room_id=room_id,
-                thread_id=thread_id,
-            )
+        projected = await _countable_thread_history(conversation_reader, room_id, thread_id)
+        if projected is None:
             return
+        # This pass starts at delivery time, so the projection cannot hold the
+        # answer that queued it until sync echoes that event back. Counting and
+        # titling the thread without it writes a number one short of the thread
+        # into the summary notice, where it becomes the durable baseline every
+        # later threshold is measured from, and titles the thread from a
+        # question whose answer is missing.
+        thread_history = with_delivered_response(
+            projected,
+            delivered_response,
+            thread_id=thread_id,
+            sender=client.user_id,
+        )
         trusted_sender_ids = current_internal_sender_ids(config, runtime_paths)
         recovered_summary_count = _recover_last_summary_count(
             thread_history,
             trusted_sender_ids=trusted_sender_ids,
         )
         if recovered_summary_count > 0:
-            update_last_summary_count(room_id, thread_id, recovered_summary_count)
+            _update_last_summary_count(room_id, thread_id, recovered_summary_count)
 
         threshold = _next_thread_summary_threshold(room_id, thread_id, config)
         message_count = _count_non_summary_thread_messages(
             thread_history,
             trusted_sender_ids=trusted_sender_ids,
         )
+        human_sender_allowed = _human_summary_authorizer(
+            client,
+            room_id,
+            config,
+            runtime_paths,
+            entity_name,
+            membership_index,
+        )
+        if _skip_pinned_thread(
+            thread_history,
+            room_id=room_id,
+            thread_id=thread_id,
+            message_count=message_count,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+        ):
+            return
         if message_count < threshold:
+            return
+        if await _thread_is_resolved(client, room_id, thread_id):
+            logger.debug(
+                "Skipping automatic thread summary for a resolved thread",
+                room_id=room_id,
+                thread_id=thread_id,
+                message_count=message_count,
+            )
+            _update_last_summary_count(room_id, thread_id, message_count)
             return
 
         initial_enrichment = recovered_summary_count > 0 and not _recover_initial_enrichment_complete(
@@ -777,24 +1255,24 @@ async def maybe_generate_thread_summary(
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
             # Record current count to prevent retry storms until next threshold
-            update_last_summary_count(room_id, thread_id, message_count)
+            _update_last_summary_count(room_id, thread_id, message_count)
             return
 
         if generated is None:
             logger.warning("Thread summary generation returned None", room_id=room_id, thread_id=thread_id)
             # Record current count to prevent retry storms until next threshold
-            update_last_summary_count(room_id, thread_id, message_count)
+            _update_last_summary_count(room_id, thread_id, message_count)
             return
 
         summary = generated.summary if isinstance(generated, _ThreadEnrichment) else generated
-        normalized_summary = normalize_thread_summary_text(summary)
+        normalized_summary = _normalize_thread_summary_text(summary)
         if not normalized_summary:
             logger.warning(
                 "Thread summary generation returned no plain-text content",
                 room_id=room_id,
                 thread_id=thread_id,
             )
-            update_last_summary_count(room_id, thread_id, message_count)
+            _update_last_summary_count(room_id, thread_id, message_count)
             return
 
         await _deliver_generated_summary(
@@ -805,8 +1283,11 @@ async def maybe_generate_thread_summary(
             normalized_summary,
             message_count,
             model_name,
-            conversation_cache,
+            conversation_reader,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+            thread_history=thread_history,
         )
         # Record after the delivery attempt so cancellation cannot leave a
         # partially delivered initial enrichment marked complete.
-        update_last_summary_count(room_id, thread_id, message_count)
+        _update_last_summary_count(room_id, thread_id, message_count)

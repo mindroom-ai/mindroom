@@ -81,15 +81,18 @@ async def watch_paths(
     and no newly vanished files. Multi-file updates (git pull, rsync) thus land
     completely before a reload reads the tree, at the cost of one extra scan
     interval of latency.
+
+    Each scan stats every watched file, so it runs in a worker thread rather than
+    on the event loop.
     """
-    last_snapshot = paths_mtime_snapshot(paths_provider())
+    last_snapshot = await asyncio.to_thread(paths_mtime_snapshot, paths_provider())
     dirty = False
 
     while stop_event is None or not stop_event.is_set():
         await asyncio.sleep(_WATCH_SCAN_INTERVAL_SECONDS)
 
         try:
-            current_snapshot = paths_mtime_snapshot(paths_provider())
+            current_snapshot = await asyncio.to_thread(paths_mtime_snapshot, paths_provider())
             changed = bool(changed_watched_paths(last_snapshot, current_snapshot))
             vanished = any_paths_newly_missing(last_snapshot, current_snapshot)
             last_snapshot = current_snapshot

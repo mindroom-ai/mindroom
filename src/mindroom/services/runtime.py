@@ -42,5 +42,6 @@ def resolve_service_environment(uv_path: Path) -> dict[str, str]:
     return {
         "MINDROOM_CONFIG_PATH": str(runtime_paths.config_path),
         "MINDROOM_STORAGE_PATH": str(runtime_paths.storage_root),
+        "NO_COLOR": "1",
         "PATH": path,
     }

@@ -21,6 +21,7 @@ from mindroom.config.yaml_includes import load_yaml_config_source_with_digests
 from mindroom.constants import config_relative_path, resolve_config_relative_path
 from mindroom.sensitivity import is_sensitive_config_key, is_sensitive_header_key, normalize_config_key
 from mindroom.tool_system.worker_routing import (
+    agent_workspace_root_path,
     normalize_worker_key_part,
     resolve_agent_owned_path,
     resolved_worker_key_scope,
@@ -28,6 +29,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import resolved_agent_policies_from_config_data
+from mindroom.workers.worker_retirement import open_worker_state_root
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
     validate_local_copy_source_dir,
@@ -35,7 +37,7 @@ from mindroom.workspaces import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.constants import RuntimePaths
@@ -279,25 +281,28 @@ class DockerProjectionManager:
         *,
         worker_key: str | None = None,
         materialize_projection: bool = True,
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> tuple[list[tuple[Path, str, bool]], _DockerProjectedConfig | None]:
         """Return projected config mount specs plus the selected projection, if any."""
         if self.config.host_config_path is None:
             return [], None
 
-        projection = self.projected_config(
+        projection = self._projected_config(
             paths,
             worker_key=worker_key,
             materialize=materialize_projection,
+            storage_mounts=storage_mounts,
         )
         config_dir = PurePosixPath(_container_config_dir(self.config.config_path))
         return [(projection.root, str(config_dir), True)], projection
 
-    def projected_config(
+    def _projected_config(
         self,
         paths: LocalWorkerStatePaths,
         *,
         worker_key: str | None = None,
         materialize: bool = True,
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> _DockerProjectedConfig:
         """Return the projected config snapshot for one worker root."""
         host_config_path = self.config.host_config_path
@@ -328,6 +333,7 @@ class DockerProjectionManager:
             asset_paths_by_host=asset_paths_by_host,
             host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
             assets=assets,
+            storage_mounts=storage_mounts,
         )
         self._sanitize_projected_config_data(
             config_data,
@@ -352,7 +358,7 @@ class DockerProjectionManager:
         projection_hash = hashlib.sha256(
             json.dumps(projection_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8"),
         ).hexdigest()[:12]
-        projection_dir = self.worker_projected_configs_root(paths) / f"config-projection-{projection_hash}"
+        projection_dir = self._worker_projected_configs_root(paths) / f"config-projection-{projection_hash}"
         projection = _DockerProjectedConfig(
             root=projection_dir,
             projected_yaml=projected_yaml,
@@ -362,11 +368,11 @@ class DockerProjectionManager:
         projection = replace(projection, ready=self._projection_ready(projection))
         if materialize:
             self._write_projected_config(projection)
-            self.prune_projected_configs(paths, keep=projection.root)
+            self._prune_projected_configs(paths, keep=projection.root)
             return replace(projection, ready=True)
         return projection
 
-    def worker_projected_configs_root(self, paths: LocalWorkerStatePaths) -> Path:
+    def _worker_projected_configs_root(self, paths: LocalWorkerStatePaths) -> Path:
         """Return the directory containing one worker root's projected config snapshots."""
         return self._projected_configs_root / paths.root.name
 
@@ -377,9 +383,18 @@ class DockerProjectionManager:
             return {}
         return resolved_agent_policies_from_config_data(self._load_host_config_data(host_config_path))
 
-    def prune_projected_configs(self, paths: LocalWorkerStatePaths, *, keep: Path) -> None:
+    def retire_worker_projection(self, worker_name: str) -> None:
+        """Remove every projected config snapshot owned by one exact worker root."""
+        with open_worker_state_root(
+            self._projected_configs_root.parent,
+            workers_subpath=(self._projected_configs_root.name,),
+            worker_name=worker_name,
+        ) as projection:
+            projection.remove()
+
+    def _prune_projected_configs(self, paths: LocalWorkerStatePaths, *, keep: Path) -> None:
         """Remove stale projected config snapshots for one worker root."""
-        projection_root = self.worker_projected_configs_root(paths)
+        projection_root = self._worker_projected_configs_root(paths)
         projection_root.mkdir(parents=True, exist_ok=True)
         for sibling in projection_root.iterdir():
             if sibling == keep:
@@ -454,7 +469,7 @@ class DockerProjectionManager:
             return copy.deepcopy(cached[2])
 
         try:
-            data, source_digests = load_yaml_config_source_with_digests(resolved_host_config_path)
+            data, source_digests, _uses_includes = load_yaml_config_source_with_digests(resolved_host_config_path)
         except (OSError, yaml.YAMLError, UnicodeError) as exc:
             msg = f"Failed to read Docker worker config file '{resolved_host_config_path}': {exc}"
             raise WorkerBackendError(msg) from exc
@@ -493,6 +508,7 @@ class DockerProjectionManager:
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> None:
         self._rewrite_projected_plugin_paths(
             config_data,
@@ -506,6 +522,7 @@ class DockerProjectionManager:
             asset_paths_by_host,
             host_paths_by_relative_asset_path,
             assets,
+            storage_mounts=storage_mounts,
         )
         self._rewrite_projected_agent_paths(
             config_data,
@@ -513,6 +530,7 @@ class DockerProjectionManager:
             asset_paths_by_host,
             host_paths_by_relative_asset_path,
             assets,
+            storage_mounts=storage_mounts,
         )
         self._rewrite_projected_memory_paths(config_data, paths)
         if worker_key is not None:
@@ -551,11 +569,13 @@ class DockerProjectionManager:
             }
 
         config_data["teams"] = {}
-        config_data["cultures"] = {}
+        config_data["calls"] = {}
         config_data["room_models"] = {}
         config_data["bot_accounts"] = []
+        config_data["administrators"] = []
+        config_data["room_defaults"] = {}
+        config_data["rooms"] = {}
         config_data["authorization"] = {}
-        config_data["matrix_room_access"] = {}
         config_data["matrix_space"] = {}
         config_data["mindroom_user"] = None
 
@@ -598,6 +618,9 @@ class DockerProjectionManager:
                 worker_scope=policy.effective_execution_scope,
             )
         )
+        if len(matching_agent_names) > 1:
+            msg = f"Worker key '{worker_key}' has an ambiguous normalized agent name."
+            raise WorkerBackendError(msg)
         if matching_agent_names:
             return (matching_agent_names[0],)
         if not resolved_agent_policies:
@@ -648,7 +671,8 @@ class DockerProjectionManager:
         worker_scope: WorkerScope | None,
     ) -> bool:
         expected_scope = "unscoped" if worker_scope is None else worker_scope
-        if resolved_worker_key_scope(worker_key) != expected_scope:
+        actual_scope = resolved_worker_key_scope(worker_key)
+        if actual_scope not in {expected_scope, "user_agent"}:
             return False
         encoded_agent_name = worker_key_agent_name(worker_key)
         if encoded_agent_name is None:
@@ -710,6 +734,7 @@ class DockerProjectionManager:
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> None:
         raw_knowledge_bases = config_data.get("knowledge_bases")
         if not isinstance(raw_knowledge_bases, dict):
@@ -732,6 +757,7 @@ class DockerProjectionManager:
                 asset_paths_by_host=asset_paths_by_host,
                 host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
+                storage_mounts=storage_mounts,
             )
 
     def _rewrite_projected_agent_paths(
@@ -741,6 +767,7 @@ class DockerProjectionManager:
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> None:
         raw_agents = config_data.get("agents")
         if not isinstance(raw_agents, dict):
@@ -762,6 +789,7 @@ class DockerProjectionManager:
                 asset_paths_by_host=asset_paths_by_host,
                 host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
+                storage_mounts=storage_mounts,
             )
             self._rewrite_projected_private_template_dir(
                 agent,
@@ -780,6 +808,7 @@ class DockerProjectionManager:
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> None:
         raw_context_files = raw_agent.get("context_files")
         if not isinstance(raw_context_files, list):
@@ -794,7 +823,7 @@ class DockerProjectionManager:
                 agent_name=agent_name,
                 base_storage_path=self._runtime_paths.storage_root,
             )
-            context_files[index] = self._projected_path_value(
+            projected_path = self._projected_path_value(
                 host_path,
                 agent_dir
                 / "context_files"
@@ -802,7 +831,15 @@ class DockerProjectionManager:
                 asset_paths_by_host=asset_paths_by_host,
                 host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
+                storage_mounts=storage_mounts,
             )
+            # Context config remains workspace-relative when its canonical files
+            # are already available through the worker's agent storage mount.
+            if PurePosixPath(projected_path).is_absolute():
+                workspace = agent_workspace_root_path(self._runtime_paths.storage_root, agent_name).resolve()
+                context_files[index] = host_path.relative_to(workspace).as_posix()
+            else:
+                context_files[index] = projected_path
 
     def _rewrite_projected_private_template_dir(
         self,
@@ -878,7 +915,17 @@ class DockerProjectionManager:
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> str:
+        # Mutable agent data already mounted into the worker must not enter the
+        # immutable asset hash: each chat export would otherwise replace it.
+        resolved_host_path = (
+            _validated_asset_host_path(host_path) if host_path.exists() else host_path.expanduser().resolve()
+        )
+        for local_root, worker_root, _read_only in storage_mounts:
+            if resolved_host_path.is_relative_to(local_root.resolve()):
+                relative = resolved_host_path.relative_to(local_root.resolve())
+                return str(PurePosixPath(worker_root).joinpath(*relative.parts))
         relative_path = self._projected_asset_path(
             host_path,
             suggested_relative_path,

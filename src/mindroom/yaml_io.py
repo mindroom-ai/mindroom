@@ -5,28 +5,28 @@ dumper, even when PyYAML was built with libyaml. The C classes parse and
 serialize 10-20x faster with identical semantics for the safe tag set, so
 every safe load/dump in this codebase should go through this module.
 
-The config ``!include`` loader (``mindroom.config.yaml_includes``) deliberately
-stays on the pure-Python ``SafeLoader``: it renames the stream so error marks
-point at the offending config file, which the C parser does not support, and
-config parsing is cold.
+``SafeLoader`` is also the base for custom safe loaders, so they share the
+same libyaml preference and pure-Python fallback.
 """
 
 from __future__ import annotations
 
+import os
+import tempfile
+from pathlib import Path
 from typing import IO, Any, TypedDict, Unpack, overload
 
 import yaml
 
 try:
-    from yaml import CSafeDumper, CSafeLoader
+    from yaml import CSafeDumper
+    from yaml import CSafeLoader as SafeLoader
 except ImportError:
     from yaml import SafeDumper, SafeLoader
 
     _SAFE_DUMPER = SafeDumper
-    _SAFE_LOADER = SafeLoader
 else:
     _SAFE_DUMPER = CSafeDumper
-    _SAFE_LOADER = CSafeLoader
 
 
 class _DumpOptions(TypedDict, total=False):
@@ -46,7 +46,7 @@ class _DumpOptions(TypedDict, total=False):
 
 def safe_load(stream: str | bytes | IO[str] | IO[bytes]) -> Any:  # noqa: ANN401
     """Parse one YAML document like ``yaml.safe_load``, preferring libyaml."""
-    return yaml.load(stream, Loader=_SAFE_LOADER)  # noqa: S506 - safe loader variant
+    return yaml.load(stream, Loader=SafeLoader)
 
 
 @overload
@@ -104,3 +104,23 @@ def safe_dump(
         encoding=encoding,
         **kwargs,
     )
+
+
+def write_text_atomic(path: Path, content: str) -> None:
+    """Replace an existing text file after fully writing a sibling temp file."""
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as temp_file:
+        temp_path = Path(temp_file.name)
+        temp_file.write(content.encode("utf-8"))
+        temp_file.flush()
+        os.fsync(temp_file.fileno())
+    temp_path.chmod(path.stat().st_mode & 0o777)
+    try:
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)

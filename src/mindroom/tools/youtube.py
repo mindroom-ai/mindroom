@@ -52,16 +52,16 @@ if TYPE_CHECKING:
         ConfigField(
             name="languages",
             label="Languages",
-            type="text",
+            type="string[]",
             required=False,
             default=None,
         ),
         ConfigField(
-            name="proxies",
-            label="Proxies",
-            type="text",
+            name="timeout",
+            label="Timeout",
+            type="number",
             required=False,
-            default=None,
+            default=30,
         ),
     ],
     dependencies=["youtube_transcript_api"],
@@ -70,7 +70,6 @@ if TYPE_CHECKING:
         "get_video_timestamps",
         "get_youtube_video_captions",
         "get_youtube_video_data",
-        "get_youtube_video_id",
     ),
 )
 def youtube_tools() -> type[YouTubeTools]:

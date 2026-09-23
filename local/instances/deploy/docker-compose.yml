@@ -52,6 +52,20 @@ services:
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.priority=100
       - traefik.http.services.${INSTANCE_NAME:-mindroom}-v1.loadbalancer.server.port=8765
 
+  sandbox-workspace-init:
+    image: ${MINDROOM_IMAGE:-deploy-mindroom:latest}
+    build:
+      context: ../../..
+      dockerfile: local/instances/deploy/Dockerfile.mindroom
+    restart: "no"
+    user: "0:0"
+    command: ["chown", "-R", "${UID:-1000}:${GID:-1000}", "/app/workspace"]
+    volumes:
+      - sandbox-workspace:/app/workspace
+    network_mode: none
+
+  # Shared sidecar: interactive computers require dedicated Docker/Kubernetes
+  # workers instead. See docs/tools/worker-computer.md for the opt-in setup.
   sandbox-runner:
     image: ${MINDROOM_IMAGE:-deploy-mindroom:latest}
     build:
@@ -61,6 +75,9 @@ services:
     restart: always
     user: "${UID:-1000}:${GID:-1000}"
     command: ["/app/run-sandbox-runner.sh"]
+    depends_on:
+      sandbox-workspace-init:
+        condition: service_completed_successfully
     volumes:
       - sandbox-workspace:/app/workspace
     environment:

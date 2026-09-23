@@ -229,6 +229,11 @@ def _published_report_to_json(report: PublishedReport) -> dict[str, object]:
     }
 
 
+# LEGACY_COMPAT: Published report records without an artifact kind.
+# Legacy format: Published report records omitted artifact_kind and represented single HTML files.
+# Last legacy release: v2026.6.71; replacement: v2026.6.72 persisted artifact_kind for HTML and static sites.
+# Handling: Default missing kind to html_file; an existing mutation rewrites the complete current record.
+# Coverage: tests/test_report_publishing.py::test_report_publishing_store_upgrades_legacy_html_record_on_revoke.
 def _published_report_from_json(data: dict[str, object]) -> PublishedReport:
     missing_fields = sorted(_REQUIRED_PUBLISHED_REPORT_FIELDS - data.keys())
     if missing_fields:
@@ -238,6 +243,12 @@ def _published_report_from_json(data: dict[str, object]) -> PublishedReport:
     if not isinstance(source, dict):
         msg = "Published report record field 'source' must be an object."
         raise ReportPublishingError(msg)
+    # LEGACY_COMPAT: Published report records without an access policy.
+    # Legacy format: Published report records omitted access_policy and were always public bearer links.
+    # Last legacy release: v2026.9.265; replacement: unreleased origin-room reports persist access_policy.
+    # Handling: Default missing policy to public so existing links keep bearer semantics; mutations rewrite it.
+    # Coverage: tests/test_report_publishing.py::test_report_publishing_store_loads_legacy_record_as_public,
+    # tests/test_report_publishing.py::test_report_publishing_store_upgrades_legacy_html_record_on_revoke.
     raw_access_policy = data.get("access_policy", ReportAccessPolicy.PUBLIC.value)
     try:
         access_policy = ReportAccessPolicy(raw_access_policy)

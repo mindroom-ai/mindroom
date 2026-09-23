@@ -14,50 +14,66 @@ Use these tools when you need OpenAI- or Google-style multimodal generation, pro
 - [`groq`] - Groq-backed audio transcription, translation, and speech generation.
 - [`replicate`] - Replicate-hosted image or video generation from prompt-driven models.
 - [`fal`] - Fal-hosted media generation and a fixed image-to-image workflow.
-- [`dalle`] - Dedicated OpenAI DALL-E image generation.
 - [`cartesia`] - Voice listing, voice localization, and text-to-speech.
 - [`eleven_labs`] - Voice listing, sound effect generation, and text-to-speech.
-- [`desi_vocal`] - Hindi and Indian-language voice listing and text-to-speech.
 - [`lumalabs`] - Luma AI video generation and image-to-video workflows.
-- [`modelslabs`] - ModelsLab media generation for MP4, GIF, MP3, and WAV outputs.
+- [`modelslabs`] - ModelsLab media generation for PNG, JPG, MP4, GIF, MP3, and WAV outputs.
 
 ## Common Setup Notes
 
 Every tool on this page is `status=requires_config` in the live registry and is meant to be configured with provider credentials.
+For `openai`, `gemini`, `groq`, `cartesia`, `eleven_labs`, `fal`, and `replicate`, MindRoom applies the documented model defaults when no model is configured.
+Stored model settings and authored agent overrides take precedence over those defaults.
 These tools do not use an `auth_provider`, and `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes, so setup is done through stored tool credentials or provider SDK environment variables rather than a dedicated dashboard OAuth flow.
 Password fields such as `api_key` should be stored through the dashboard or credential store instead of inline YAML.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 Most generation calls on this page return `ToolResult` media attachments rather than only raw text, so they are best suited to agents that can pass generated images, videos, or audio back to the user.
-`openai` and `dalle` both use the OpenAI Python SDK and the same `OPENAI_API_KEY`, but they expose different tool surfaces.
+`openai` uses the OpenAI Python SDK and `OPENAI_API_KEY`.
 `gemini` uses `GOOGLE_API_KEY` in Gemini API mode, and MindRoom also maps provider name `gemini` to shared Google credentials in its provider credential helpers.
-The current upstream SDK implementations also honor provider env vars such as `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, `REPLICATE_API_KEY`, `FAL_API_KEY`, `CARTESIA_API_KEY`, `ELEVEN_LABS_API_KEY`, `DESI_VOCAL_API_KEY`, `LUMAAI_API_KEY`, and `MODELS_LAB_API_KEY`.
+The current upstream SDK implementations also honor provider env vars such as `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, `REPLICATE_API_KEY`, `FAL_API_KEY`, `CARTESIA_API_KEY`, `ELEVEN_LABS_API_KEY`, `LUMAAI_API_KEY`, and `MODELS_LAB_API_KEY`.
+
+The former `desi_vocal` toolkit was removed after [DesiVocal announced its June 30, 2026 sunset](https://www.desivocal.com/text-to-speech/punjabi).
+Use a supported speech toolkit such as `eleven_labs` or `openai`.
 
 ## [`openai`]
 
 `openai` is the general OpenAI media toolkit for audio transcription, image generation, and text-to-speech.
+The former `dalle` toolkit was removed because [DALL-E 3 is no longer available through the OpenAI API](https://developers.openai.com/api/docs/models/dall-e-3).
+Replace the entire old `dalle` configuration block with this image-only configuration to use GPT Image 2.5 Sunburst:
+
+```yaml
+agents:
+  illustrator:
+    tools:
+      - openai:
+          enable_transcription: false
+          enable_speech_generation: false
+```
+
+Old `dalle` options such as `model`, `n`, `size`, `quality`, `style`, and `enable_create_image` do not transfer directly.
+Use the `image_*` options in the configuration table below for supported overrides, and update instructions that call `create_image()` to use `generate_image()`.
 
 ### What It Does
 
 `openai` exposes `transcribe_audio(audio_path)`, `generate_image(prompt)`, and `generate_speech(text_input)`.
-`transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `gpt-4o-transcribe`.
-`generate_image()` uses the configured `image_model`, defaults to `gpt-image-2`, and returns attached image bytes rather than only a remote URL.
-The current implementation handles both `gpt-image-*` style models and older DALL-E response formats internally.
+`transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `gpt-transcribe`.
+`generate_image()` uses the configured `image_model`, defaults to `gpt-image-2.5-sunburst`, and returns attached image bytes rather than only a remote URL.
 `generate_speech()` uses the configured OpenAI TTS model, voice, and output format and returns an attached audio artifact.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | OpenAI API key. The upstream SDK also checks `OPENAI_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | OpenAI API key, with `OPENAI_API_KEY` as the upstream SDK fallback. |
 | `enable_transcription` | `boolean` | `no` | `true` | Enable `transcribe_audio()`. |
 | `enable_image_generation` | `boolean` | `no` | `true` | Enable `generate_image()`. |
 | `enable_speech_generation` | `boolean` | `no` | `true` | Enable `generate_speech()`. |
 | `all` | `boolean` | `no` | `false` | Enable all three OpenAI media functions. |
-| `transcription_model` | `text` | `no` | `gpt-4o-transcribe` | Model used by `transcribe_audio()`. |
+| `transcription_model` | `text` | `no` | `gpt-transcribe` | Model used by `transcribe_audio()`. |
 | `text_to_speech_voice` | `text` | `no` | `alloy` | Default voice for `generate_speech()`. |
 | `text_to_speech_model` | `text` | `no` | `gpt-4o-mini-tts` | Default TTS model for `generate_speech()`. |
 | `text_to_speech_format` | `text` | `no` | `mp3` | Output format for generated speech, such as `mp3`, `wav`, or `opus`. |
-| `image_model` | `text` | `no` | `gpt-image-2` | Image generation model for `generate_image()`. |
+| `image_model` | `text` | `no` | `gpt-image-2.5-sunburst` | Image generation model for `generate_image()`. |
 | `image_quality` | `text` | `no` | `null` | Optional image quality override passed through to the API. |
 | `image_size` | `text` | `no` | `null` | Optional image size override passed through to the API. |
 | `image_style` | `text` | `no` | `null` | Optional image style override passed through to the API. |
@@ -69,8 +85,8 @@ agents:
   creator:
     tools:
       - openai:
-          transcription_model: gpt-4o-transcribe
-          image_model: gpt-image-2
+          transcription_model: gpt-transcribe
+          image_model: gpt-image-2.5-sunburst
           text_to_speech_voice: alloy
 ```
 
@@ -82,19 +98,18 @@ generate_speech("Status update complete.")
 
 ### Notes
 
-- `openai` is the broad OpenAI media tool, while [`dalle`] is the narrower image-only wrapper.
 - `transcribe_audio()` expects a readable local path, not a URL.
-- If you only want image generation with explicit DALL-E-specific options like `n`, `size`, `quality`, and `style`, use [`dalle`] instead.
+- For image generation only, set `enable_transcription: false` and `enable_speech_generation: false`.
 
 ## [`gemini`]
 
-`gemini` is the Google media toolkit for image generation through Imagen and video generation through Veo.
+`gemini` is the Google media toolkit for image generation through Nano Banana and video generation through Veo.
 
 ### What It Does
 
 `gemini` exposes `generate_image(prompt)` and `generate_video(prompt)`.
-`generate_image()` uses the configured `image_generation_model`, which defaults to `imagen-3.0-generate-002`, and returns attached image bytes.
-`generate_video()` uses the configured `video_generation_model`, which defaults to `veo-2.0-generate-001`, polls until the long-running operation completes, and returns attached video artifacts.
+`generate_image()` uses the Gemini content-generation API with the configured `image_generation_model`, which defaults to Nano Banana 2 (`gemini-3.1-flash-image`), and returns attached image bytes.
+`generate_video()` uses the configured `video_generation_model`, which defaults to Veo 3.1 (`veo-3.1-generate-001`), polls until the long-running operation completes, and returns attached video artifacts.
 The current implementation requires Vertex AI mode for video generation and returns an error if `vertexai` is not enabled.
 In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 
@@ -106,28 +121,49 @@ In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 | `vertexai` | `boolean` | `no` | `false` | Use Vertex AI instead of the direct Gemini API. Required for `generate_video()`. |
 | `project_id` | `text` | `no` | `null` | Vertex project override. Falls back to `GOOGLE_CLOUD_PROJECT` when omitted. |
 | `location` | `text` | `no` | `null` | Vertex location override. Falls back to `GOOGLE_CLOUD_LOCATION` when omitted. |
-| `image_generation_model` | `text` | `no` | `imagen-3.0-generate-002` | Model used by `generate_image()`. |
-| `video_generation_model` | `text` | `no` | `veo-2.0-generate-001` | Model used by `generate_video()`. |
+| `image_generation_model` | `text` | `no` | `gemini-3.1-flash-image` | Model used by `generate_image()`. |
+| `video_generation_model` | `text` | `no` | `veo-3.1-generate-001` | Model used by `generate_video()`. |
 | `enable_generate_image` | `boolean` | `no` | `true` | Enable `generate_image()`. |
 | `enable_generate_video` | `boolean` | `no` | `true` | Enable `generate_video()`. |
 | `all` | `boolean` | `no` | `false` | Enable both generation functions. |
 
-### Example
+### Examples
+
+Each `gemini` toolkit instance uses one client and one Vertex location for both generation methods.
+Google's current model cards list `global`, `us`, and `eu` for [Gemini 3.1 Flash Image](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-1-flash-image) and `us-central1` for [Veo 3.1](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/veo/3-1-generate).
+These models have no documented shared serving location, so configure separate agents and disable the unused method in each toolkit.
 
 ```yaml
 agents:
-  studio:
+  illustrator:
+    display_name: Illustrator
+    tools:
+      - gemini:
+          vertexai: true
+          project_id: my-gcp-project
+          location: global
+          image_generation_model: gemini-3.1-flash-image
+          enable_generate_video: false
+  filmmaker:
+    display_name: Filmmaker
     tools:
       - gemini:
           vertexai: true
           project_id: my-gcp-project
           location: us-central1
-          image_generation_model: imagen-3.0-generate-002
-          video_generation_model: veo-2.0-generate-001
+          video_generation_model: veo-3.1-generate-001
+          enable_generate_image: false
 ```
+
+The `illustrator` agent can call:
 
 ```python
 generate_image("A minimal poster for a Matrix developer conference.")
+```
+
+The `filmmaker` agent can call:
+
+```python
 generate_video("A slow cinematic flythrough of a neon data center.")
 ```
 
@@ -153,11 +189,11 @@ All three functions use the Groq SDK directly and require a Groq API key.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Groq API key. The upstream SDK also checks `GROQ_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Groq API key, with `GROQ_API_KEY` as the upstream SDK fallback. |
 | `transcription_model` | `text` | `no` | `whisper-large-v3` | Model used by `transcribe_audio()`. |
 | `translation_model` | `text` | `no` | `whisper-large-v3` | Model used by `translate_audio()`. |
-| `tts_model` | `text` | `no` | `playai-tts` | Model used by `generate_speech()`. |
-| `tts_voice` | `text` | `no` | `Chip-PlayAI` | Voice used by `generate_speech()`. |
+| `tts_model` | `text` | `no` | `canopylabs/orpheus-v1-english` | Model used by `generate_speech()`. |
+| `tts_voice` | `text` | `no` | `troy` | Voice used by `generate_speech()`. |
 | `enable_transcribe_audio` | `boolean` | `no` | `true` | Enable `transcribe_audio()`. |
 | `enable_translate_audio` | `boolean` | `no` | `true` | Enable `translate_audio()`. |
 | `enable_generate_speech` | `boolean` | `no` | `true` | Enable `generate_speech()`. |
@@ -171,8 +207,8 @@ agents:
     tools:
       - groq:
           transcription_model: whisper-large-v3
-          tts_model: playai-tts
-          tts_voice: Chip-PlayAI
+          tts_model: canopylabs/orpheus-v1-english
+          tts_voice: troy
 ```
 
 ```python
@@ -202,10 +238,13 @@ Generated artifacts are attached by remote URL rather than downloaded into MindR
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Replicate API key. The upstream implementation also checks `REPLICATE_API_KEY`. |
-| `model` | `text` | `no` | `minimax/video-01` | Replicate model ref used by `generate_media()`. |
+| `api_key` | `password` | `no` | `null` | Replicate API key, with `REPLICATE_API_KEY` as the fallback. The resolved key is passed directly to the request client. |
+| `model` | `text` | `no` | `minimax/h3` | Replicate model ref used by `generate_media()`. |
 | `enable_generate_media` | `boolean` | `no` | `true` | Enable `generate_media()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full toolkit, which is currently just `generate_media()`. |
+
+Stored `api_key` credentials take precedence over `REPLICATE_API_KEY`.
+`REPLICATE_API_TOKEN` alone does not configure this toolkit and cannot override its resolved key.
 
 ### Example
 
@@ -214,7 +253,7 @@ agents:
   video:
     tools:
       - replicate:
-          model: minimax/video-01
+          model: minimax/h3
 ```
 
 ```python
@@ -234,16 +273,16 @@ generate_media("A short looping animation of code flowing across a terminal.")
 ### What It Does
 
 `fal` exposes `generate_media(prompt)` and, when enabled, `image_to_image(prompt, image_url=None)`.
-`generate_media()` calls `fal_client.subscribe()` with the configured `model` and a single `prompt` argument and returns the first `image` or `video` URL from the provider result.
-`image_to_image()` is a separate fixed workflow that always uses `fal-ai/flux/dev/image-to-image` rather than the configured `model`.
-The current implementation streams queue log messages to the MindRoom process logs while the job is running.
+`generate_media()` calls Fal with the configured `model` and a single `prompt` argument and returns the provider's image or video URLs as attachments.
+`image_to_image()` requires a source image URL and uses the fixed `fal-ai/flux-2/edit` workflow independently of the configured `model`.
+Both Fal methods use the configured API key and stream queue log messages to the MindRoom process logs while the job is running.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Fal API key. The upstream implementation also checks `FAL_API_KEY`. |
-| `model` | `text` | `no` | `fal-ai/hunyuan-video` | Model used by `generate_media()`. |
+| `api_key` | `password` | `no` | `null` | Fal API key, with `FAL_API_KEY` as the upstream fallback. |
+| `model` | `text` | `no` | `fal-ai/hunyuan-video-v1.5/text-to-video` | Model used by `generate_media()`. |
 | `enable_generate_media` | `boolean` | `no` | `true` | Enable `generate_media()`. |
 | `enable_image_to_image` | `boolean` | `no` | `false` | Enable `image_to_image()`. |
 | `all` | `boolean` | `no` | `false` | Enable both Fal functions. |
@@ -255,7 +294,7 @@ agents:
   visuals:
     tools:
       - fal:
-          model: fal-ai/hunyuan-video
+          model: fal-ai/hunyuan-video-v1.5/text-to-video
           enable_image_to_image: true
 ```
 
@@ -270,55 +309,8 @@ image_to_image(
 ### Notes
 
 - `model` only affects `generate_media()`.
-- `image_to_image()` ignores `model` and always calls Fal's `fal-ai/flux/dev/image-to-image` route on this branch.
+- `image_to_image()` uses [Fal's FLUX.2 edit route](https://fal.ai/models/fal-ai/flux-2/edit/api) and sends the source image in `image_urls`.
 - Returned media are attached by remote URL rather than stored bytes.
-
-## [`dalle`]
-
-`dalle` is the dedicated DALL-E image generation wrapper.
-
-### What It Does
-
-`dalle` exposes one call, `create_image(prompt)`.
-It uses the OpenAI image API directly with the configured `model`, `n`, `size`, `quality`, and `style`.
-Unlike [`openai`], this wrapper is image-only and exposes DALL-E-specific request options directly in the tool config.
-Generated images are returned as provider-hosted URLs with optional revised prompts when the API supplies them.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `model` | `text` | `no` | `dall-e-3` | DALL-E model used by `create_image()`. The current implementation only accepts `dall-e-3` or `dall-e-2`. |
-| `n` | `number` | `no` | `1` | Number of images to request. `dall-e-3` only supports `1` in the current implementation. |
-| `size` | `text` | `no` | `1024x1024` | Output size. The current implementation validates it against a fixed allowed set. |
-| `quality` | `text` | `no` | `standard` | Image quality, currently `standard` or `hd`. |
-| `style` | `text` | `no` | `vivid` | Image style, currently `vivid` or `natural`. |
-| `api_key` | `password` | `yes` | `null` | OpenAI API key. The upstream SDK also checks `OPENAI_API_KEY`. |
-| `enable_create_image` | `boolean` | `no` | `true` | Enable `create_image()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full toolkit, which is currently just `create_image()`. |
-
-### Example
-
-```yaml
-agents:
-  illustrator:
-    tools:
-      - dalle:
-          model: dall-e-3
-          size: 1792x1024
-          quality: hd
-          style: vivid
-```
-
-```python
-create_image("A cover illustration for a Matrix automation handbook.")
-```
-
-### Notes
-
-- Use [`dalle`] when you want explicit DALL-E request controls instead of the broader [`openai`] toolkit.
-- `dall-e-3` plus `n > 1` is rejected before the API call.
-- The current implementation does not expose image edits, variations, or `response_format` controls.
 
 ## [`cartesia`]
 
@@ -336,8 +328,8 @@ The current implementation hardcodes MP3 output at 44.1 kHz and 128 kbps.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Cartesia API key. The upstream SDK also checks `CARTESIA_API_KEY`. |
-| `model_id` | `text` | `no` | `sonic-2` | Model used by `text_to_speech()`. |
+| `api_key` | `password` | `no` | `null` | Cartesia API key, with `CARTESIA_API_KEY` as the upstream SDK fallback. |
+| `model_id` | `text` | `no` | `sonic-3.6` | Model used by `text_to_speech()`. |
 | `default_voice_id` | `text` | `no` | `78ab82d5-25be-4f7d-82b3-7ad64e5b85b2` | Default source voice for localization and TTS when no call-specific `voice_id` is supplied. |
 | `enable_text_to_speech` | `boolean` | `no` | `true` | Enable `text_to_speech()`. |
 | `enable_list_voices` | `boolean` | `no` | `true` | Enable `list_voices()`. |
@@ -351,7 +343,7 @@ agents:
   voice:
     tools:
       - cartesia:
-          model_id: sonic-2
+          model_id: sonic-3.6
           enable_localize_voice: true
 ```
 
@@ -389,9 +381,9 @@ If `target_directory` is set, the current implementation also saves generated au
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `voice_id` | `text` | `no` | `JBFqnCBsd6RMkjVDRZzb` | Default voice used by `text_to_speech()`. |
-| `api_key` | `password` | `yes` | `null` | ElevenLabs API key. The upstream implementation also checks `ELEVEN_LABS_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | ElevenLabs API key, with `ELEVEN_LABS_API_KEY` as the upstream fallback. |
 | `target_directory` | `text` | `no` | `null` | Optional directory where generated audio is also saved locally. |
-| `model_id` | `text` | `no` | `eleven_multilingual_v2` | Model used by `text_to_speech()`. |
+| `model_id` | `text` | `no` | `eleven_v3` | Model used by `text_to_speech()`. |
 | `output_format` | `text` | `no` | `mp3_44100_64` | Output codec and bitrate preset for generated audio. |
 | `enable_get_voices` | `boolean` | `no` | `true` | Enable `get_voices()`. |
 | `enable_generate_sound_effect` | `boolean` | `no` | `true` | Enable `generate_sound_effect()`. |
@@ -405,7 +397,7 @@ agents:
   audio_fx:
     tools:
       - eleven_labs:
-          model_id: eleven_multilingual_v2
+          model_id: eleven_v3
           output_format: mp3_44100_64
           target_directory: generated-audio
 ```
@@ -418,51 +410,10 @@ text_to_speech("The build succeeded.")
 
 ### Notes
 
+- The default [Eleven v3 model](https://elevenlabs.io/docs/overview/models) accepts up to 5,000 characters per request.
 - `target_directory` is optional and only affects local file saving, not the returned attachment.
 - The current implementation always emits `audio/mpeg` artifacts, even when you choose a PCM- or u-law-style output format.
 - `generate_sound_effect()` is useful when you want non-speech audio from the same provider toolkit.
-
-## [`desi_vocal`]
-
-`desi_vocal` is the speech toolkit for Hindi and other Indian-language voices.
-
-### What It Does
-
-`desi_vocal` exposes `get_voices()` and `text_to_speech(prompt, voice_id=None)`.
-`get_voices()` returns a provider voice list with ID, name, gender, voice type, supported languages, and preview URL.
-`text_to_speech()` posts the prompt to DesiVocal's generation API and returns the resulting audio as a remote URL attachment.
-The default `voice_id` can be overridden per call.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | DesiVocal API key. The current TTS request sends it as `X_API_KEY`, and the upstream implementation also checks `DESI_VOCAL_API_KEY`. |
-| `voice_id` | `text` | `no` | `f27d74e5-ea71-4697-be3e-f04bbd80c1a8` | Default voice used by `text_to_speech()`. |
-| `enable_get_voices` | `boolean` | `no` | `true` | Enable `get_voices()`. |
-| `enable_text_to_speech` | `boolean` | `no` | `true` | Enable `text_to_speech()`. |
-| `all` | `boolean` | `no` | `false` | Enable both DesiVocal functions. |
-
-### Example
-
-```yaml
-agents:
-  hindi_voice:
-    tools:
-      - desi_vocal:
-          voice_id: f27d74e5-ea71-4697-be3e-f04bbd80c1a8
-```
-
-```python
-get_voices()
-text_to_speech("नमस्ते, आपकी रिपोर्ट तैयार है।")
-```
-
-### Notes
-
-- This is the most language-specific TTS tool on this page and is the best fit when you want Hindi or Indian-language voices.
-- The current `get_voices()` implementation reads a public voice list endpoint, but `text_to_speech()` needs the API key.
-- Generated audio is returned as a provider-hosted URL rather than inline bytes.
 
 ## [`lumalabs`]
 
@@ -471,7 +422,7 @@ text_to_speech("नमस्ते, आपकी रिपोर्ट तैय
 ### What It Does
 
 `lumalabs` exposes `generate_video(prompt, loop=False, aspect_ratio="16:9", keyframes=None)` and `image_to_video(prompt, start_image_url, end_image_url=None, loop=False, aspect_ratio="16:9")`.
-Both calls create a Luma generation job and poll until it completes or times out.
+Both calls create a Luma generation job with the configured model and, by default, poll until it completes or times out.
 `generate_video()` optionally accepts provider-style keyframes, while `image_to_video()` builds the required keyframe structure from one or two image URLs.
 Completed jobs return remote video URL attachments.
 If `wait_for_completion` is false, the current implementation returns `Async generation unsupported`.
@@ -480,7 +431,8 @@ If `wait_for_completion` is false, the current implementation returns `Async gen
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Luma AI API key. The upstream implementation also checks `LUMAAI_API_KEY`. |
+| `api_key` | `password` | `no` | `null` | Luma AI API key, with `LUMAAI_API_KEY` as the upstream fallback. |
+| `model` | `select` | `no` | `ray-2` | Dream Machine video model: `ray-2` or `ray-flash-2`; explicit `null` uses the default `ray-2`. |
 | `wait_for_completion` | `boolean` | `no` | `true` | Poll until the provider job completes. Setting it to `false` is not useful on this branch because async return is not implemented. |
 | `poll_interval` | `number` | `no` | `3` | Seconds between status polls. |
 | `max_wait_time` | `number` | `no` | `300` | Maximum wait time in seconds before timing out. |
@@ -495,6 +447,7 @@ agents:
   motion:
     tools:
       - lumalabs:
+          model: ray-2
           poll_interval: 5
           max_wait_time: 600
 ```
@@ -510,31 +463,47 @@ image_to_video(
 
 ### Notes
 
+- The available models follow the [Dream Machine video API](https://docs.lumalabs.ai/docs/video-generation).
 - `image_to_video()` requires remote image URLs, not local file paths.
 - `wait_for_completion: false` does not currently provide a job handle or async response.
 - Use [`gemini`] instead when you specifically want Google's Veo-backed video path.
 
 ## [`modelslabs`]
 
-`modelslabs` is the ModelsLab wrapper for provider-hosted MP4, GIF, MP3, or WAV generation.
+`modelslabs` is the ModelsLab wrapper for provider-hosted PNG, JPG, MP4, GIF, MP3, or WAV generation.
 
 ### What It Does
 
 `modelslabs` exposes one call, `generate_media(prompt)`.
 The current wrapper chooses one of several provider endpoints based on `file_type` and sends a fixed payload template for that media class.
-For MP4 and GIF generation, it currently uses the provider's text-to-video endpoint and returns future-link URLs with an ETA.
+For PNG and JPG it uses the image endpoint; MP4 and GIF use the text-to-video endpoint and return future-link URLs with an ETA.
 For MP3 and WAV generation, it uses provider voice endpoints and returns audio URLs.
-If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint until the media is ready or the timeout is reached.
+If `wait_for_completion` is enabled and the response includes a finite numeric ETA (as a number or numeric string) and a provider job ID, the tool polls that job at the provider fetch endpoint.
+Confirmed completion returns the fetched output URLs, replacing queued placeholders when present.
+A terminal provider rejection returns its message without unavailable media artifacts.
+Retryable service and rate-limit errors use the remaining polling attempts; exhaustion retains queued media links and the last status-check error.
+A retryable fetch response with a nonempty `Retry-After` header ends the current wait early, returning queued links, the provider explanation, and the requested retry delay without another fetch or an additional sleep.
+A timeout does not mean the remote job failed.
+If a queued response lacks the ID or finite numeric ETA needed for polling, the tool reports that completion could not be checked.
+With completion waiting enabled, generation and fetch requests each use 60-second connect and read timeouts.
+These limit connection establishment and waiting for response bytes, not the overall wall-clock duration.
+HTTP request time remains additional to the polling-attempt budget.
+Positive fractional attempt budgets round up to a whole attempt; with a positive polling cap, a queued job gets one immediate check even when its ETA and `add_to_eta` are zero.
+Setting `max_wait_time: 0` skips status polling.
+The tool sleeps for one second between attempts, never after the final check.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | ModelsLab API key. The upstream implementation also checks `MODELS_LAB_API_KEY`. |
-| `file_type` | `text` | `no` | `mp4` | Output type for `generate_media()`, currently `mp4`, `gif`, or audio types such as `mp3` and `wav`. |
+| `api_key` | `password` | `no` | `null` | ModelsLab API key, with `MODELS_LAB_API_KEY` as the upstream fallback. |
+| `file_type` | `text` | `no` | `mp4` | Output type: `png`, `jpg`, `mp4`, `gif`, `mp3`, or `wav`. |
+| `model_id` | `text` | `no` | `null` | Provider model override; defaults to `flux` for images or `cogvideox` for video. |
+| `width` | `number` | `no` | `512` | Image or video width. |
+| `height` | `number` | `no` | `512` | Image or video height. |
 | `wait_for_completion` | `boolean` | `no` | `false` | Poll the provider fetch endpoint until the output is ready. |
-| `add_to_eta` | `number` | `no` | `15` | Extra seconds added to the provider ETA before timing out. |
-| `max_wait_time` | `number` | `no` | `60` | Maximum total wait time in seconds. |
+| `add_to_eta` | `number` | `no` | `15` | Extra one-second polling attempts added to the provider ETA, capped by `max_wait_time`. |
+| `max_wait_time` | `number` | `no` | `60` | Cap on one-second polling attempts; HTTP request time is additional. |
 
 ### Example
 
@@ -555,8 +524,10 @@ generate_media("A looping animation of messages flowing through a Matrix bridge.
 ### Notes
 
 - Despite the broad provider branding, the current wrapper exposes one opinionated `generate_media()` path rather than a generic arbitrary-model interface.
-- MP4 and GIF generation currently use a fixed provider-side video template, including default dimensions and a hardcoded model ID.
-- Returned media are provider URLs, and the success message usually includes the provider ETA rather than immediate ready-to-view bytes.
+- MP4 and GIF generation use a provider-side video template whose model and dimensions can be overridden with `model_id`, `width`, and `height`.
+- Returned media are provider URLs.
+- Without completion waiting, the response retains the provider ETA; queued URLs may not be ready yet.
+- Local media artifact IDs remain separate from the provider job ID used for completion polling.
 
 ## Related Docs
 

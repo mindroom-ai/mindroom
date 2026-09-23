@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
+from urllib.parse import quote
 
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
 
 WorkerScope = Literal["shared", "user", "user_agent"]
 ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
-_ExecutionChannel = Literal["matrix", "openai_compat"]
+_ExecutionChannel = Literal["matrix", "openai_compat", "mcp"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _DEFAULT_WORKER_NAME_PREFIX = "mindroom-worker"
@@ -32,22 +33,6 @@ _SHARED_ONLY_INTEGRATION_NAMES = frozenset(
     {
         "spotify",
         "homeassistant",
-    },
-)
-_LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
-    {
-        "approved_egress",
-        "attachments",
-        "callback_manager",
-        "desktop",
-        "external_trigger_manager",
-        "gmail",
-        "google_calendar",
-        "google_docs",
-        "google_drive",
-        "google_sheets",
-        "homeassistant",
-        "todo",
     },
 )
 
@@ -107,10 +92,10 @@ def parse_tool_execution_identity_payload(
 
     raw_payload = cast("dict[str, object]", payload)
     channel = raw_payload.get("channel")
-    if channel not in ("matrix", "openai_compat"):
+    if channel not in ("matrix", "openai_compat", "mcp"):
         return _invalid_tool_execution_identity_payload(
             strict,
-            f"{error_prefix}.channel must be matrix or openai_compat",
+            f"{error_prefix}.channel must be matrix, openai_compat, or mcp",
         )
 
     agent_name = raw_payload.get("agent_name")
@@ -291,9 +276,8 @@ def _requester_localpart(requester: str) -> str:
     return requester
 
 
-def _normalize_worker_requester_part(value: str) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9._:@+-]+", "_", value.strip()).strip("_")
-    return normalized or "default"
+def _encode_worker_requester_part(value: str) -> str:
+    return "~" + quote(value, safe="._:@+-")
 
 
 def _normalize_worker_dir_part(value: str) -> str:
@@ -303,7 +287,7 @@ def _normalize_worker_dir_part(value: str) -> str:
 
 def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
     if identity.requester_id:
-        return _normalize_worker_requester_part(identity.requester_id)
+        return _encode_worker_requester_part(identity.requester_id)
     return None
 
 
@@ -464,9 +448,9 @@ def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | Non
 def _requires_shared_only_integration_scope(name: str) -> bool:
     """Return whether a tool or dashboard integration is restricted to shared scope.
 
-    MCP registry tools are supported on every scope: OAuth-backed servers use
-    requester-scoped sessions, and non-OAuth servers always execute through the
-    shared server session without requester credentials.
+    MCP registry tools are supported on every scope: OAuth-backed servers follow
+    the configured worker scope, and non-OAuth servers always execute through
+    the shared server session without requester credentials.
     """
     return name in _SHARED_ONLY_INTEGRATION_NAMES
 
@@ -486,11 +470,6 @@ def unsupported_shared_only_integration_names(
     if worker_scope_allows_shared_only_integrations(worker_scope):
         return []
     return [name for name in names if _requires_shared_only_integration_scope(name)]
-
-
-def tool_stays_local(name: str) -> bool:
-    """Return whether one integration tool always stays in the primary runtime."""
-    return name in _LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES
 
 
 def unsupported_shared_only_integration_message(
@@ -694,6 +673,11 @@ def agent_state_root_path(base_storage_path: Path, agent_name: str) -> Path:
     return resolved_base_path / "agents" / _normalize_worker_dir_part(agent_name)
 
 
+def private_instances_root_path(base_storage_path: Path) -> Path:
+    """Return the directory that holds every worker-scoped private-instance namespace."""
+    return shared_storage_root(base_storage_path) / _PRIVATE_INSTANCE_ROOT_DIRNAME
+
+
 def private_instance_scope_root_path(base_storage_path: Path, worker_key: str) -> Path:
     """Return the canonical shared root for one worker-scoped private-instance namespace."""
     resolved_base_path = shared_storage_root(base_storage_path)
@@ -710,36 +694,6 @@ def _private_instance_state_root_path(
 ) -> Path:
     """Return the canonical durable state root for one private agent instance."""
     return private_instance_scope_root_path(base_storage_path, worker_key) / _normalize_worker_dir_part(agent_name)
-
-
-def private_instance_state_root_for_requester(
-    base_storage_path: Path,
-    *,
-    requester_id: str,
-    agent_name: str,
-    worker_scope: WorkerScope,
-    runtime_paths: RuntimePaths,
-) -> Path | None:
-    """Return the private-instance state root one requester would own for an agent.
-
-    Instance directory names embed a one-way digest of the worker key, so ownership can only be
-    established by forward-computing the path a known requester would get and comparing it against
-    the directories that exist on disk.
-    """
-    identity = build_tool_execution_identity(
-        channel="matrix",
-        agent_name=agent_name,
-        runtime_paths=runtime_paths,
-        requester_id=requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
-    worker_key = resolve_worker_key(worker_scope, identity, agent_name=agent_name)
-    if worker_key is None:
-        return None
-    return _private_instance_state_root_path(base_storage_path, worker_key=worker_key, agent_name=agent_name)
 
 
 def _is_resolved_agent_state_root(path: Path, agent_name: str) -> bool:

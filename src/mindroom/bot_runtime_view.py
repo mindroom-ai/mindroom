@@ -6,14 +6,15 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
+from mindroom.response_admission import ResponseAdmissionGate
+
 if TYPE_CHECKING:
     import nio
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.runtime_protocols import OrchestratorRuntime
-    from mindroom.runtime_support import StartupThreadPrewarmRegistry
 
 
 class BotRuntimeView(Protocol):
@@ -29,27 +30,19 @@ class BotRuntimeView(Protocol):
     def runtime_paths(self) -> RuntimePaths: ...  # noqa: D102
 
     @property
+    def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102
+
+    @property
     def enable_streaming(self) -> bool: ...  # noqa: D102
 
     @property
     def orchestrator(self) -> OrchestratorRuntime | None: ...  # noqa: D102
 
     @property
-    def event_cache(self) -> ConversationEventCache: ...  # noqa: D102
-
-    @property
-    def event_cache_write_coordinator(self) -> EventCacheWriteCoordinator: ...  # noqa: D102
-
-    @property
-    def startup_thread_prewarm_registry(self) -> StartupThreadPrewarmRegistry: ...  # noqa: D102
+    def response_admission_gate(self) -> ResponseAdmissionGate: ...  # noqa: D102
 
     @property
     def runtime_started_at(self) -> float: ...  # noqa: D102
-
-    @property
-    def callback_failure_count(self) -> int: ...  # noqa: D102
-
-    def mark_callback_failed(self) -> None: ...  # noqa: D102
 
 
 @dataclass
@@ -59,18 +52,14 @@ class BotRuntimeState:
     client: nio.AsyncClient | None
     config: Config
     runtime_paths: RuntimePaths
+    agent_reply_memberships: AgentReplyMembershipIndex
     enable_streaming: bool
     orchestrator: OrchestratorRuntime | None
-    event_cache: ConversationEventCache | None
-    event_cache_write_coordinator: EventCacheWriteCoordinator | None
-    startup_thread_prewarm_registry: StartupThreadPrewarmRegistry | None = None
+    # Orchestrator-owned and shared across bots. Lives here, not on ResponseRunner,
+    # so it survives the runtime rebuild after a login identity change.
+    response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate)
     runtime_started_at: float = field(default_factory=time.time)
-    callback_failure_count: int = 0
 
     def mark_runtime_started(self) -> None:
         """Record the runtime start time for this bot start."""
         self.runtime_started_at = time.time()
-
-    def mark_callback_failed(self) -> None:
-        """Record that a Matrix callback failed after sync certification."""
-        self.callback_failure_count += 1

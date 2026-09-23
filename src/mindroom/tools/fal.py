@@ -4,15 +4,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.model_defaults import FAL_VIDEO
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.fal import FalTools
+    from mindroom.custom_tools.fal import MindRoomFalTools
 
 
 @register_tool_with_metadata(
     name="fal",
+    worker_inert_agent_functions=("generate_media", "image_to_image"),
     display_name="Fal",
     description="AI model serving platform for media generation (images and videos)",
     category=ToolCategory.DEVELOPMENT,  # others category maps to DEVELOPMENT
@@ -33,7 +35,7 @@ if TYPE_CHECKING:
             label="Model",
             type="text",
             required=False,
-            default="fal-ai/hunyuan-video",
+            default=FAL_VIDEO,
         ),
         ConfigField(
             name="enable_generate_media",
@@ -61,8 +63,8 @@ if TYPE_CHECKING:
     docs_url="https://docs.agno.com/tools/toolkits/others/fal",  # URL without .md extension
     function_names=("generate_media", "image_to_image", "on_queue_update"),
 )
-def fal_tools() -> type[FalTools]:
+def fal_tools() -> type[MindRoomFalTools]:
     """Return Fal tools for AI model serving and media generation."""
-    from agno.tools.fal import FalTools
+    from mindroom.custom_tools.fal import MindRoomFalTools
 
-    return FalTools
+    return MindRoomFalTools

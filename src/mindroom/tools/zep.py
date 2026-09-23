@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="zep",
+    requires_primary_runtime=True,
     display_name="Zep Memory",
     description="Memory system for storing, retrieving, and searching conversational data",
     category=ToolCategory.PRODUCTIVITY,
@@ -94,7 +95,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["zep-cloud"],
     docs_url="https://docs.agno.com/tools/toolkits/database/zep",
-    function_names=("add_zep_message", "get_zep_memory", "initialize", "search_zep_memory"),
+    function_names=("add_zep_message", "get_zep_memory", "search_zep_memory"),
 )
 def zep_tools() -> type[ZepTools]:
     """Return Zep memory tools for storing and retrieving conversational data."""

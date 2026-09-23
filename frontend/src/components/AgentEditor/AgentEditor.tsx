@@ -288,16 +288,17 @@ export function AgentEditor() {
     [knowledgeBaseNames],
   );
 
-  // Prepare checkbox items for delegation targets (all agents except current)
+  // Include this agent so fresh self subagents can be explicitly allowed.
   const delegateItems: CheckboxListItem[] = useMemo(
     () =>
-      agents
-        .filter((a) => a.id !== selectedAgentId)
-        .map((a) => ({
-          value: a.id,
-          label: a.display_name,
-          description: a.role,
-        })),
+      agents.map((a) => ({
+        value: a.id,
+        label:
+          a.id === selectedAgentId
+            ? `${a.display_name} (this agent)`
+            : a.display_name,
+        description: a.role,
+      })),
     [agents, selectedAgentId],
   );
 
@@ -564,6 +565,7 @@ export function AgentEditor() {
       icon={Bot}
       title="Agent Details"
       isDirty={isDirty}
+      isBusy={toolsLoading || skillsLoading}
       onSave={handleSave}
       onDelete={handleDelete}
       disableSave={isLoading}
@@ -736,10 +738,10 @@ export function AgentEditor() {
         />
       </FieldGroup>
 
-      {/* Delegate To */}
+      {/* Allowed subagents */}
       <FieldGroup
-        label="Delegate To"
-        helperText="Allow this agent to delegate tasks to other agents via tool calls"
+        label="Allowed subagents"
+        helperText="Run these agents with fresh context and wait for their results. Select this agent to allow fresh copies of itself."
       >
         <CheckboxListField
           name="delegate_to"
@@ -748,7 +750,7 @@ export function AgentEditor() {
           fieldName="delegate_to"
           onFieldChange={handleFieldChange}
           idPrefix="delegate"
-          emptyMessage="No other agents available to delegate to."
+          emptyMessage="No agents available."
           className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
         />
       </FieldGroup>

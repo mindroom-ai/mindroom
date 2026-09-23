@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event
 from typing import TYPE_CHECKING
 
 import pytest
@@ -35,16 +35,18 @@ from mindroom.desktop.credentials import (
     delete_desktop_credentials,
     save_desktop_credentials,
 )
-from mindroom.mcp.toolkit import bind_mcp_server_manager
+from mindroom.mcp.toolkit import MindRoomMCPToolkit, bind_mcp_server_manager
 from mindroom.openai_tool_search import _DEFERRED_TOOL_NAMES_ATTR as _OPENAI_DEFERRED_TOOL_NAMES_ATTR
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import (
     get_loaded_tools_for_session,
+    load_tool_for_session,
     save_loaded_tools_for_session,
     suppress_fully_deferred_toolkit_instructions,
     visible_tool_surface,
 )
+from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
 
@@ -234,7 +236,7 @@ def test_config_rejects_lazy_flags_inside_named_tool_overrides(tmp_path: Path, l
         _validated_config(tmp_path, raw)
 
 
-@pytest.mark.parametrize("tool_name", ["delegate", "dynamic_tools", "self_config"])
+@pytest.mark.parametrize("tool_name", ["delegate", "dynamic_tools", "invite_router", "self_config"])
 def test_config_rejects_deferred_control_plane_tools(tmp_path: Path, tool_name: str) -> None:
     """Control-plane tools are injected by runtime policy and cannot be lazy-loading units."""
     raw = _base_config_data()
@@ -614,13 +616,13 @@ def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initia
     assert listed["loaded_tools"] == ["shell"]
     assert listed["tools"] == [
         {
-            "description": "Execute shell commands and scripts",
+            "description": TOOL_METADATA["shell"].description,
             "loaded": True,
             "name": "shell",
             "sticky": True,
         },
         {
-            "description": "Sleep utility for introducing delays and pauses in execution",
+            "description": TOOL_METADATA["sleep"].description,
             "loaded": False,
             "name": "sleep",
             "sticky": False,
@@ -740,7 +742,7 @@ async def test_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: 
 async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path) -> None:
     """Native deferred Desktop keeps one stable schema and fails closed until paired."""
     raw = _base_config_data()
-    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
     raw["agents"]["code"].update(  # type: ignore[union-attr,index]
         {
             "model": "claude",
@@ -945,7 +947,10 @@ def test_dynamic_tools_manager_concurrent_load_collision_uses_latest_state(tmp_p
             self,
             _agent_name: str,
             loaded_tools: list[str],
+            *,
+            worker_target: object | None = None,
         ) -> list[str]:
+            del worker_target
             if {"mcp_demo", "shell"} <= set(loaded_tools):
                 return ["MCP/local collision"]
             return []
@@ -962,6 +967,123 @@ def test_dynamic_tools_manager_concurrent_load_collision_uses_latest_state(tmp_p
         ["mcp_demo"],
         ["shell"],
     )
+
+
+def test_blocked_load_validation_does_not_block_visible_tool_surface(tmp_path: Path) -> None:
+    """Reading visible tools should not wait for an in-progress load validation."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+    validation_started = Event()
+    continue_validation = Event()
+
+    def blocked_validator(_loaded_tools: list[str]) -> None:
+        validation_started.set()
+        assert continue_validation.wait(timeout=30)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        load_future = executor.submit(
+            load_tool_for_session,
+            agent_name="code",
+            config=config,
+            session_id="thread-a",
+            tool_name="shell",
+            validate_loaded_tools=blocked_validator,
+        )
+        assert validation_started.wait(timeout=10)
+        try:
+            surface_future = executor.submit(
+                visible_tool_surface,
+                agent_name="code",
+                config=config,
+                session_id="thread-a",
+            )
+            surface = surface_future.result(timeout=10)
+        finally:
+            continue_validation.set()
+
+        result = load_future.result(timeout=30)
+
+    assert surface.loaded_tools == ()
+    assert result.status == "loaded"
+
+
+def test_load_revalidates_after_concurrent_session_mutation(tmp_path: Path) -> None:
+    """A load should merge with state committed while its first validation is blocked."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"shell": {"defer": True}},
+        {"sleep": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+    first_validation_started = Event()
+    continue_first_validation = Event()
+    validated_candidates: list[tuple[str, ...]] = []
+
+    def validator(loaded_tools: list[str]) -> None:
+        candidate = tuple(loaded_tools)
+        validated_candidates.append(candidate)
+        if candidate == ("shell",) and not continue_first_validation.is_set():
+            first_validation_started.set()
+            assert continue_first_validation.wait(timeout=30)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        shell_future = executor.submit(
+            load_tool_for_session,
+            agent_name="code",
+            config=config,
+            session_id="thread-a",
+            tool_name="shell",
+            validate_loaded_tools=validator,
+        )
+        assert first_validation_started.wait(timeout=10)
+        try:
+            sleep_future = executor.submit(
+                load_tool_for_session,
+                agent_name="code",
+                config=config,
+                session_id="thread-a",
+                tool_name="sleep",
+                validate_loaded_tools=validator,
+            )
+            sleep_result = sleep_future.result(timeout=10)
+        finally:
+            continue_first_validation.set()
+
+        shell_result = shell_future.result(timeout=30)
+
+    assert shell_result.status == "loaded"
+    assert sleep_result.status == "loaded"
+    assert ("shell", "sleep") in validated_candidates
+    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == [
+        "shell",
+        "sleep",
+    ]
+
+
+def test_deferred_scope_validation_builds_authored_tools_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope validation must not rebuild the whole tool list for every deferred entry."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {name: {"defer": True}} for name in ["homeassistant", "shell", "file", "calculator", "sleep"]
+    ]
+    config = _validated_config(tmp_path, raw)
+    config.agents["code"].worker_scope = "user"
+    original = Config._agent_authored_deferred_tool_configs
+    builds = 0
+
+    def count_builds(self: Config, agent_name: str) -> list[EffectiveToolConfig]:
+        nonlocal builds
+        builds += 1
+        return original(self, agent_name)
+
+    monkeypatch.setattr(Config, "_agent_authored_deferred_tool_configs", count_builds)
+
+    assert config._agent_scope_incompatible_deferred_tools("code") == {"homeassistant": ["homeassistant"]}
+    assert builds == 1
 
 
 def test_scope_incompatible_deferred_tools_reject_at_config_and_runtime(tmp_path: Path) -> None:
@@ -1020,7 +1142,7 @@ def test_openclaw_compat_implies_matrix_messaging_tool(tmp_path: Path) -> None:
 def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(tmp_path: Path) -> None:
     """Claude-native tool search attaches all deferred toolkits and drops the manager machinery."""
     raw = _base_config_data()
-    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
     raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"sleep": {"defer": True}},
@@ -1041,6 +1163,109 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machi
     assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
 
 
+@pytest.mark.parametrize(
+    ("provider", "model_id"),
+    [
+        ("anthropic", "claude-opus-5"),
+        ("openai", "gpt-6-astra"),
+    ],
+)
+def test_native_tool_search_prompt_lists_deferred_capability_domains(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+) -> None:
+    """Native tool search should tell the model which capability domains it can discover."""
+    raw = _base_config_data()
+    raw["models"]["native"] = {"provider": provider, "id": model_id}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "native"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"sleep": {"defer": True}},
+        {"calculator": {"defer": True, "initial": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+
+    discovery_block = next(block for block in agent.instructions if block.startswith("## Deferred Tool Discovery"))
+    assert discovery_block in _render_system_prompt(agent)
+    assert "Deferred capability domains available through native tool search: sleep." in discovery_block
+    assert "search the deferred tool catalog before concluding that the capability is unavailable" in discovery_block
+    assert "calculator" not in discovery_block
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id", "deferred_names_attr"),
+    [
+        ("anthropic", "claude-opus-5", _DEFERRED_TOOL_NAMES_ATTR),
+        ("openai", "gpt-6-astra", _OPENAI_DEFERRED_TOOL_NAMES_ATTR),
+    ],
+)
+@pytest.mark.parametrize("collide_all", [False, True], ids=["partial-collision", "full-collision"])
+def test_native_tool_search_does_not_defer_eager_local_collision_survivor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    model_id: str,
+    deferred_names_attr: str,
+    *,
+    collide_all: bool,
+) -> None:
+    """Final MCP collision projection must preserve the surviving local tool's eager ownership."""
+    raw = _base_config_data()
+    raw["models"]["native"] = {"provider": provider, "id": model_id}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "native"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = ["sleep", {"mcp_demo": {"defer": True}}]  # type: ignore[index]
+    raw["mcp_servers"] = {
+        "demo": {
+            "transport": "streamable-http",
+            "url": "https://mcp.example.test/mcp",
+            "auth": {
+                "type": "oauth",
+                "discovery": "manual",
+                "authorization_url": "https://auth.example.test/authorize",
+                "token_url": "https://auth.example.test/token",
+            },
+        },
+    }
+    config = _validated_config(tmp_path, raw)
+    runtime_paths = _runtime_paths(tmp_path)
+
+    def fake_build_agent_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        if tool_name == "mcp_demo":
+            return MindRoomMCPToolkit(
+                server_id="demo",
+                manager=None,
+                catalog=None,
+                server_config=config.mcp_servers["demo"],
+                runtime_paths=runtime_paths,
+                credentials_manager=get_runtime_credentials_manager(runtime_paths),
+            )
+        local = Toolkit(name="local", auto_register=False)
+        colliding_names = (
+            {"demo_call_tool", "demo_connection_status", "demo_list_tools"} if collide_all else {"demo_list_tools"}
+        )
+        for function_name in colliding_names:
+            local.functions[function_name] = Function(
+                name=function_name,
+                entrypoint=lambda: "local",
+            )
+        return local
+
+    monkeypatch.setattr("mindroom.agents.build_agent_toolkit", fake_build_agent_toolkit)
+
+    agent = create_agent("code", config, runtime_paths, execution_identity=None, session_id="thread-a")
+
+    expected_deferred_names = frozenset() if collide_all else frozenset({"demo_call_tool", "demo_connection_status"})
+    assert vars(agent.model).get(deferred_names_attr, frozenset()) == expected_deferred_names
+    local = next(tool for tool in agent.tools if tool.name == "local")
+    assert "demo_list_tools" in local.functions
+    discovery_blocks = [block for block in agent.instructions if block.startswith("## Deferred Tool Discovery")]
+    assert bool(discovery_blocks) is not collide_all
+    if discovery_blocks:
+        assert "mcp_demo" in discovery_blocks[0]
+
+
 def test_native_tool_search_omits_fully_deferred_toolkit_instructions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1048,7 +1273,7 @@ def test_native_tool_search_omits_fully_deferred_toolkit_instructions(
     """A native-search toolkit should not describe functions that are all deferred."""
     instruction_marker = _install_update_awareness_status(monkeypatch)
     raw = _base_config_data()
-    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
     raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [{"update_awareness": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
@@ -1142,7 +1367,7 @@ def test_native_tool_search_keeps_initial_toolkit_instructions(
     """An initially loaded deferred toolkit should keep its instructions inline."""
     instruction_marker = _install_update_awareness_status(monkeypatch)
     raw = _base_config_data()
-    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
     raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"update_awareness": {"defer": True, "initial": True}},
@@ -1164,7 +1389,7 @@ def test_native_tool_search_drops_toolkit_emptied_by_include_filter(
     """Final assembly should discard a toolkit with no provider-visible functions."""
     instruction_marker = _install_update_awareness_status(monkeypatch)
     raw = _base_config_data()
-    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
     raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"update_awareness": {"defer": True, "include_tools": []}},
@@ -1213,7 +1438,7 @@ def test_homegrown_load_tool_makes_toolkit_instructions_available(
     assert instruction_marker in _render_system_prompt(loaded_agent)
 
 
-@pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-5.6"), ("openai", "gpt-5.6")])
+@pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-6-astra"), ("openai", "gpt-6-astra")])
 def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(
     tmp_path: Path,
     provider: str,
@@ -1241,6 +1466,53 @@ def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_homegrow
     assert not any(block.startswith("## Dynamic Tools") for block in agent.instructions)
     assert not any("Dynamic tools currently loaded" in block for block in agent.instructions)
     assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+
+
+@pytest.mark.parametrize(
+    ("api", "base_url"),
+    [("chat_completions", None), ("responses", "http://localhost:9292/v1")],
+)
+def test_explicit_openai_api_keeps_homegrown_tool_discovery_when_native_is_unavailable(
+    tmp_path: Path,
+    api: str,
+    base_url: str | None,
+) -> None:
+    """Chat and Responses proxies must not lose deferred tools to hosted-only search."""
+    raw = _base_config_data()
+    raw["models"]["gpt"] = {  # type: ignore[index]
+        "provider": "openai",
+        "id": "gpt-6-astra",
+        "api": api,
+        "extra_kwargs": {"base_url": base_url},
+    }
+    raw["agents"]["code"]["model"] = "gpt"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [{"sleep": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+
+    function_names = {name for toolkit in agent.tools for name in toolkit.get_functions()}
+    assert "load_tool" in function_names
+    assert "sleep" not in function_names
+    assert _OPENAI_DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
+
+
+def test_codex_deferred_browser_uses_non_reserved_function_name(tmp_path: Path) -> None:
+    """The deferred browser function must not collide with Codex's reserved browser namespace."""
+    raw = _base_config_data()
+    raw["models"]["codex"] = {"provider": "codex", "id": "gpt-6-astra"}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "codex"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [{"browser": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+
+    function_names = {
+        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
+    }
+    assert "browser_control" in function_names
+    assert "browser" not in function_names
+    assert vars(agent.model)[_OPENAI_DEFERRED_TOOL_NAMES_ATTR] == frozenset({"browser_control"})
 
 
 def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path: Path) -> None:
@@ -1299,7 +1571,7 @@ def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path)
     ("provider", "model_id", "extra_kwargs"),
     [
         ("openai", "gpt-4o-mini", None),
-        ("openai", "gpt-5.6", {"base_url": "http://localhost:9292/v1"}),
+        ("openai", "gpt-6-astra", {"base_url": "http://localhost:9292/v1"}),
         ("codex", "gpt-4.1", None),
         ("anthropic", "claude-opus-4-1", None),
     ],
@@ -1364,7 +1636,7 @@ def test_dynamic_prompt_splits_static_catalog_from_volatile_loaded_state(tmp_pat
     )
 
     assert static_before == static_after
-    assert "shell - Execute shell commands" in static_before
+    assert f"shell - {TOOL_METADATA['shell'].description}" in static_before
     assert "becomes callable once it appears in your available tools" in static_before
     assert "same parallel tool-call batch" in static_before
     assert "each member manages its own dynamic tool state" in static_before
@@ -1375,3 +1647,25 @@ def test_dynamic_prompt_splits_static_catalog_from_volatile_loaded_state(tmp_pat
         suffix_after == "Dynamic tools currently loaded for this session: shell, sleep\n"
         "Sticky initial dynamic tools that cannot be unloaded: shell"
     )
+
+
+def test_browser_search_discovers_chat_ui_before_loading(tmp_path: Path) -> None:
+    """A browser query must expose the display tool and canonical call while both tools are deferred."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"browser": {"defer": True}},
+        {"chat_ui": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="browser-discovery")
+
+    payload = _tool_payload(manager.tool_search("browser"))
+    matches = {match["name"]: match for match in payload["matches"]}
+    assert set(matches) == {"browser", "chat_ui"}
+    assert payload["loaded_tools"] == []
+    assert all(not match["loaded"] for match in matches.values())
+    assert "chat_ui.open_panel(panel='computer')" in matches["browser"]["description"]
+    assert "Computer panel" in matches["chat_ui"]["description"]
+
+    prompt = _build_dynamic_tooling_instruction_block(config, "code", enable_dynamic_tools_manager=True)
+    assert "chat_ui.open_panel(panel='computer')" in prompt

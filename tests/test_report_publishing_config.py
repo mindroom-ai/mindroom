@@ -110,19 +110,20 @@ def test_origin_room_default_accepts_trusted_browser_auth_runtime(tmp_path: Path
 
 
 @pytest.mark.parametrize(
-    ("template", "expected_error"),
+    ("template", "email_domain"),
     [
-        ("@alice:example.org", r"exactly one \{localpart\} placeholder"),
-        ("@{localpart}-{localpart}:example.org", r"exactly one \{localpart\} placeholder"),
-        ("@{localpart}:example.org{", r"exactly one \{localpart\} placeholder"),
-        ("@{localpart}:{other}", r"exactly one \{localpart\} placeholder"),
-        ("@{localpart}:example.org.", "valid Matrix user ID"),
+        ("@alice:example.org", "example.com"),
+        ("@{localpart}-{localpart}:example.org", "example.com"),
+        ("@{localpart}:example.org{", "example.com"),
+        ("@{localpart}:{other}", "example.com"),
+        ("@{localpart}:example.org.", "example.com"),
+        ("@{localpart}:example.org", None),
     ],
 )
 def test_origin_room_default_rejects_malformed_email_mapping(
     tmp_path: Path,
     template: str,
-    expected_error: str,
+    email_domain: str | None,
 ) -> None:
     """Protected defaults should reject mappings that runtime auth cannot use."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -137,11 +138,12 @@ def test_origin_room_default_rejects_malformed_email_mapping(
             "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": template,
+            **({} if email_domain is None else {"MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN": email_domain}),
         },
         env_file_values=runtime_paths.env_file_values,
     )
 
-    with pytest.raises(ValueError, match=expected_error):
+    with pytest.raises(ValueError, match="valid template and MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"):
         Config.validate_with_runtime(
             {
                 **_base_config(),

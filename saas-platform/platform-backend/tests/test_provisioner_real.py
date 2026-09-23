@@ -210,6 +210,7 @@ class TestProvisionerCommandValidation:
                 INSTANCE_SYNAPSE_IMAGE_PULL_POLICY="IfNotPresent",
                 INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED="true",
                 INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER="X-MindRoom-User-Id",
+                INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN="example.com",
                 INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER="X-MindRoom-User-Email",
                 INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER="X-MindRoom-Matrix-User-Id",
                 INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE="@{localpart}:example.org",
@@ -263,6 +264,7 @@ class TestProvisionerCommandValidation:
         assert set_args["synapse_image_pull_policy"] == "IfNotPresent"
         assert set_args["trustedUpstreamAuth.enabled"] == "true"
         assert set_args["trustedUpstreamAuth.userIdHeader"] == "X-MindRoom-User-Id"
+        assert set_args["trustedUpstreamAuth.emailDomain"] == "example.com"
         assert set_args["trustedUpstreamAuth.emailHeader"] == "X-MindRoom-User-Email"
         assert set_args["trustedUpstreamAuth.matrixUserIdHeader"] == "X-MindRoom-Matrix-User-Id"
         assert set_args["trustedUpstreamAuth.emailToMatrixUserIdTemplate"] == "@{localpart}:example.org"

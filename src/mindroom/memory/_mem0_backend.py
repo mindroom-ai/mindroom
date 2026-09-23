@@ -12,10 +12,10 @@ from mindroom.embedder_health import (
 )
 from mindroom.embedding_errors import EmbedderRequestError, classified_embedder_error
 from mindroom.logging_config import get_logger
+from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.timing import timed
 
 from ._policy import (
-    agent_scope_user_id,
     allowed_scope_storage_paths,
     build_team_user_id,
     effective_storage_paths_for_context,
@@ -26,6 +26,7 @@ from ._policy import (
 from ._prompting import build_memory_messages
 from ._shared import (
     MEM0_REPLICA_KEY,
+    MemoryEntrypointContext,
     MemoryNotFoundError,
     MemoryResult,
     MemorySearchOutcome,
@@ -686,7 +687,7 @@ class Mem0MemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
-    ) -> str:
+    ) -> MemoryEntrypointContext:
         """Return no stable entrypoint context; mem0 has no curated `MEMORY.md`."""
         del agent_name, storage_path, config, execution_identity
-        return ""
+        return MemoryEntrypointContext()

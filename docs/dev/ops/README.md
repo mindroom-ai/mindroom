@@ -10,7 +10,12 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
 ## Decision Table
 
 - Core dev against local Matrix + DB
-  - Commands: `just local-matrix-up|down|logs|reset`, then `mindroom run`
+  - Commands: `just local-matrix-up`, `just local-matrix-down`, or `just local-matrix-logs`, then `mindroom run`
+  - Destructive reset: stop the backend, run `just local-matrix-reset`, then `just local-matrix-up` and `mindroom run`.
+    Reset deletes this Compose project's containers, networks, and volumes (local accounts, rooms, messages, and media), the selected runtime's `matrix_state.yaml`, and repository `tmp/`.
+    It resolves storage like `mindroom run`: `MINDROOM_STORAGE_PATH` in the environment takes precedence over the selected config's `.env`, then storage defaults to `mindroom_data/` beside that config.
+    If the backend uses `--config` or `--storage-path`, supply the matching `MINDROOM_CONFIG_PATH` or `MINDROOM_STORAGE_PATH` environment value when resetting.
+    Relative environment paths are resolved from the repository root; relative storage paths in `.env` are resolved from the selected config directory.
   - `mindroom run` serves the bundled dashboard on `http://localhost:8765`
   - Optional frontend-only dev server for UI iteration: `run-frontend.sh`
   - Compose files: `local/matrix/docker-compose.yml`, assets in `local/matrix/docker/`
@@ -44,16 +49,30 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
 
 Use kind to spin up a throwaway local K8s cluster and install the platform chart for smoke testing and development.
 
-- Prereqs: `kind`, `kubectl`, `helm`, and Docker.
-- With Nix: use the root dev shell (`nix-shell`) which now includes `kind`, or the focused one at `nix-shell cluster/k8s/kind/shell.nix`.
-- Quickstart:
+The `just cluster-kind-*` recipes require `just`, Nix (`nix-shell`), and a running Docker daemon.
+Each recipe enters `cluster/k8s/kind/shell.nix`, which supplies `kind`, `kubectl`, Helm, and the Docker client.
+
+- Quickstart with Nix:
   - `just cluster-kind-up`
   - `just cluster-kind-build-load` (builds platform + MindRoom images and loads them into kind)
   - `just cluster-kind-install-platform`
-  - Or run the one-shot script: `cluster/k8s/kind/start-fresh.sh`
+  - Or run `just cluster-kind-fresh` for the complete setup.
   - Port-forward:
     - Backend: `just cluster-kind-port-backend` -> http://localhost:8000
     - Frontend: `just cluster-kind-port-frontend` -> http://localhost:3000
+
+With `kind`, `kubectl`, Helm, and Docker already installed, use the direct script from the repository root:
+
+```bash
+bash cluster/k8s/kind/start-fresh.sh
+```
+
+Then run each port-forward in a separate terminal:
+
+```bash
+kubectl -n mindroom-staging port-forward svc/platform-backend 8000:8000
+kubectl -n mindroom-staging port-forward svc/platform-frontend 3000:3000
+```
 
 Notes:
 - The Helm chart defaults reference a private registry. The `cluster-kind-build-load` step tags and loads images with those names so the cluster uses local images (no registry pull needed).
@@ -61,12 +80,13 @@ Notes:
 - Secrets (Supabase, Stripe, etc.) default to empty; the backend handles missing values for local smoke tests.
 
 - Platform app development
-  - Backend dev: `just platform-app-backend-dev`
-  - Frontend dev: `just platform-app-frontend-dev`
+  - Backend dev: `just start-saas-backend-dev`
+  - Frontend dev: `just start-saas-frontend-dev`
 
 ## Notes
 
 - Instances in Cluster should be created via the platform provisioner API. Avoid direct Helm installs except for debugging.
 - `saas-platform/.env` is the source of truth for Terraform + Helm deployment. It is not committed.
 - Local artifacts (backups, wgcf, etc.) are ignored by git.
-- Router-managed rooms in `multi_user` mode now reconcile `m.room.power_levels` so `com.mindroom.thread.tags` can be sent at PL0. If room reconciliation logs start failing, check that the service account is joined and allowed to update room power levels.
+- Managed rooms reconcile `m.room.power_levels` so `com.mindroom.thread.tags` can be sent at PL0.
+  If room reconciliation logs start failing, check that the service account is joined and allowed to update room power levels.

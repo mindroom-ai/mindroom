@@ -49,7 +49,7 @@ def mock_config(runtime_paths: RuntimePaths) -> Config:
     )
     config = Config(
         agents={name: {"display_name": name.replace("_", " ").title()} for name in agent_names},
-        models={"default": {"provider": "openai", "id": "gpt-5.4"}},
+        models={"default": {"provider": "openai", "id": "gpt-6-astra"}},
     )
     persist_entity_accounts(config, runtime_paths)
     return config

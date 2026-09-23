@@ -6,31 +6,54 @@ import json
 import os
 import shutil
 import stat
+import threading
 from contextlib import suppress
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
-from urllib.parse import quote
-from uuid import uuid4
+from functools import wraps
+from pathlib import Path
+from typing import TYPE_CHECKING, ParamSpec, TypeVar
+from urllib.parse import quote, unquote
 
 import yaml
 
 from mindroom import yaml_io
+from mindroom.atomic_file import atomic_write_bytes_at
+from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
-    from pathlib import Path
+    from collections.abc import Callable, Collection, Sequence
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.thread_export.models import ThreadExportRoom
 
 _EXPORT_SCHEMA_VERSION = 1
 _ROOM_INDEX_FILENAME = "index.json"
+_ROOT_MARKER_FILENAME = ".mindroom-thread-exports"
+_ROOT_MARKER_TEXT = '{"format":"mindroom-thread-exports","version":1}\n'
 _THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
+logger = get_logger(__name__)
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+_THREAD_EXPORT_MUTATION_LOCK = threading.RLock()
+
+
+def _serialized_export_mutation(function: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Serialize target mutations so cleanup cannot race a replacement writer."""
+
+    @wraps(function)
+    def serialized(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with _THREAD_EXPORT_MUTATION_LOCK:
+            return function(*args, **kwargs)
+
+    return serialized
+
+
 class _UnsafeThreadExportPathError(RuntimeError):
-    """Raised when an export path could escape through a symlink."""
+    """Raised when an export path is unsafe or lacks ownership proof."""
 
 
 def _safe_path_segment(value: str) -> str:
@@ -41,9 +64,65 @@ def _safe_path_segment(value: str) -> str:
     return encoded
 
 
+def _room_path_segment(room_key: str) -> str:
+    """Return a room segment outside the export-root marker namespace."""
+    encoded = _safe_path_segment(room_key)
+    if encoded == _ROOT_MARKER_FILENAME:
+        return f"%2E{encoded[1:]}"
+    return encoded
+
+
+def _is_encoded_room_segment(value: str) -> bool:
+    """Return whether a directory name is one canonical room segment."""
+    if value == _ROOT_MARKER_FILENAME:
+        return False
+    try:
+        return _room_path_segment(unquote(value, errors="strict")) == value
+    except UnicodeError:
+        return False
+
+
+def _is_thread_export_filename(value: str) -> bool:
+    """Return whether a filename is one canonical Matrix thread export."""
+    if not value.endswith(".yaml"):
+        return False
+    stem = value.removesuffix(".yaml")
+    try:
+        thread_id = unquote(stem, errors="strict")
+    except UnicodeError:
+        return False
+    return thread_id.startswith("$") and f"{_safe_path_segment(thread_id)}.yaml" == value
+
+
 def _unsafe_directory(path: Path, label: str) -> _UnsafeThreadExportPathError:
     """Return a normalized failure for an unsafe controlled directory component."""
     return _UnsafeThreadExportPathError(f"Refusing symlinked thread export {label}: {path}")
+
+
+def canonicalize_output_dir(output_dir: Path) -> Path:
+    """Reject a broad authored path and return an absolute lexical path."""
+    if output_dir.name in {"", ".", ".."}:
+        msg = f"Thread export output must end in an explicit directory name, not '.' or '..': {output_dir}"
+        raise _UnsafeThreadExportPathError(msg)
+    return Path(os.path.abspath(output_dir))  # noqa: PTH100 - resolve() would hide a final symlink
+
+
+def _canonicalize_trusted_output_dir(
+    output_dir: Path,
+    trusted_root: Path | None,
+) -> tuple[Path, Path | None]:
+    """Return a lexical output path and its optional containing root."""
+    canonical_output_dir = canonicalize_output_dir(output_dir)
+    if trusted_root is None:
+        return canonical_output_dir, None
+    canonical_trusted_root = Path(os.path.abspath(trusted_root))  # noqa: PTH100
+    outside_trusted_root = not canonical_output_dir.is_relative_to(
+        canonical_trusted_root,
+    )
+    if canonical_output_dir == canonical_trusted_root or outside_trusted_root:
+        msg = f"Thread export output must be a descendant of its trusted root: {canonical_output_dir}"
+        raise _UnsafeThreadExportPathError(msg)
+    return canonical_output_dir, canonical_trusted_root
 
 
 def _open_directory_at(
@@ -55,15 +134,9 @@ def _open_directory_at(
     create: bool,
 ) -> int | None:
     """Open one directory relative to a pinned parent without following symlinks."""
-    if create:
-        try:
-            os.mkdir(name, dir_fd=parent_fd)
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            raise _unsafe_directory(path, label) from exc
     try:
-        return os.open(name, _DIRECTORY_OPEN_FLAGS, dir_fd=parent_fd)
+        with open_directory_within_root(parent_fd, name, create=create) as descriptor:
+            return os.dup(descriptor)
     except FileNotFoundError:
         if not create:
             return None
@@ -72,28 +145,246 @@ def _open_directory_at(
         raise _unsafe_directory(path, label) from exc
 
 
-def _open_export_root(output_dir: Path, *, create: bool) -> int | None:
-    """Open and pin the export root so later operations cannot be redirected."""
-    if create:
-        output_dir.parent.mkdir(parents=True, exist_ok=True)
+def _open_anchored_directory(
+    trusted_root: Path,
+    relative_parts: tuple[str, ...],
+    *,
+    create: bool,
+    final_label: str,
+) -> int | None:
+    """Open one descendant by descriptor-relative traversal without symlinks."""
     try:
-        parent_fd = os.open(output_dir.parent, _DIRECTORY_OPEN_FLAGS)
+        with open_directory_within_root(trusted_root, Path(*relative_parts[:-1]), create=create) as parent_fd:
+            return _open_directory_at(
+                parent_fd,
+                relative_parts[-1],
+                path=trusted_root.joinpath(*relative_parts),
+                label=final_label,
+                create=create,
+            )
     except FileNotFoundError:
         if not create:
             return None
         raise
     except OSError as exc:
-        raise _unsafe_directory(output_dir.parent, "root parent") from exc
+        raise _unsafe_directory(trusted_root.joinpath(*relative_parts[:-1]), "root parent") from exc
+
+
+def _open_export_root(
+    output_dir: Path,
+    *,
+    create: bool,
+    trusted_root: Path | None = None,
+) -> int | None:
+    """Open the final export directory without following a symlink at that entry."""
+    canonical_output_dir, canonical_trusted_root = _canonicalize_trusted_output_dir(
+        output_dir,
+        trusted_root,
+    )
+    if canonical_trusted_root is not None:
+        return _open_anchored_directory(
+            canonical_trusted_root,
+            canonical_output_dir.relative_to(canonical_trusted_root).parts,
+            create=create,
+            final_label="root",
+        )
+    if create:
+        canonical_output_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        parent_fd = os.open(canonical_output_dir.parent, _DIRECTORY_OPEN_FLAGS)
+    except FileNotFoundError:
+        if not create:
+            return None
+        raise
+    except OSError as exc:
+        raise _unsafe_directory(canonical_output_dir.parent, "root parent") from exc
     try:
         return _open_directory_at(
             parent_fd,
-            output_dir.name,
-            path=output_dir,
+            canonical_output_dir.name,
+            path=canonical_output_dir,
             label="root",
             create=create,
         )
     finally:
         os.close(parent_fd)
+
+
+def _regular_file_at(directory_fd: int, filename: str) -> bool:
+    """Return whether one descriptor-relative entry is a regular file."""
+    try:
+        mode = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return False
+    return stat.S_ISREG(mode)
+
+
+def _atomic_temp_destination(filename: str) -> str | None:
+    """Return the known-file destination encoded by an atomic-write temp name."""
+    if not filename.startswith(".") or not filename.endswith(".tmp"):
+        return None
+    destination, separator, token = filename[1:-4].rpartition(".")
+    if separator != "." or len(token) != 32 or any(character not in "0123456789abcdef" for character in token):
+        return None
+    return destination
+
+
+def _is_room_export_temp_file(room_fd: int, filename: str) -> bool:
+    """Return whether one regular file is exact residue from a room export write."""
+    destination = _atomic_temp_destination(filename)
+    return (
+        destination is not None
+        and (destination == _ROOM_INDEX_FILENAME or _is_thread_export_filename(destination))
+        and _regular_file_at(room_fd, filename)
+    )
+
+
+def _is_room_export_file(room_fd: int, filename: str) -> bool:
+    """Return whether one room entry is an exporter-owned regular file."""
+    return (
+        (filename == _ROOM_INDEX_FILENAME and _regular_file_at(room_fd, filename))
+        or (_is_thread_export_filename(filename) and _regular_file_at(room_fd, filename))
+        or _is_room_export_temp_file(room_fd, filename)
+    )
+
+
+def _room_contains_only_export_files(room_fd: int) -> bool:
+    """Return whether one room directory contains an index and only exporter-owned files."""
+    names = os.listdir(room_fd)
+    return _regular_file_at(room_fd, _ROOM_INDEX_FILENAME) and all(
+        _is_room_export_file(room_fd, name) for name in names
+    )
+
+
+def _contains_thread_export_file(room_fd: int) -> bool:
+    """Return whether one pinned directory holds a committed Matrix thread export."""
+    names = os.listdir(room_fd)
+    return any(_is_thread_export_filename(name) and _regular_file_at(room_fd, name) for name in names)
+
+
+def _open_canonical_room_directory(root_fd: int, output_dir: Path, name: str) -> int | None:
+    """Open one canonically named, non-symlinked room directory below a pinned root."""
+    if not _is_encoded_room_segment(name):
+        return None
+    try:
+        mode = os.stat(name, dir_fd=root_fd, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(mode):
+        return None
+    return _open_directory_at(
+        root_fd,
+        name,
+        path=output_dir / name,
+        label="room directory",
+        create=False,
+    )
+
+
+def _recognizable_room_directory(root_fd: int, output_dir: Path, name: str) -> bool:
+    """Return whether one root entry holds an index and nothing the exporter does not own."""
+    room_fd = _open_canonical_room_directory(root_fd, output_dir, name)
+    if room_fd is None:
+        return False
+    try:
+        return _room_contains_only_export_files(room_fd)
+    finally:
+        os.close(room_fd)
+
+
+def _has_valid_export_root_marker(root_fd: int) -> bool:
+    """Return whether the marker contains the exact supported ownership text."""
+    try:
+        marker_fd = os.open(_ROOT_MARKER_FILENAME, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+    except FileNotFoundError:
+        return False
+    try:
+        with os.fdopen(marker_fd, encoding="utf-8") as marker_file:
+            marker_fd = -1
+            return marker_file.read(len(_ROOT_MARKER_TEXT) + 1) == _ROOT_MARKER_TEXT
+    finally:
+        if marker_fd >= 0:
+            os.close(marker_fd)
+
+
+def _unowned_export_root(path: Path) -> _UnsafeThreadExportPathError:
+    """Return a failure for a root without MindRoom ownership proof."""
+    return _UnsafeThreadExportPathError(
+        f"Refusing unowned thread export root: {path}; "
+        f"the root must be empty or contain a "
+        f"{_ROOT_MARKER_FILENAME} file whose only line is {_ROOT_MARKER_TEXT.strip()}",
+    )
+
+
+def _claim_export_root(root_fd: int, output_dir: Path) -> None:
+    """Install the marker on an empty root."""
+    if _has_valid_export_root_marker(root_fd):
+        return
+    if not os.listdir(root_fd):
+        _atomic_write_at(root_fd, _ROOT_MARKER_FILENAME, _ROOT_MARKER_TEXT)
+        return
+    logger.warning(
+        "Refusing to mark populated thread export root",
+        output_dir=str(output_dir),
+    )
+    raise _unowned_export_root(output_dir)
+
+
+def _require_owned_export_root(root_fd: int, output_dir: Path) -> None:
+    """Require the marker before a destructive operation."""
+    if _has_valid_export_root_marker(root_fd):
+        return
+    logger.warning(
+        "Refusing destructive operation on markerless thread export root",
+        output_dir=str(output_dir),
+    )
+    raise _unowned_export_root(output_dir)
+
+
+@_serialized_export_mutation
+def prepare_export_root(
+    output_dir: Path,
+    *,
+    trusted_root: Path | None = None,
+) -> None:
+    """Create an export root if needed and install its marker when empty."""
+    canonical_output_dir = canonicalize_output_dir(output_dir)
+    root_fd = _open_export_root(
+        canonical_output_dir,
+        create=True,
+        trusted_root=trusted_root,
+    )
+    assert root_fd is not None
+    try:
+        _claim_export_root(root_fd, canonical_output_dir)
+    finally:
+        os.close(root_fd)
+
+
+def _open_owned_export_root(
+    output_dir: Path,
+    *,
+    create: bool,
+    trusted_root: Path | None = None,
+) -> int | None:
+    """Open an owned root, claiming empty storage only for write creation."""
+    canonical_output_dir = canonicalize_output_dir(output_dir)
+    root_fd = _open_export_root(
+        canonical_output_dir,
+        create=create,
+        trusted_root=trusted_root,
+    )
+    if root_fd is None:
+        return None
+    try:
+        if create:
+            _claim_export_root(root_fd, canonical_output_dir)
+        else:
+            _require_owned_export_root(root_fd, canonical_output_dir)
+    except Exception:
+        os.close(root_fd)
+        raise
+    return root_fd
 
 
 def _open_room_directory(
@@ -104,7 +395,7 @@ def _open_room_directory(
     create: bool,
 ) -> int | None:
     """Open and pin one exporter-controlled room directory."""
-    room_name = _safe_path_segment(room.key)
+    room_name = _room_path_segment(room.key)
     return _open_directory_at(
         root_fd,
         room_name,
@@ -140,28 +431,8 @@ def _read_text_at(directory_fd: int, filename: str) -> str | None:
 
 
 def _atomic_write_at(directory_fd: int, filename: str, text: str) -> None:
-    """Durably replace one file relative to an already-pinned directory."""
-    temp_name = f".{filename}.{uuid4().hex}.tmp"
-    temp_fd = -1
-    try:
-        temp_fd = os.open(
-            temp_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=directory_fd,
-        )
-        with os.fdopen(temp_fd, mode="w", encoding="utf-8") as temp_file:
-            temp_fd = -1
-            temp_file.write(text)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        os.replace(temp_name, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-        _fsync_directory_fd(directory_fd)
-    finally:
-        if temp_fd >= 0:
-            os.close(temp_fd)
-        with suppress(FileNotFoundError):
-            os.unlink(temp_name, dir_fd=directory_fd)
+    """Publish UTF-8 text with the temporary naming scheme used by export cleanup."""
+    atomic_write_bytes_at(directory_fd, filename, text.encode("utf-8"), temp_prefix=f".{filename}.")
 
 
 def _timestamp_iso(timestamp_ms: int) -> str | None:
@@ -182,6 +453,10 @@ def _message_payload(message: ResolvedVisibleMessage) -> dict[str, object]:
     }
     if timestamp_iso := _timestamp_iso(message.timestamp):
         payload["timestamp_iso"] = timestamp_iso
+    if message.edited_timestamp is not None:
+        payload["edited_timestamp"] = message.edited_timestamp
+        if edited_timestamp_iso := _timestamp_iso(message.edited_timestamp):
+            payload["edited_timestamp_iso"] = edited_timestamp_iso
     if message.thread_id is not None:
         payload["thread_id"] = message.thread_id
     if message.reply_to_event_id is not None:
@@ -279,10 +554,12 @@ def _thread_index_entry_at(directory_fd: int, filename: str) -> tuple[int, dict[
 
 
 def _room_index_payload(room_fd: int, room: ThreadExportRoom) -> dict[str, object]:
-    """Build one room index document from the exported thread files on disk."""
+    """Build one room index document from the recognizable thread files on disk."""
     indexed = [
         indexed_entry
-        for filename in sorted(name for name in os.listdir(room_fd) if name.endswith(".yaml"))
+        for filename in sorted(
+            name for name in os.listdir(room_fd) if _is_thread_export_filename(name) and _regular_file_at(room_fd, name)
+        )
         if (indexed_entry := _thread_index_entry_at(room_fd, filename)) is not None
     ]
     indexed.sort(key=lambda item: item[0], reverse=True)
@@ -300,9 +577,52 @@ def _room_index_payload(room_fd: int, room: ThreadExportRoom) -> dict[str, objec
     }
 
 
-def write_room_index(output_dir: Path, room: ThreadExportRoom) -> None:
-    """Write one room's index.json when its content changed."""
-    root_fd = _open_export_root(output_dir, create=False)
+def _declared_room_index_filenames(room_fd: int) -> set[str] | None:
+    """Return the thread filename set declared by the current room index."""
+    text = _read_text_at(room_fd, _ROOM_INDEX_FILENAME)
+    if text is None:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict) or not isinstance(threads := payload.get("threads"), list):
+        return None
+    filenames: set[str] = set()
+    for entry in threads:
+        if not isinstance(entry, dict) or not isinstance(filename := entry.get("file"), str):
+            return None
+        filenames.add(filename)
+    return filenames
+
+
+def _room_index_filename_set_matches(room_fd: int) -> bool:
+    """Return whether index membership matches regular thread YAML files on disk."""
+    declared_filenames = _declared_room_index_filenames(room_fd)
+    if declared_filenames is None:
+        return False
+    disk_filenames = {
+        filename
+        for filename in os.listdir(room_fd)
+        if _is_thread_export_filename(filename) and _regular_file_at(room_fd, filename)
+    }
+    return declared_filenames == disk_filenames
+
+
+@_serialized_export_mutation
+def write_room_index(
+    output_dir: Path,
+    room: ThreadExportRoom,
+    *,
+    thread_files_changed: bool = True,
+    trusted_root: Path | None = None,
+) -> None:
+    """Rebuild a room index after YAML changes or detected filename-set drift."""
+    root_fd = _open_owned_export_root(
+        output_dir,
+        create=False,
+        trusted_root=trusted_root,
+    )
     if root_fd is None:
         return
     try:
@@ -312,18 +632,28 @@ def write_room_index(output_dir: Path, room: ThreadExportRoom) -> None:
     if room_fd is None:
         return
     try:
+        if not thread_files_changed and _room_index_filename_set_matches(room_fd):
+            return
         payload = _room_index_payload(room_fd, room)
         text = f"{json.dumps(payload, indent=2)}\n"
-        if _read_text_at(room_fd, _ROOM_INDEX_FILENAME) == text:
-            return
-        _atomic_write_at(room_fd, _ROOM_INDEX_FILENAME, text)
+        if _read_text_at(room_fd, _ROOM_INDEX_FILENAME) != text:
+            _atomic_write_at(room_fd, _ROOM_INDEX_FILENAME, text)
     finally:
         os.close(room_fd)
 
 
-def room_index_exists(output_dir: Path, room: ThreadExportRoom) -> bool:
-    """Return whether a room has a regular index file inside a safe export directory."""
-    root_fd = _open_export_root(output_dir, create=False)
+def room_has_thread_exports(
+    output_dir: Path,
+    room: ThreadExportRoom,
+    *,
+    trusted_root: Path | None = None,
+) -> bool:
+    """Return whether a safe room directory contains recognizable thread YAML."""
+    root_fd = _open_export_root(
+        output_dir,
+        create=False,
+        trusted_root=trusted_root,
+    )
     if root_fd is None:
         return False
     try:
@@ -333,45 +663,116 @@ def room_index_exists(output_dir: Path, room: ThreadExportRoom) -> bool:
     if room_fd is None:
         return False
     try:
-        try:
-            return stat.S_ISREG(os.stat(_ROOM_INDEX_FILENAME, dir_fd=room_fd, follow_symlinks=False).st_mode)
-        except FileNotFoundError:
-            return False
+        return _contains_thread_export_file(room_fd)
     finally:
         os.close(room_fd)
 
 
-def remove_room_export(output_dir: Path, room: ThreadExportRoom) -> bool:
-    """Remove one room's exported data without following workspace symlinks."""
-    root_fd = _open_export_root(output_dir, create=False)
-    if root_fd is None:
+def _log_unrecognized_entry(output_dir: Path, entry: str, *, room_key: str | None = None) -> None:
+    """Warn that deletion left an unrecognized entry untouched."""
+    logger.warning(
+        "Leaving unrecognized thread export entry untouched",
+        output_dir=str(output_dir),
+        room_key=room_key,
+        entry=entry,
+    )
+
+
+def _remove_room_export_entries(
+    root_fd: int,
+    output_dir: Path,
+    room_name: str,
+    *,
+    room_key: str | None,
+) -> bool:
+    """Remove exporter-owned room entries, preserving and reporting everything else."""
+    room_fd = _open_directory_at(
+        root_fd,
+        room_name,
+        path=output_dir / room_name,
+        label="room directory",
+        create=False,
+    )
+    if room_fd is None:
         return False
-    room_name = _safe_path_segment(room.key)
+    try:
+        filenames = os.listdir(room_fd)  # noqa: PTH208 - room_fd pins the directory
+        removed_files = False
+        for filename in filenames:
+            if _is_room_export_file(room_fd, filename):
+                os.unlink(filename, dir_fd=room_fd)
+                removed_files = True
+            else:
+                _log_unrecognized_entry(output_dir, filename, room_key=room_key)
+        if removed_files:
+            _fsync_directory_fd(room_fd)
+        removed_directory = False
+        if not os.listdir(room_fd):  # noqa: PTH208 - room_fd pins the directory
+            with suppress(OSError):
+                os.rmdir(room_name, dir_fd=root_fd)
+                removed_directory = True
+        return removed_files or removed_directory
+    finally:
+        os.close(room_fd)
+
+
+@_serialized_export_mutation
+def remove_room_export(
+    output_dir: Path,
+    room: ThreadExportRoom,
+    *,
+    trusted_root: Path | None = None,
+) -> None:
+    """Retract one room export, preserving and reporting entries the exporter does not own.
+
+    Retraction is idempotent: once every exporter-owned entry is gone, later passes over the
+    same room are quiet no-ops rather than a failure the operator can never clear.
+    """
+    root_fd = _open_owned_export_root(
+        output_dir,
+        create=False,
+        trusted_root=trusted_root,
+    )
+    if root_fd is None:
+        return
+    room_name = _room_path_segment(room.key)
     try:
         try:
             mode = os.stat(room_name, dir_fd=root_fd, follow_symlinks=False).st_mode
         except FileNotFoundError:
-            return False
-        if stat.S_ISDIR(mode):
+            return
+        if stat.S_ISLNK(mode):
+            raise _unsafe_directory(output_dir / room_name, "room directory")
+        if _recognizable_room_directory(root_fd, output_dir, room_name):
             if not shutil.rmtree.avoids_symlink_attacks:
                 msg = "Safe descriptor-relative directory removal is unavailable"
                 raise RuntimeError(msg)
             shutil.rmtree(room_name, dir_fd=root_fd)
-        else:
-            os.unlink(room_name, dir_fd=root_fd)
-        _fsync_directory_fd(root_fd)
-        return True
+            _fsync_directory_fd(root_fd)
+            return
+        if not stat.S_ISDIR(mode):
+            _log_unrecognized_entry(output_dir, room_name, room_key=room.key)
+            return
+        if _remove_room_export_entries(root_fd, output_dir, room_name, room_key=room.key):
+            _fsync_directory_fd(root_fd)
     finally:
         os.close(root_fd)
 
 
+@_serialized_export_mutation
 def remove_stale_thread_exports(
     output_dir: Path,
     room: ThreadExportRoom,
     thread_ids: Sequence[str],
+    *,
+    trusted_root: Path | None = None,
 ) -> bool:
-    """Remove thread files absent from a complete homeserver enumeration."""
-    root_fd = _open_export_root(output_dir, create=False)
+    """Remove recognizable thread files absent from a complete enumeration."""
+    root_fd = _open_owned_export_root(
+        output_dir,
+        create=False,
+        trusted_root=trusted_root,
+    )
     if root_fd is None:
         return False
     try:
@@ -382,18 +783,12 @@ def remove_stale_thread_exports(
         return False
     try:
         expected_names = {f"{_safe_path_segment(thread_id)}.yaml" for thread_id in thread_ids}
-        stale_names = [
-            name
-            for name in os.listdir(room_fd)  # noqa: PTH208 - descriptor pinning prevents path races
-            if name.endswith(".yaml") and name not in expected_names
-        ]
         removed = False
-        for filename in stale_names:
-            try:
-                mode = os.stat(filename, dir_fd=room_fd, follow_symlinks=False).st_mode
-            except FileNotFoundError:
+        for filename in os.listdir(room_fd):  # noqa: PTH208 - room_fd pins the directory
+            if not filename.endswith(".yaml") or filename in expected_names:
                 continue
-            if stat.S_ISDIR(mode):
+            if not _is_thread_export_filename(filename) or not _regular_file_at(room_fd, filename):
+                _log_unrecognized_entry(output_dir, filename, room_key=room.key)
                 continue
             os.unlink(filename, dir_fd=room_fd)
             removed = True
@@ -404,33 +799,75 @@ def remove_stale_thread_exports(
         os.close(room_fd)
 
 
-def reconcile_room_directories(output_dir: Path, retained_room_keys: set[str]) -> None:
-    """Remove room directories outside the target's full-pass authorization scope."""
-    root_fd = _open_export_root(output_dir, create=False)
+def _remove_reconciliation_room(root_fd: int, output_dir: Path, room_name: str) -> bool:
+    """Remove a stale indexed room or its recognizable partial thread files."""
+    if _recognizable_room_directory(root_fd, output_dir, room_name):
+        if not shutil.rmtree.avoids_symlink_attacks:
+            msg = "Safe descriptor-relative directory removal is unavailable"
+            raise RuntimeError(msg)
+        shutil.rmtree(room_name, dir_fd=root_fd)
+        return True
+    if not _is_encoded_room_segment(room_name):
+        _log_unrecognized_entry(output_dir, room_name)
+        return False
+    try:
+        mode = os.stat(room_name, dir_fd=root_fd, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return False
+    if stat.S_ISDIR(mode):
+        return _remove_room_export_entries(root_fd, output_dir, room_name, room_key=None)
+    _log_unrecognized_entry(output_dir, room_name)
+    return False
+
+
+@_serialized_export_mutation
+def reconcile_room_directories(
+    output_dir: Path,
+    retained_room_keys: set[str],
+    *,
+    trusted_root: Path | None = None,
+) -> None:
+    """Remove recognizable room directories outside the retained authorization scope."""
+    root_fd = _open_owned_export_root(
+        output_dir,
+        create=False,
+        trusted_root=trusted_root,
+    )
     if root_fd is None:
         return
     try:
-        retained_names = {_safe_path_segment(room_key) for room_key in retained_room_keys}
+        retained_names = {_room_path_segment(room_key) for room_key in retained_room_keys}
         removed = False
-        for name in os.listdir(root_fd):  # noqa: PTH208 - descriptor pinning prevents path races
-            if name in retained_names:
+        for name in os.listdir(root_fd):  # noqa: PTH208 - root_fd pins the directory
+            if name == _ROOT_MARKER_FILENAME or name in retained_names:
                 continue
-            try:
-                mode = os.stat(name, dir_fd=root_fd, follow_symlinks=False).st_mode
-            except FileNotFoundError:
-                continue
-            if stat.S_ISLNK(mode):
-                os.unlink(name, dir_fd=root_fd)
-            elif stat.S_ISDIR(mode):
-                if not shutil.rmtree.avoids_symlink_attacks:
-                    msg = "Safe descriptor-relative directory removal is unavailable"
-                    raise RuntimeError(msg)
-                shutil.rmtree(name, dir_fd=root_fd)
-            else:
-                continue
-            removed = True
+            removed = _remove_reconciliation_room(root_fd, output_dir, name) or removed
         if removed:
             _fsync_directory_fd(root_fd)
+    finally:
+        os.close(root_fd)
+
+
+@_serialized_export_mutation
+def clear_thread_export_root(
+    output_dir: Path,
+    *,
+    trusted_root: Path | None = None,
+) -> None:
+    """Remove exporter-owned content from one target and preserve unrelated entries."""
+    root_fd = _open_owned_export_root(
+        output_dir,
+        create=False,
+        trusted_root=trusted_root,
+    )
+    if root_fd is None:
+        return
+    try:
+        for name in os.listdir(root_fd):  # noqa: PTH208 - root_fd pins the directory
+            if name == _ROOT_MARKER_FILENAME:
+                continue
+            _remove_reconciliation_room(root_fd, output_dir, name)
+        _fsync_directory_fd(root_fd)
     finally:
         os.close(root_fd)
 
@@ -458,14 +895,21 @@ def _existing_payload_matches(room_fd: int, filename: str, payload: dict[str, ob
     return _payload_without_exported_at(existing) == _payload_without_exported_at(payload)
 
 
+@_serialized_export_mutation
 def write_thread_payload(
     output_dir: Path,
     room: ThreadExportRoom,
     thread_id: str,
     payload: dict[str, object],
+    *,
+    trusted_root: Path | None = None,
 ) -> bool:
     """Write one thread payload when changed and return whether bytes were replaced."""
-    root_fd = _open_export_root(output_dir, create=True)
+    root_fd = _open_owned_export_root(
+        output_dir,
+        create=True,
+        trusted_root=trusted_root,
+    )
     if root_fd is None:
         msg = f"Failed to create thread export root: {output_dir}"
         raise RuntimeError(msg)

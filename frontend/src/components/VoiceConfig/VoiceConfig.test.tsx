@@ -41,8 +41,8 @@ describe("VoiceConfig", () => {
 
   const createConfig = (): Partial<Config> => ({
     models: {
-      default: { provider: "openai", id: "gpt-4o-mini" },
-      fast: { provider: "openai", id: "gpt-4.1-mini" },
+      default: { provider: "openai", id: "gpt-5.6-luna" },
+      fast: { provider: "openai", id: "gpt-5.6-terra" },
     },
     voice: {
       enabled: true,
@@ -200,9 +200,7 @@ describe("VoiceConfig", () => {
 
     render(<VoiceConfig />);
 
-    expect(document.getElementById("stt-model")).toHaveValue(
-      "gpt-4o-transcribe",
-    );
+    expect(document.getElementById("stt-model")).toHaveValue("gpt-transcribe");
   });
 
   it("shows an error toast when saving fails", async () => {

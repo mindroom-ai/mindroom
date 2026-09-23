@@ -14,6 +14,7 @@ CONCRETE_ORCHESTRATOR_IMPORT_ALLOWLIST = {
 }
 RUNTIME_PROTOCOLS_MODULE = Path("src/mindroom/runtime_protocols.py")
 CONFIG_MAIN_MODULE = Path("src/mindroom/config/main.py")
+CONFIG_MODELS_MODULE = Path("src/mindroom/config/models.py")
 APPROVAL_CONFIG_MODULE = Path("src/mindroom/config/approval.py")
 MATRIX_MESSAGE_TOOL_MODULE = Path("src/mindroom/custom_tools/matrix_message.py")
 RESPONSE_RUNNER_MODULE = Path("src/mindroom/response_runner.py")
@@ -28,7 +29,6 @@ MATRIX_MESSAGE_LOW_LEVEL_IMPORTS = frozenset(
         "mindroom.custom_tools.attachments",
         "mindroom.interactive",
         "mindroom.matrix.client_delivery",
-        "mindroom.matrix.client_thread_history",
         "mindroom.matrix.client_visible_messages",
         "mindroom.matrix.mentions",
     },
@@ -38,10 +38,9 @@ MATRIX_IDENTIFIER_HELPERS = frozenset(
         "agent_username_localpart",
         "extract_server_name_from_homeserver",
         "managed_room_alias_localpart",
-        "managed_room_key_from_alias_localpart",
         "managed_space_alias_localpart",
         "mindroom_namespace",
-        "room_alias_localpart",
+        "room_alias_identifier_candidates",
     },
 )
 
@@ -51,12 +50,18 @@ def _is_matrix_runtime_module(module: str) -> bool:
 
 
 def test_config_modules_do_not_import_matrix_runtime_modules() -> None:
-    """Config models stay authored-data focused and avoid Matrix runtime imports."""
+    """Config models avoid Matrix runtime imports outside the server-name validation seam."""
     forbidden: list[str] = []
     for source_path in CONFIG_MODULES:
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module and _is_matrix_runtime_module(node.module):
+                if (
+                    source_path == CONFIG_MODELS_MODULE
+                    and node.module == "mindroom.matrix.identity"
+                    and {alias.name for alias in node.names} == {"valid_matrix_server_name"}
+                ):
+                    continue
                 forbidden.append(f"{source_path}:{node.lineno}: from {node.module}")
             if isinstance(node, ast.Import):
                 forbidden.extend(

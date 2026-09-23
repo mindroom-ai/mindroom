@@ -8,13 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import install_runtime_cache_support, replace_turn_controller_deps, wrap_extracted_collaborators
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import make_test_agent_bot
+from tests.conftest import install_runtime_journal_support, replace_turn_controller_deps, wrap_extracted_collaborators
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
@@ -23,10 +24,12 @@ if TYPE_CHECKING:
 
 def _test_config() -> Config:
     """Return one typed config for edit-after-restart tests."""
-    return Config(
-        agents={"test_agent": AgentConfig(display_name="Test Agent")},
-        authorization={"default_room_access": True},
-        mindroom_user={"username": "mindroom"},
+    return with_current_room_member_access(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            authorization={},
+            mindroom_user={"username": "mindroom"},
+        ),
     )
 
 
@@ -59,7 +62,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     )
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -71,7 +74,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
 
     # Mock logger
     bot.logger = MagicMock()
@@ -83,7 +86,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Simulate that the bot has already responded to the original message
     original_event_id = "$original:example.com"
     response_event_id = "$response:example.com"
-    bot._turn_store.record_turn(
+    await bot._turn_store.record_turn(
         TurnRecord.create(
             [original_event_id],
             response_event_id=response_event_id,
@@ -93,7 +96,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Also mark the edit event as "seen" (simulating it was delivered before restart)
     # With the correct implementation, edits should still be processed
     edit_event_id = "$edit:example.com"
-    bot._turn_store.record_turn(TurnRecord.create([edit_event_id]))
+    await bot._turn_store.record_turn(TurnRecord.create([edit_event_id]))
 
     # Create an edit event that would be redelivered after restart
     edit_event = nio.RoomMessageText.from_dict(
@@ -137,7 +140,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Mock the methods needed for regeneration
     with (
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
-        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
         # Process the redelivered edit event
         await bot._on_message(room, edit_event)
@@ -169,7 +172,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     )
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -181,7 +184,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
 
     # Mock logger
     bot.logger = MagicMock()
@@ -192,7 +195,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
 
     # Mark a message as already responded to
     message_event_id = "$message:example.com"
-    bot._turn_store.record_turn(TurnRecord.create([message_event_id]))
+    await bot._turn_store.record_turn(TurnRecord.create([message_event_id]))
 
     # Create a regular message event (not an edit)
     message_event = nio.RoomMessageText.from_dict(
@@ -219,8 +222,8 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
 
     # Mock methods
     with (
-        patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
-        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
         # Process the redelivered message
         await bot._on_message(room, message_event)

@@ -24,7 +24,16 @@ from mindroom.report_access_policy import ReportAccessPolicy
 from mindroom.report_publishing.store import PublishableReport, ReportPublishingError, ReportPublishingStore
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,7 +56,7 @@ def _workflow_spec() -> dict[str, object]:
                 "id": "writer",
                 "kind": "ephemeral_agent",
                 "name": "Report Writer",
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-5",
                 "tools": [],
             },
         ],
@@ -63,7 +72,7 @@ def _workflow_spec() -> dict[str, object]:
             "max_runtime_seconds": 1800,
             "max_concurrent_agents": 4,
             "max_total_agents": 16,
-            "models": ["claude-sonnet-4-6"],
+            "models": ["claude-sonnet-5"],
             "tools": [],
             "data": {
                 "matrix_history": "none",
@@ -115,12 +124,12 @@ def _make_context(
                     memory_backend=agent_memory_backend,
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
             report_publishing=report_publishing or ReportPublishingConfig(),
         ),
         runtime_paths,
     )
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
             room_id="!room:localhost",
@@ -131,8 +140,8 @@ def _make_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=AsyncMock(),
-        event_cache=make_event_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
         room=None,
         storage_path=None,
     )
@@ -309,6 +318,60 @@ def test_report_publishing_store_rejects_incidental_public_room_metadata(tmp_pat
             published_by="@alice:localhost",
             origin_room_id="!origin:localhost",
         )
+
+
+def test_report_publishing_store_upgrades_legacy_html_record_on_revoke(tmp_path: Path) -> None:
+    """A pre-artifact-kind record serves its file and rewrites without losing publication metadata."""
+    storage_root = tmp_path / "mindroom_data"
+    artifact_path = storage_root / "reports" / "legacy.html"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_bytes(b"<!doctype html><h1>Legacy report</h1>\n")
+    slug = "pub_00000000000000000000000000000000"
+    record_path = storage_root / "report_publishing" / "public_reports" / f"{slug}.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(
+        json.dumps(
+            {
+                "slug": slug,
+                "source_type": "dynamic_workflow_run",
+                "source": {"workflow_id": "weekly-report", "run_id": "run-7"},
+                "artifact_path": "reports/legacy.html",
+                "title": "Weekly report",
+                "requested_by": "@alice:localhost",
+                "published_by": "@publisher:localhost",
+                "published_at": "2026-06-20T12:00:00+00:00",
+                "public_url": "https://example.test/reports/public/" + slug,
+                "revoked_at": None,
+                "revoked_by": None,
+            },
+        ),
+        encoding="utf-8",
+    )
+    store = ReportPublishingStore(storage_root)
+
+    loaded = store.get_report(slug)
+    served_path = store.report_asset_path(loaded)
+    revoked = store.revoke_report(slug, revoked_by="@admin:localhost")
+
+    assert loaded.artifact_kind == "html_file"
+    assert loaded.access_policy is ReportAccessPolicy.PUBLIC
+    assert served_path == artifact_path
+    assert served_path.read_bytes() == b"<!doctype html><h1>Legacy report</h1>\n"
+    assert revoked.source_type == "dynamic_workflow_run"
+    assert revoked.source == {"workflow_id": "weekly-report", "run_id": "run-7"}
+    assert revoked.title == "Weekly report"
+    assert revoked.requested_by == "@alice:localhost"
+    assert revoked.published_by == "@publisher:localhost"
+    assert revoked.published_at == "2026-06-20T12:00:00+00:00"
+    assert revoked.public_url == "https://example.test/reports/public/" + slug
+
+    persisted = json.loads(record_path.read_text(encoding="utf-8"))
+    assert persisted["artifact_kind"] == "html_file"
+    assert persisted["access_policy"] == "public"
+    reopened = ReportPublishingStore(storage_root)
+    reloaded = reopened.get_report(slug, include_revoked=True)
+    assert reloaded == revoked
+    assert reopened.report_asset_path(reloaded).read_bytes() == b"<!doctype html><h1>Legacy report</h1>\n"
 
 
 def test_report_publishing_store_rejects_artifacts_outside_storage_root(tmp_path: Path) -> None:
@@ -821,6 +884,7 @@ def test_report_publishing_tool_rejects_origin_room_with_malformed_email_mapping
             "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@static:example.org",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN": "example.com",
         },
     )
 
@@ -835,7 +899,7 @@ def test_report_publishing_tool_rejects_origin_room_with_malformed_email_mapping
         )
 
     assert rejected["status"] == "error"
-    assert "exactly one {localpart} placeholder" in rejected["message"]
+    assert "valid template and MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN" in rejected["message"]
 
 
 def test_report_publishing_tool_rejects_unknown_policy_and_publisher(tmp_path: Path) -> None:

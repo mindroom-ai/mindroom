@@ -10,13 +10,13 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.memory._policy import (
-    agent_scope_user_id,
     allowed_scope_storage_paths,
     effective_storage_paths_for_context,
     get_allowed_memory_user_ids,
     get_team_ids_for_agent,
     storage_paths_for_scope_user_id,
 )
+from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_state_root_path, tool_execution_identity
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig

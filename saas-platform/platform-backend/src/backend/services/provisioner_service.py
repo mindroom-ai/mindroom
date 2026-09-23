@@ -37,6 +37,7 @@ from backend.config import (
     INSTANCE_STORAGE_CLASS_NAME,
     INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED,
     INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE,
+    INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN,
     INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER,
     INSTANCE_TRUSTED_UPSTREAM_JWKS_URL,
     INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE,
@@ -238,13 +239,9 @@ def _append_matrix_oidc_helm_args(helm_args: list[str]) -> None:
     if _env_flag_enabled(INSTANCE_MATRIX_OIDC_ENABLED):
         helm_args += [
             "--set",
-            "matrixRoomAccess.mode=multi_user",
+            "roomDefaults.joinPolicy=public",
             "--set",
-            "matrixRoomAccess.multiUserJoinRule=public",
-            "--set",
-            "matrixRoomAccess.publishToRoomDirectory=false",
-            "--set",
-            "matrixRoomAccess.reconcileExistingRooms=true",
+            "roomDefaults.listed=false",
         ]
         for index, room_key in enumerate(_HOSTED_MATRIX_AUTO_JOIN_ROOM_KEYS):
             helm_args += ["--set-string", f"matrixAutoJoinRoomKeys[{index}]={room_key}"]
@@ -642,7 +639,14 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         if INSTANCE_MINDROOM_IMAGE_PULL_POLICY:
             helm_args += ["--set", f"mindroom_image_pull_policy={INSTANCE_MINDROOM_IMAGE_PULL_POLICY}"]
         if owner_matrix_user_id:
-            helm_args += ["--set-string", f"authorizationGlobalUsers[0]={owner_matrix_user_id}"]
+            helm_args += [
+                "--set-string",
+                f"administrators[0]={owner_matrix_user_id}",
+                "--set-string",
+                f"roomDefaults.inviteUsers[0]={owner_matrix_user_id}",
+                "--set-string",
+                f"roomDefaults.admins[0]={owner_matrix_user_id}",
+            ]
         _append_image_pull_secret_helm_args(helm_args, INSTANCE_IMAGE_PULL_SECRET_NAMES)
         if INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS:
             helm_args += [
@@ -657,6 +661,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             helm_args += ["--set", f"trustedUpstreamAuth.enabled={INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED}"]
         if INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER:
             helm_args += ["--set", f"trustedUpstreamAuth.userIdHeader={INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER}"]
+        if INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN:
+            helm_args += ["--set", f"trustedUpstreamAuth.emailDomain={INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN}"]
         if INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER:
             helm_args += ["--set", f"trustedUpstreamAuth.emailHeader={INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER}"]
         if INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER:

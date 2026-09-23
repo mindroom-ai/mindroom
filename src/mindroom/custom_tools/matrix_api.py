@@ -15,7 +15,8 @@ from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
-from mindroom.matrix.thread_bookkeeping import (
+from mindroom.matrix.client import send_room_event_result
+from mindroom.matrix.thread_mutation_impact import (
     MutationThreadImpactState,
     resolve_event_thread_impact_for_client,
     resolve_redaction_thread_impact_for_client,
@@ -661,24 +662,6 @@ class MatrixApiTools(Toolkit):
         return None
 
     @staticmethod
-    async def _record_send_event_outbound_cache_write(
-        context: ToolRuntimeContext,
-        *,
-        room_id: str,
-        event_type: str,
-        event_id: str,
-        content: dict[str, object],
-    ) -> None:
-        """Record a successful room-message send in the local conversation cache."""
-        if event_type != "m.room.message":
-            return
-        context.conversation_cache.notify_outbound_message(
-            room_id,
-            event_id,
-            content,
-        )
-
-    @staticmethod
     async def _redaction_thread_resolution_error(
         context: ToolRuntimeContext,
         *,
@@ -691,7 +674,7 @@ class MatrixApiTools(Toolkit):
                 context.client,
                 room_id=room_id,
                 event_id=event_id,
-                conversation_cache=context.conversation_cache,
+                relations=context.relations,
             )
         except Exception as exc:
             logger.warning(
@@ -702,7 +685,7 @@ class MatrixApiTools(Toolkit):
             )
             return "Failed to resolve redaction target thread mapping."
 
-        if thread_impact.state is MutationThreadImpactState.UNKNOWN:
+        if thread_impact is MutationThreadImpactState.UNKNOWN:
             logger.warning(
                 "Failed to resolve redaction target thread mapping for matrix_api redact",
                 room_id=room_id,
@@ -755,9 +738,9 @@ class MatrixApiTools(Toolkit):
                 room_id=room_id,
                 event_type=normalized_event_type,
                 content=normalized_content,
-                conversation_cache=context.conversation_cache,
+                relations=context.relations,
             )
-            if thread_impact.state is MutationThreadImpactState.UNKNOWN:
+            if thread_impact is MutationThreadImpactState.UNKNOWN:
                 return self._error_payload(
                     action="send_event",
                     room_id=room_id,
@@ -799,11 +782,12 @@ class MatrixApiTools(Toolkit):
             )
 
         try:
-            response = await context.client.room_send(
-                room_id=room_id,
-                message_type=normalized_event_type,
-                content=normalized_content,
-                ignore_unverified_devices=True,
+            response = await send_room_event_result(
+                context.client,
+                room_id,
+                normalized_event_type,
+                normalized_content,
+                operation="matrix_api_send_event",
             )
         except Exception as exc:
             self._audit_write(
@@ -824,13 +808,6 @@ class MatrixApiTools(Toolkit):
             )
 
         if isinstance(response, nio.RoomSendResponse):
-            await self._record_send_event_outbound_cache_write(
-                context,
-                room_id=room_id,
-                event_type=normalized_event_type,
-                event_id=response.event_id,
-                content=normalized_content,
-            )
             self._audit_write(
                 context=context,
                 room_id=room_id,
@@ -1180,10 +1157,6 @@ class MatrixApiTools(Toolkit):
             )
 
         if isinstance(response, nio.RoomRedactResponse):
-            context.conversation_cache.notify_outbound_redaction(
-                room_id,
-                normalized_event_id,
-            )
             self._audit_write(
                 context=context,
                 room_id=room_id,

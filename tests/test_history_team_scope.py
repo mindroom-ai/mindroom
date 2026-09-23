@@ -19,11 +19,13 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.history.runtime import (
-    ScopeSessionContext,
     _estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
-    open_bound_scope_session_context,
     prepare_bound_scope_history,
+)
+from mindroom.history.session_context import (
+    ScopeSessionContext,
+    open_bound_scope_session_context,
     resolve_bound_team_scope_context,
 )
 from mindroom.history.types import (
@@ -417,6 +419,7 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
     assert team.add_history_to_context is True
     assert team.num_history_messages == 2
     assert team.store_history_messages is False
+    assert team.store_member_responses is False
 
 
 def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None:

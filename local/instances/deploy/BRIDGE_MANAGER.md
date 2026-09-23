@@ -27,7 +27,7 @@ The `bridge.py` script provides a unified interface for managing Matrix bridges 
 ./bridge.py register telegram --instance my-instance
 
 # For Tuwunel: Follow the manual registration steps shown
-# For Synapse: Restart Matrix server after registration
+# For Synapse: Mount the generated registration file, then restart Matrix
 
 # Start the bridge
 ./bridge.py start telegram --instance my-instance
@@ -160,33 +160,43 @@ instance_data/
 ## Bridge Registration
 
 ### For Tuwunel/Conduit
-1. The script generates `registration.yaml`
-2. Join admin room: `#admins:your-server.com`
-3. Send: `!admin appservices register`
-4. Paste the registration content
-5. Verify: `!admin appservices list`
+1. The script generates `registration.yaml`.
+2. Join the admin room `#admins:your-server.com` using an authorized admin account.
+3. Send the command and the complete generated YAML together as **one message**, with the YAML inside triple backticks:
+
+   ````text
+   !admin appservices register
+   ```
+   <paste the complete registration.yaml contents here>
+   ```
+   ````
+
+4. Check the response, then verify registration with `!admin appservices list`.
+
+See the [Tuwunel appservice registration guide](https://github.com/matrix-construct/tuwunel/blob/main/docs/appservices.md#admin-room).
 
 ### For Synapse
 1. The script adds registration to `homeserver.yaml`
-2. Restart Synapse: `./deploy.py restart --only-matrix`
-3. Bridge is automatically registered on startup
+2. The local Compose layout does not mount the generated registration file into the Synapse container
+3. Manually expose the generated file at the configured `app_service_config_files` path
+4. Restart Synapse for the selected instance: `./deploy.py restart my-instance --only-matrix`
 
 ## Port Allocation
 
-Bridges use dedicated port ranges to avoid conflicts:
-- **Telegram**: 29317-29399
-- **Slack**: 29400-29499
-- **Email**: 29500-29599
+Each bridge type has a default starting port:
+- **Telegram**: 29317
+- **Slack**: 29400
+- **Email**: 29500
 
-Ports are automatically allocated and tracked to prevent conflicts.
+The allocator scans upward from that start, skipping ports reserved for the same bridge type across instances and ports currently in use on the host, up to port 30000.
+These are starting points, not disjoint ranges.
+Reservations for other bridge types are not checked, so a stopped bridge of another type can still hold the selected port in the registry.
 
 ## Docker Network
 
-All bridges join the `matrix-bridges` network for communication:
-```bash
-docker network create matrix-bridges
-```
-This is created automatically when starting bridges.
+Generated bridge services join the external `<instance>_mindroom-network` and `mynetwork` networks.
+`./bridge.py register <type> --instance <name>` creates either network when it is missing before generating the appservice registration.
+Run registration before `./bridge.py start <type> --instance <name>` so both networks exist.
 
 ## Troubleshooting
 
@@ -197,11 +207,11 @@ This is created automatically when starting bridges.
 
 ### Registration Issues
 - **Tuwunel**: Ensure you're in the admin room and have admin privileges
-- **Synapse**: Check that homeserver.yaml has correct registration path
+- **Synapse**: Check that `homeserver.yaml` has the correct registration path and that the generated file is mounted there
 
 ### Connection Issues
-- Verify Matrix server is running: `./deploy.py status`
-- Check network: `docker network ls | grep matrix-bridges`
+- Inspect the intended instance with `./deploy.py list`; confirm its Matrix container is running with `docker ps --filter label=com.docker.compose.project=my-instance`
+- Check networks: `docker network inspect <instance>_mindroom-network` and `docker network inspect mynetwork`
 - Ensure firewall allows bridge ports
 
 ## Integration with deploy.py
@@ -221,7 +231,7 @@ The bridge manager integrates seamlessly with Mindroom instances:
 
 - Bridge configurations are stored in the instance's data directory
 - Registry tracked in `bridge_instances.json`
-- All data removed with `./bridge.py remove --force`
+- Remove all bridges and their data for the selected instance with `./bridge.py remove --all --instance my-instance --force`
 
 ## Security Notes
 

@@ -14,10 +14,11 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="matrix_room",
     display_name="Matrix Room",
-    description="Inspect Matrix room metadata, members, threads, and state",
+    description="Discover available agents and view Matrix room details, members, and conversation threads",
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_room_context=True,
     icon="LayoutList",
     icon_color="text-blue-500",
     dependencies=["agno"],

@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import PurePath, PureWindowsPath
 from typing import Any, Literal, Self, cast
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
+from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
+from mindroom.config.judgment import TypeSafeJudgmentConfig  # noqa: TC001
+from mindroom.config.legacy_fields import reject_legacy_defaults_fields
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
-from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+from mindroom.constants import (
+    DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+    DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+)
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import validate_service_name
+from mindroom.matrix.identity import valid_matrix_server_name
 from mindroom.model_defaults import OPENAI_EMBEDDING_SMALL
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
@@ -28,6 +37,7 @@ class EffectiveToolConfig:
 
 
 AgentLearningMode = Literal["always", "agentic"]
+_LargeMessageStrategy = Literal["sidecar", "split"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
 
@@ -245,8 +255,8 @@ class CompactionOverrideConfig(BaseModel):
         default=None,
         ge=1,
         description=(
-            "Optional operational cap for persisted replay, required-compaction planning, and summary input chunks; "
-            "destructive compaction requires the resolved summary input budget to exceed 2,000 tokens"
+            "Optional operational cap for persisted replay and required-compaction planning; compaction summary "
+            "input is instead budgeted from the selected compaction model's context window"
         ),
     )
     reserve_tokens: int | None = Field(
@@ -260,7 +270,15 @@ class CompactionOverrideConfig(BaseModel):
     )
     fallback_model: str | None = Field(
         default=None,
-        description="Optional model config name retried once when the summary model refuses for safeguards",
+        description=(
+            "Optional model config name retried once when the summary model refuses for safeguards; summary input "
+            "is rebuilt under the fallback model's context budget when needed"
+        ),
+    )
+    timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description="Maximum seconds allowed for each compaction summary request",
     )
 
     @model_validator(mode="after")
@@ -298,8 +316,8 @@ class CompactionConfig(BaseModel):
         default=None,
         ge=1,
         description=(
-            "Optional operational cap for persisted replay, required-compaction planning, and summary input chunks; "
-            "destructive compaction requires the resolved summary input budget to exceed 2,000 tokens"
+            "Optional operational cap for persisted replay and required-compaction planning; compaction summary "
+            "input is instead budgeted from the selected compaction model's context window"
         ),
     )
     reserve_tokens: int = Field(
@@ -313,7 +331,15 @@ class CompactionConfig(BaseModel):
     )
     fallback_model: str | None = Field(
         default=None,
-        description="Optional model config name retried once when the summary model refuses for safeguards",
+        description=(
+            "Optional model config name retried once when the summary model refuses for safeguards; summary input "
+            "is rebuilt under the fallback model's context budget when needed"
+        ),
+    )
+    timeout_seconds: float = Field(
+        default=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        gt=0,
+        description="Maximum seconds allowed for each compaction summary request",
     )
 
     @model_validator(mode="after")
@@ -339,6 +365,13 @@ class DefaultsConfig(BaseModel):
     enable_streaming: bool = Field(
         default=True,
         description="Enable streaming responses via progressive message edits",
+    )
+    large_message_strategy: _LargeMessageStrategy = Field(
+        default="sidecar",
+        description=(
+            "How to deliver oversized text responses: 'sidecar' uploads the full content as an "
+            "attachment behind a preview event; 'split' sends the full text as lossless segmented messages"
+        ),
     )
     coalescing: CoalescingConfig = Field(
         default_factory=CoalescingConfig,
@@ -436,7 +469,8 @@ class DefaultsConfig(BaseModel):
         description=(
             "Temperature override for automatic thread summaries. "
             "Set to null to omit temperature and use provider defaults. "
-            "MindRoom always omits temperature for Vertex Claude thread summaries."
+            "MindRoom always uses provider temperature defaults for GPT-6 Astra, Vertex Claude, Claude Opus 5, Sonnet 5, "
+            "Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries."
         ),
     )
     thread_summary_first_threshold: int = Field(
@@ -454,17 +488,7 @@ class DefaultsConfig(BaseModel):
     @classmethod
     def reject_legacy_defaults_fields(cls, data: object) -> object:
         """Reject removed legacy fields to prevent silent misconfiguration."""
-        if isinstance(data, dict):
-            if "sandbox_tools" in data:
-                msg = "defaults.sandbox_tools was removed. Use defaults.worker_tools instead."
-                raise ValueError(msg)
-            if "allowed_toolkits" in data:
-                msg = "defaults.allowed_toolkits was removed. Use defaults.tools instead."
-                raise ValueError(msg)
-            if "initial_toolkits" in data:
-                msg = "defaults.initial_toolkits was removed. Use defaults.tools instead."
-                raise ValueError(msg)
-        return data
+        return reject_legacy_defaults_fields(data)
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -556,6 +580,12 @@ class ModelConfig(BaseModel):
         description="Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
     )
     id: str = Field(description="Model ID specific to the provider")
+    display_name: str | None = Field(default=None, description="Friendly model name shown in clients")
+    icon: str | None = Field(default=None, description="Config-relative image path or Matrix mxc URI")
+    api: Literal["responses", "chat_completions"] | None = Field(
+        default=None,
+        description="OpenAI API transport; unset keeps automatic model/endpoint selection",
+    )
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
     api_key: str | None = Field(default=None, description="Optional API key (usually from env vars)")
     extra_kwargs: dict[str, Any] | None = Field(
@@ -566,21 +596,88 @@ class ModelConfig(BaseModel):
         default=None,
         ge=1,
         description=(
-            "Actual provider context window size in tokens. MindRoom uses it as the default replay-planning "
-            "window unless compaction.replay_window_tokens sets a smaller cap. An explicit compaction.model "
-            "or compaction.fallback_model also needs its own context_window for summary generation. "
+            "Actual provider context window size in tokens. MindRoom uses it for compaction summary input and as "
+            "the default replay-planning window unless compaction.replay_window_tokens sets a smaller replay cap. "
+            "An explicit compaction.model or compaction.fallback_model also needs its own context_window for "
+            "summary generation. "
             "On vertexai_claude models it additionally "
             "enables request-time fitting that trims replayed history when a request would exceed the window"
         ),
     )
+
+    @field_validator("display_name")
+    @classmethod
+    def _normalize_display_name(cls, value: str | None) -> str | None:
+        """Trim an optional display name and treat blank input as unset."""
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("icon")
+    @classmethod
+    def _normalize_icon(cls, value: str | None) -> str | None:
+        """Accept config-relative paths and complete Matrix content URIs."""
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+
+        try:
+            parsed = urlsplit(normalized)
+            parsed_port = parsed.port
+        except ValueError as exc:
+            msg = "Model icon must be a config-relative path or Matrix mxc URI"
+            raise ValueError(msg) from exc
+
+        if parsed.scheme:
+            valid_mxc = (
+                parsed.scheme.lower() == "mxc"
+                and bool(parsed.netloc)
+                and bool(parsed.hostname)
+                and parsed.username is None
+                and parsed.password is None
+                and not (parsed_port is None and ":" in parsed.netloc.rsplit("]", maxsplit=1)[-1])
+                and valid_matrix_server_name(parsed.netloc)
+                and parsed.path.startswith("/")
+                and parsed.path.count("/") == 1
+                and len(parsed.path) > 1
+                and not parsed.query
+                and not parsed.fragment
+                and not any(character.isspace() for character in normalized)
+            )
+            if not valid_mxc:
+                msg = "Model icon must be a config-relative path or Matrix mxc URI"
+                raise ValueError(msg)
+            return f"mxc{normalized[3:]}"
+
+        windows_path = PureWindowsPath(normalized)
+        if PurePath(normalized).is_absolute() or windows_path.is_absolute() or bool(windows_path.root):
+            msg = "Model icon filesystem path must be relative to the config file"
+            raise ValueError(msg)
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_api_provider(self) -> Self:
+        if self.api is not None and self.provider.strip().lower() != "openai":
+            msg = "Model api is only supported for provider: openai"
+            raise ValueError(msg)
+        return self
 
 
 class RouterConfig(BaseModel):
     """Configuration for the router system."""
 
     model: str = Field(default="default", description="Model to use for routing decisions")
-    accept_invites: bool = Field(default=True, description="Whether the router accepts and persists room invites")
-    startup_thread_prewarm: bool = Field(
+    judgment: TypeSafeJudgmentConfig | None = Field(
+        default=None,
+        description="Optional JEV responder selection before the LLM router",
+    )
+    accept_invites: InviteAcceptancePolicy = Field(
         default=True,
-        description="Whether the router may prewarm recent thread snapshots for rooms already joined when first sync completes",
+        description="Whether the router accepts all, no, or matching inviter room invites",
+    )
+    access: ResponderAccessConfig | None = Field(
+        default=None,
+        description="Optional membership-based conversation access policy",
     )

@@ -2,38 +2,157 @@
 
 from __future__ import annotations
 
+import json
+import threading
+import time
+import weakref
+from contextlib import nullcontext
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
+from sqlalchemy import Engine, create_engine, event, select
+from sqlalchemy.dialects.sqlite import insert
 
+from mindroom import (
+    agno_compat_run_messages,
+    agno_compat_session_metrics,
+    agno_compat_session_persistence,
+    agno_compat_sqlite,
+)
 from mindroom.constants import prompt_roles_for_history_storage
-from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.legacy_session_storage import scrub_legacy_run_blobs
+from mindroom.legacy_usage_storage import migrate_usage_database
+from mindroom.logging_config import get_logger
+from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.session_storage_preflight import session_storage_preflight
+from mindroom.usage_storage import project_usage, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Mapping
     from pathlib import Path
 
     from agno.agent import Agent
+    from agno.run.workflow import WorkflowRunOutput
     from agno.session import Session
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.usage_storage import IndependentUsageKind
+
+
+_BUSY_TIMEOUT_SECONDS = 30.0
+logger = get_logger(__name__)
+_CACHE_DIAGNOSTICS_LOCK = threading.Lock()
+_CACHE_DIAGNOSTICS_NEXT_REPORT = 0.0
+_CACHE_DIAGNOSTICS: weakref.WeakKeyDictionary[_ConversationSqliteDb, tuple[int, int]] = weakref.WeakKeyDictionary()
+
 
 __all__ = [
-    "create_culture_storage",
+    "configure_state_engine_pragmas",
     "create_session_storage",
+    "create_state_engine",
     "create_state_storage",
     "get_agent_runtime_state_dbs",
     "get_agent_session",
     "get_team_session",
+    "replace_runs",
+    "run_session_storage_operation",
+    "runs_without",
+    "save_compaction_usage",
+    "save_independent_usage",
+    "save_runs",
 ]
+
+
+def save_compaction_usage(
+    storage: BaseDb,
+    *,
+    session_id: str,
+    requester_id: str | None,
+    model_provider: str,
+    model: str,
+    metrics: Mapping[str, object],
+) -> None:
+    """Persist one incurred summary response independently of conversation changes."""
+    created_at = time.time()
+    save_independent_usage(
+        storage,
+        session_id=session_id,
+        usage_id=f"compaction:{uuid4()}",
+        kind="compaction_summary",
+        requester_id=requester_id,
+        run={
+            "model_provider": model_provider,
+            "model": model,
+            "created_at": created_at,
+            "metrics": dict(metrics),
+            "messages": [{"role": "assistant", "created_at": created_at, "metrics": dict(metrics)}],
+        },
+    )
+
+
+def save_independent_usage(
+    storage: BaseDb,
+    *,
+    session_id: str,
+    usage_id: str,
+    kind: IndependentUsageKind,
+    requester_id: str | None,
+    run: Mapping[str, object],
+    initial_session: AgentSession | TeamSession | None = None,
+) -> None:
+    """Upsert content-free helper usage with explicit conversation and requester ownership."""
+    if not isinstance(storage, SqliteDb):
+        msg = "Independent usage requires SQLite session storage"
+        raise TypeError(msg)
+    snapshot = project_usage(
+        {**run, "run_id": usage_id, "user_id": requester_id, "metadata": None, "parent_run_id": None, "team_id": None},
+    )
+    snapshot["kind"] = kind
+    session_table = (
+        storage._get_table("sessions", create_table_if_not_found=True) if initial_session is not None else None
+    )
+    with storage.db_engine.begin() as connection:
+        if initial_session is not None and session_table is not None:
+            is_team = isinstance(initial_session, TeamSession)
+            values = {
+                "session_id": session_id,
+                "session_type": SessionType.TEAM.value if is_team else SessionType.AGENT.value,
+                "team_id" if is_team else "agent_id": (
+                    initial_session.team_id if isinstance(initial_session, TeamSession) else initial_session.agent_id
+                ),
+                "created_at": initial_session.created_at,
+                "updated_at": initial_session.updated_at,
+            }
+            connection.execute(
+                insert(session_table).values(**values).on_conflict_do_nothing(index_elements=["session_id"]),
+            )
+        connection.exec_driver_sql(usage_table_sql(storage.session_table_name))
+        connection.exec_driver_sql(
+            usage_upsert_sql(storage.session_table_name),
+            (session_id, usage_id, json.dumps(snapshot)),
+        )
+
+
+async def run_session_storage_operation[Result](
+    create_storage: Callable[[], BaseDb],
+    operation: Callable[[BaseDb], Result],
+) -> Result:
+    """Run one application-owned synchronous storage operation off-loop and in order."""
+    return await agno_compat_session_persistence.run_registered_storage_operation(
+        create_storage,
+        operation,
+    )
 
 
 def get_agent_runtime_state_dbs(agent: Agent) -> tuple[BaseDb | None, BaseDb | None]:
@@ -62,6 +181,14 @@ def create_state_storage(
     )
 
 
+def create_state_engine(db_file: str) -> Engine:
+    """Build an engine that waits for state-database locks before failing."""
+    return create_engine(
+        f"sqlite:///{db_file}",
+        connect_args={"timeout": _BUSY_TIMEOUT_SECONDS},
+    )
+
+
 def _create_sqlite_state_storage(
     storage_name: str,
     state_root: Path,
@@ -71,16 +198,59 @@ def _create_sqlite_state_storage(
     prompt_roles: frozenset[str] | None = None,
 ) -> SqliteDb:
     """Create a persistent SQLite database from an already-resolved state root."""
-    db_dir = state_root / subdir
-    db_dir.mkdir(parents=True, exist_ok=True)
-    db_file = str(db_dir / f"{storage_name}.db")
-    if prompt_roles is not None:
-        return _PromptSanitizingSqliteDb(
-            prompt_roles=prompt_roles,
+    agno_compat_session_persistence.install_patch()
+    preflight = (
+        session_storage_preflight(
+            state_root,
+            storage_name=storage_name,
+            session_table=session_table,
+            timeout_seconds=_BUSY_TIMEOUT_SECONDS,
+        )
+        if subdir == "sessions"
+        else nullcontext()
+    )
+    with preflight:
+        db_dir = state_root / subdir
+        db_dir.mkdir(parents=True, exist_ok=True)
+        if subdir == "sessions":
+            migrate_usage_database(db_dir / f"{storage_name}.db", session_table)
+        db_file = str(db_dir / f"{storage_name}.db")
+        # Both: the engine is what the database is reached through, and the path
+        # is what it reports itself as. Handing over an engine alone leaves
+        # ``db_file`` empty on a store that is very much file-backed.
+        database = _ConversationSqliteDb(
+            prompt_roles=prompt_roles or frozenset(),
             session_table=session_table,
             db_file=db_file,
+            db_engine=create_state_engine(db_file),
         )
-    return SqliteDb(session_table=session_table, db_file=db_file)
+        agno_compat_session_persistence._register_sync_session_storage(
+            database,
+            db_file=db_file,
+            session_table=session_table,
+        )
+        agno_compat_session_metrics.register_database(database)
+        agno_compat_run_messages.install_patch()
+        return database
+
+
+def configure_state_engine_pragmas(engine: Engine) -> None:
+    """Keep rollback journaling on state databases despite Agno 3 forcing WAL.
+
+    Agno's ``SqliteDb`` registers a connect listener that switches every
+    connection to ``journal_mode=WAL``. MindRoom state databases stay in the
+    default rollback mode because WAL is unsafe on network filesystems and
+    breaks single-file backups, so that listener is swapped for one that keeps
+    only the part MindRoom wants: foreign keys on, so deleting a session row
+    cascades to its runs.
+    """
+    agno_compat_sqlite.remove_default_pragmas(engine)
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection: Any, _connection_record: object) -> None:  # noqa: ANN401
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.close()
 
 
 def create_session_storage(
@@ -90,45 +260,59 @@ def create_session_storage(
     execution_identity: ToolExecutionIdentity | None,
 ) -> BaseDb:
     """Create persistent session storage for an agent."""
-    return _create_agent_state_db(
+    return _create_agent_session_db(
         agent_name,
         config,
         runtime_paths,
-        subdir="sessions",
         session_table=f"{agent_name}_sessions",
         execution_identity=execution_identity,
         prompt_roles=prompt_roles_for_history_storage(),
     )
 
 
-def _create_agent_state_db(
+def _create_agent_session_db(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,
-    subdir: str,
     session_table: str,
     prompt_roles: frozenset[str] | None = None,
 ) -> BaseDb:
-    """Create persistent storage for one agent state category."""
-    state_storage_path = resolve_agent_runtime(
+    """Create persistent session storage for one agent."""
+    session_state_root = resolve_agent_storage(
         agent_name,
         config,
         runtime_paths,
         execution_identity=execution_identity,
-    ).state_root
+    ).session_state_root
     return create_state_storage(
         storage_name=agent_name,
-        state_root=state_storage_path,
-        subdir=subdir,
+        state_root=session_state_root,
+        subdir="sessions",
         session_table=session_table,
         prompt_roles=prompt_roles,
     )
 
 
-class _PromptSanitizingSqliteDb(SqliteDb):
-    """SQLite session DB that strips prompt messages before durable persistence."""
+type _PersistedRun = RunOutput | TeamRunOutput | WorkflowRunOutput | dict[str, Any]
+
+
+class _ConversationSqliteDb(SqliteDb):
+    """SQLite session DB with conversation-specific persistence semantics.
+
+    Agno 3 stores runs as rows of ``<session_table>_runs``: ``upsert_session``
+    writes the session row only, ``upsert_run`` writes one run, ``delete_runs``
+    removes runs. MindRoom follows that model; :func:`save_runs` and
+    :func:`replace_runs` are the two module-level helpers callers use when they
+    edit or drop runs of a loaded session. The overrides here only adjust what
+    agno already does: prompt-role stripping and append-only indexing in
+    ``upsert_run``, a full read in ``get_session``, and an atomic ``delete_runs``.
+
+    Agno merges compatible 2.x ``runs`` blobs into every read alongside current
+    run rows. ``delete_runs`` scrubs deleted ids from both stores in one
+    transaction so removed history cannot reappear after reopening.
+    """
 
     def __init__(
         self,
@@ -136,87 +320,236 @@ class _PromptSanitizingSqliteDb(SqliteDb):
         prompt_roles: frozenset[str],
         session_table: str,
         db_file: str,
+        db_engine: Engine,
     ) -> None:
-        super().__init__(session_table=session_table, db_file=db_file)
+        super().__init__(session_table=session_table, db_file=db_file, db_engine=db_engine)
         self._prompt_roles = prompt_roles
+        configure_state_engine_pragmas(db_engine)
+        with _CACHE_DIAGNOSTICS_LOCK:
+            _CACHE_DIAGNOSTICS[self] = (0, 0)
+
+    def close(self) -> None:
+        """Remove closed adapters from diagnostics as well as disposing their connections."""
+        try:
+            super().close()
+        finally:
+            with _CACHE_DIAGNOSTICS_LOCK:
+                _CACHE_DIAGNOSTICS.pop(self, None)
+
+    def _report_cache_counts(self) -> None:
+        """Publish counts on the storage owner; never inspect other owners' caches.
+
+        Each snapshot reflects that adapter's latest completed read. Counting
+        session maps is bounded by Agno's session cache limit; no run contents
+        are traversed, serialized, or retained by these diagnostics.
+        """
+        global _CACHE_DIAGNOSTICS_NEXT_REPORT
+        counts = agno_compat_sqlite.cached_run_counts(self)
+        now = time.monotonic()
+        with _CACHE_DIAGNOSTICS_LOCK:
+            if self not in _CACHE_DIAGNOSTICS:
+                return
+            _CACHE_DIAGNOSTICS[self] = counts
+            if now < _CACHE_DIAGNOSTICS_NEXT_REPORT:
+                return
+            _CACHE_DIAGNOSTICS_NEXT_REPORT = now + 60.0
+            snapshots = list(_CACHE_DIAGNOSTICS.values())
+        logger.info(
+            "conversation_cache_summary",
+            adapters=len(snapshots),
+            observed_cached_sessions=sum(item[0] for item in snapshots),
+            observed_cached_runs=sum(item[1] for item in snapshots),
+        )
+
+    def get_session(
+        self,
+        session_id: str,
+        session_type: SessionType | None = None,
+        user_id: str | None = None,
+        deserialize: bool | None = True,
+        runs_limit: int | None = None,
+    ) -> Session | dict[str, Any] | None:
+        """Read a canonical conversation session without treating its requester as its owner.
+
+        ``runs_limit`` is ignored: MindRoom's history layer (compaction, replay,
+        redaction) reasons over the whole run list.
+        """
+        del user_id, runs_limit
+        session = super().get_session(
+            session_id=session_id,
+            session_type=session_type,
+            user_id=None,
+            deserialize=deserialize,
+        )
+        if isinstance(session, (AgentSession, TeamSession)):
+            agno_compat_session_metrics.seed_accounted_usage(session)
+        self._report_cache_counts()
+        return session
 
     def upsert_session(
         self,
         session: Session,
         deserialize: bool | None = True,
     ) -> Session | dict[str, Any] | None:
-        return super().upsert_session(
-            _session_without_prompt_messages(session, self._prompt_roles),
-            deserialize=deserialize,
-        )
+        """Initialize empty usage after Agno lazily creates a new session store."""
+        stored = super().upsert_session(session, deserialize=deserialize)
+        if stored is not None:
+            with self.db_engine.begin() as connection:
+                connection.exec_driver_sql(usage_table_sql(self.session_table_name))
+        return stored
 
-    def upsert_sessions(
+    def upsert_run(
         self,
-        sessions: list[Session],
-        deserialize: bool | None = True,
-        preserve_updated_at: bool = False,
-    ) -> list[Session | dict[str, Any]]:
-        return super().upsert_sessions(
-            [_session_without_prompt_messages(session, self._prompt_roles) for session in sessions],
-            deserialize=deserialize,
-            preserve_updated_at=preserve_updated_at,
+        run: _PersistedRun,
+        session_id: str,
+        user_id: str | None = None,
+        run_index: int | None = None,
+        *,
+        record_usage: bool = True,
+    ) -> None:
+        """Save a sanitized run, capturing provider usage unless this is a conversation rewrite."""
+        del run_index
+        agno_compat_sqlite.upsert_run_at_end(
+            self,
+            _run_without_prompt_messages(run, self._prompt_roles),
+            session_id=session_id,
+            user_id=user_id,
+            record_usage=record_usage,
         )
 
+    def delete_runs(self, run_ids: list[str]) -> None:
+        """Delete a run subtree and its legacy representations atomically."""
+        if not run_ids:
+            return
+        wanted = {run_id for run_id in run_ids if run_id}
+        with agno_compat_sqlite.run_deletion_transaction(self) as (sess, runs_table, sessions_table):
+            if runs_table is not None:
+                # Team member runs are rows whose parent_run_id is the team run; a
+                # deleted run takes its whole subtree along, as agno's own
+                # session-level delete cascades do.
+                frontier = list(wanted)
+                while frontier:
+                    children = sess.execute(
+                        select(runs_table.c.run_id).where(runs_table.c.parent_run_id.in_(frontier)),
+                    ).scalars()
+                    frontier = [child for child in children if child not in wanted]
+                    wanted.update(frontier)
+                sess.execute(runs_table.delete().where(runs_table.c.run_id.in_(wanted)))
+            if sessions_table is not None:
+                scrub_legacy_run_blobs(sess, sessions_table, wanted)
 
-def _session_without_prompt_messages(session: Session, prompt_roles: frozenset[str]) -> Session:
-    if not _session_has_prompt_messages(session, prompt_roles):
-        return session
-    sanitized_session = deepcopy(session)
-    _strip_prompt_messages_from_session(sanitized_session, prompt_roles)
-    return sanitized_session
+
+def runs_without(
+    runs: Iterable[RunOutput | TeamRunOutput],
+    run_ids: Iterable[str],
+) -> list[RunOutput | TeamRunOutput]:
+    """Return ``runs`` minus ``run_ids`` and every run descending from them through ``parent_run_id``."""
+    run_list = list(runs)
+    removed = {run_id for run_id in run_ids if run_id}
+    if not removed:
+        return run_list
+    children_by_parent: dict[str, list[str]] = {}
+    for run in run_list:
+        if isinstance(run.parent_run_id, str) and run.parent_run_id and isinstance(run.run_id, str) and run.run_id:
+            children_by_parent.setdefault(run.parent_run_id, []).append(run.run_id)
+    frontier = list(removed)
+    while frontier:
+        parent = frontier.pop()
+        for child in children_by_parent.get(parent, []):
+            if child not in removed:
+                removed.add(child)
+                frontier.append(child)
+    # A child without its own run_id cannot be reached through the id map but is
+    # still a descendant; its parent_run_id says so.
+    return [run for run in run_list if run.run_id not in removed and run.parent_run_id not in removed]
 
 
-def _session_has_prompt_messages(session: Session, prompt_roles: frozenset[str]) -> bool:
-    if not isinstance(session, (AgentSession, TeamSession)) or not session.runs:
-        return False
-    return any(
+def save_runs(
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    runs: Iterable[RunOutput | TeamRunOutput],
+) -> None:
+    """Write conversation-only changes and make them the session's copies of those runs.
+
+    Conversation rewrites leave the owned usage ledger untouched. Provider
+    execution must persist through ``storage.upsert_run`` to capture usage.
+
+    The session row must already exist (the runs table references it). A run
+    already in ``session.runs`` under the same ``run_id`` is replaced by the
+    given object, so callers edit a copy and hand the copy here: agno shares
+    loaded run objects across reads and treats them as immutable. The rows
+    are written first; a failed write leaves ``session.runs`` untouched so a
+    retry does not believe the change already landed.
+    """
+    runs = list(runs)
+    if not runs:
+        return
+    loaded = {id(existing) for existing in session.runs or []}
+    if any(id(run) in loaded for run in runs):
+        msg = "save_runs received a run object loaded from the session; edit a copy instead"
+        raise ValueError(msg)
+    for run in runs:
+        if isinstance(storage, _ConversationSqliteDb):
+            storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id, record_usage=False)
+        else:
+            storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
+    replacements: dict[str, RunOutput | TeamRunOutput] = {run.run_id: run for run in runs if run.run_id}
+    merged: list[Any] = []
+    for existing in session.runs or []:
+        run_id = existing.run_id if isinstance(existing, (RunOutput, TeamRunOutput)) else None
+        merged.append(replacements.pop(run_id, existing) if run_id else existing)
+    merged.extend(replacements.values())
+    session.runs = merged
+
+
+def replace_runs(
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    runs: Iterable[RunOutput | TeamRunOutput],
+) -> list[str]:
+    """Make ``runs`` the session's run list and delete the rows of the runs it dropped.
+
+    Surviving runs are not rewritten; only removal is persisted, and it is
+    persisted before ``session.runs`` changes so a failed delete leaves the
+    session as loaded. Returns the removed run ids.
+    """
+    kept = list(runs)
+    kept_ids = {run.run_id for run in kept}
+    removed = [
+        run.run_id
+        for run in session.runs or []
+        if isinstance(run, (RunOutput, TeamRunOutput)) and run.run_id and run.run_id not in kept_ids
+    ]
+    if removed:
+        storage.delete_runs(removed)
+    session.runs = kept
+    return removed
+
+
+def _run_has_prompt_messages(run: object, prompt_roles: frozenset[str]) -> bool:
+    return (
         isinstance(run, (RunOutput, TeamRunOutput))
+        and run.status != RunStatus.paused
         and run.messages is not None
         and any(message.role in prompt_roles for message in run.messages)
-        for run in session.runs
     )
 
 
-def _strip_prompt_messages_from_session(session: Session, prompt_roles: frozenset[str]) -> None:
-    if not isinstance(session, (AgentSession, TeamSession)) or not session.runs:
-        return
-    for run in session.runs:
-        if not isinstance(run, (RunOutput, TeamRunOutput)) or not run.messages:
-            continue
-        run.messages = [message for message in run.messages if message.role not in prompt_roles]
-
-
-def create_culture_storage(culture_name: str, storage_path: Path) -> BaseDb:
-    """Create persistent culture storage shared by all agents in a culture."""
-    culture_dir = storage_path / "culture"
-    culture_dir.mkdir(parents=True, exist_ok=True)
-    return SqliteDb(db_file=str(culture_dir / f"{culture_name}.db"))
+def _run_without_prompt_messages(run: _PersistedRun, prompt_roles: frozenset[str]) -> _PersistedRun:
+    if not isinstance(run, (RunOutput, TeamRunOutput)) or not _run_has_prompt_messages(run, prompt_roles):
+        return run
+    sanitized_run = deepcopy(run)
+    sanitized_run.messages = [message for message in sanitized_run.messages or [] if message.role not in prompt_roles]
+    return sanitized_run
 
 
 def get_agent_session(storage: BaseDb, session_id: str) -> AgentSession | None:
-    """Retrieve and deserialize an AgentSession from storage."""
-    raw = storage.get_session(session_id, SessionType.AGENT)
-    if raw is None:
-        return None
-    if isinstance(raw, AgentSession):
-        return raw
-    if isinstance(raw, dict):
-        return AgentSession.from_dict(cast("dict[str, Any]", raw))
-    return None
+    """Load one agent session, or None when the row is missing or not an agent session."""
+    session = storage.get_session(session_id, SessionType.AGENT)
+    return session if isinstance(session, AgentSession) else None
 
 
 def get_team_session(storage: BaseDb, session_id: str) -> TeamSession | None:
-    """Retrieve and deserialize a TeamSession from storage."""
-    raw = storage.get_session(session_id, SessionType.TEAM)
-    if raw is None:
-        return None
-    if isinstance(raw, TeamSession):
-        return raw
-    if isinstance(raw, dict):
-        return TeamSession.from_dict(cast("dict[str, Any]", raw))
-    return None
+    """Load one team session, or None when the row is missing or not a team session."""
+    session = storage.get_session(session_id, SessionType.TEAM)
+    return session if isinstance(session, TeamSession) else None

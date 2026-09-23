@@ -21,7 +21,7 @@ Works well:
 - OpenClaw-inspired behavior and instructions
 - Native MindRoom tool bundle via the `openclaw_compat` preset
 - Native Matrix messaging via the `matrix_message` tool in the preset bundle
-- Native sub-agent session orchestration via the `subagents` tool in the preset bundle
+- Matrix agent conversations through `matrix_message`, with agent discovery through `matrix_room`
 
 Not included:
 
@@ -34,7 +34,8 @@ Not included:
 ## The `openclaw_compat` preset
 
 `openclaw_compat` is a config macro, not a runtime toolkit.
-`Config.get_agent_tools` expands it into native MindRoom tools and dedupes while preserving order.
+`Config.expand_tool_names` expands presets and implied tools while preserving order and removing duplicates.
+Use `config.resolve_entity(agent_name).available_tools` to read the agent's resolved tool list.
 
 Preset expansion:
 
@@ -44,9 +45,9 @@ Preset expansion:
 - `website`
 - `browser`
 - `scheduler`
-- `subagents`
 - `matrix_message`
 - `attachments` (auto-implied by `matrix_message` via `IMPLIED_TOOLS`, not listed in the preset directly)
+- `matrix_room` (auto-implied by `matrix_message` via `IMPLIED_TOOLS`, not listed in the preset directly)
 
 Memory is not a separate OpenClaw subsystem in MindRoom.
 It uses the normal MindRoom memory backend.
@@ -62,7 +63,7 @@ agents:
     include_default_tools: false
     learning: false
     memory_backend: file
-    model: opus
+    model: default
     role: OpenClaw-style personal assistant with persistent file-based identity and memory.
     rooms: [personal]
 
@@ -103,9 +104,13 @@ memory:
 
 When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the canonical workspace root, so there is no need to add it to `context_files`.
 If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded.
-The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, sub-agent orchestration, and `matrix_message` tools (`attachments` is auto-implied by `matrix_message`), so listing those tools individually is not necessary.
+The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, and `matrix_message` tools (`attachments` and `matrix_room` are auto-implied by `matrix_message`), so listing those tools individually is not necessary.
 Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `search_memories` read the same canonical workspace.
-Direct external edits to daily memory files are picked up lazily on the next semantic memory search.
+Native memory mutations schedule semantic-index refresh.
+Arbitrary external edits are not detected by a ready semantic index on access; use the supported memory tools or trigger/restart the index refresh before expecting those edits in semantic results.
+File memory is already searchable on demand through `search_memories`.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+Use `search_memories` for keyword fallback, team-visible memory, and memory IDs.
 Use `knowledge_bases` only for non-memory project documents that should be searchable as external knowledge.
 
 ## Recommended workspace layout
@@ -131,8 +136,8 @@ mindroom_data/
 
 OpenClaw-compatible agents use the same memory system as every other MindRoom agent:
 
-- `memory.backend: mem0` for vector memory (global default)
-- `memory.backend: file` for file-first memory (global default)
+- `memory.backend: mem0` for vector memory (schema default)
+- `memory.backend: file` for file-first memory
 - `memory.backend: none` or `memory: none` to disable built-in durable memory globally
 - `memory_backend: file` on an individual agent to override the global default
 - `memory_backend: none` on an individual agent to keep that agent stateless
@@ -148,7 +153,8 @@ MindRoom includes built-in context controls for OpenClaw-style agents:
 
 - **Conversation history** is stored in Agno sessions, but MindRoom decides what replay summary and raw history messages are injected into each run.
 - **Replay depth** is controlled with `num_history_runs` or `num_history_messages`, and optional required compaction is controlled with `compaction` (see [Agents](configuration/agents.md)).
-- **Preloaded role context** from `context_files` is hard-capped by `defaults.max_preload_chars` (configured in `config.yaml` under `defaults`). When the combined context exceeds this limit, chunks are trimmed from the end and a truncation marker is inserted.
+- **Preloaded role context** from `context_files` is hard-capped by `defaults.max_preload_chars` configured under `defaults` in `config.yaml`.
+  When combined context exceeds the limit, whole chunks are omitted in configured/list order first, the tail of the final retained chunk may be trimmed, and per-file plus summary markers explain the omission.
 
 ## Known limitations
 
@@ -165,7 +171,11 @@ MindRoom includes built-in context controls for OpenClaw-style agents:
 
 For details on skill eligibility gating (`openclaw.os`, `openclaw.requires`, `openclaw.always`), see [Skills](skills.md).
 
-Skills are loaded from `~/.mindroom/skills/<name>/`. To use an OpenClaw skill like `transcribe`, copy the skill directory from your OpenClaw workspace:
+Global allowlisted skills load from `~/.mindroom/skills/<name>/`.
+Agent-local workspace skills load automatically from `agents/<agent>/workspace/skills/<name>/` and take precedence over user-global copies.
+For a portable OpenClaw agent, prefer `agents/openclaw/workspace/skills/transcribe/`; use the global root when several agents should share an allowlisted skill.
+
+To install a global skill:
 
 ```bash
 mkdir -p ~/.mindroom/skills

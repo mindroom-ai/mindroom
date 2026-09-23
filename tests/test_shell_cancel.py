@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 def _make_runtime_paths(tmp_path: Path) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("", encoding="utf-8")
@@ -45,9 +45,19 @@ def _get_run_shell_command(tmp_path: Path) -> Callable[..., Awaitable[str]]:
 
 
 async def _wait_for_pid(pid_file: Path) -> int:
+    """Wait until the PID file holds a PID, rather than until it merely exists.
+
+    The subprocesses record their PID with `write_text`, which creates the file
+    before it puts anything in it. Treating the file's appearance as readiness
+    therefore reads whatever is there at that instant, and between those two
+    steps that is an empty string -- `int("")`, not a PID. The window is a
+    couple of syscalls wide and a loaded machine is enough to land in it, so
+    wait for the content this helper actually promises to return.
+    """
     for _ in range(50):
-        if pid_file.exists():
-            return int(pid_file.read_text(encoding="utf-8").strip())
+        recorded = pid_file.read_text(encoding="utf-8").strip() if pid_file.exists() else ""
+        if recorded:
+            return int(recorded)
         await asyncio.sleep(0.05)
     message = f"PID file was not written: {pid_file}"
     raise AssertionError(message)

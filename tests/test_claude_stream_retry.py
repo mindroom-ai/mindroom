@@ -4,14 +4,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 from agno.exceptions import ContextWindowExceededError, ModelProviderError, ModelRateLimitError
 from agno.models.anthropic import Claude
 from agno.models.response import ModelResponse
 
-from mindroom import claude_stream_retry
-from mindroom.claude_stream_retry import install_claude_stream_retry_hook
-from mindroom.error_handling import ModelSafeguardRefusalError
+from mindroom import provider_stream_retry
+from mindroom.error_handling import (
+    MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+    IncompleteResponsesStreamError,
+    ModelSafeguardRefusalError,
+)
+from mindroom.provider_stream_retry import install_provider_stream_retry_hook
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -19,7 +24,7 @@ if TYPE_CHECKING:
 
 @pytest.fixture(autouse=True)
 def _no_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(claude_stream_retry, "_RETRY_BASE_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(provider_stream_retry, "_RETRY_BASE_DELAY_SECONDS", 0.0)
 
 
 def _hooked_model_with_async_attempts(attempts: list[list[ModelResponse | Exception]]) -> tuple[Claude, list[int]]:
@@ -35,7 +40,7 @@ def _hooked_model_with_async_attempts(attempts: list[list[ModelResponse | Except
             yield item
 
     vars(model)["ainvoke_stream"] = fake_ainvoke_stream
-    install_claude_stream_retry_hook(model)
+    install_provider_stream_retry_hook(model)
     return model, calls
 
 
@@ -51,7 +56,7 @@ def _hooked_model_with_sync_attempts(attempts: list[list[ModelResponse | Excepti
             yield item
 
     vars(model)["invoke_stream"] = fake_invoke_stream
-    install_claude_stream_retry_hook(model)
+    install_provider_stream_retry_hook(model)
     return model, calls
 
 
@@ -157,7 +162,7 @@ async def test_does_not_retry_non_transient_error() -> None:
 async def test_does_not_retry_safeguard_refusal() -> None:
     """A deterministic model safeguard refusal must surface after one request."""
     refusal = ModelSafeguardRefusalError(
-        message="Vertex Claude returned stop_reason=refusal",
+        message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
         model_name="Claude",
         model_id="claude-sonnet-5",
     )
@@ -188,14 +193,14 @@ async def test_retries_rate_limit_then_gives_up() -> None:
     """Rate limits retry up to the cap, then the last error propagates."""
     attempts: list[list[ModelResponse | Exception]] = [
         [ModelRateLimitError(message="overloaded_error", status_code=529)]
-        for _ in range(claude_stream_retry._MAX_TRANSIENT_RETRIES + 1)
+        for _ in range(provider_stream_retry._MAX_TRANSIENT_RETRIES + 1)
     ]
     model, calls = _hooked_model_with_async_attempts(attempts)
 
     with pytest.raises(ModelRateLimitError):
         await _collect(model.ainvoke_stream([], object()))
 
-    assert len(calls) == claude_stream_retry._MAX_TRANSIENT_RETRIES + 1
+    assert len(calls) == provider_stream_retry._MAX_TRANSIENT_RETRIES + 1
 
 
 @pytest.mark.asyncio
@@ -240,16 +245,16 @@ def test_install_is_idempotent() -> None:
     would keep going and reach the success attempt.
     """
     attempts: list[list[ModelResponse | Exception]] = [
-        [_mid_stream_api_error()] for _ in range(claude_stream_retry._MAX_TRANSIENT_RETRIES + 1)
+        [_mid_stream_api_error()] for _ in range(provider_stream_retry._MAX_TRANSIENT_RETRIES + 1)
     ]
     attempts.append([ModelResponse(content="only reachable when double-wrapped")])
     model, calls = _hooked_model_with_sync_attempts(attempts)
-    install_claude_stream_retry_hook(model)
+    install_provider_stream_retry_hook(model)
 
     with pytest.raises(ModelProviderError):
         list(model.invoke_stream([], object()))
 
-    assert len(calls) == claude_stream_retry._MAX_TRANSIENT_RETRIES + 1
+    assert len(calls) == provider_stream_retry._MAX_TRANSIENT_RETRIES + 1
 
 
 def test_early_close_closes_underlying_sync_stream() -> None:
@@ -265,7 +270,7 @@ def test_early_close_closes_underlying_sync_stream() -> None:
             finalized.append(True)
 
     vars(model)["invoke_stream"] = fake_invoke_stream
-    install_claude_stream_retry_hook(model)
+    install_provider_stream_retry_hook(model)
 
     stream = model.invoke_stream([], object())
     assert next(stream).content == "first"
@@ -288,7 +293,7 @@ async def test_early_aclose_closes_underlying_async_stream() -> None:
             finalized.append(True)
 
     vars(model)["ainvoke_stream"] = fake_ainvoke_stream
-    install_claude_stream_retry_hook(model)
+    install_provider_stream_retry_hook(model)
 
     stream = model.ainvoke_stream([], object())
     assert (await anext(stream)).content == "first"
@@ -297,7 +302,45 @@ async def test_early_aclose_closes_underlying_async_stream() -> None:
     assert finalized == [True]
 
 
-def test_install_skips_non_claude_models() -> None:
-    """Non-Claude models are left untouched."""
-    sentinel = object()
-    install_claude_stream_retry_hook(sentinel)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [IncompleteResponsesStreamError(message="incomplete stream"), ValueError("server overloaded")],
+)
+async def test_unsafe_or_untyped_errors_are_not_retried(error: Exception) -> None:
+    """An explicit unsafe-stream marker or wording alone cannot authorize replay."""
+    model, calls = _hooked_model_with_async_attempts([[error]])
+
+    with pytest.raises(type(error)) as raised:
+        await _collect(model.ainvoke_stream([], object()))
+
+    assert raised.value is error
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", [None, ValueError("overloaded")])
+async def test_default_status_without_typed_transient_cause_is_not_retried(cause: Exception | None) -> None:
+    """A cause-less or permanently caused default 502 must fail immediately."""
+    error = ModelProviderError(message="unknown provider failure")
+    error.__cause__ = cause
+    model, calls = _hooked_model_with_async_attempts([[error], [ModelResponse(content="Must not run")]])
+
+    with pytest.raises(ModelProviderError) as raised:
+        await _collect(model.ainvoke_stream([], object()))
+
+    assert raised.value is error
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_default_status_with_typed_network_cause_is_retried() -> None:
+    """A typed network cause authorizes recovery even when Agno loses its status."""
+    error = ModelProviderError(message="unknown provider failure")
+    error.__cause__ = httpx.ReadError("connection interrupted")
+    model, calls = _hooked_model_with_async_attempts([[error], [ModelResponse(content="Recovered")]])
+
+    chunks = await _collect(model.ainvoke_stream([], object()))
+
+    assert [chunk.content for chunk in chunks] == ["Recovered"]
+    assert len(calls) == 2

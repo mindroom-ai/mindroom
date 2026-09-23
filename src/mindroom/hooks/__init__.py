@@ -32,6 +32,7 @@ from .context import (
     ResponseDraft,
     ResponseResult,
     RoomMemberJoinedContext,
+    RoomMemberLeftContext,
     ScheduleFiredContext,
     SessionHookContext,
     SystemEnrichContext,
@@ -43,7 +44,7 @@ from .enrichment import render_enrichment_block, render_system_enrichment_block,
 from .execution import emit, emit_collect, emit_final_response_transform, emit_gate, emit_transform
 from .ingress import HookIngressPolicy, hook_ingress_policy
 from .registry import HookRegistry, HookRegistryPlugin, HookRegistryState
-from .sender import build_hook_message_sender, send_and_track_message, send_hook_message
+from .sender import build_hook_message_sender, send_hook_message, send_matrix_message
 from .state import build_hook_room_state_putter, build_hook_room_state_querier
 from .types import (
     BUILTIN_EVENT_NAMES,
@@ -61,6 +62,7 @@ from .types import (
     EVENT_MESSAGE_RECEIVED,
     EVENT_REACTION_RECEIVED,
     EVENT_ROOM_MEMBER_JOINED,
+    EVENT_ROOM_MEMBER_LEFT,
     EVENT_SCHEDULE_FIRED,
     EVENT_SESSION_STARTED,
     EVENT_SYSTEM_ENRICH,
@@ -100,6 +102,7 @@ __all__ = [
     "EVENT_MESSAGE_RECEIVED",
     "EVENT_REACTION_RECEIVED",
     "EVENT_ROOM_MEMBER_JOINED",
+    "EVENT_ROOM_MEMBER_LEFT",
     "EVENT_SCHEDULE_FIRED",
     "EVENT_SESSION_STARTED",
     "EVENT_SYSTEM_ENRICH",
@@ -136,6 +139,7 @@ __all__ = [
     "ResponseDraft",
     "ResponseResult",
     "RoomMemberJoinedContext",
+    "RoomMemberLeftContext",
     "ScheduleFiredContext",
     "SenderKind",
     "SessionHookContext",
@@ -164,8 +168,8 @@ __all__ = [
     "render_enrichment_block",
     "render_system_enrichment_block",
     "render_transient_context",
-    "send_and_track_message",
     "send_hook_message",
+    "send_matrix_message",
     "validate_event_name",
 ]
 

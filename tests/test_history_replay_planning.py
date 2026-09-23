@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from agno.media import Image
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
@@ -15,20 +16,18 @@ from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
-from mindroom.history.compaction import (
-    estimate_prompt_visible_history_tokens,
-)
 from mindroom.history.policy import (
     classify_compaction_decision,
     context_budget_after_reserve,
-    describe_compaction_unavailability,
     resolve_history_execution_plan,
 )
-from mindroom.history.runtime import (
-    _compaction_fallback_is_distinct,
-    _plan_replay_that_fits,
+from mindroom.history.replay import (
+    _HistorySummaryBudgetError,
     apply_replay_plan,
+    estimate_prompt_visible_history_tokens,
+    plan_replay_that_fits,
 )
+from mindroom.history.runtime import _compaction_fallback_is_distinct
 from mindroom.history.storage import (
     read_scope_state,
     write_scope_state,
@@ -47,6 +46,7 @@ from tests.conftest import (
     FakeModel,
     bind_runtime_paths,
     prepare_history_for_run_for_test,
+    seed_session,
 )
 from tests.history_helpers import (  # noqa: F401
     _agent,
@@ -56,6 +56,166 @@ from tests.history_helpers import (  # noqa: F401
     _runtime_paths,
     _session,
 )
+
+
+class _RecordingVisualReplayEstimate:
+    """Record the shared history projection while supplying a visual estimate."""
+
+    def __init__(self) -> None:
+        self.messages: list[Message] = []
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
+        self.messages = messages
+        return 100
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        return True
+
+
+class _UnavailableVisualReplayEstimate:
+    def __init__(self) -> None:
+        self.messages: list[Message] = []
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> None:
+        self.messages = messages
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        return True
+
+
+class _DominantTextReplayEstimate:
+    def __init__(self) -> None:
+        self.messages: list[Message] = []
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
+        self.messages = messages
+        return 12_000
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        return False
+
+
+def _viewed_image_message(index: int) -> Message:
+    return Message(
+        role="user",
+        content="The tool call above generated the attached media.",
+        images=[Image(id=f"mindroom_viewed_{index}", content=f"image-{index}".encode(), mime_type="image/png")],
+    )
+
+
+@pytest.mark.parametrize("native_route", [None, "native-route"])
+def test_history_estimate_projects_bounded_viewed_images_without_mutating_session(native_route: str | None) -> None:
+    """The planner and provider estimator see the same bounded newest-first media replay."""
+    messages = [_viewed_image_message(index) for index in range(6)]
+    session = _session("viewed-images", runs=[_completed_run("run-1", messages=messages)])
+    before = session.to_dict()
+    replay_model = _RecordingVisualReplayEstimate()
+
+    estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+        ),
+        replay_model=replay_model,  # type: ignore[arg-type]
+        native_route=native_route,
+    )
+
+    replayed_ids = [image.id for message in replay_model.messages for image in message.images or []]
+    assert replayed_ids == ["mindroom_viewed_2", "mindroom_viewed_3", "mindroom_viewed_4", "mindroom_viewed_5"]
+    assert sum("omitted from replay" in str(message.content) for message in replay_model.messages) == 2
+    assert session.to_dict() == before
+
+
+@pytest.mark.parametrize("native_route", [None, "native-route"])
+def test_history_estimate_charges_conservative_visual_cost_without_provider_estimator(native_route: str | None) -> None:
+    """Fallback planning charges visual tokens without treating image bytes as prompt text."""
+    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    without_image = _session(
+        "without-image",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[Message(role="user", content="The tool call above generated the attached media.")],
+            ),
+        ],
+    )
+    with_image = _session(
+        "with-image",
+        runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])],
+    )
+
+    text_tokens = estimate_prompt_visible_history_tokens(
+        session=without_image,
+        scope=scope,
+        history_settings=settings,
+        native_route=native_route,
+    )
+    visual_tokens = estimate_prompt_visible_history_tokens(
+        session=with_image,
+        scope=scope,
+        history_settings=settings,
+        native_route=native_route,
+    )
+
+    assert 5_000 <= visual_tokens - text_tokens < 5_100
+
+
+@pytest.mark.parametrize("native_route", [None, "native-route"])
+def test_history_estimate_uses_visual_fallback_when_provider_estimate_is_unavailable(native_route: str | None) -> None:
+    """A declared visual capability cannot erase image cost when its estimate is unavailable."""
+    session = _session("with-image", runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])])
+
+    tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+        ),
+        replay_model=_UnavailableVisualReplayEstimate(),  # type: ignore[arg-type]
+        native_route=native_route,
+    )
+
+    assert tokens >= 5_000
+
+
+@pytest.mark.parametrize("native_route", [None, "native-route"])
+def test_history_estimate_adds_visual_fallback_after_dominant_provider_text_estimate(
+    native_route: str | None,
+) -> None:
+    """A larger provider text estimate cannot hide the fallback image charge."""
+    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    without_image = _session(
+        "without-image",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="Viewed output")])],
+    )
+    with_image = _session(
+        "with-image",
+        runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])],
+    )
+    replay_model = _DominantTextReplayEstimate()
+
+    text_tokens = estimate_prompt_visible_history_tokens(
+        session=without_image,
+        scope=scope,
+        history_settings=settings,
+        native_route=native_route,
+        replay_model=replay_model,  # type: ignore[arg-type]
+    )
+    visual_tokens = estimate_prompt_visible_history_tokens(
+        session=with_image,
+        scope=scope,
+        history_settings=settings,
+        native_route=native_route,
+        replay_model=replay_model,  # type: ignore[arg-type]
+    )
+
+    assert visual_tokens - text_tokens >= 5_000
+    assert replay_model.messages[0].images is None
 
 
 @pytest.mark.asyncio
@@ -87,7 +247,7 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
             ),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     agent = _agent(db=storage)
     prepared = await prepare_history_for_run_for_test(
@@ -114,22 +274,12 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
     assert prepared.replay_plan.num_history_messages is None
 
 
-@pytest.mark.asyncio
-async def test_small_replay_window_cannot_select_required_compaction_without_progress(tmp_path: Path) -> None:
-    config, runtime_paths = _make_config(
+def test_small_replay_window_does_not_cap_compaction_model_input(tmp_path: Path) -> None:
+    config, _runtime_paths_value = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True, replay_window_tokens=1),
         context_window=1_000_000,
     )
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session(
-        "session-1",
-        runs=[
-            _completed_run("run-1"),
-            _completed_run("run-2"),
-        ],
-    )
-    storage.upsert_session(session)
 
     execution_plan = resolve_history_execution_plan(
         config=config,
@@ -140,40 +290,10 @@ async def test_small_replay_window_cannot_select_required_compaction_without_pro
         static_prompt_tokens=10,
     )
 
-    assert execution_plan.summary_input_budget_tokens == 1
-    assert execution_plan.destructive_compaction_available is False
-    assert execution_plan.unavailable_reason == "summary_input_budget_without_retry_headroom"
-    assert describe_compaction_unavailability(execution_plan) == (
-        "the summary input budget must exceed 2,000 tokens to provide meaningful headroom for a smaller retry"
-    )
-
-    with patch("mindroom.history.runtime._run_scope_compaction_with_lifecycle", new=AsyncMock()) as compact_mock:
-        prepared_attempts = [
-            await prepare_history_for_run_for_test(
-                agent=_agent(db=storage),
-                agent_name="test_agent",
-                full_prompt="Current prompt",
-                session_id="session-1",
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=None,
-                storage=storage,
-                session=session,
-            )
-            for _attempt in range(2)
-        ]
-
-    assert [
-        (prepared.compaction_decision.mode, prepared.compaction_decision.reason) for prepared in prepared_attempts
-    ] == [
-        ("none", "compaction_unavailable"),
-        ("none", "compaction_unavailable"),
-    ]
-    compact_mock.assert_not_awaited()
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    assert persisted.summary is None
-    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
+    assert execution_plan.replay_window_tokens == 1
+    assert execution_plan.summary_input_budget_tokens == 881_616
+    assert execution_plan.destructive_compaction_available is True
+    assert execution_plan.unavailable_reason is None
 
 
 @pytest.mark.asyncio
@@ -188,7 +308,7 @@ async def test_prepare_history_for_run_without_authored_compaction_and_no_window
             _completed_run("run-2"),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         prepared = await prepare_history_for_run_for_test(
@@ -227,7 +347,7 @@ async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_sk
             _completed_run("run-2"),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         prepared = await prepare_history_for_run_for_test(
@@ -266,7 +386,7 @@ async def test_prepare_history_for_run_warns_once_when_authored_compaction_is_un
             _completed_run("run-2"),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         await prepare_history_for_run_for_test(
@@ -293,6 +413,7 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
                     display_name="Test Agent",
                     compaction=CompactionOverrideConfig(
                         threshold_percent=0.6,
+                        timeout_seconds=75.0,
                     ),
                 ),
             },
@@ -303,6 +424,7 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
                     threshold_tokens=12_000,
                     reserve_tokens=2_048,
                     model="summary-model",
+                    timeout_seconds=420.0,
                 ),
             ),
             models={
@@ -328,6 +450,26 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
     assert resolved.threshold_percent == 0.6
     assert resolved.reserve_tokens == 2_048
     assert resolved.model == "summary-model"
+    assert resolved.timeout_seconds == 75.0
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=resolved,
+        has_authored_compaction_config=True,
+        active_model_name="default",
+        active_context_window=48_000,
+        static_prompt_tokens=2_000,
+    )
+    assert execution_plan.compaction_timeout_seconds == 75.0
+
+
+def test_compaction_timeout_defaults_to_ten_minutes_and_must_be_positive() -> None:
+    assert CompactionConfig().timeout_seconds == 600.0
+
+    with pytest.raises(ValueError, match="greater than 0"):
+        CompactionConfig(timeout_seconds=0)
+
+    with pytest.raises(ValueError, match="greater than 0"):
+        CompactionOverrideConfig(timeout_seconds=-1)
 
 
 def test_authored_empty_defaults_compaction_enables_destructive_compaction(tmp_path: Path) -> None:
@@ -710,6 +852,45 @@ def test_resolve_history_execution_plan_carries_fallback_model_name(tmp_path: Pa
 
     assert execution_plan.compaction_model_name == "summary-model"
     assert execution_plan.compaction_fallback_model_name == "fallback-model"
+    assert execution_plan.compaction_fallback_summary_input_budget_tokens == 10_800
+
+
+def test_resolve_history_execution_plan_uses_each_compaction_model_window_for_summary_budget(
+    tmp_path: Path,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(
+                    model="summary-model",
+                    fallback_model="fallback-model",
+                    replay_window_tokens=200_000,
+                ),
+            ),
+            models={
+                "default": ModelConfig(provider="openai", id="default-model", context_window=1_000_000),
+                "summary-model": ModelConfig(provider="openai", id="summary-model-id", context_window=1_000_000),
+                "fallback-model": ModelConfig(provider="openai", id="fallback-model-id", context_window=200_000),
+            },
+        ),
+        runtime_paths,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=True,
+        active_model_name="default",
+        active_context_window=1_000_000,
+        static_prompt_tokens=10_000,
+    )
+
+    assert execution_plan.replay_window_tokens == 200_000
+    assert execution_plan.summary_input_budget_tokens == 881_616
+    assert execution_plan.compaction_fallback_summary_input_budget_tokens == 161_616
 
 
 def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_path: Path) -> None:
@@ -931,21 +1112,22 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
 
 
 @pytest.mark.parametrize(
-    ("replay_window_tokens", "expected_available"),
+    ("context_window_tokens", "expected_summary_input_budget", "expected_available"),
     [
-        (2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS, False),
-        (2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1, True),
+        (10_000, 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS, False),
+        (10_001, 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1, True),
     ],
 )
 def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
     tmp_path: Path,
-    replay_window_tokens: int,
+    context_window_tokens: int,
+    expected_summary_input_budget: int,
     expected_available: bool,
 ) -> None:
     config, _runtime_paths_value = _make_config(
         tmp_path,
-        compaction=CompactionOverrideConfig(enabled=True, replay_window_tokens=replay_window_tokens),
-        context_window=1_000_000,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=context_window_tokens,
     )
 
     execution_plan = resolve_history_execution_plan(
@@ -953,11 +1135,11 @@ def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
         compaction_config=config.resolve_entity("test_agent").compaction_config,
         has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
         active_model_name="default",
-        active_context_window=1_000_000,
+        active_context_window=context_window_tokens,
         static_prompt_tokens=10,
     )
 
-    assert execution_plan.summary_input_budget_tokens == replay_window_tokens
+    assert execution_plan.summary_input_budget_tokens == expected_summary_input_budget
     assert execution_plan.destructive_compaction_available is expected_available
     assert (execution_plan.unavailable_reason is None) is expected_available
 
@@ -1009,11 +1191,11 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
 @pytest.mark.parametrize(
     ("active_context_window", "expected_replay_window", "expected_summary_input_budget"),
     [
-        (1_000_000, 200_000, 200_000),
+        (1_000_000, 200_000, 881_616),
         (100_000, 100_000, 71_616),
     ],
 )
-def test_resolve_history_execution_plan_caps_replay_without_changing_model_window(
+def test_resolve_history_execution_plan_caps_replay_without_capping_summary_input(
     tmp_path: Path,
     active_context_window: int,
     expected_replay_window: int,
@@ -1065,6 +1247,7 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
         replay_budget_tokens=10_000,
         hard_replay_budget_tokens=10_000,
         summary_input_budget_tokens=5_000,
+        compaction_timeout_seconds=600.0,
     )
 
     decision = classify_compaction_decision(
@@ -1091,6 +1274,7 @@ def test_classify_compaction_decision_does_not_compact_when_over_trigger_but_wit
         replay_budget_tokens=10_000,
         summary_input_budget_tokens=5_000,
         hard_replay_budget_tokens=20_000,
+        compaction_timeout_seconds=600.0,
     )
 
     decision = classify_compaction_decision(
@@ -1130,7 +1314,7 @@ def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: P
         policy=HistoryPolicy(mode="runs", limit=2),
         max_tool_calls_from_history=None,
     )
-    replay_plan = _plan_replay_that_fits(
+    replay_plan = plan_replay_that_fits(
         session=session,
         scope=scope,
         history_settings=history_settings,
@@ -1164,7 +1348,7 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
         agent=_agent(db=storage),
@@ -1201,7 +1385,7 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
             _completed_run("run-2"),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
         agent=_agent(db=storage, num_history_runs=2),
@@ -1261,7 +1445,7 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
             ),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
         agent=_agent(db=storage, num_history_runs=2),
@@ -1281,7 +1465,7 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_forced_compaction_uses_summary_replay_when_no_runs_fit(
+async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds_final_budget(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(
@@ -1311,7 +1495,7 @@ async def test_prepare_history_for_run_forced_compaction_uses_summary_replay_whe
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     agent = _agent(db=storage)
     with (
@@ -1325,8 +1509,9 @@ async def test_prepare_history_for_run_forced_compaction_uses_summary_replay_whe
                 return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
             ),
         ),
+        pytest.raises(_HistorySummaryBudgetError, match=r"summary.*budget"),
     ):
-        prepared = await prepare_history_for_run_for_test(
+        await prepare_history_for_run_for_test(
             agent=agent,
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -1347,13 +1532,64 @@ async def test_prepare_history_for_run_forced_compaction_uses_summary_replay_whe
     state = read_scope_state(persisted, scope)
     assert state.last_compacted_run_count == 2
     assert state.force_compact_before_next_run is False
-    assert len(prepared.compaction_outcomes) == 1
-    assert prepared.compaction_outcomes[0].runs_after == 0
-    assert prepared.compaction_outcomes[0].summary == "merged summary"
-    assert prepared.replay_plan is not None
-    assert prepared.replay_plan.mode == "disabled"
-    assert prepared.replay_plan.estimated_tokens > 0
-    assert prepared.replays_persisted_history is True
+
+
+def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_history() -> None:
+    """A summary-only session must fail explicitly instead of returning an oversized replay plan."""
+    summary = SessionSummary(summary="Project fact. " * 2000)
+    session = _session("summary-only", runs=[])
+    session.summary = summary
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    size = estimate_prompt_visible_history_tokens(session=session, scope=scope, history_settings=settings)
+
+    with pytest.raises(_HistorySummaryBudgetError, match=r"summary.*budget"):
+        plan_replay_that_fits(
+            session=session,
+            scope=scope,
+            history_settings=settings,
+            available_history_budget=500,
+            current_history_tokens=size,
+        )
+
+    assert session.summary is summary
+    assert session.summary.summary == "Project fact. " * 2000
+    assert session.runs == []
+
+    recovered = plan_replay_that_fits(
+        session=session,
+        scope=scope,
+        history_settings=settings,
+        available_history_budget=10_000,
+        current_history_tokens=size,
+    )
+    assert recovered.mode == "configured"
+    assert recovered.estimated_tokens <= 10_000
+
+
+def test_replay_planner_retains_fitting_summary_when_raw_history_cannot_fit() -> None:
+    """A fitting summary remains available when only the raw runs exceed the replay budget."""
+    session = _session(
+        "summary-and-runs",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="x" * 4000)])],
+    )
+    session.summary = SessionSummary(summary="Project facts")
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    plan = plan_replay_that_fits(
+        session=session,
+        scope=scope,
+        history_settings=settings,
+        available_history_budget=100,
+        current_history_tokens=estimate_prompt_visible_history_tokens(
+            session=session,
+            scope=scope,
+            history_settings=settings,
+        ),
+    )
+    assert plan.mode == "disabled"
+    assert 0 < plan.estimated_tokens <= 100
+    assert session.summary.summary == "Project facts"
 
 
 def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> None:
@@ -1377,7 +1613,7 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
     )
-    replay_plan = _plan_replay_that_fits(
+    replay_plan = plan_replay_that_fits(
         session=session,
         scope=scope,
         history_settings=history_settings,

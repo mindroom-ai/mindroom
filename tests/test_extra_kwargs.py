@@ -1,10 +1,15 @@
 """Test extra_kwargs functionality in model configuration."""
 
+import asyncio
 import importlib
+import inspect
 import os
 import tempfile
+import threading
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 from agno.models.anthropic import Claude
@@ -17,8 +22,12 @@ from agno.models.openai.like import OpenAILike
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages
+from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 
+import mindroom.bedrock_claude as bedrock_claude_module
+from mindroom.agno_compat_vertex_claude_tools import strip_vertex_claude_tool_strict
+from mindroom.bedrock_claude import MindRoomBedrockClaude
 from mindroom.claude_prompt_cache import (
     _DEFERRED_TOOL_NAMES_ATTR,
     _MAX_CACHE_MARKERS,
@@ -27,9 +36,11 @@ from mindroom.claude_prompt_cache import (
     _PromptCacheClientProxy,
     _request_kwargs_with_prompt_cache_ladder,
     _request_kwargs_with_replay_safe_tool_search_results,
+    aclose_anthropic_async_client,
     install_claude_deferred_tool_search,
     install_claude_prompt_cache_hook,
     native_tool_search_supported,
+    prewarm_anthropic_async_client,
 )
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -37,7 +48,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import render_transient_context
 from mindroom.model_loading import get_model_instance
 from mindroom.startup_errors import PermanentStartupError
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _strip_vertex_claude_tool_strict
+from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 
 
 def _config_with_runtime_paths(
@@ -67,7 +78,7 @@ def test_model_config_with_extra_kwargs() -> None:
 
     model_config = ModelConfig(
         provider="openrouter",
-        id="openai/gpt-4",
+        id="openai/gpt-6-astra",
         extra_kwargs=extra_kwargs,
     )
 
@@ -81,7 +92,7 @@ def test_config_yaml_with_extra_kwargs() -> None:
         "models": {
             "test_model": {
                 "provider": "openrouter",
-                "id": "openai/gpt-4",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "extra_kwargs": {
                     "request_params": {
                         "provider": {
@@ -142,7 +153,7 @@ def test_get_model_instance_with_extra_kwargs() -> None:
         "models": {
             "test_model": {
                 "provider": "openrouter",
-                "id": "openai/gpt-4",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "extra_kwargs": {
                     "request_params": {
                         "provider": {
@@ -177,7 +188,7 @@ def test_get_model_instance_with_extra_kwargs() -> None:
     model = get_model_instance(config, runtime_paths, "test_model")
 
     # Check that the model has the correct parameters
-    assert model.id == "openai/gpt-4"
+    assert model.id == "deepseek/deepseek-v4.1-flash"
     assert model.request_params is not None
     assert model.request_params["provider"]["order"] == ["Cerebras"]
     assert model.request_params["provider"]["allow_fallbacks"] is False
@@ -192,12 +203,12 @@ def test_openrouter_provider_defaults_to_uncapped_max_tokens() -> None:
         "models": {
             "uncapped": {
                 "provider": "openrouter",
-                "id": "deepseek/deepseek-v4-pro",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "extra_kwargs": {"api_key": "test-key"},
             },
             "capped": {
                 "provider": "openrouter",
-                "id": "deepseek/deepseek-v4-pro",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "extra_kwargs": {"api_key": "test-key", "max_tokens": 4096},
             },
         },
@@ -217,7 +228,7 @@ def test_get_model_instance_supports_llama_cpp_provider() -> None:
         "models": {
             "local_model": {
                 "provider": "llama_cpp",
-                "id": "gemma-4:31b-q4-uncensored",
+                "id": "local-model",
                 "extra_kwargs": {
                     "api_key": "sk-no-key-required",
                     "base_url": "http://llama.local/v1",
@@ -236,7 +247,7 @@ def test_get_model_instance_supports_llama_cpp_provider() -> None:
     model = get_model_instance(config, runtime_paths, "local_model")
 
     assert isinstance(model, LlamaCpp)
-    assert model.id == "gemma-4:31b-q4-uncensored"
+    assert model.id == "local-model"
     assert model.api_key == "sk-no-key-required"
     assert model.base_url == "http://llama.local/v1"
     assert model.max_tokens == 32000
@@ -249,7 +260,7 @@ def test_llama_cpp_provider_does_not_auto_fetch_api_key(monkeypatch: pytest.Monk
         "models": {
             "local_model": {
                 "provider": "llama_cpp",
-                "id": "gemma-4:31b-q4-uncensored",
+                "id": "local-model",
                 "extra_kwargs": {
                     "base_url": "http://llama.local/v1",
                 },
@@ -295,7 +306,7 @@ def test_different_providers_with_extra_kwargs() -> None:
             },
             "anthropic_model": {
                 "provider": "anthropic",
-                "id": "claude-opus-4-8",
+                "id": "claude-opus-5",
                 "extra_kwargs": {
                     "temperature": 0.2,
                     "max_tokens": 2048,
@@ -343,7 +354,7 @@ def test_model_without_extra_kwargs() -> None:
         "models": {
             "simple_model": {
                 "provider": "openai",
-                "id": "gpt-3.5-turbo",
+                "id": "gpt-5.6-luna",
                 # No extra_kwargs
             },
         },
@@ -368,7 +379,7 @@ def test_model_without_extra_kwargs() -> None:
 
     # Should work without any issues
     model = get_model_instance(config, runtime_paths, "simple_model")
-    assert model.id == "gpt-3.5-turbo"
+    assert model.id == "gpt-5.6-luna"
     assert model.provider == "OpenAI"
 
 
@@ -378,7 +389,7 @@ def test_vertexai_claude_provider() -> None:
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4@20250514",
+                "id": "claude-sonnet-5",
                 "context_window": 200000,
                 "extra_kwargs": {
                     "project_id": "demo-project",
@@ -408,7 +419,7 @@ def test_vertexai_claude_provider() -> None:
 
     assert isinstance(model, VertexAIClaude)
     assert isinstance(model, MindroomVertexAIClaude)
-    assert model.id == "claude-sonnet-4@20250514"
+    assert model.id == "claude-sonnet-5"
     assert model.provider == "VertexAI"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
@@ -435,7 +446,7 @@ def test_bedrock_claude_provider_uses_runtime_env() -> None:
         models={
             "bedrock_model": ModelConfig(
                 provider="bedrock_claude",
-                id="anthropic.claude-opus-4-8",
+                id="anthropic.claude-opus-5",
                 context_window=1_000_000,
             ),
         },
@@ -453,7 +464,7 @@ def test_bedrock_claude_provider_uses_runtime_env() -> None:
     model = get_model_instance(config, runtime_paths, "bedrock_model")
 
     assert isinstance(model, AwsBedrockClaude)
-    assert model.id == "anthropic.claude-opus-4-8"
+    assert model.id == "anthropic.claude-opus-5"
     assert model.provider == "AwsBedrock"
     assert model.aws_access_key == "aws-access"
     assert model.aws_secret_key == "aws-secret"  # noqa: S105
@@ -461,6 +472,133 @@ def test_bedrock_claude_provider_uses_runtime_env() -> None:
     assert model.aws_region == "us-east-1"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
+
+
+def test_session_backed_bedrock_async_client_is_retained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session-backed model must reuse the client built before its request."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+        session=object(),
+    )
+    factory_calls: list[dict[str, object]] = []
+
+    class _FakeAsyncClient:
+        def is_closed(self) -> bool:
+            return False
+
+    built_client = _FakeAsyncClient()
+
+    def _build_client(**kwargs: object) -> _FakeAsyncClient:
+        factory_calls.append(kwargs)
+        return built_client
+
+    monkeypatch.setattr(bedrock_claude_module, "AsyncAnthropicBedrockMantle", _build_client)
+    vars(model)["_get_client_params"] = dict
+
+    first_client = model.get_async_client()
+    second_client = model.get_async_client()
+
+    assert first_client is built_client
+    assert second_client is built_client
+    assert model.async_client is built_client
+    assert factory_calls == [{}]
+
+
+def test_prewarm_anthropic_async_client_builds_cacheable_bedrock_client() -> None:
+    """A non-session Bedrock model should build its retained client off-loop."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+    )
+    built_client = object()
+    calls: list[None] = []
+
+    def _build_client() -> object:
+        calls.append(None)
+        return built_client
+
+    vars(model)["get_async_client"] = _build_client
+
+    prewarm_anthropic_async_client(model)
+
+    assert calls == [None]
+
+
+@pytest.mark.asyncio
+async def test_aclose_anthropic_async_client_closes_cacheable_bedrock_client() -> None:
+    """A retained non-session Bedrock client should be closed and detached."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+    )
+    closed = False
+
+    class _FakeAsyncClient:
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    model.async_client = _FakeAsyncClient()  # type: ignore[assignment]
+
+    await aclose_anthropic_async_client(model)
+
+    assert closed is True
+    assert model.async_client is None
+
+
+@pytest.mark.asyncio
+async def test_aclose_anthropic_async_client_closes_session_backed_bedrock_client() -> None:
+    """A retained session-backed client must have the same deterministic owner."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+        session=object(),
+    )
+    closed = False
+
+    class _FakeAsyncClient:
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    model.async_client = _FakeAsyncClient()  # type: ignore[assignment]
+
+    await aclose_anthropic_async_client(model)
+
+    assert closed is True
+    assert model.async_client is None
+
+
+def test_prewarm_anthropic_async_client_closes_partial_client_on_failure() -> None:
+    """A client retained before a failed prewarm must not lose its owner."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+    )
+    closed = False
+
+    class _FakeAsyncClient:
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    partial_client = _FakeAsyncClient()
+
+    def _fail_after_retaining_client() -> object:
+        model.async_client = partial_client  # type: ignore[assignment]
+        msg = "client initialization failed"
+        raise RuntimeError(msg)
+
+    vars(model)["get_async_client"] = _fail_after_retaining_client
+
+    with pytest.raises(RuntimeError, match="client initialization failed"):
+        prewarm_anthropic_async_client(model)
+
+    assert closed is True
+    assert model.async_client is None
 
 
 def test_bedrock_claude_provider_respects_explicit_profile_over_env_static_keys(
@@ -482,7 +620,7 @@ def test_bedrock_claude_provider_respects_explicit_profile_over_env_static_keys(
         models={
             "bedrock_model": ModelConfig(
                 provider="bedrock_claude",
-                id="anthropic.claude-opus-4-8",
+                id="anthropic.claude-opus-5",
                 context_window=1_000_000,
                 extra_kwargs={"aws_profile": "my-explicit-profile"},
             ),
@@ -523,7 +661,7 @@ def test_bedrock_claude_provider_auto_installs_boto3(
         "models": {
             "bedrock_model": {
                 "provider": "bedrock_claude",
-                "id": "anthropic.claude-opus-4-8",
+                "id": "anthropic.claude-opus-5",
                 "extra_kwargs": {
                     "aws_access_key": "aws-access",
                     "aws_secret_key": "aws-secret",
@@ -673,7 +811,7 @@ def test_strip_vertex_claude_tool_strict_preserves_schema_and_input() -> None:
     """Vertex Claude rejects provider-level strict, but schema fields named strict are valid."""
     tool = _strict_tool_definition()
 
-    sanitized = _strip_vertex_claude_tool_strict([tool])
+    sanitized = strip_vertex_claude_tool_strict([tool])
 
     assert sanitized is not None
     assert "strict" not in sanitized[0]["function"]
@@ -684,7 +822,7 @@ def test_strip_vertex_claude_tool_strict_preserves_schema_and_input() -> None:
 def test_mindroom_vertexai_claude_request_kwargs_strip_tool_strict() -> None:
     """Mindroom's Vertex Claude model should not send strict in the provider tool payload."""
     model = MindroomVertexAIClaude(
-        id="claude-sonnet-4-6",
+        id="claude-sonnet-5",
         project_id="demo-project",
         region="us-central1",
         cache_system_prompt=False,
@@ -710,9 +848,74 @@ def test_mindroom_vertexai_claude_request_kwargs_strip_tool_strict() -> None:
     assert model._has_beta_features(tools=[_strict_tool_definition()]) is False
 
 
+@pytest.mark.parametrize(
+    "codex_provider_data",
+    [{"response_id": "response-1"}, {"signature": ""}],
+    ids=["missing-signature", "empty-signature"],
+)
+@pytest.mark.asyncio
+async def test_mindroom_vertexai_claude_omits_unsigned_reasoning_from_cross_provider_replay(
+    codex_provider_data: dict[str, str],
+) -> None:
+    """Codex reasoning without an Anthropic signature must not become a thinking block."""
+    model = MindroomVertexAIClaude(
+        id="claude-opus-5",
+        project_id="demo-project",
+        region="global",
+    )
+    codex_message = Message(
+        role="assistant",
+        content="Codex answer",
+        reasoning_content="Unsigned Codex reasoning",
+        provider_data=codex_provider_data,
+        tool_calls=[
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "demo_tool", "arguments": "{}"},
+            },
+        ],
+        from_history=True,
+    )
+    claude_message = Message(
+        role="assistant",
+        content="Claude answer",
+        reasoning_content="Signed Claude reasoning",
+        provider_data={"signature": "signature-1"},
+        from_history=True,
+    )
+    messages = [
+        Message(role="user", content="First question", from_history=True),
+        codex_message,
+        Message(role="user", content="Second question", from_history=True),
+        claude_message,
+        Message(role="user", content="Current question"),
+    ]
+
+    fitted_messages = await model._fit_request_messages(
+        messages,
+        tools=None,
+        response_format=None,
+        compress_tool_results=False,
+    )
+    chat_messages, _system_prompt = format_messages(fitted_messages)
+
+    assert [block.type for block in chat_messages[1]["content"]] == ["text", "tool_use"]
+    assert [block.type for block in chat_messages[3]["content"]] == ["thinking", "text"]
+    fitted_codex_message = fitted_messages[1]
+    assert fitted_codex_message is not codex_message
+    assert fitted_codex_message.reasoning_content is None
+    assert fitted_codex_message.content == "Codex answer"
+    assert fitted_codex_message.tool_calls == codex_message.tool_calls
+    assert fitted_codex_message.provider_data == codex_provider_data
+    assert fitted_messages[3] == claude_message
+    assert codex_message.reasoning_content == "Unsigned Codex reasoning"
+    assert codex_message.provider_data == codex_provider_data
+
+
 def _vertex_claude_model(*, extended_cache_time: bool = True) -> VertexAIClaude:
     return VertexAIClaude(
-        id="claude-sonnet-4-6",
+        id="claude-sonnet-5",
         project_id="demo-project",
         region="us-central1",
         cache_system_prompt=True,
@@ -957,7 +1160,7 @@ def test_prompt_cache_hook_inert_when_cache_disabled() -> None:
 
 def test_prompt_cache_hook_applies_to_direct_anthropic_claude() -> None:
     """The hook must ladder direct Anthropic Claude models, not only Vertex."""
-    model = Claude(id="claude-sonnet-4-6", api_key="test-key", cache_system_prompt=True)
+    model = Claude(id="claude-sonnet-5", api_key="test-key", cache_system_prompt=True)
     captured_kwargs = _install_fake_sync_client(model)
     install_claude_prompt_cache_hook(model)
 
@@ -1013,7 +1216,7 @@ def _wire_tool(name: str) -> dict[str, object]:
 @pytest.mark.parametrize(
     ("provider", "model_id", "expected"),
     [
-        ("anthropic", "claude-opus-4-8", True),
+        ("anthropic", "claude-opus-5", True),
         ("anthropic", "claude-sonnet-5", True),
         ("Anthropic", "claude-sonnet-4-5-20250929", True),
         ("vertexai_claude", "claude-haiku-4-5@20251001", True),
@@ -1024,8 +1227,8 @@ def _wire_tool(name: str) -> dict[str, object]:
         ("anthropic", "claude-opus-4-20250514", False),
         ("anthropic", "claude-3-5-sonnet-20241022", False),
         ("vertexai_claude", "claude-sonnet-4@20250514", False),
-        ("openai", "gpt-5.6", False),
-        ("bedrock_claude", "anthropic.claude-opus-4-8", False),
+        ("openai", "gpt-6-astra", False),
+        ("bedrock_claude", "anthropic.claude-opus-5", False),
     ],
 )
 def test_native_tool_search_supported_gating(provider: str, model_id: str, *, expected: bool) -> None:
@@ -1035,7 +1238,7 @@ def test_native_tool_search_supported_gating(provider: str, model_id: str, *, ex
 
 def test_deferred_tool_search_tags_tools_and_injects_search_tool() -> None:
     """Deferred tools ship tagged and name-sorted after the search tool and non-deferred tools."""
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=True)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=True)
     captured_kwargs = _install_fake_sync_client(model)
     # zeta_tool arrives pre-marked (as Agno's cache_tools flag would): the
     # marker must be stripped because deferred tools may not carry one.
@@ -1072,7 +1275,7 @@ def test_deferred_tool_search_skips_tools_marker_when_all_tools_deferred() -> No
     unverified, and deferred tools may never carry one, so the ladder leaves
     the tools array unmarked and relies on the system-prompt breakpoint.
     """
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=True)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=True)
     captured_kwargs = _install_fake_sync_client(model)
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [_wire_tool("alpha_tool")]}
     install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"alpha_tool"}))
@@ -1087,7 +1290,7 @@ def test_deferred_tool_search_skips_tools_marker_when_all_tools_deferred() -> No
 
 def test_deferred_tool_search_applies_without_cache_ladder_when_cache_disabled() -> None:
     """Deferred tagging is independent of the cache ladder gate."""
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     captured_kwargs = _install_fake_sync_client(model)
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [_wire_tool("alpha_tool")]}
     install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"alpha_tool"}))
@@ -1103,7 +1306,7 @@ def test_deferred_tool_search_applies_without_cache_ladder_when_cache_disabled()
 
 def test_deferred_tool_search_leaves_requests_without_matching_tools_unchanged() -> None:
     """The search tool is injected only when a deferred tool is present in the request."""
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=True)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=True)
     captured_kwargs = _install_fake_sync_client(model)
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [_wire_tool("always_tool")]}
     install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"other_tool"}))
@@ -1119,7 +1322,7 @@ def test_install_claude_deferred_tool_search_ignores_non_claude_and_empty_sets()
     install_claude_deferred_tool_search(llama, deferred_tool_names=frozenset({"alpha_tool"}))
     assert _DEFERRED_TOOL_NAMES_ATTR not in vars(llama)
 
-    claude = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    claude = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     install_claude_deferred_tool_search(claude, deferred_tool_names=frozenset())
     assert _DEFERRED_TOOL_NAMES_ATTR not in vars(claude)
 
@@ -1165,7 +1368,7 @@ def _anthropic_response(content: list[dict[str, object]]) -> AnthropicMessage:
             "id": "msg_test",
             "type": "message",
             "role": "assistant",
-            "model": "claude-opus-4-8",
+            "model": "claude-opus-5",
             "content": content,
             "stop_reason": "end_turn",
             "stop_sequence": None,
@@ -1176,7 +1379,7 @@ def _anthropic_response(content: list[dict[str, object]]) -> AnthropicMessage:
 
 def test_server_tool_search_blocks_round_trip_in_assistant_history() -> None:
     """server_tool_use and tool_search_tool_result replay verbatim, in order, exactly once."""
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     first_response = _anthropic_response(
         [
             {"type": "text", "text": "I'll search for a weather tool."},
@@ -1204,10 +1407,10 @@ def test_server_tool_search_blocks_round_trip_in_assistant_history() -> None:
 
     assistant_wires = [message for message in captured_kwargs[1]["messages"] if message["role"] == "assistant"]
     assert len(assistant_wires) == 1
-    replayed_dict_blocks = [block for block in assistant_wires[0]["content"] if isinstance(block, dict)]
-    assert replayed_dict_blocks == [
-        first_response.content[1].model_dump(),
-        first_response.content[2].model_dump(),
+    assert assistant_wires[0]["content"] == [
+        {"type": "text", "text": "I'll search for a weather tool."},
+        _SERVER_TOOL_USE_BLOCK,
+        _TOOL_SEARCH_RESULT_BLOCK,
     ]
 
 
@@ -1219,7 +1422,7 @@ def test_server_tool_blocks_replay_to_non_anthropic_provider_without_crashing() 
         provider_data={"server_tool_blocks": [dict(_SERVER_TOOL_USE_BLOCK), dict(_TOOL_SEARCH_RESULT_BLOCK)]},
     )
 
-    formatted = OpenAIChat(id="gpt-5.6", api_key="test-key")._format_message(assistant)
+    formatted = OpenAIChat(id="gpt-6-astra", api_key="test-key")._format_message(assistant)
 
     assert formatted["role"] == "assistant"
     assert formatted["content"] == "I'll search for a weather tool."
@@ -1392,7 +1595,7 @@ def test_replay_safe_tool_search_results_returns_original_when_references_are_av
 @pytest.mark.asyncio
 async def test_prompt_cache_hook_drops_orphaned_search_use_from_streaming_replay() -> None:
     """Mixed client/server tool history must remain valid on the next streamed request."""
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     captured_kwargs: list[dict[str, object]] = []
 
     class _EmptyAsyncStream:
@@ -1459,6 +1662,175 @@ async def test_prompt_cache_hook_drops_orphaned_search_use_from_streaming_replay
     assert wire_messages[-1]["content"][0]["type"] == "tool_result"
 
 
+@pytest.mark.parametrize("use_beta", [False, True])
+@pytest.mark.asyncio
+async def test_prompt_cache_hook_constructs_async_stream_off_event_loop(*, use_beta: bool) -> None:
+    """Slow synchronous SDK stream setup must not block unrelated async work."""
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
+    stream_started = threading.Event()
+    heartbeat_seen = threading.Event()
+    allow_stream_return = threading.Event()
+    heartbeat_before_release: list[bool] = []
+    stream_thread_ids: list[int] = []
+    event_loop_thread_id = threading.get_ident()
+
+    class _EmptyAsyncStream:
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def __aiter__(self) -> object:
+            return self
+
+        async def __anext__(self) -> object:
+            raise StopAsyncIteration
+
+    class _BlockingAsyncMessagesAPI:
+        def stream(self, **_kwargs: object) -> object:
+            stream_thread_ids.append(threading.get_ident())
+            stream_started.set()
+            assert allow_stream_return.wait(2.0)
+            return _EmptyAsyncStream()
+
+    class _FakeBetaAPI:
+        def __init__(self) -> None:
+            self.messages = _BlockingAsyncMessagesAPI()
+
+    class _FakeAsyncClient:
+        def __init__(self) -> None:
+            self.messages = _BlockingAsyncMessagesAPI()
+            self.beta = _FakeBetaAPI()
+
+    def release_after_heartbeat() -> None:
+        assert stream_started.wait(2.0)
+        heartbeat_before_release.append(heartbeat_seen.wait(0.5))
+        allow_stream_return.set()
+
+    vars(model)["get_async_client"] = lambda: _FakeAsyncClient()
+    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {}
+    vars(model)["_has_beta_features"] = lambda **_kwargs: use_beta
+    install_claude_prompt_cache_hook(model)
+    release_thread = threading.Thread(target=release_after_heartbeat)
+    release_thread.start()
+
+    async def consume_stream() -> list[ModelResponse]:
+        return [
+            response
+            async for response in model.ainvoke_stream(
+                messages=[Message(role="user", content="Current turn")],
+                assistant_message=Message(role="assistant"),
+            )
+        ]
+
+    stream_task = asyncio.create_task(consume_stream())
+    try:
+        assert await asyncio.to_thread(stream_started.wait, 2.0)
+        await asyncio.sleep(0)
+        heartbeat_seen.set()
+        assert await asyncio.wait_for(stream_task, timeout=2.0) == []
+    finally:
+        allow_stream_return.set()
+        await asyncio.to_thread(release_thread.join, 2.0)
+
+    assert heartbeat_before_release == [True]
+    assert stream_thread_ids
+    assert stream_thread_ids[0] != event_loop_thread_id
+
+
+@pytest.mark.parametrize("cancel_count", [1, 2])
+@pytest.mark.parametrize("cancel_before_setup", [False, True])
+@pytest.mark.parametrize("use_beta", [False, True])
+@pytest.mark.asyncio
+async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutine(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cancel_before_setup: bool,
+    cancel_count: int,
+    use_beta: bool,
+) -> None:
+    """Cancellation during worker setup must dispose the SDK request coroutine."""
+    transport_calls = 0
+
+    class _RecordingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            nonlocal transport_calls
+            transport_calls += 1
+            return httpx.Response(200, request=request)
+
+    client = AsyncAnthropic(
+        api_key="test-key",
+        http_client=httpx.AsyncClient(transport=_RecordingTransport()),
+    )
+    request_coroutines: list[Coroutine[object, object, object]] = []
+    request_created = threading.Event()
+    original_post: Callable[..., Coroutine[object, object, object]] = client.post
+
+    def observed_post(*args: object, **kwargs: object) -> Coroutine[object, object, object]:
+        request = original_post(*args, **kwargs)
+        request_coroutines.append(request)
+        request_created.set()
+        return request
+
+    # Observe the real SDK request before the messages resource binds client.post.
+    # Its closed state proves cleanup directly, without collecting the whole
+    # pytest worker's object graph repeatedly to provoke an unawaited warning.
+    monkeypatch.setattr(client, "post", observed_post)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
+    setup_started = threading.Event()
+    allow_setup = threading.Event()
+    setup_finished = threading.Event()
+
+    def blocking_prepare(_model: object, request_kwargs: dict[str, object]) -> dict[str, object]:
+        setup_started.set()
+        assert allow_setup.wait(2.0)
+        setup_finished.set()
+        return request_kwargs
+
+    monkeypatch.setattr("mindroom.claude_prompt_cache.prepare_claude_request_kwargs", blocking_prepare)
+    vars(model)["get_async_client"] = lambda: client
+    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"max_tokens": 1}
+    vars(model)["_has_beta_features"] = lambda **_kwargs: use_beta
+    install_claude_prompt_cache_hook(model)
+
+    async def consume_stream() -> list[ModelResponse]:
+        if cancel_before_setup:
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            for _ in range(cancel_count):
+                current_task.cancel()
+        return [
+            response
+            async for response in model.ainvoke_stream(
+                messages=[Message(role="user", content="hello")],
+                assistant_message=Message(role="assistant"),
+            )
+        ]
+
+    setup_task = asyncio.create_task(consume_stream())
+    try:
+        assert await asyncio.to_thread(setup_started.wait, 2.0)
+        if not cancel_before_setup:
+            for _ in range(cancel_count):
+                setup_task.cancel()
+        allow_setup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await setup_task
+
+        assert await asyncio.to_thread(setup_finished.wait, 2.0)
+        assert await asyncio.to_thread(request_created.wait, 2.0)
+        assert setup_task.cancelling() == cancel_count
+        assert len(request_coroutines) == 1
+        assert inspect.getcoroutinestate(request_coroutines[0]) == inspect.CORO_CLOSED
+        assert transport_calls == 0
+    finally:
+        allow_setup.set()
+        await client.close()
+        for request in request_coroutines:
+            request.close()
+
+
 def _dirty_replay_messages() -> list[Message]:
     """A conversation whose assistant turn replays a persisted dirty tool-search block."""
     return [
@@ -1503,7 +1875,7 @@ def test_prompt_cache_hook_sanitizes_replay_with_cache_disabled_and_no_deferred_
     model with no deferred tools must still send schema-clean history, while
     the disabled ladder stays inert.
     """
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     captured_kwargs = _install_fake_sync_client(model)
     install_claude_prompt_cache_hook(model)
 
@@ -1520,7 +1892,7 @@ def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatc
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4@20250514",
+                "id": "claude-sonnet-5",
                 "extra_kwargs": {
                     "project_id": "demo-project",
                     "region": "us-central1",
@@ -1590,7 +1962,7 @@ def test_vertexai_claude_rejects_missing_runtime_google_application_credentials(
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4-6",
+                "id": "claude-sonnet-5",
                 "extra_kwargs": {
                     "project_id": "demo-project",
                     "region": "us-central1",
@@ -1625,7 +1997,7 @@ def test_vertexai_claude_rejects_invalid_runtime_google_application_credentials(
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4-6",
+                "id": "claude-sonnet-5",
                 "extra_kwargs": {
                     "project_id": "demo-project",
                     "region": "us-central1",
@@ -1660,7 +2032,7 @@ def test_vertexai_claude_loads_service_account_credentials_directly(
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4-6",
+                "id": "claude-sonnet-5",
                 "extra_kwargs": {
                     "project_id": "demo-project",
                     "region": "us-central1",
@@ -1719,12 +2091,12 @@ def test_get_model_instance_supports_zai_provider() -> None:
         "models": {
             "glm": {
                 "provider": "zai",
-                "id": "glm-5.2",
+                "id": "glm-5.3",
                 "extra_kwargs": {"api_key": "test-zai-key"},
             },
             "glm_custom": {
                 "provider": "zai",
-                "id": "glm-5.2",
+                "id": "glm-5.3",
                 "extra_kwargs": {
                     "api_key": "test-zai-key",
                     "base_url": "https://open.bigmodel.cn/api/paas/v4",
@@ -1741,7 +2113,7 @@ def test_get_model_instance_supports_zai_provider() -> None:
 
     model = get_model_instance(config, runtime_paths, "glm")
     assert isinstance(model, OpenAILike)
-    assert model.id == "glm-5.2"
+    assert model.id == "glm-5.3"
     assert model.api_key == "test-zai-key"
     assert model.base_url == "https://api.z.ai/api/paas/v4"
     assert model.name == "ZAI"
@@ -1757,7 +2129,7 @@ def test_zai_provider_resolves_api_key_from_runtime_env() -> None:
         "models": {
             "glm": {
                 "provider": "zai",
-                "id": "glm-5.2",
+                "id": "glm-5.3",
             },
         },
         "router": {
@@ -1779,7 +2151,7 @@ def test_zai_provider_drops_falsy_api_key() -> None:
         "models": {
             "glm": {
                 "provider": "zai",
-                "id": "glm-5.2",
+                "id": "glm-5.3",
                 "extra_kwargs": {"api_key": None},
             },
         },

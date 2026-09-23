@@ -86,6 +86,7 @@ class HookRegistry:
                         source_lineno=_callback_source_lineno(callback),
                         agents=metadata.agents,
                         rooms=metadata.rooms,
+                        required=metadata.required,
                     ),
                 )
 

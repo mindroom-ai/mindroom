@@ -1,0 +1,276 @@
+"""Headed, persistent native MCP browser owned by one Computer binding."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import os
+import stat
+from pathlib import Path
+from typing import TYPE_CHECKING
+from uuid import uuid4
+
+from mcp import StdioServerParameters
+from mcp.client.stdio import get_default_environment
+
+from mindroom.browser_profile import clear_stale_singleton_locks
+from mindroom.mcp.results import tool_result_from_call_result
+from mindroom.media_delivery import image_result
+from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
+from mindroom.playwright_mcp_session import PlaywrightMCPSession
+from mindroom.worker_computer.browser_bundle import (
+    COMPUTER_BROWSER_EXECUTABLE,
+    COMPUTER_BROWSER_GUARD,
+    COMPUTER_BROWSER_MCP_SERVER,
+)
+from mindroom.worker_computer.browser_guard import BrowserURLVerifier
+from mindroom.worker_computer.browser_proxy import COMPUTER_PROXY_BYPASS, BrowserDestinationProxy
+from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
+
+if TYPE_CHECKING:
+    from agno.tools.function import ToolResult
+    from mcp.types import CallToolResult
+
+
+class WorkerBrowserMCP:
+    """Retain a guarded MCP browser; every call must arrive through the Computer gate."""
+
+    def __init__(
+        self,
+        *,
+        display: str,
+        workspace: Path,
+        storage_root: Path,
+        allow_private_networks: bool = False,
+        allow_loopback: bool = False,
+        upstream_proxy_url: str | None = None,
+    ) -> None:
+        self._display = display
+        self._workspace = workspace.resolve()
+        self._profile = storage_root.resolve() / "browser-profiles" / "native-mcp"
+        self._output = self._workspace / "browser"
+        self._verifier = BrowserURLVerifier(
+            allow_private_networks=allow_private_networks,
+            allow_loopback=allow_loopback,
+        )
+        self._upstream_proxy_url = upstream_proxy_url
+        self._proxy_bypass = COMPUTER_PROXY_BYPASS if upstream_proxy_url and allow_loopback else "<-loopback>"
+        self._proxy = (
+            None
+            if upstream_proxy_url
+            else BrowserDestinationProxy(allow_private_networks=allow_private_networks, allow_loopback=allow_loopback)
+        )
+        self._session: PlaywrightMCPSession | None = None
+        self._ready = False
+
+    def _server_parameters(self) -> StdioServerParameters:
+        """Build fixed offline launch options; neither model nor workspace supplies code."""
+        proxy_server = self._proxy.endpoint if self._proxy is not None else self._upstream_proxy_url
+        assert proxy_server is not None
+        env = get_default_environment()
+        env.update(
+            {
+                "DISPLAY": self._display,
+                "MINDROOM_BROWSER_VERIFY_ENDPOINT": self._verifier.endpoint,
+                "MINDROOM_BROWSER_VERIFY_TOKEN": self._verifier.token,
+            },
+        )
+        return StdioServerParameters(
+            command="node",
+            args=[
+                COMPUTER_BROWSER_MCP_SERVER,
+                "--caps",
+                "vision,pdf",
+                "--sandbox",
+                "--block-service-workers",
+                "--proxy-server",
+                proxy_server,
+                "--proxy-bypass",
+                self._proxy_bypass,
+                "--executable-path",
+                COMPUTER_BROWSER_EXECUTABLE,
+                "--user-data-dir",
+                str(self._profile),
+                "--output-dir",
+                str(self._output),
+                "--output-mode",
+                "stdout",
+                "--init-page",
+                COMPUTER_BROWSER_GUARD,
+            ],
+            env=env,
+            cwd=str(self._workspace),
+        )
+
+    async def execute(self, function_name: str, arguments: dict[str, object]) -> ToolResult:
+        """Validate catalog and install initial context guard before any native call."""
+        if function_name not in browser_mcp_catalog():
+            msg = "Unsupported native browser MCP function."
+            raise ValueError(msg)
+        output = self._automatic_output_path()
+        inline_screenshot = function_name == "browser_take_screenshot" and "filename" not in arguments
+        arguments = self._file_arguments(function_name, arguments)
+        try:
+            if not self._ready:
+                self._workspace.mkdir(parents=True, exist_ok=True)
+                self._profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+                clear_stale_singleton_locks(self._profile)
+                output.mkdir(parents=True, exist_ok=True)
+                await self._verifier.start()
+                if self._proxy is not None:
+                    await self._proxy.start()
+                self._session = PlaywrightMCPSession(self._server_parameters())
+                tools = await self._session.list_tools()
+                verify_browser_mcp_catalog([tool.model_dump(by_alias=True) for tool in tools])
+                bootstrap = await self._session.call_tool("browser_tabs", {"action": "list"})
+                tool_result_from_call_result("browser_mcp", bootstrap)
+                self._ready = True
+            assert self._session is not None
+            result = await self._session.call_tool(function_name, arguments)
+        except BaseException:
+            await self.close()
+            raise
+        if inline_screenshot:
+            return await asyncio.to_thread(self._inline_screenshot_result, output, result)
+        return tool_result_from_call_result("browser_mcp", result)
+
+    def _inline_screenshot_result(self, output: Path, result: CallToolResult) -> ToolResult:
+        """Decode, retain, and bound one inline capture away from browser control."""
+        converted = tool_result_from_call_result("browser_mcp", result)
+        metadata: dict[str, object] = {"result": converted.content}
+        if not converted.images:
+            return image_result(b"", metadata=metadata)
+        image = converted.images[0]
+        assert isinstance(image.content, bytes)
+        path = self._persist_inline_screenshot(output, image.content, image.mime_type)
+        metadata["path"] = path.relative_to(self._workspace).as_posix()
+        return image_result(image.content, metadata=metadata)
+
+    def _persist_inline_screenshot(self, output: Path, data: bytes, mime_type: str | None) -> Path:
+        """Retain original MCP pixels once under a new confined workspace path."""
+        extension = "jpg" if mime_type == "image/jpeg" else "png" if mime_type == "image/png" else "img"
+        with contextlib.ExitStack() as descriptors:
+            directory = self._open_output_directory(output, descriptors)
+            for _attempt in range(3):
+                filename = f"page-{uuid4().hex}.{extension}"
+                try:
+                    descriptor = os.open(
+                        filename,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=directory,
+                    )
+                except FileExistsError:
+                    continue
+                try:
+                    with os.fdopen(descriptor, "wb") as screenshot:
+                        screenshot.write(data)
+                except OSError:
+                    with contextlib.suppress(OSError):
+                        os.unlink(filename, dir_fd=directory)
+                    raise
+                return output / filename
+        msg = "Native browser screenshot output could not be reserved."
+        raise OSError(msg)
+
+    def _open_output_directory(self, output: Path, descriptors: contextlib.ExitStack) -> int:
+        """Open a canonical workspace descendant without following swapped links."""
+        msg = "Native browser screenshot output directory is unsafe."
+        try:
+            parts = output.relative_to(self._workspace).parts
+        except ValueError as exc:
+            raise OSError(msg) from exc
+        if not parts:
+            raise OSError(msg)
+        try:
+            parent = descriptors.enter_context(open_directory_within_root(self._workspace, Path(*parts[:-1])))
+            directory = descriptors.enter_context(
+                open_directory_within_root(parent, parts[-1], create=True, mode=0o700),
+            )
+        except OSError as exc:
+            raise OSError(msg) from exc
+        return directory
+
+    def _file_arguments(self, function_name: str, arguments: dict[str, object]) -> dict[str, object]:
+        """Confine native files before startup; retain cancellation and default outputs."""
+        schema = browser_mcp_catalog()[function_name]["inputSchema"]
+        if "filename" in schema["properties"] and "filename" in arguments:
+            filename = arguments["filename"]
+            if not isinstance(filename, str) or not filename:
+                msg = "Native browser filename must be a non-empty file path."
+                raise ValueError(msg)
+            arguments = {**arguments, "filename": str(self._output_path(self._workspace / filename))}
+        if function_name not in {"browser_file_upload", "browser_drop"} or "paths" not in arguments:
+            return arguments
+        paths = arguments["paths"]
+        if not isinstance(paths, list):
+            msg = "Native browser paths must be an array of file paths."
+            raise ValueError(msg)  # noqa: TRY004 - invalid tool payloads share the validation error contract
+        canonical_paths: list[str] = []
+        for value in paths:
+            if not isinstance(value, str) or not value:
+                msg = "Native browser paths must contain non-empty file paths."
+                raise ValueError(msg)
+            msg = "Native browser files must be existing regular files within the worker workspace."
+            try:
+                path = resolve_path_within_root(self._workspace, value, symlinks="internal", strict=True)
+                allowed = path.is_file()
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ValueError(msg) from exc
+            if not allowed:
+                raise ValueError(msg)
+            canonical_paths.append(str(path))
+        return {**arguments, "paths": canonical_paths}
+
+    def _automatic_output_path(self) -> Path:
+        """Admit direct output links without traversing ordinary or linked directories."""
+        output = self._output_path(self._output, directory=True)
+        try:
+            if output.exists():
+                with os.scandir(output) as entries:
+                    for entry in entries:
+                        if entry.is_symlink():
+                            self._output_path(output / entry.name, directory=entry.is_dir())
+        except OSError as exc:
+            msg = "Native browser output directory could not be inspected."
+            raise ValueError(msg) from exc
+        return output
+
+    def _output_path(self, path: Path, *, directory: bool = False) -> Path:
+        """Resolve existing links and missing descendants within the workspace."""
+        msg = "Native browser output must stay within the worker workspace and have the expected file type."
+        try:
+            canonical = resolve_path_within_root(self._workspace, path, symlinks="internal")
+            # stat still reports symlink loops and invalid parents on Python
+            # versions where non-strict resolve suppresses those errors.
+            try:
+                mode = canonical.stat().st_mode
+            except FileNotFoundError:
+                mode = None
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(msg) from exc
+        if mode is not None and not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
+            raise ValueError(msg)
+        return canonical
+
+    async def close(self) -> None:
+        """Reap MCP/browser and callback resources while keeping profile and output files."""
+        try:
+            if self._session is not None:
+                try:
+                    if self._ready and self._session.running:
+                        # Normal stop flushes the persistent profile. A stuck or
+                        # disconnected browser still reaches bounded forced cleanup.
+                        with contextlib.suppress(Exception):
+                            async with asyncio.timeout(2):
+                                await self._session.call_tool("browser_close", {})
+                finally:
+                    await self._session.close()
+                    self._session = None
+        finally:
+            self._ready = False
+            try:
+                if self._proxy is not None:
+                    await self._proxy.close()
+            finally:
+                await self._verifier.close()

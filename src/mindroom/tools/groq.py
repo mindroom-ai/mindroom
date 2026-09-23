@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="groq",
+    worker_inert_agent_functions=("generate_speech",),
     display_name="Groq",
     description="Fast AI inference for audio transcription, translation, and text-to-speech",
     category=ToolCategory.DEVELOPMENT,
@@ -55,7 +56,7 @@ if TYPE_CHECKING:
             label="Tts Voice",
             type="text",
             required=False,
-            default="Chip-PlayAI",
+            default="troy",
         ),
         ConfigField(
             name="enable_transcribe_audio",

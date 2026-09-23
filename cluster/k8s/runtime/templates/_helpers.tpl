@@ -227,11 +227,20 @@ app.kubernetes.io/component: runtime
 include /etc/squid/squid.conf
 
 acl egress_has_token req_header Proxy-Authorization .
+{{- with .Values.approvedEgress.parentProxy.bypassDomains }}
+acl egress_bypass_parent dstdomain -n {{ join " " . }}
+{{- end }}
 dns_defnames on
 cache_peer {{ .Values.approvedEgress.parentProxy.host }} parent {{ .Values.approvedEgress.parentProxy.port }} 0 no-query no-digest login=PASSTHRU
+{{- if .Values.approvedEgress.parentProxy.bypassDomains }}
+cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} deny egress_bypass_parent
+{{- end }}
 cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} allow egress_has_token
 cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} deny all
 nonhierarchical_direct off
+{{- if .Values.approvedEgress.parentProxy.bypassDomains }}
+always_direct allow egress_bypass_parent
+{{- end }}
 always_direct allow !egress_has_token
 never_direct allow egress_has_token
 {{- end -}}
@@ -380,10 +389,6 @@ matchLabels:
 {{- end -}}
 {{- end -}}
 
-{{- define "mindroom-runtime.eventCacheNamespace" -}}
-{{- default .Release.Namespace .Values.eventCache.namespace -}}
-{{- end -}}
-
 {{- define "mindroom-runtime.eventCacheDatabaseUrlSecretKey" -}}
 {{- default .Values.eventCache.databaseUrlEnv .Values.eventCache.databaseUrl.key -}}
 {{- end -}}
@@ -443,13 +448,10 @@ app.kubernetes.io/component: event-cache-postgres
 {{- define "mindroom-runtime.defaultConfig" -}}
 agents: {}
 models: {}
-cache:
+event_journal:
   backend: {{ .Values.eventCache.backend | quote }}
 {{- if eq .Values.eventCache.backend "postgres" }}
   database_url_env: {{ .Values.eventCache.databaseUrlEnv | quote }}
-  namespace: {{ include "mindroom-runtime.eventCacheNamespace" . | quote }}
-{{- else if .Values.eventCache.sqlite.dbPath }}
-  db_path: {{ .Values.eventCache.sqlite.dbPath | quote }}
 {{- end }}
 {{- end -}}
 

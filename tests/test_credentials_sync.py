@@ -158,6 +158,32 @@ class TestCredentialsSync:
             "_source": "env",
         }
 
+    def test_sync_declared_credential_seed_rejects_oauth_token_service(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Bootstrap seeds must not bypass lifecycle publication for OAuth tokens."""
+        monkeypatch.setenv(
+            "MINDROOM_CREDENTIAL_SEEDS_JSON",
+            json.dumps(
+                {
+                    "service": "google_oauth",
+                    "credentials": {"access_token": {"value": "seeded-access-token"}},
+                },
+            ),
+        )
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials("google_oauth") is None
+
     def test_sync_declared_credential_seed_from_file(
         self,
         tmp_path: Path,

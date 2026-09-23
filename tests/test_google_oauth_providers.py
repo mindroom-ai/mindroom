@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
+from authlib.integrations.httpx_client import AsyncOAuth2Client
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
@@ -26,16 +30,20 @@ from mindroom.oauth.google_gmail import _GOOGLE_GMAIL_OAUTH_SCOPES, google_gmail
 from mindroom.oauth.google_sheets import _GOOGLE_SHEETS_OAUTH_SCOPES, google_sheets_oauth_provider
 from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+    OAuthClientConfig,
     OAuthConnectionRequired,
     OAuthProviderError,
+    is_terminal_oauth_refresh_error_code,
     oauth_connection_required_payload,
 )
 from mindroom.oauth.service import build_oauth_connect_instruction, build_oauth_reconnect_instruction
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Callable
+    from typing import Any
 
     from mindroom.constants import RuntimePaths
+    from mindroom.credentials import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
 
 GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -51,6 +59,21 @@ GOOGLE_NARROW_EXTRA_AUTH_PARAMS = {
     "access_type": "offline",
     "prompt": "consent",
 }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("invalid_grant", True),
+        (" Invalid_Refresh_Token ", True),
+        ("bad_refresh_token", True),
+        ("temporarily_unavailable", False),
+        (None, False),
+    ],
+)
+def test_terminal_oauth_refresh_error_classification(value: object, expected: bool) -> None:
+    """All refresh paths should share one normalized terminal-code policy."""
+    assert is_terminal_oauth_refresh_error_code(value) is expected
 
 
 @pytest.mark.parametrize(
@@ -151,6 +174,127 @@ def test_google_providers_request_minimum_functionality_preserving_scopes() -> N
     )
 
 
+@pytest.mark.parametrize("scope_field", ["scopes", "scope"])
+@pytest.mark.parametrize(
+    ("requested_scope", "response_scope", "expected_scope"),
+    [
+        (None, None, None),
+        (
+            None,
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.readonly",
+        ),
+        ("openid", None, "openid"),
+        (
+            "openid",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.readonly",
+        ),
+    ],
+)
+def test_calendar_refresh_preserves_grant_without_requesting_new_scopes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested_scope: str | None,
+    response_scope: str | None,
+    expected_scope: str | None,
+    scope_field: str,
+) -> None:
+    """Refreshing an older broad grant must not request newly configured scopes."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={},
+    )
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "google_oauth_client",
+        {"client_id": "client-id", "client_secret": PROVISIONED_CLIENT_SECRET},
+    )
+    provider = replace(
+        google_calendar_oauth_provider(),
+        extra_token_params={"scope": requested_scope} if requested_scope is not None else {},
+    )
+    granted_scopes = [*GOOGLE_IDENTITY_SCOPES, "https://www.googleapis.com/auth/calendar"]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        response: dict[str, object] = {"access_token": "new-access-token", "expires_in": 3600}
+        if response_scope is not None:
+            response["scope"] = response_scope
+        return httpx.Response(200, json=response)
+
+    def client_factory(**kwargs: object) -> AsyncOAuth2Client:
+        return AsyncOAuth2Client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", client_factory)
+    refreshed = asyncio.run(
+        provider.refresh_token_data(
+            {
+                "token": "old-access-token",
+                "refresh_token": "refresh-token",
+                "client_id": "client-id",
+                "expires_at": 1.0,
+                scope_field: granted_scopes if scope_field == "scopes" else " ".join(granted_scopes),
+                "_oauth_claims": {"email": "alice@example.test", "email_verified": True, "sub": "subject-1"},
+                "_oauth_claims_verified": True,
+            },
+            runtime_paths,
+        ),
+    )
+
+    assert len(requests) == 1
+    assert requests[0].url == GOOGLE_TOKEN_URL
+    body = parse_qs(requests[0].content.decode(), keep_blank_values=True)
+    assert body["grant_type"] == ["refresh_token"]
+    if requested_scope is None:
+        assert "scope" not in body
+    else:
+        assert body["scope"] == [requested_scope]
+    assert refreshed is not None
+    assert refreshed["refresh_token"] == "refresh-token"  # noqa: S105
+    assert refreshed["scopes"] == (granted_scopes if expected_scope is None else expected_scope.split())
+
+
+def test_google_exchange_defaults_to_requested_scopes_when_response_omits_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Initial authorization retains configured scopes when Google omits scope."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={},
+    )
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "google_oauth_client",
+        {"client_id": "client-id", "client_secret": PROVISIONED_CLIENT_SECRET},
+    )
+    provider = google_calendar_oauth_provider()
+
+    def client_factory(**kwargs: object) -> AsyncOAuth2Client:
+        assert kwargs["scope"] == provider.scopes
+        return AsyncOAuth2Client(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    200,
+                    json={"access_token": "access-token", "id_token": "identity-token"},
+                ),
+            ),
+            **kwargs,
+        )
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", client_factory)
+    monkeypatch.setattr(
+        "mindroom.oauth.google.google_id_token.verify_oauth2_token",
+        lambda *_args: {"email": "alice@example.test", "email_verified": True, "sub": "subject-1"},
+    )
+
+    result = asyncio.run(provider.exchange_code("auth-code", runtime_paths, code_verifier="pkce-verifier"))
+
+    assert result.token_data["scopes"] == list(provider.scopes)
+
+
 @pytest.mark.parametrize(
     "provider",
     [
@@ -219,6 +363,53 @@ def test_google_oauth_provider_helper_builds_common_google_provider_skeleton() -
     assert provider.token_parser is _google_token_parser
 
 
+def test_google_token_parser_bounds_identity_certificate_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identity verification must not outlive the credential transaction lock budget."""
+    captured_timeouts: list[object] = []
+
+    class _Request:
+        def __call__(
+            self,
+            _url: str,
+            *,
+            method: str = "GET",
+            timeout: float = 120.0,
+        ) -> object:
+            assert method == "GET"
+            captured_timeouts.append(timeout)
+            return object()
+
+    def verify_token(
+        _id_token: str,
+        request: Callable[..., object],
+        _audience: str,
+    ) -> dict[str, object]:
+        request("https://www.googleapis.com/oauth2/v1/certs", method="GET")
+        return {"sub": "subject-1", "email": "alice@example.com", "email_verified": True}
+
+    monkeypatch.setattr("mindroom.oauth.google.GoogleRequest", _Request)
+    monkeypatch.setattr("mindroom.oauth.google.google_id_token.verify_oauth2_token", verify_token)
+    provider = google_drive_oauth_provider()
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+    result = _google_token_parser(
+        provider,
+        {"access_token": "access-token", "id_token": "identity-token"},
+        OAuthClientConfig(
+            client_id="client-id",
+            client_secret=PROVISIONED_CLIENT_SECRET,
+            redirect_uri="http://localhost:8765/api/oauth/google_drive/callback",
+        ),
+        runtime_paths,
+    )
+
+    assert result.claims["sub"] == "subject-1"
+    assert captured_timeouts == [20.0]
+
+
 def _install_provisioning_transport(
     monkeypatch: pytest.MonkeyPatch,
     provisioning_url: str = "https://provisioning.example",
@@ -263,6 +454,115 @@ def _paired_runtime_paths(tmp_path: Path) -> RuntimePaths:
             "MINDROOM_LOCAL_CLIENT_SECRET": "local-secret",
         },
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("custom_client", "observed_operation"),
+    [(True, "read"), (False, "read"), (False, "manager"), (False, "save")],
+    ids=["custom-read", "provisioned-read", "provisioned-manager", "provisioned-save"],
+)
+async def test_google_bootstrap_client_storage_stays_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    custom_client: bool,
+    observed_operation: str,
+) -> None:
+    """Custom config reads and provisioned config reads/writes leave the owner loop free."""
+    owner_thread = threading.get_ident()
+    requests = _install_provisioning_transport(monkeypatch)
+    runtime_paths = _paired_runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    service = "google_drive_oauth_client" if custom_client else "google_oauth_client"
+    manager.save_credentials(
+        service,
+        {
+            "client_id": "previous-client.apps.googleusercontent.com",
+            "client_secret": "previous-secret",
+            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: not custom_client,
+            _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY: 0.0,
+        },
+    )
+    client_path = manager.get_credentials_path(service)
+    original_read = Path.read_bytes
+    original_save = manager.save_credentials
+    operations: set[str] = set()
+
+    def observed_read(path: Path) -> bytes:
+        if path == client_path:
+            assert threading.get_ident() != owner_thread, "Google client read blocked the event loop"
+            operations.add("read")
+        return original_read(path)
+
+    def observed_manager(paths: RuntimePaths) -> CredentialsManager:
+        assert threading.get_ident() != owner_thread, "Google client path resolution blocked the event loop"
+        operations.add("manager")
+        return get_runtime_credentials_manager(paths)
+
+    def observed_save(saved_service: str, credentials: dict[str, Any]) -> None:
+        assert threading.get_ident() != owner_thread, "Google client write blocked the event loop"
+        operations.add("save")
+        original_save(saved_service, credentials)
+
+    with monkeypatch.context() as storage_patch:
+        if observed_operation == "read":
+            storage_patch.setattr(Path, "read_bytes", observed_read)
+        elif observed_operation == "manager":
+            storage_patch.setattr("mindroom.oauth.google.get_runtime_credentials_manager", observed_manager)
+        else:
+            storage_patch.setattr(manager, "save_credentials", observed_save)
+        endpoints = await google_drive_oauth_provider().runtime_endpoints(runtime_paths)
+
+    assert operations == {observed_operation}
+    assert endpoints.authorization_url == GOOGLE_AUTHORIZATION_URL
+    assert endpoints.token_url == GOOGLE_TOKEN_URL
+    stored = manager.load_credentials(service)
+    assert stored is not None
+    if custom_client:
+        assert stored["client_id"] == "previous-client.apps.googleusercontent.com"
+        assert requests == []
+    else:
+        assert stored["client_id"] == PROVISIONED_CLIENT_ID
+        assert stored["client_secret"] == PROVISIONED_CLIENT_SECRET
+        assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_google_bootstrap_drains_client_publication_before_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated cancellation cannot abandon an accepted client-config publication."""
+    _install_provisioning_transport(monkeypatch)
+    runtime_paths = _paired_runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    original_save = manager.save_credentials
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_save(service: str, credentials: dict[str, Any]) -> None:
+        entered.set()
+        assert release.wait(5), "Client publication gate was not released"
+        original_save(service, credentials)
+
+    monkeypatch.setattr(manager, "save_credentials", blocked_save)
+    bootstrap = asyncio.create_task(google_drive_oauth_provider().runtime_endpoints(runtime_paths))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        bootstrap.cancel()
+        await asyncio.sleep(0)
+        bootstrap.cancel()
+        await asyncio.sleep(0)
+        assert not bootstrap.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await bootstrap
+
+    stored = manager.load_credentials("google_oauth_client")
+    assert stored is not None
+    assert stored["client_id"] == PROVISIONED_CLIENT_ID
+    assert stored["client_secret"] == PROVISIONED_CLIENT_SECRET
 
 
 def test_google_oauth_provider_bootstraps_client_for_paired_install(
@@ -357,7 +657,18 @@ def test_google_oauth_provider_keeps_cached_client_after_unpairing(tmp_path: Pat
     assert manager.load_credentials("google_oauth_client") == stale_credentials
 
 
-@pytest.mark.parametrize("hostname", ["localhost", "127.0.0.1", "[::1]"])
+@pytest.mark.parametrize(
+    "hostname",
+    [
+        "localhost",
+        "localhost.",
+        "app.localhost",
+        "127.0.0.1",
+        "127.0.0.2",
+        "[::1]",
+        "[::ffff:127.0.0.2]",
+    ],
+)
 def test_google_oauth_provider_allows_http_provisioning_only_on_loopback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -380,13 +691,17 @@ def test_google_oauth_provider_allows_http_provisioning_only_on_loopback(
     assert resolution is not None
 
 
-def test_google_oauth_provider_rejects_remote_http_provisioning(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "hostname",
+    ["provisioning.example", "2130706433", "127.1", "0x7f000001", "1.1", "0x08080808"],
+)
+def test_google_oauth_provider_rejects_remote_http_provisioning(tmp_path: Path, hostname: str) -> None:
     """Pairing credentials must never be sent to a plaintext remote endpoint."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
         process_env={
-            "MINDROOM_PROVISIONING_URL": "http://provisioning.example",
+            "MINDROOM_PROVISIONING_URL": f"http://{hostname}",
             "MINDROOM_LOCAL_CLIENT_ID": "local-client",
             "MINDROOM_LOCAL_CLIENT_SECRET": "local-secret",
         },
@@ -541,6 +856,18 @@ def test_build_oauth_reconnect_instruction_explains_loopback_device_handoff() ->
         "Google Drive session for this agent expired or is no longer valid. "
         "Open this MindRoom link in a browser on the computer where the MindRoom process is running, "
         "not on a phone or another computer. If needed, open this conversation there or copy the complete "
-        "link into that browser. After reconnecting, retry the request: "
+        "link into that browser. After reconnecting, retry the request. "
+        "This link is valid for 10 minutes; if it expires, rerun the original request for a fresh link: "
         f"{connect_url}"
+    )
+
+
+def test_build_oauth_reconnect_instruction_omits_expiry_for_dashboard_link() -> None:
+    """Requester-less dashboard fallback links must not claim a capability TTL."""
+    connect_url = "https://mindroom.example/api/oauth/google_drive/authorize?agent_name=general&execution_scope=shared"
+
+    assert build_oauth_reconnect_instruction(google_drive_oauth_provider(), connect_url) == (
+        "Google Drive session for this agent expired or is no longer valid. "
+        "Reconnect it with this MindRoom link. After reconnecting, retry the request. "
+        f"Reconnect here: {connect_url}"
     )

@@ -236,7 +236,8 @@ agents:
   openclaw:
     display_name: OpenClawAgent
     # Drop-in OpenClaw workspace import.
-    # Place your files under ./openclaw_data/ (SOUL.md, AGENTS.md, USER.md, MEMORY.md, memory/*.md, etc).
+    # Copy OpenClaw files into <storage>/agents/openclaw/workspace/ (default: mindroom_data/agents/openclaw/workspace/).
+    # The file memory backend preloads MEMORY.md from that workspace root.
     instructions:
     - >-
       You wake up fresh each session with no memory of previous conversations.
@@ -252,7 +253,7 @@ agents:
       remember something, you MUST write it to a file. Mental notes do not
       survive. When someone says "remember this", when you learn something
       important, or when you make a decision worth tracking, write it to
-      ./openclaw_data/memory/YYYY-MM-DD.md using today's date. Append, never
+      memory/YYYY-MM-DD.md using today's date. Append, never
       overwrite.
     - >-
       MEMORY.md is your curated long-term memory: distilled insights, not raw
@@ -268,14 +269,14 @@ agents:
       from incomplete context; search first.
     include_default_tools: false
     learning: false
+    memory_backend: file
     context_files:
-    - ./openclaw_data/SOUL.md
-    - ./openclaw_data/AGENTS.md
-    - ./openclaw_data/USER.md
-    - ./openclaw_data/IDENTITY.md
-    - ./openclaw_data/MEMORY.md
-    - ./openclaw_data/TOOLS.md
-    - ./openclaw_data/HEARTBEAT.md
+    - SOUL.md
+    - AGENTS.md
+    - USER.md
+    - IDENTITY.md
+    - TOOLS.md
+    - HEARTBEAT.md
     model: opus
     role: OpenClaw-style personal assistant with persistent file-based identity
       and memory.
@@ -408,12 +409,13 @@ agents:
     - docs
     skills: []
     tools: []
-authorization:
-  default_room_access: false
-  config_command_enabled: false
-  global_users:
+administrators:
+- '@test:m-test-4.mindroom.chat'
+room_defaults:
+  invite_users:
   - '@test:m-test-4.mindroom.chat'
-  room_permissions: {}
+authorization:
+  config_command_enabled: false
 bot_accounts: []
 mindroom_user:
   display_name: MindRoomUser
@@ -468,32 +470,35 @@ models:
   haiku:
     id: claude-haiku-4-5
     provider: anthropic
+  fable:
+    id: claude-fable-5-1
+    provider: anthropic
   opus:
-    id: claude-opus-4-8
+    id: claude-opus-5
     provider: anthropic
   sonnet:
     id: claude-sonnet-5
     provider: anthropic
   # --- OpenAI ---
-  gpt56:
-    id: gpt-5.6
+  astra:
+    id: gpt-6-astra
     provider: openai
   gpt5terra:
     id: gpt-5.6-terra
     provider: openai
   # --- Google ---
   gemini_flash:
-    id: gemini-3.5-flash
+    id: gemini-3.8-flash
     provider: google
   # --- OpenRouter ---
   deepseek:
-    id: deepseek/deepseek-v3.2
+    id: deepseek/deepseek-v4.1-flash
     provider: openrouter
   nemotron:
-    id: nvidia/nemotron-3-super-120b-a12b:free
+    id: nvidia/nemotron-3.5-lightning:free
     provider: openrouter
-  tencent_hy3:
-    id: tencent/hy3-preview
+  tencent_hy4:
+    id: tencent/hy4-preview
     provider: openrouter
 plugins: []
 room_models:
@@ -528,5 +533,5 @@ voice:
   intelligence:
     model: sonnet
   stt:
-    model: gpt-4o-transcribe
+    model: gpt-transcribe
     provider: openai

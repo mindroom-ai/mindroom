@@ -1,0 +1,165 @@
+"""Signed Connections controls for the user's selection across all MCP clients."""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING, Protocol
+
+from fastapi import HTTPException
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+
+from mindroom.api.auth import require_connections_user, require_same_origin
+from mindroom.api.config_lifecycle import app_state, rebind_current_request_snapshot
+from mindroom.api.connection_agents import CONNECTIONS_HEADERS, resolve_connection_user
+from mindroom.api.mcp_identity import resolve_gateway_connections_owner
+from mindroom.mcp_gateway.selection import SelectionAccessDeniedError
+from mindroom.mcp_gateway.server import read_gateway_body
+from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
+from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from starlette.requests import Request
+
+    from mindroom.api.connection_agents import ConnectionUserContext
+    from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
+    from mindroom.mcp_gateway.selection import AgentSelections, GatewaySelections
+
+
+class _SelectionRuntime(Protocol):
+    @property
+    def provider(self) -> GatewayOAuthProvider: ...
+
+    @property
+    def origin(self) -> str: ...
+
+    @property
+    def selections(self) -> GatewaySelections: ...
+
+
+async def _selection_choices(request: Request, origin: str) -> AgentSelections:
+    require_same_origin(request, origin, detail="Selection changes require a same-origin request")
+    if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":
+        raise HTTPException(415, "JSON content required")
+    try:
+        mutation = json.loads(await read_gateway_body(request))
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        raise HTTPException(400, "Invalid agent selection") from exc
+    if (
+        not isinstance(mutation, dict)
+        or set(mutation) != {"agents"}
+        or not isinstance(mutation["agents"], dict)
+        or any(
+            tools is not None and (not isinstance(tools, list) or any(not isinstance(tool, str) for tool in tools))
+            for tools in mutation["agents"].values()
+        )
+    ):
+        raise HTTPException(400, "Invalid agent selection")
+    return {name: None if tools is None else tuple(tools) for name, tools in mutation["agents"].items()}
+
+
+def _available_choices(
+    choices: AgentSelections,
+    context: ConnectionUserContext,
+    *,
+    previous: AgentSelections | None = None,
+) -> AgentSelections:
+    """Hide stale choices and discard them on save without accepting new unavailable tools."""
+    metadata = (
+        resolved_tool_metadata_for_runtime(context.runtime_paths, context.config, tolerate_plugin_load_errors=True)
+        if any(choices.values())
+        else {}
+    )
+    result: AgentSelections = {}
+    for name, tools in choices.items():
+        if name not in context.agent_names:
+            continue
+        if tools is None:
+            result[name] = None
+            continue
+        available = {
+            tool
+            for tool in context.config.resolve_entity(name).available_tools
+            if tool in metadata and not metadata[tool].requires_room_context
+        }
+        previous_tools = previous.get(name, ()) if previous is not None else None
+        if previous_tools is not None and set(tools) - available - set(previous_tools):
+            raise HTTPException(400, "Tool is not available for MCP")
+        selected = tuple(tool for tool in tools if tool in available)
+        if selected:
+            result[name] = selected
+    return result
+
+
+async def _handle_selection(
+    request: Request,
+    runtime_for_request: Callable[[Request], _SelectionRuntime],
+) -> JSONResponse:
+    user = await require_connections_user(request)
+    try:
+        runtime = runtime_for_request(request)
+    except HTTPException as exc:
+        if exc.status_code == 404 and request.method in {"GET", "HEAD"}:
+            return JSONResponse({"enabled": False, "agents": {}}, headers=CONNECTIONS_HEADERS)
+        raise
+    if request.query_params:
+        raise HTTPException(400, "Selection target overrides are not accepted")
+    choices = await _selection_choices(request, runtime.origin) if request.method == "POST" else None
+    owner = await resolve_gateway_connections_owner(request, user, runtime.provider)
+    if owner is None:
+        return JSONResponse(
+            {"enabled": False, "agents": {}, "unavailable_reason": "account_required"},
+            headers=CONNECTIONS_HEADERS,
+        )
+    context = resolve_connection_user(
+        rebind_current_request_snapshot(request),
+        owner.authenticated_user_id,
+        account_id=owner.account_id,
+        membership_index=app_state(request.app).agent_reply_memberships,
+    )
+    runtime_for_request(request)
+    defaults = (context.personal_agent_name,) if context.personal_agent_name is not None else ()
+    saved = await runtime.selections.get(context.owner, defaults)
+    if choices is None:
+        selected = _available_choices(saved, context)
+    else:
+        if any(name not in context.agent_names for name in choices):
+            raise HTTPException(404, "Agent is not available")
+        selected = _available_choices(choices, context, previous=saved)
+        try:
+            selected = await runtime.selections.set(context.owner, selected)
+        except ValueError as exc:
+            raise HTTPException(400, "Invalid agent selection") from exc
+    return JSONResponse({"enabled": True, "agents": selected}, headers=CONNECTIONS_HEADERS)
+
+
+def selection_routes(runtime_for_request: Callable[[Request], _SelectionRuntime]) -> list[Route]:
+    """Install settings for local and external authentication without importing the runtime root."""
+
+    async def selection(request: Request) -> JSONResponse:
+        try:
+            return await _handle_selection(request, runtime_for_request)
+        except HTTPException as exc:
+            return JSONResponse(
+                {"detail": exc.detail},
+                status_code=exc.status_code,
+                headers=CONNECTIONS_HEADERS,
+            )
+        except SelectionAccessDeniedError:
+            return JSONResponse(
+                {"detail": "Account access has changed"},
+                status_code=403,
+                headers=CONNECTIONS_HEADERS,
+            )
+        except GatewayOAuthCapacityError:
+            return JSONResponse(
+                {"detail": "Selection storage is temporarily full"},
+                status_code=503,
+                headers=CONNECTIONS_HEADERS,
+            )
+        except TimeoutError:
+            return JSONResponse({"detail": "Request timed out"}, status_code=408, headers=CONNECTIONS_HEADERS)
+
+    return [Route("/api/connections/mcp/selection", selection, methods=["GET", "POST"])]

@@ -8,18 +8,21 @@ import os
 import stat
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
+from agno.media import Image
 from agno.metrics import MessageMetrics
 from agno.models.anthropic import Claude
+from agno.models.google import Gemini
 from agno.models.message import Message
 from agno.models.openai import OpenAIChat
 from agno.models.response import ModelResponse
 from agno.utils.models.claude import format_messages as claude_format_messages
-from openai.types.responses import Response, ResponseOutputItemDoneEvent, ResponseTextDeltaEvent
+from openai.types.responses import Response, ResponseCompletedEvent, ResponseOutputItemDoneEvent, ResponseTextDeltaEvent
 
 from mindroom import codex_model
 from mindroom.codex_model import (
@@ -39,10 +42,14 @@ from mindroom.openai_tool_search import (
     install_openai_deferred_tool_search,
     openai_native_tool_search_supported,
 )
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+_TEST_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
+)
+_TEST_PNG_BASE64 = base64.b64encode(_TEST_PNG_BYTES).decode("ascii")
 
 
 def _jwt_with_exp(exp: int) -> str:
@@ -67,6 +74,8 @@ def _write_codex_auth(codex_home: Path, access_token: str, refresh_value: str) -
 @pytest.mark.parametrize(
     ("configured_id", "endpoint_id"),
     [
+        ("gpt-6-astra", "gpt-6-astra"),
+        ("openai-codex/gpt-6-astra", "gpt-6-astra"),
         ("gpt-5.6", "gpt-5.6-sol"),
         ("openai-codex/gpt-5.6", "gpt-5.6-sol"),
         ("gpt-5.6-sol", "gpt-5.6-sol"),
@@ -246,11 +255,7 @@ def test_codex_responses_request_params_include_prompt_cache_key(tmp_path: Path)
     params = model.get_request_params()
 
     assert params["prompt_cache_key"] == "mindroom-code-agent"
-    assert params["extra_headers"] == {
-        "session_id": "mindroom-code-agent",
-        "x-client-request-id": "mindroom-code-agent",
-        "x-codex-window-id": "mindroom-code-agent:0",
-    }
+    assert "extra_headers" not in params
 
 
 def test_codex_responses_request_params_include_installation_metadata(tmp_path: Path) -> None:
@@ -297,57 +302,20 @@ def test_codex_responses_request_params_preserve_existing_extra_body(tmp_path: P
 
 
 def test_codex_responses_request_params_preserve_existing_extra_headers(tmp_path: Path) -> None:
-    """Codex prompt-cache headers should not clobber caller-supplied headers."""
+    """Codex session headers should not clobber caller-supplied headers."""
     model = CodexResponses(
         id="gpt-5.6",
         prompt_cache_key="mindroom-code-agent",
+        session_id="conversation-a",
         codex_home=str(tmp_path),
         extra_headers={"X-Test": "1", "x-codex-window-id": "custom-window"},
     )
 
     assert model.get_request_params()["extra_headers"] == {
         "X-Test": "1",
-        "session_id": "mindroom-code-agent",
-        "x-client-request-id": "mindroom-code-agent",
+        "session_id": "conversation-a",
+        "x-client-request-id": "conversation-a",
         "x-codex-window-id": "custom-window",
-    }
-
-
-def test_codex_model_loader_derives_prompt_cache_key_from_execution_identity(tmp_path: Path) -> None:
-    """MindRoom should use a stable per-agent/session Codex cache key by default."""
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={},
-    )
-    config = Config(
-        models={
-            "default": ModelConfig(
-                provider="codex",
-                id="gpt-5.6",
-            ),
-        },
-        agents={},
-    )
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="code",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread:example.org",
-        resolved_thread_id="$thread:example.org",
-        session_id="!room:example.org:$thread:example.org",
-    )
-
-    model = get_model_instance(config, runtime_paths, execution_identity=identity)
-    params = model.get_request_params()
-
-    assert isinstance(model, CodexResponses)
-    assert params["prompt_cache_key"] == "mindroom-7ac97f304c4001bd9939c88ddba8b0e2"
-    assert params["extra_headers"] == {
-        "session_id": "mindroom-7ac97f304c4001bd9939c88ddba8b0e2",
-        "x-client-request-id": "mindroom-7ac97f304c4001bd9939c88ddba8b0e2",
-        "x-codex-window-id": "mindroom-7ac97f304c4001bd9939c88ddba8b0e2:0",
     }
 
 
@@ -387,11 +355,6 @@ def test_codex_responses_invoke_aggregates_streaming_deltas(monkeypatch: pytest.
     assert response.content == "mindroom-codex-live-ok"
     assert response.provider_data == {"response_id": "resp_123"}
     assert response.response_usage == usage
-    assert assistant_message.content == "mindroom-codex-live-ok"
-    assert assistant_message.provider_data == {"response_id": "resp_123"}
-    assert assistant_message.metrics.input_tokens == 7
-    assert assistant_message.metrics.cache_read_tokens == 5
-    assert assistant_message.metrics.reasoning_tokens == 2
 
 
 def test_get_model_instance_supports_codex_provider(tmp_path: Path) -> None:
@@ -460,14 +423,34 @@ def _output_item_done_event(item: dict[str, object], index: int) -> ResponseOutp
     )
 
 
+def _response_completed_event(response_id: str) -> ResponseCompletedEvent:
+    return ResponseCompletedEvent.model_validate(
+        {
+            "type": "response.completed",
+            "sequence_number": 3,
+            "response": {
+                "id": response_id,
+                "created_at": 1,
+                "model": "gpt-6-astra",
+                "object": "response",
+                "status": "completed",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        },
+    )
+
+
 class _FakeResponsesAPI:
     def __init__(self, event_batches: list[list[object]]) -> None:
         self._event_batches = iter(event_batches)
         self.captured_kwargs: list[dict[str, object]] = []
 
-    def create(self, **kwargs: object) -> Iterator[object]:
+    def create(self, **kwargs: object) -> nullcontext[Iterator[object]]:
         self.captured_kwargs.append(kwargs)
-        return iter(next(self._event_batches))
+        return nullcontext(iter(next(self._event_batches)))
 
 
 class _FakeCodexClient:
@@ -491,7 +474,7 @@ class _FakeCodexClient:
         ("codex", "gpt-4.1", False),
         ("codex", "codex-mini-latest", False),
         ("openai", "gpt-5.6", True),
-        ("anthropic", "claude-opus-4-8", False),
+        ("anthropic", "claude-opus-5", False),
     ],
 )
 def test_openai_native_tool_search_supported_gating(provider: str, model_id: str, *, expected: bool) -> None:
@@ -517,7 +500,7 @@ def test_openai_native_tool_search_rejects_custom_compatible_base_url() -> None:
 
 def test_install_openai_deferred_tool_search_ignores_non_responses_models_and_empty_sets() -> None:
     """The installer is a no-op for non-Responses models and empty name sets."""
-    claude = Claude(id="claude-opus-4-8", api_key="test-key")
+    claude = Claude(id="claude-opus-5", api_key="test-key")
     install_openai_deferred_tool_search(claude, deferred_tool_names=frozenset({"alpha_tool"}))
     assert _DEFERRED_TOOL_NAMES_ATTR not in vars(claude)
 
@@ -584,9 +567,10 @@ def test_codex_tool_search_items_round_trip_through_streaming_history() -> None:
         _output_item_done_event(_TOOL_SEARCH_CALL_ITEM, 0),
         _output_item_done_event(_TOOL_SEARCH_OUTPUT_ITEM, 1),
         text_event,
+        _response_completed_event("resp_1"),
     ]
-    client = _FakeCodexClient([first_batch, []])
-    model = CodexResponses(id="gpt-5.6")
+    client = _FakeCodexClient([first_batch, [_response_completed_event("resp_2")]])
+    model = CodexResponses(id="gpt-6-astra")
     vars(model)["get_client"] = lambda: client
 
     messages = [Message(role="user", content="What is the weather?")]
@@ -597,7 +581,13 @@ def test_codex_tool_search_items_round_trip_through_streaming_history() -> None:
         _output_item_done_event(_TOOL_SEARCH_CALL_ITEM, 0).item.model_dump(exclude_none=True),
         _output_item_done_event(_TOOL_SEARCH_OUTPUT_ITEM, 1).item.model_dump(exclude_none=True),
     ]
-    assert messages[1].provider_data == {"tool_search_items": expected_items}
+    assert messages[1].provider_data == {
+        "mindroom_native_compaction": None,
+        "tool_search_items": expected_items,
+        "response_id": "resp_1",
+        "mindroom_response_stored": False,
+        "mindroom_portable_replay": False,
+    }
     assert client.responses.captured_kwargs[1]["input"] == [
         {"role": "user", "content": "What is the weather?"},
         *expected_items,
@@ -631,7 +621,6 @@ def test_codex_tool_search_items_replay_ahead_of_the_discovered_function_call() 
         dict(_TOOL_SEARCH_OUTPUT_ITEM),
         {
             "type": "function_call",
-            "id": "fc_1",
             "call_id": "call_1",
             "name": "get_weather",
             "arguments": "{}",
@@ -639,6 +628,110 @@ def test_codex_tool_search_items_replay_ahead_of_the_discovered_function_call() 
         },
         {"type": "function_call_output", "call_id": "call_1", "output": "sunny"},
     ]
+
+
+def test_codex_formats_synthetic_tool_image_followup_on_next_request() -> None:
+    """Agno's standard tool-media follow-up carries the viewed image to Codex."""
+    model = CodexResponses(id="gpt-6-astra")
+    assistant = Message(
+        role="assistant",
+        tool_calls=[
+            {
+                "id": "fc_view",
+                "call_id": "call_view",
+                "type": "function",
+                "function": {"name": "view_file", "arguments": '{"path":"plot.png"}'},
+            },
+        ],
+    )
+    tool_result = Message(
+        role="tool",
+        content='{"path":"plot.png","view_status":"ready"}',
+        tool_call_id="fc_view",
+        tool_name="view_file",
+        images=[Image(id="mindroom_viewed_plot", content=_TEST_PNG_BYTES, mime_type="image/png")],
+    )
+
+    messages = [assistant, tool_result]
+    model._handle_function_call_media(messages, [tool_result])
+    formatted_input = model._format_messages(messages)
+
+    assert formatted_input[-1] == {
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "The tool call above generated the attached media."},
+            {"type": "input_image", "image_url": f"data:image/png;base64,{_TEST_PNG_BASE64}"},
+        ],
+    }
+    assert tool_result.images is None
+
+
+def test_public_openai_responses_formats_synthetic_tool_image_followup() -> None:
+    """The standard Responses adapter sends Agno's tool-media follow-up as image input."""
+    message = Message(
+        role="user",
+        content="The tool call above generated the attached media.",
+        images=[Image(id="mindroom_viewed_plot", content=_TEST_PNG_BYTES, mime_type="image/png")],
+    )
+
+    formatted = MindRoomOpenAIResponses(id="gpt-6-astra")._format_messages([message])
+
+    assert formatted == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "The tool call above generated the attached media."},
+                {"type": "input_image", "image_url": f"data:image/png;base64,{_TEST_PNG_BASE64}"},
+            ],
+        },
+    ]
+
+
+def test_openai_chat_formats_synthetic_tool_image_followup() -> None:
+    """Chat Completions receives the viewed image through Agno's standard follow-up."""
+    message = Message(
+        role="user",
+        content="The tool call above generated the attached media.",
+        images=[Image(id="mindroom_viewed_plot", content=_TEST_PNG_BYTES, mime_type="image/png")],
+    )
+
+    formatted = OpenAIChat(id="gpt-6-astra", api_key="test-key")._format_message(message)
+
+    assert formatted["role"] == "user"
+    assert formatted["content"][0] == {"type": "text", "text": message.content}
+    assert formatted["content"][1]["type"] == "image_url"
+    assert formatted["content"][1]["image_url"]["url"] == f"data:image/png;base64,{_TEST_PNG_BASE64}"
+
+
+def test_claude_formats_synthetic_tool_image_followup() -> None:
+    """Claude receives the viewed image through Agno's standard user follow-up."""
+    message = Message(
+        role="user",
+        content="The tool call above generated the attached media.",
+        images=[Image(id="mindroom_viewed_plot", content=_TEST_PNG_BYTES, mime_type="image/png")],
+    )
+
+    formatted, _system = claude_format_messages([message])
+
+    assert formatted[0]["role"] == "user"
+    assert formatted[0]["content"][0]["type"] == "text"
+    assert formatted[0]["content"][1]["type"] == "image"
+    assert formatted[0]["content"][1]["source"]["data"] == _TEST_PNG_BASE64
+
+
+def test_gemini_formats_synthetic_tool_image_followup() -> None:
+    """Gemini receives the viewed image through Agno's standard user follow-up."""
+    message = Message(
+        role="user",
+        content="The tool call above generated the attached media.",
+        images=[Image(id="mindroom_viewed_plot", content=_TEST_PNG_BYTES, mime_type="image/png")],
+    )
+
+    formatted, _system = Gemini(id="gemini-3.1-pro-preview", api_key="test-key")._format_messages([message])
+
+    assert formatted[0].parts[0].text == message.content
+    assert formatted[0].parts[1].inline_data is not None
+    assert formatted[0].parts[1].inline_data.data == _TEST_PNG_BYTES
 
 
 def test_codex_parse_provider_response_captures_tool_search_items() -> None:

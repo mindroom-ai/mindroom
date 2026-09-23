@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
@@ -56,13 +57,53 @@ if TYPE_CHECKING:
             required=False,
             default=False,
         ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
+        ),
     ],
     dependencies=["httpx"],
     docs_url="https://docs.agno.com/tools/toolkits/search/pubmed",
-    function_names=("fetch_details", "fetch_pubmed_ids", "parse_details", "search_pubmed"),
+    function_names=("search_pubmed",),
 )
 def pubmed_tools() -> type[PubmedTools]:
     """Return PubMed tools for medical research and literature search."""
     from agno.tools.pubmed import PubmedTools
 
-    return PubmedTools
+    class MindRoomPubmedTools(PubmedTools):
+        """PubMed toolkit whose configured result limit is the call default."""
+
+        def search_pubmed(self, query: str, max_results: int | None = None) -> str:
+            """Search PubMed, using the configured max_results when the call omits it."""
+            if max_results == 0:
+                return "[]"
+            resolved_max_results = self.max_results if max_results is None else max_results
+            if self.results_expanded:
+                return super().search_pubmed(query, max_results=resolved_max_results)
+
+            # AGNO_COMPAT: Concise PubMed results lose metadata for short abstracts.
+            # Reason: Upstream's conditional expression includes the title/year
+            # prefix only when the summary exceeds 200 characters.
+            # Upstream issue: Tracking gap; preserve the documented concise fields.
+            # Upstream PR: No verified fix identified.
+            # Remove when: Agno retains title/year independently of truncation.
+            # Coverage: tests/test_pubmed_tools.py; tests/test_tool_config_sync.py.
+            try:
+                ids = self.fetch_pubmed_ids(query, resolved_max_results or 10, self.email)
+                articles = self.parse_details(self.fetch_details(ids))
+                results = []
+                for article in articles:
+                    summary = article.get("Summary", "")
+                    if len(summary) > 200:
+                        summary = f"{summary[:200]}..."
+                    results.append(
+                        f"Title: {article.get('Title')}\nPublished: {article.get('Published')}\nSummary: {summary}",
+                    )
+                return json.dumps(results)
+            except Exception as error:
+                return f"Could not fetch articles. Error: {error}"
+
+    return MindRoomPubmedTools

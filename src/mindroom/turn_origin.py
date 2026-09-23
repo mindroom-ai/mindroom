@@ -11,6 +11,7 @@ from mindroom.dispatch_source import (
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
 )
 
@@ -162,15 +163,16 @@ def requester_id_from_trusted_original_sender(
     *,
     original_sender: str | None,
     original_sender_entity_name: str | None,
+    original_sender_is_human: bool,
     source_kind: str | None,
     sender_trusts_original_sender: bool,
 ) -> str | None:
     """Return original-sender metadata that may act as the dispatch requester."""
     if not sender_trusts_original_sender or not original_sender:
         return None
-    if original_sender_entity_name is None:
+    if original_sender_is_human:
         return original_sender
-    if source_kind == SCHEDULED_SOURCE_KIND:
+    if original_sender_entity_name is not None and source_kind in {SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND}:
         return original_sender
     return None
 
@@ -201,7 +203,7 @@ def _turn_intent(
             intent = TurnIntent.ROUTER_HANDOFF
         else:
             intent = TurnIntent.TRUSTED_INTERNAL_RELAY
-    elif source_kind == SCHEDULED_SOURCE_KIND:
+    elif source_kind in {SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND}:
         intent = TurnIntent.SCHEDULED_FIRE
     elif source_kind == EXTERNAL_TRIGGER_SOURCE_KIND:
         intent = TurnIntent.EXTERNAL_TRIGGER

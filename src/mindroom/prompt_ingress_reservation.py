@@ -12,9 +12,11 @@ from mindroom.coalescing import (
     ReadyPendingEvent,
     close_ready_task_result_metadata,
 )
+from mindroom.ingress_lanes import ReceiptLaneKey
 
 if TYPE_CHECKING:
     from mindroom.coalescing_batch import CoalescingKey
+    from mindroom.handled_turns import TurnRecord
 
 
 @dataclass
@@ -25,6 +27,7 @@ class PromptIngressReservationOwner:
     slot: LaneSlot
     admitted: bool = False
     ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
+    pending_turn_claim: TurnRecord | None = None
 
     @staticmethod
     def _close_late_ready_task_result(task: asyncio.Task[ReadyPendingEvent | None]) -> None:
@@ -58,14 +61,14 @@ class PromptIngressReservationOwner:
             )
             metadata_transferred = True
         except BaseException:
-            await self.cancel_ready_task()
+            await self._cancel_ready_task()
             if ready_result is not None and not metadata_transferred:
                 close_ready_task_result_metadata(ready_result)
             raise
         self.admitted = True
         self.ready_task = None
 
-    async def cancel_ready_task(self) -> None:
+    async def _cancel_ready_task(self) -> None:
         """Cancel or collect the owned ready task once."""
         if self.ready_task is None:
             return
@@ -88,6 +91,18 @@ class PromptIngressReservationOwner:
         if self.admitted:
             return
         try:
-            await self.cancel_ready_task()
+            await self._cancel_ready_task()
         finally:
             self.gate.release_lane_slot(self.slot)
+
+    def reenter_lane(self) -> None:
+        """Take a fresh receipt-order position after a released wait.
+
+        Ingress that released its slot to wait for a competing owner has lost
+        its place in the burst it arrived in, and that burst is long over by
+        the time the wait returns. It re-enters at the back of the lane rather
+        than reusing a released slot, which no worker would ever deliver.
+        """
+        self.slot = self.gate.enter_lane(
+            ReceiptLaneKey(room_id=self.slot.room_id, sender_id=self.slot.sender_id),
+        )

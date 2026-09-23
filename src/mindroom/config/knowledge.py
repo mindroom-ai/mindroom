@@ -79,6 +79,10 @@ class KnowledgeBaseConfig(BaseModel):
         default=True,
         description="When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations",
     )
+    require_content_before_publish: bool = Field(
+        default=False,
+        description="Keep a cold semantic index initializing until at least one managed source file exists",
+    )
     chunk_size: int = Field(
         default=5000,
         ge=128,

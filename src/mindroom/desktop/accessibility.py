@@ -8,10 +8,10 @@ import math
 import re
 import sys
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import uuid4
 
 if TYPE_CHECKING:
@@ -36,6 +36,8 @@ class _Workspace(Protocol):
 
 PRIMARY_SCREEN_APP_ID = "primary-screen"
 MAX_ACCESSIBILITY_ELEMENTS = 128
+MAX_RETAINED_STATES = 128
+STATE_TTL_SECONDS = 120.0
 _MAX_ACCESSIBILITY_DEPTH = 12
 _MAX_VISITED_ELEMENTS = 512
 _MAX_TEXT_LENGTH = 160
@@ -68,6 +70,7 @@ _CONTAINER_ROLES = frozenset(
     },
 )
 _PRESENTATION_ONLY_ACTIONS = frozenset({"AXShowAlternateUI", "AXShowDefaultUI"})
+_PASSIVE_VOLATILE_ROLES = frozenset({"AXStaticText", "AXProgressIndicator", "AXBusyIndicator"})
 
 
 class AccessibilityError(RuntimeError):
@@ -134,7 +137,7 @@ class AccessibilityElement:
 
 @dataclass(frozen=True, slots=True)
 class AccessibilityState:
-    """One fresh app state whose element indexes expire on the next state change."""
+    """One retained observation with indexes and opaque refs scoped to its state ID."""
 
     state_id: str
     app_id: str
@@ -142,6 +145,11 @@ class AccessibilityState:
     window: DesktopRect
     elements: tuple[AccessibilityElement, ...]
     truncated: bool
+    stability: Literal["stable", "unstable", "truncated"] = "stable"
+
+    def element_ref(self, index: int) -> str:
+        """Return the opaque reference for an element in this exact snapshot."""
+        return hashlib.sha256(f"{self.state_id}:{index}".encode()).hexdigest()
 
     def to_result(self) -> dict[str, object]:
         """Return the app state sent to the model."""
@@ -149,8 +157,15 @@ class AccessibilityState:
             "state_id": self.state_id,
             "app": {"id": self.app_id, "name": self.app_name},
             "window": self.window.to_result(),
-            "elements": [element.to_result() for element in self.elements],
+            "elements": [
+                {
+                    **element.to_result(),
+                    "ref": self.element_ref(element.index),
+                }
+                for element in self.elements
+            ],
             "truncated": self.truncated,
+            "stability": "truncated" if self.truncated else self.stability,
         }
 
 
@@ -215,6 +230,10 @@ class AccessibilityBackend(Protocol):
         """Invoke the semantic press action on one element."""
         ...
 
+    def prepare_typing(self, app_id: str, state_id: str, element_index: int) -> Callable[[], None]:
+        """Focus an exact editable element and return a guard for subsequent input."""
+        ...
+
     def set_value(self, app_id: str, state_id: str, element_index: int, value: str) -> None:
         """Set one accessibility value after verifying it is writable."""
         ...
@@ -225,12 +244,20 @@ class AccessibilityBackend(Protocol):
 
 
 @dataclass(slots=True)
+class _MacElementIdentity:
+    ancestors: tuple[object, ...]
+    content_fingerprint: str
+
+
+@dataclass(slots=True)
 class _StoredMacState:
     public: AccessibilityState
     fingerprint: str
     references: tuple[object, ...]
     application: _RunningApplication | None
     window_reference: object | None
+    identities: tuple[_MacElementIdentity, ...] = ()
+    created_at: float = field(default_factory=lambda: time.monotonic())
 
 
 class MacAccessibilityBackend:
@@ -244,7 +271,7 @@ class MacAccessibilityBackend:
         self._screen_size = screen_size
         self._services: Any = ApplicationServices
         self._workspace: _Workspace = AppKit.NSWorkspace.sharedWorkspace()  # ty: ignore[unresolved-attribute]
-        self._states: dict[str, _StoredMacState] = {}
+        self._states: OrderedDict[str, _StoredMacState] = OrderedDict()
 
     def availability(self) -> dict[str, object]:
         """Report whether macOS granted the process Accessibility permission."""
@@ -293,19 +320,22 @@ class MacAccessibilityBackend:
         except AccessibilityError as exc:
             msg = "Application activation was requested, but its outcome is unknown; request list_apps before retrying."
             raise AccessibilityActionOutcomeUnknownError(msg) from exc
-        self._states.pop(app_id, None)
+        for state_id, stored in list(self._states.items()):
+            if stored.public.app_id == app_id:
+                del self._states[state_id]
 
     def get_app_state(self, app_id: str) -> AccessibilityState:
-        """Capture one allowed app and invalidate its previous element indexes."""
+        """Retain bounded observations for 120 monotonic seconds after collection."""
         self._require_allowed(app_id)
         if app_id == PRIMARY_SCREEN_APP_ID:
             state = _primary_screen_state(self._screen_size(), state_id=uuid4().hex)
-            self._states[app_id] = _StoredMacState(state, _state_fingerprint(state), (), None, None)
+            self._remember_state(_StoredMacState(state, _state_fingerprint(state), (), None, None))
             return state
         state_id = uuid4().hex
         candidate = self._collect_app_state(app_id, state_id=state_id)
         if candidate.public.truncated:
-            self._states[app_id] = candidate
+            candidate.public = replace(candidate.public, stability="truncated")
+            self._remember_state(candidate)
             return candidate.public
         matching_observations = 0
         for _ in range(_STATE_STABILIZATION_ATTEMPTS):
@@ -325,10 +355,35 @@ class MacAccessibilityBackend:
                 matching_observations = 0
             candidate = current
             if matching_observations >= _STATE_STABILIZATION_MATCHES:
-                self._states[app_id] = current
+                self._remember_state(current)
                 return current.public
-        msg = "Accessibility state did not settle; wait briefly and request get_app_state again."
-        raise AccessibilityError(msg)
+        candidate.public = replace(
+            candidate.public,
+            stability="truncated" if candidate.public.truncated else "unstable",
+        )
+        self._remember_state(candidate)
+        return candidate.public
+
+    def _remember_state(self, stored: _StoredMacState) -> None:
+        self._prune_states()
+        self._states[stored.public.state_id] = stored
+        while len(self._states) > MAX_RETAINED_STATES:
+            self._states.popitem(last=False)
+
+    def _prune_states(self) -> None:
+        now = time.monotonic()
+        for state_id, stored in list(self._states.items()):
+            if now - stored.created_at >= STATE_TTL_SECONDS:
+                del self._states[state_id]
+
+    def _stored_state(self, app_id: str, state_id: str) -> _StoredMacState:
+        self._require_allowed(app_id)
+        self._prune_states()
+        stored = self._states.get(state_id)
+        if stored is None or stored.public.app_id != app_id:
+            msg = "Accessibility state is stale; request get_app_state again before acting."
+            raise AccessibilityError(msg)
+        return stored
 
     def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
         """Revalidate exact state before focusing an allowed target."""
@@ -357,12 +412,12 @@ class MacAccessibilityBackend:
         element_index: int,
     ) -> AccessibilityElement:
         """Return one current element after structural revalidation."""
-        current = self._current_action_state(app_id, state_id, element_index)
-        self._require_element_enabled(current, element_index)
+        current, current_index = self._current_action_state(app_id, state_id, element_index)
+        self._require_element_enabled(current, current_index)
         self._activate(current.application)
-        current = self._current_action_state(app_id, state_id, element_index)
-        self._require_element_enabled(current, element_index)
-        element = current.public.elements[element_index]
+        current, current_index = self._current_action_state(app_id, state_id, element_index)
+        self._require_element_enabled(current, current_index)
+        element = current.public.elements[current_index]
         if element.bounds is not None and not _rect_center_inside(element.bounds, current.public.window):
             msg = f"Accessibility element {element_index} is outside the allowed app window."
             raise AccessibilityError(msg)
@@ -372,14 +427,85 @@ class MacAccessibilityBackend:
         """Perform AXPress only when the fresh element advertises it."""
         self.perform_action(app_id, state_id, element_index, self._services.kAXPressAction)
 
+    def prepare_typing(self, app_id: str, state_id: str, element_index: int) -> Callable[[], None]:
+        """Focus one exact nonsecure text field and return a guard for each input chunk."""
+        current, index = self._current_action_state(app_id, state_id, element_index)
+        reference = self._typing_target(current, index)
+        self._activate(current.application)
+        current, index = self._current_action_state(app_id, state_id, element_index)
+        reference = self._typing_target(current, index)
+        content = self._element_content_fingerprint(reference, None)
+        error = self._services.AXUIElementSetAttributeValue(reference, self._services.kAXFocusedAttribute, True)
+        if error != self._services.kAXErrorSuccess:
+            msg = "macOS did not confirm text-field focus; the action outcome is unknown."
+            raise AccessibilityActionOutcomeUnknownError(msg)
+
+        def guard() -> None:
+            try:
+                self._validate_typing_focus(app_id, state_id, element_index, reference, content)
+            except AccessibilityError as exc:
+                msg = "The exact text-field focus or target changed; typing stopped and its outcome may be partial."
+                raise AccessibilityActionOutcomeUnknownError(msg) from exc
+
+        guard()
+        return guard
+
+    def _typing_target(self, stored: _StoredMacState, index: int) -> object:
+        reference = self._writable_value_target(stored, index)
+        if stored.public.elements[index].role not in {"AXTextField", "AXTextArea", "AXComboBox"}:
+            msg = "Element-targeted typing requires an editable text field."
+            raise AccessibilityError(msg)
+        if not self._attribute_settable(reference, self._services.kAXFocusedAttribute):
+            msg = "The selected text field cannot be focused exactly."
+            raise AccessibilityError(msg)
+        return reference
+
+    def _validate_typing_focus(
+        self,
+        app_id: str,
+        state_id: str,
+        element_index: int,
+        reference: object,
+        content: str,
+    ) -> None:
+        observed = self._stored_state(app_id, state_id)
+        application = observed.application
+        if application is None or not application.isActive():
+            msg = "The allowed application lost keyboard focus."
+            raise AccessibilityError(msg)
+        current = self._collect_app_state(
+            app_id,
+            state_id=state_id,
+            expected_pid=application.processIdentifier(),
+            expected_window=observed.window_reference,
+        )
+        indexes = [index for index, candidate in enumerate(current.references) if candidate == reference]
+        if len(indexes) != 1:
+            msg = "The focused text element was replaced."
+            raise AccessibilityError(msg)
+        index = indexes[0]
+        previous = observed.public.elements[element_index]
+        target = current.public.elements[index]
+        app_reference = self._services.AXUIElementCreateApplication(application.processIdentifier())
+        if (
+            self._copy_attribute(app_reference, self._services.kAXFocusedUIElementAttribute) != reference
+            or current.public.window != observed.public.window
+            or replace(previous, index=index, parent_index=target.parent_index, value=target.value) != target
+            or observed.identities[element_index].ancestors != current.identities[index].ancestors
+            or self._element_content_fingerprint(reference, None) != content
+        ):
+            msg = "The exact text-field focus or identity changed."
+            raise AccessibilityError(msg)
+        self._typing_target(current, index)
+
     def set_value(self, app_id: str, state_id: str, element_index: int, value: str) -> None:
         """Set a writable AXValue after refreshing the element reference."""
-        current = self._current_action_state(app_id, state_id, element_index)
-        self._writable_value_target(current, element_index)
+        current, current_index = self._current_action_state(app_id, state_id, element_index)
+        self._writable_value_target(current, current_index)
         self._activate(current.application)
-        current = self._current_action_state(app_id, state_id, element_index)
-        reference = self._writable_value_target(current, element_index)
-        element = current.public.elements[element_index]
+        current, current_index = self._current_action_state(app_id, state_id, element_index)
+        reference = self._writable_value_target(current, current_index)
+        element = current.public.elements[current_index]
         if element.role in _FOCUS_BEFORE_SET_ROLES and self._services.kAXPressAction in element.actions:
             focus_error = self._services.AXUIElementPerformAction(reference, self._services.kAXPressAction)
             if focus_error != self._services.kAXErrorSuccess:
@@ -397,32 +523,31 @@ class MacAccessibilityBackend:
 
     def perform_action(self, app_id: str, state_id: str, element_index: int, action: str) -> None:
         """Perform only an action present in the fresh element's advertised action list."""
-        current = self._current_action_state(app_id, state_id, element_index)
-        self._advertised_action_target(current, element_index, action)
+        current, current_index = self._current_action_state(app_id, state_id, element_index)
+        self._advertised_action_target(current, current_index, action)
         self._activate(current.application)
-        current = self._current_action_state(app_id, state_id, element_index)
-        reference = self._advertised_action_target(current, element_index, action)
+        current, current_index = self._current_action_state(app_id, state_id, element_index)
+        reference = self._advertised_action_target(current, current_index, action)
         error = self._services.AXUIElementPerformAction(reference, action)
         if error != self._services.kAXErrorSuccess:
             msg = f"macOS accessibility action returned error {error}; the outcome is unknown."
             raise AccessibilityActionOutcomeUnknownError(msg)
 
     def _fresh_state(self, app_id: str, state_id: str) -> _StoredMacState:
-        self._require_allowed(app_id)
-        stored = self._states.get(app_id)
-        if stored is None or stored.public.state_id != state_id:
-            msg = "Accessibility state is stale; request get_app_state again before acting."
+        stored = self._stored_state(app_id, state_id)
+        if stored.public.stability != "stable" or stored.public.truncated:
+            msg = "Accessibility fallback requires a stable complete observation; request get_app_state again."
             raise AccessibilityError(msg)
         if app_id == PRIMARY_SCREEN_APP_ID:
             current = _primary_screen_state(self._screen_size(), state_id=state_id)
             if _state_fingerprint(current) != stored.fingerprint:
-                self._states.pop(app_id, None)
+                self._states.pop(state_id, None)
                 msg = "Accessibility state changed; request get_app_state again before acting."
                 raise AccessibilityError(msg)
             return stored
         application = stored.application
         if application is None or stored.window_reference is None:
-            self._states.pop(app_id, None)
+            self._states.pop(state_id, None)
             msg = "Accessibility target is stale; request get_app_state again before acting."
             raise AccessibilityError(msg)
         try:
@@ -433,10 +558,10 @@ class MacAccessibilityBackend:
                 expected_window=stored.window_reference,
             )
         except AccessibilityError:
-            self._states.pop(app_id, None)
+            self._states.pop(state_id, None)
             raise
-        if current.fingerprint != stored.fingerprint:
-            self._states.pop(app_id, None)
+        if current.fingerprint != stored.fingerprint or _fallback_identity(current) != _fallback_identity(stored):
+            self._states.pop(state_id, None)
             msg = "Accessibility state changed; request get_app_state again before acting."
             raise AccessibilityError(msg)
         return current
@@ -446,11 +571,8 @@ class MacAccessibilityBackend:
         app_id: str,
         state_id: str,
         element_index: int,
-    ) -> _StoredMacState:
-        observed = self._states.get(app_id)
-        if observed is None or observed.public.state_id != state_id:
-            msg = "Accessibility state is stale; request get_app_state again before acting."
-            raise AccessibilityError(msg)
+    ) -> tuple[_StoredMacState, int]:
+        observed = self._stored_state(app_id, state_id)
         application = observed.application
         if application is None or observed.window_reference is None:
             msg = "Accessibility target is stale; request get_app_state again before acting."
@@ -463,21 +585,25 @@ class MacAccessibilityBackend:
                 expected_window=observed.window_reference,
             )
         except AccessibilityError:
-            self._states.pop(app_id, None)
+            self._states.pop(state_id, None)
             raise
-        self._validate_element_index(observed, element_index)
-        self._validate_element_index(current, element_index)
-        if observed.public.elements[element_index] != current.public.elements[element_index]:
-            self._states.pop(app_id, None)
-            msg = "Accessibility target element changed; request get_app_state again before acting."
-            raise AccessibilityError(msg)
-        return current
+        reference = self._validate_element_index(observed, element_index)
+        matching_indexes = [index for index, candidate in enumerate(current.references) if candidate == reference]
+        if len(matching_indexes) == 1:
+            current_index = matching_indexes[0]
+            previous = observed.public.elements[element_index]
+            target = current.public.elements[current_index]
+            # Enumeration offsets may shift, but the selected object and its ancestry cannot.
+            same_target = replace(previous, index=target.index, parent_index=target.parent_index) == target
+            same_identity = observed.identities[element_index] == current.identities[current_index]
+            if same_target and same_identity and current.public.window == observed.public.window:
+                return current, current_index
+        self._states.pop(state_id, None)
+        msg = "Accessibility target element changed; request get_app_state again before acting."
+        raise AccessibilityError(msg)
 
     def _current_capture_state(self, app_id: str, state_id: str) -> _StoredMacState:
-        observed = self._states.get(app_id)
-        if observed is None or observed.public.state_id != state_id:
-            msg = "Accessibility state is stale; request get_app_state again before acting."
-            raise AccessibilityError(msg)
+        observed = self._stored_state(app_id, state_id)
         if app_id == PRIMARY_SCREEN_APP_ID:
             return self._fresh_state(app_id, state_id)
         application = observed.application
@@ -492,10 +618,10 @@ class MacAccessibilityBackend:
                 expected_window=observed.window_reference,
             )
         except AccessibilityError:
-            self._states.pop(app_id, None)
+            self._states.pop(state_id, None)
             raise
         if current.public.window != observed.public.window:
-            self._states.pop(app_id, None)
+            self._states.pop(state_id, None)
             msg = "Accessibility target window geometry changed; request get_app_state again before capture."
             raise AccessibilityError(msg)
         return current
@@ -521,7 +647,7 @@ class MacAccessibilityBackend:
         if window is None:
             msg = f"Allowed application {app_id!r} has no readable window bounds."
             raise AccessibilityError(msg)
-        elements, references, truncated = self._flatten_tree(window_element)
+        elements, references, identities, truncated = self._flatten_tree(window_element)
         state = AccessibilityState(
             state_id=state_id,
             app_id=app_id,
@@ -530,20 +656,21 @@ class MacAccessibilityBackend:
             elements=elements,
             truncated=truncated,
         )
-        return _StoredMacState(state, _state_fingerprint(state), references, application, window_element)
+        return _StoredMacState(state, _state_fingerprint(state), references, application, window_element, identities)
 
     def _flatten_tree(
         self,
         root: object,
-    ) -> tuple[tuple[AccessibilityElement, ...], tuple[object, ...], bool]:
-        queue: deque[tuple[object, int, int | None]] = deque([(root, 0, None)])
+    ) -> tuple[tuple[AccessibilityElement, ...], tuple[object, ...], tuple[_MacElementIdentity, ...], bool]:
+        queue: deque[tuple[object, int, int | None, tuple[object, ...]]] = deque([(root, 0, None, ())])
         seen: set[object] = set()
         elements: list[AccessibilityElement] = []
         references: list[object] = []
+        identities: list[_MacElementIdentity] = []
         visited = 0
         truncated = False
         while queue and visited < _MAX_VISITED_ELEMENTS:
-            reference, depth, parent_index = queue.popleft()
+            reference, depth, parent_index, ancestors = queue.popleft()
             if reference in seen:
                 continue
             seen.add(reference)
@@ -553,9 +680,8 @@ class MacAccessibilityBackend:
             actions = self._action_names(reference)
             name = self._element_name(reference)
             secure = role == "AXSecureTextField" or subrole == "AXSecureTextField"
-            value = (
-                None if secure else _bounded_value(self._copy_attribute(reference, self._services.kAXValueAttribute))
-            )
+            raw_value = None if secure else self._copy_attribute(reference, self._services.kAXValueAttribute)
+            value = _bounded_value(raw_value)
             include = (
                 depth == 0
                 or role not in _CONTAINER_ROLES
@@ -588,6 +714,9 @@ class MacAccessibilityBackend:
                     ),
                 )
                 references.append(reference)
+                identities.append(
+                    _MacElementIdentity(ancestors, self._element_content_fingerprint(reference, raw_value)),
+                )
                 current_parent = index
             children = self._children(reference, role=role)
             if depth >= _MAX_ACCESSIBILITY_DEPTH:
@@ -595,10 +724,34 @@ class MacAccessibilityBackend:
                     truncated = True
                 continue
             for child in children:
-                queue.append((child, depth + 1, current_parent))
+                queue.append((child, depth + 1, current_parent, (*ancestors, reference)))
         if queue or visited >= _MAX_VISITED_ELEMENTS:
             truncated = True
-        return tuple(elements), tuple(references), truncated
+        return tuple(elements), tuple(references), tuple(identities), truncated
+
+    def _element_content_fingerprint(self, reference: object, raw_value: object) -> str:
+        # Hash full local text: truncation of the public tree must not hide a changed target.
+        content = [
+            self._copy_attribute(reference, attribute)
+            for attribute in (
+                self._services.kAXTitleAttribute,
+                self._services.kAXDescriptionAttribute,
+                self._services.kAXHelpAttribute,
+                self._services.kAXIdentifierAttribute,
+            )
+        ]
+        content.append(raw_value)
+        action_error, actions = self._services.AXUIElementCopyActionNames(reference, None)
+        if (
+            action_error == self._services.kAXErrorSuccess
+            and isinstance(actions, Sequence)
+            and not isinstance(actions, str)
+        ):
+            content.append(json.dumps(sorted(action for action in actions if isinstance(action, str))))
+        else:
+            content.append(None)
+        scalars = [value if isinstance(value, str) else _bounded_value(value) for value in content]
+        return hashlib.sha256(json.dumps(scalars, ensure_ascii=True).encode()).hexdigest()
 
     def _running_application(self, app_id: str, *, expected_pid: int | None = None) -> _RunningApplication:
         matches = [
@@ -845,6 +998,12 @@ class ScreenshotOnlyAccessibilityBackend:
         """Reject semantic clicking on a screenshot-only backend."""
         self.element_for_action(app_id, state_id, element_index)
 
+    def prepare_typing(self, app_id: str, state_id: str, element_index: int) -> Callable[[], None]:  # noqa: ARG002
+        """Reject element typing when the platform cannot verify exact AX focus."""
+        self._require_primary(app_id)
+        msg = "Element-targeted typing requires macOS accessibility."
+        raise AccessibilityError(msg)
+
     def set_value(self, app_id: str, state_id: str, element_index: int, value: str) -> None:
         """Reject semantic value changes on a screenshot-only backend."""
         del value
@@ -917,6 +1076,23 @@ def _primary_screen_state(screen_size: tuple[int, int], *, state_id: str) -> Acc
     )
 
 
+def _fallback_identity(stored: _StoredMacState) -> tuple[tuple[object, tuple[object, ...], str], ...]:
+    """Keep native object, ancestry and unabridged content checks for nonpassive targets."""
+    return tuple(
+        (stored.references[index], stored.identities[index].ancestors, stored.identities[index].content_fingerprint)
+        for index, element in enumerate(stored.public.elements)
+        if not _passive_volatile_element(element)
+    )
+
+
+def _passive_volatile_element(element: AccessibilityElement) -> bool:
+    return (
+        element.role in _PASSIVE_VOLATILE_ROLES
+        and not element.settable
+        and not any(action not in _PRESENTATION_ONLY_ACTIONS for action in element.actions)
+    )
+
+
 def _state_fingerprint(state: AccessibilityState) -> str:
     structural = {
         "app_id": state.app_id,
@@ -927,8 +1103,8 @@ def _state_fingerprint(state: AccessibilityState) -> str:
                 "parent_index": element.parent_index,
                 "role": element.role,
                 "subrole": element.subrole,
-                "name": element.name,
-                "value": element.value,
+                "name": None if _passive_volatile_element(element) else element.name,
+                "value": None if _passive_volatile_element(element) else element.value,
                 "enabled": element.enabled,
                 "settable": element.settable,
                 "bounds": (
@@ -979,7 +1155,9 @@ def _rect_center_inside(rect: DesktopRect, container: DesktopRect) -> bool:
 
 __all__ = [
     "MAX_ACCESSIBILITY_ELEMENTS",
+    "MAX_RETAINED_STATES",
     "PRIMARY_SCREEN_APP_ID",
+    "STATE_TTL_SECONDS",
     "AccessibilityActionOutcomeUnknownError",
     "AccessibilityBackend",
     "AccessibilityCapture",

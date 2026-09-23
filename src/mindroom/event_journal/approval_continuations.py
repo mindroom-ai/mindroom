@@ -1,0 +1,1003 @@
+"""Paused Agno runs owned by their exact pending journal events."""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass, field, replace
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, Literal, cast
+
+from mindroom.handled_turns import TurnRecordCodec
+from mindroom.history.types import HistoryScope
+from mindroom.legacy_approval_payloads import resolve_legacy_visibility
+from mindroom.response_sources import ResponseAttempt, ResponseSources
+from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
+
+from . import journal, membership_state, outbox, response_attempts, turn_records
+from .legacy_approval_recovery import deleted_delivery_is_terminal
+from .models import DeliveryStage
+from .projection import is_tombstoned
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from mindroom.turn_record import TurnRecord
+
+    from .backend import Row, Transaction
+
+type ApprovalContinuationState = Literal["waiting", "ready", "claimed", "failing"]
+
+_CONTINUATION_COLUMNS = """
+    approval_id, entity_name, state, generation,
+    runtime_generation, failure_reason, context_json
+"""
+
+
+def _unavailable_notice_delivery_id(approval_id: str, membership_epoch: int) -> str:
+    """Return one membership's delivery identity for an unavailable-owner notice."""
+    return f"approval-unavailable:{approval_id}:{membership_epoch}"
+
+
+def enqueue_unavailable_notice(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    room_id: str,
+    thread_id: str | None,
+    payload: Mapping[str, object],
+) -> str | None:
+    """Enqueue the current membership's physical attempt for one logical notice."""
+    membership_epoch = membership_state.claim_active_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+    )
+    if membership_epoch is None:
+        return None
+    delivery_id = _unavailable_notice_delivery_id(approval_id, membership_epoch)
+    transaction_id = outbox.enqueue(
+        transaction,
+        principal_id,
+        delivery_id=delivery_id,
+        stage=DeliveryStage.FINAL,
+        event_type="m.room.message",
+        room_id=room_id,
+        membership_epoch=membership_epoch,
+        thread_id=thread_id,
+        payload=payload,
+        edits_event_id=None,
+    )
+    return delivery_id if transaction_id is not None else None
+
+
+class ApprovalDecision(StrEnum):
+    """One terminal decision for an exact paused tool call."""
+
+    APPROVED = "approved"
+    DENIED = "denied"
+    EXPIRED = "expired"
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalCall:
+    """One exact tool call in the current paused generation."""
+
+    tool_call_id: str
+    tool_name: str
+    invoking_agent: str
+    expires_at_ns: int
+    decision: ApprovalDecision | None = None
+    reason: str | None = None
+    human_approval_required: bool | None = None
+    toolkit_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalMemoryTurn:
+    """The original history fields consumed by conversation memory."""
+
+    sender: str
+    body: str
+
+
+def _origin_to_dict(origin: TurnOrigin) -> dict[str, object]:
+    """Serialize exact hook origin without coupling the store to responses."""
+    return {
+        "transport_sender_id": origin.transport_sender_id,
+        "requester_id": origin.requester_id,
+        "sender_entity_name": origin.sender_entity_name,
+        "requester_entity_name": origin.requester_entity_name,
+        "sender_kind": origin.sender_kind.value,
+        "requester_kind": origin.requester_kind.value,
+        "intent": origin.intent.value,
+        "source_kind": origin.source_kind,
+        "trust": origin.trust.value,
+    }
+
+
+def _origin_from_dict(value: object) -> TurnOrigin | None:
+    """Restore one exact hook origin from the durable snapshot."""
+    if not isinstance(value, dict):
+        return None
+    stored = cast("dict[str, object]", value)
+    return TurnOrigin(
+        transport_sender_id=cast("str", stored["transport_sender_id"]),
+        requester_id=cast("str", stored["requester_id"]),
+        sender_entity_name=cast("str | None", stored.get("sender_entity_name")),
+        requester_entity_name=cast("str | None", stored.get("requester_entity_name")),
+        sender_kind=SenderKind(cast("str", stored["sender_kind"])),
+        requester_kind=SenderKind(cast("str", stored["requester_kind"])),
+        intent=TurnIntent(cast("str", stored["intent"])),
+        source_kind=cast("str", stored["source_kind"]),
+        trust=TurnTrust(cast("str", stored["trust"])),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalContinuation:
+    """The MindRoom context required to continue one persisted Agno pause."""
+
+    approval_id: str
+    run_id: str
+    session_id: str
+    entity_kind: Literal["agent", "team"]
+    entity_name: str
+    room_id: str
+    thread_id: str | None
+    requester_id: str
+    response_event_id: str
+    sources: ResponseSources
+    calls: tuple[ApprovalCall, ...]
+    state: ApprovalContinuationState
+    response_text: str = ""
+    response_tool_trace: tuple[dict[str, object], ...] = ()
+    response_presentation_state: dict[str, object] = field(default_factory=dict)
+    delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
+    show_tool_calls: bool = True
+    show_tool_calls_is_frozen: bool = True
+    execution_identity: dict[str, object] = field(default_factory=dict)
+    runtime_model_name: str | None = None
+    team_member_names: tuple[str, ...] = ()
+    team_member_model_names: tuple[tuple[str, str], ...] = ()
+    team_mode: str | None = None
+    request_body: str = ""
+    transport_sender_id: str | None = None
+    source_kind: str = "message"
+    attachment_ids: tuple[str, ...] = ()
+    mentioned_agents: tuple[str, ...] = ()
+    hook_source: str | None = None
+    message_received_depth: int = 0
+    dispatch_policy_source_kind: str | None = None
+    correlation_id: str | None = None
+    history_scope: HistoryScope | None = None
+    origin: TurnOrigin | None = None
+    memory_prompt: str | None = None
+    memory_thread_history: tuple[ApprovalMemoryTurn, ...] = ()
+    thread_summary_message_count_hint: int | None = None
+    runtime_generation: str | None = None
+    failure_reason: str | None = None
+    generation: int = 0
+    prepared_edit_record: TurnRecord | None = None
+    continuation_count: int = 0
+
+    @property
+    def source_event_ids(self) -> tuple[str, ...]:
+        """Return the captured pending sources owned by this continuation."""
+        return self.sources.pending_event_ids
+
+
+def _context(continuation: ApprovalContinuation) -> dict[str, object]:
+    """Return the opaque response snapshot stored beside normalized routing facts."""
+    return {
+        "run_id": continuation.run_id,
+        "continuation_count": continuation.continuation_count,
+        "session_id": continuation.session_id,
+        "entity_kind": continuation.entity_kind,
+        "thread_id": continuation.thread_id,
+        "requester_id": continuation.requester_id,
+        "response_text": continuation.response_text,
+        "response_tool_trace": [dict(event) for event in continuation.response_tool_trace],
+        "response_presentation_state": continuation.response_presentation_state,
+        "delegation_storage_bindings": continuation.delegation_storage_bindings,
+        "show_tool_calls": continuation.show_tool_calls,
+        "execution_identity": continuation.execution_identity,
+        "runtime_model_name": continuation.runtime_model_name,
+        "team_member_names": list(continuation.team_member_names),
+        "team_member_model_names": [list(item) for item in continuation.team_member_model_names],
+        "team_mode": continuation.team_mode,
+        "request_body": continuation.request_body,
+        "transport_sender_id": continuation.transport_sender_id,
+        "source_kind": continuation.source_kind,
+        "attachment_ids": list(continuation.attachment_ids),
+        "mentioned_agents": list(continuation.mentioned_agents),
+        "hook_source": continuation.hook_source,
+        "message_received_depth": continuation.message_received_depth,
+        "dispatch_policy_source_kind": continuation.dispatch_policy_source_kind,
+        "correlation_id": continuation.correlation_id,
+        "history_scope": continuation.history_scope.to_metadata() if continuation.history_scope is not None else None,
+        "origin": _origin_to_dict(continuation.origin) if continuation.origin is not None else None,
+        "memory_prompt": continuation.memory_prompt,
+        "memory_thread_history": [
+            {"sender": turn.sender, "body": turn.body} for turn in continuation.memory_thread_history
+        ],
+        "thread_summary_message_count_hint": continuation.thread_summary_message_count_hint,
+        "prepared_edit_record": (
+            TurnRecordCodec._to_ledger_record(continuation.prepared_edit_record)
+            if continuation.prepared_edit_record is not None
+            else None
+        ),
+    }
+
+
+def _json(value: Mapping[str, object]) -> str:
+    """Encode one stable JSON object for both durable backends."""
+    return json.dumps(dict(value), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+
+def get(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+) -> ApprovalContinuation | None:
+    """Load one continuation and its exact ordered sources and calls."""
+    row = transaction.fetchone(
+        f"""
+        SELECT {_CONTINUATION_COLUMNS}
+        FROM approval_continuations
+        WHERE principal_id = ? AND approval_id = ?
+        """,  # noqa: S608 - a fixed column list, not interpolated input
+        (principal_id, approval_id),
+    )
+    if row is None:
+        return None
+    source_rows = transaction.fetchall(
+        """
+        SELECT event_id FROM approval_continuation_sources
+        WHERE principal_id = ? AND approval_id = ?
+        ORDER BY source_ordinal
+        """,
+        (principal_id, approval_id),
+    )
+    call_rows = transaction.fetchall(
+        """
+        SELECT tool_call_id, tool_name, invoking_agent, expires_at_ns, decision, reason,
+               human_approval_required, toolkit_name
+        FROM approval_continuation_calls
+        WHERE principal_id = ? AND approval_id = ? AND generation = ?
+        ORDER BY call_ordinal
+        """,
+        (principal_id, approval_id, int(row["generation"])),
+    )
+    pending = tuple(str(source["event_id"]) for source in source_rows)
+    attempt = response_attempts.load_response_attempt(transaction, principal_id, pending[0]) if pending else None
+    return _from_rows(row, call_rows, pending, attempt)
+
+
+def _from_rows(
+    row: Row,
+    call_rows: tuple[Row, ...],
+    pending: tuple[str, ...],
+    attempt: response_attempts.StoredResponseAttempt | None,
+) -> ApprovalContinuation:
+    """Decode one normalized continuation aggregate."""
+    if attempt is None or attempt.response_event_id is None:
+        message = "Approval continuation has no response attempt identity"
+        raise ValueError(message)
+    sources = ResponseSources(
+        pending,
+        attempt.logical_source_event_ids,
+        attempt.discovery_event_ids,
+        attempt.edit_receipt_order,
+    )
+    context = json.loads(str(row["context_json"]))
+    if not isinstance(context, dict):
+        msg = f"Approval continuation {row['approval_id']!r} has a non-object context"
+        raise TypeError(msg)
+    stored = cast("dict[str, Any]", context)
+    prepared_edit = stored.get("prepared_edit_record")
+    calls = tuple(
+        ApprovalCall(
+            tool_call_id=str(call["tool_call_id"]),
+            tool_name=str(call["tool_name"]),
+            invoking_agent=str(call["invoking_agent"]),
+            toolkit_name=cast("str | None", call["toolkit_name"]),
+            expires_at_ns=int(call["expires_at_ns"]),
+            decision=(ApprovalDecision(str(call["decision"])) if call["decision"] is not None else None),
+            reason=cast("str | None", call["reason"]),
+            human_approval_required=(
+                bool(call["human_approval_required"]) if call["human_approval_required"] is not None else None
+            ),
+        )
+        for call in call_rows
+    )
+    return ApprovalContinuation(
+        approval_id=str(row["approval_id"]),
+        run_id=cast("str", stored["run_id"]),
+        continuation_count=int(stored.get("continuation_count", 0)),
+        session_id=cast("str", stored["session_id"]),
+        entity_kind=cast("Literal['agent', 'team']", stored["entity_kind"]),
+        entity_name=attempt.entity_name,
+        room_id=attempt.room_id,
+        thread_id=cast("str | None", stored.get("thread_id")),
+        requester_id=cast("str", stored["requester_id"]),
+        response_event_id=attempt.response_event_id,
+        sources=sources,
+        calls=calls,
+        state=cast("ApprovalContinuationState", row["state"]),
+        response_text=cast("str", stored.get("response_text", "")),
+        response_tool_trace=tuple(
+            dict(event) for event in cast("list[dict[str, object]]", stored.get("response_tool_trace", []))
+        ),
+        response_presentation_state=cast(
+            "dict[str, object]",
+            stored.get("response_presentation_state", {}),
+        ),
+        delegation_storage_bindings=cast(
+            "dict[str, dict[str, object]]",
+            stored.get("delegation_storage_bindings", {}),
+        ),
+        show_tool_calls=stored.get("show_tool_calls", True) is not False,
+        show_tool_calls_is_frozen="show_tool_calls" in stored,
+        execution_identity=cast("dict[str, object]", stored.get("execution_identity", {})),
+        runtime_model_name=cast("str | None", stored.get("runtime_model_name")),
+        team_member_names=tuple(cast("list[str]", stored.get("team_member_names", []))),
+        team_member_model_names=tuple(
+            (str(item[0]), str(item[1]))
+            for item in cast("list[list[str]]", stored.get("team_member_model_names", []))
+            if len(item) == 2
+        ),
+        team_mode=cast("str | None", stored.get("team_mode")),
+        request_body=cast("str", stored.get("request_body", "")),
+        transport_sender_id=cast("str | None", stored.get("transport_sender_id")),
+        source_kind=cast("str", stored.get("source_kind", "message")),
+        attachment_ids=tuple(cast("list[str]", stored.get("attachment_ids", []))),
+        mentioned_agents=tuple(cast("list[str]", stored.get("mentioned_agents", []))),
+        hook_source=cast("str | None", stored.get("hook_source")),
+        message_received_depth=int(stored.get("message_received_depth", 0)),
+        dispatch_policy_source_kind=cast("str | None", stored.get("dispatch_policy_source_kind")),
+        correlation_id=cast("str | None", stored.get("correlation_id")),
+        history_scope=HistoryScope.from_metadata(stored.get("history_scope")),
+        origin=_origin_from_dict(stored.get("origin")),
+        memory_prompt=cast("str | None", stored.get("memory_prompt")),
+        memory_thread_history=tuple(
+            ApprovalMemoryTurn(
+                sender=cast("str", turn["sender"]),
+                body=cast("str", turn["body"]),
+            )
+            for turn in cast("list[dict[str, object]]", stored.get("memory_thread_history", []))
+        ),
+        thread_summary_message_count_hint=cast("int | None", stored.get("thread_summary_message_count_hint")),
+        runtime_generation=cast("str | None", row["runtime_generation"]),
+        failure_reason=cast("str | None", row["failure_reason"]),
+        generation=int(row["generation"]),
+        prepared_edit_record=TurnRecordCodec._from_ledger_record(
+            str(prepared_edit.get("anchor_event_id")),
+            prepared_edit,
+        )
+        if isinstance(prepared_edit, dict)
+        else None,
+    )
+
+
+def _insert_calls(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+    generation: int,
+    calls: tuple[ApprovalCall, ...],
+) -> None:
+    """Insert one ordered exact-call generation."""
+    for ordinal, call in enumerate(calls):
+        transaction.execute(
+            """
+            INSERT INTO approval_continuation_calls (
+                principal_id, approval_id, generation, tool_call_id, call_ordinal,
+                tool_name, invoking_agent, expires_at_ns, decision, reason,
+                human_approval_required, toolkit_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                principal_id,
+                approval_id,
+                generation,
+                call.tool_call_id,
+                ordinal,
+                call.tool_name,
+                call.invoking_agent,
+                call.expires_at_ns,
+                call.decision.value if call.decision is not None else None,
+                call.reason,
+                call.human_approval_required,
+                call.toolkit_name,
+            ),
+        )
+
+
+def create(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+) -> ApprovalContinuation | None:
+    """Create one paused-run owner only while all of its sources remain pending."""
+    if not continuation.source_event_ids:
+        return None
+    # Admission and approval creation must agree which owner receives a
+    # concurrent source redaction, on PostgreSQL as well as SQLite.
+    membership_epoch = membership_state.claim_active_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=continuation.room_id,
+    )
+    if membership_epoch is None:
+        return None
+    initial = outbox.load(
+        transaction,
+        principal_id,
+        delivery_id=continuation.source_event_ids[0],
+        stage=DeliveryStage.INITIAL,
+    )
+    if initial is not None and initial.retired:
+        return None
+    for event_id in continuation.source_event_ids:
+        row = transaction.fetchone(
+            """
+            SELECT 1 AS present FROM journal_events
+            WHERE principal_id = ? AND event_id = ? AND room_id = ? AND state = 'pending'
+            """,
+            (principal_id, event_id, continuation.room_id),
+        )
+        if row is None:
+            return None
+    inserted = transaction.fetchone(
+        """
+        INSERT INTO approval_continuations (
+            principal_id, approval_id, entity_name, state,
+            generation, runtime_generation, failure_reason, context_json, created_at_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (approval_id) DO NOTHING
+        RETURNING approval_id
+        """,
+        (
+            principal_id,
+            continuation.approval_id,
+            continuation.entity_name,
+            continuation.state,
+            continuation.generation,
+            continuation.runtime_generation,
+            continuation.failure_reason,
+            _json(_context(continuation)),
+            time.time_ns(),
+        ),
+    )
+    if inserted is None:
+        existing = get(transaction, principal_id, approval_id=continuation.approval_id)
+        return existing if existing == continuation else None
+    response_attempts.register_response_attempt(
+        transaction,
+        principal_id,
+        attempt=ResponseAttempt(continuation.entity_name, continuation.sources),
+        room_id=continuation.room_id,
+        membership_epoch=membership_epoch,
+        response_event_id=continuation.response_event_id,
+    )
+    for ordinal, event_id in enumerate(continuation.source_event_ids):
+        transaction.execute(
+            """
+            INSERT INTO approval_continuation_sources (
+                principal_id, approval_id, event_id, source_ordinal
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (principal_id, continuation.approval_id, event_id, ordinal),
+        )
+    _insert_calls(
+        transaction,
+        principal_id,
+        continuation.approval_id,
+        continuation.generation,
+        continuation.calls,
+    )
+    return get(transaction, principal_id, approval_id=continuation.approval_id)
+
+
+def for_source(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    event_id: str,
+) -> ApprovalContinuation | None:
+    """Return the paused run that owns one exact source event."""
+    row = transaction.fetchone(
+        """
+        SELECT approval_id FROM approval_continuation_sources
+        WHERE principal_id = ? AND event_id = ?
+        """,
+        (principal_id, event_id),
+    )
+    return None if row is None else get(transaction, principal_id, approval_id=str(row["approval_id"]))
+
+
+def for_entities(
+    transaction: Transaction,
+    entity_names: set[str],
+    *,
+    limit: int,
+    after: tuple[str, str] | None = None,
+) -> tuple[tuple[str, ApprovalContinuation], ...]:
+    """Return one bounded page owned by exact managed entities."""
+    if not entity_names:
+        return ()
+    ordered_names = sorted(entity_names)
+    placeholders = ", ".join("?" for _name in ordered_names)
+    cursor_clause = "" if after is None else " AND (entity_name/*bytes*/, approval_id/*bytes*/) > (?, ?)"
+    cursor_params: tuple[object, ...] = () if after is None else after
+    rows = transaction.fetchall(
+        f"""
+        SELECT principal_id, {_CONTINUATION_COLUMNS} FROM approval_continuations
+        WHERE entity_name IN ({placeholders}){cursor_clause}
+        ORDER BY entity_name/*bytes*/, approval_id/*bytes*/
+        LIMIT ?
+        """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
+        (*ordered_names, *cursor_params, limit),
+    )
+    return _load_owners(transaction, rows)
+
+
+def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple[str, ApprovalContinuation], ...]:
+    """Load one page's normalized children without one query per owner."""
+    if not rows:
+        return ()
+    approval_ids = tuple(str(row["approval_id"]) for row in rows)
+    placeholders = ", ".join("?" for _approval_id in approval_ids)
+    source_rows = transaction.fetchall(
+        f"""
+        SELECT approval_id, event_id FROM approval_continuation_sources
+        WHERE approval_id IN ({placeholders})
+        ORDER BY approval_id/*bytes*/, source_ordinal
+        """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
+        approval_ids,
+    )
+    call_rows = transaction.fetchall(
+        f"""
+        SELECT calls.approval_id, calls.tool_call_id, calls.tool_name,
+               calls.invoking_agent, calls.expires_at_ns, calls.decision, calls.reason,
+               calls.human_approval_required, calls.toolkit_name
+        FROM approval_continuation_calls AS calls
+        JOIN approval_continuations AS continuations
+          ON continuations.principal_id = calls.principal_id
+         AND continuations.approval_id = calls.approval_id
+         AND continuations.generation = calls.generation
+        WHERE calls.approval_id IN ({placeholders})
+        ORDER BY calls.approval_id/*bytes*/, calls.call_ordinal
+        """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
+        approval_ids,
+    )
+    pending_by_approval: dict[str, list[str]] = {approval_id: [] for approval_id in approval_ids}
+    for source in source_rows:
+        pending_by_approval[str(source["approval_id"])].append(str(source["event_id"]))
+    calls_by_approval: dict[str, list[Row]] = {approval_id: [] for approval_id in approval_ids}
+    for call in call_rows:
+        calls_by_approval[str(call["approval_id"])].append(call)
+    attempts = response_attempts.load_response_attempts(
+        transaction,
+        tuple(
+            (str(row["principal_id"]), pending[0])
+            for row in rows
+            if (pending := pending_by_approval[str(row["approval_id"])])
+        ),
+    )
+    owners = []
+    for row in rows:
+        principal_id = str(row["principal_id"])
+        approval_id = str(row["approval_id"])
+        pending = tuple(pending_by_approval[approval_id])
+        attempt = attempts.get((principal_id, pending[0])) if pending else None
+        continuation = _from_rows(row, tuple(calls_by_approval[approval_id]), pending, attempt)
+        owners.append((principal_id, continuation))
+    return tuple(owners)
+
+
+def all_owners(
+    transaction: Transaction,
+    *,
+    limit: int,
+    after: tuple[str, str] | None = None,
+) -> tuple[tuple[str, ApprovalContinuation], ...]:
+    """Return one bounded owner page with its journal principals."""
+    cursor_clause = "" if after is None else " WHERE (entity_name/*bytes*/, approval_id/*bytes*/) > (?, ?)"
+    cursor_params: tuple[object, ...] = () if after is None else after
+    rows = transaction.fetchall(
+        f"""
+        SELECT principal_id, {_CONTINUATION_COLUMNS} FROM approval_continuations
+        {cursor_clause}
+        ORDER BY entity_name/*bytes*/, approval_id/*bytes*/
+        LIMIT ?
+        """,  # noqa: S608 - a fixed cursor clause, not input
+        (*cursor_params, limit),
+    )
+    return _load_owners(transaction, rows)
+
+
+def claim(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    runtime_generation: str,
+    legacy_show_tool_calls: bool | None = None,
+) -> ApprovalContinuation | None:
+    """Move one ready paused run into its single execution attempt."""
+    current = get(transaction, principal_id, approval_id=approval_id)
+    if current is None or current.state != "ready":
+        return None
+    show_tool_calls = resolve_legacy_visibility(
+        show_tool_calls=current.show_tool_calls,
+        is_frozen=current.show_tool_calls_is_frozen,
+        current_policy=legacy_show_tool_calls,
+    )
+    claimed_continuation = replace(
+        current,
+        state="claimed",
+        runtime_generation=runtime_generation,
+        show_tool_calls=show_tool_calls,
+        show_tool_calls_is_frozen=True,
+    )
+    claimed = transaction.fetchone(
+        """
+        UPDATE approval_continuations
+        SET state = 'claimed', runtime_generation = ?, context_json = ?
+        WHERE principal_id = ? AND approval_id = ? AND state = 'ready'
+        RETURNING approval_id
+        """,
+        (
+            runtime_generation,
+            _json(_context(claimed_continuation)),
+            principal_id,
+            approval_id,
+        ),
+    )
+    return None if claimed is None else get(transaction, principal_id, approval_id=approval_id)
+
+
+def advance(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    claimant_generation: int,
+    run_id: str,
+    session_id: str,
+    calls: tuple[ApprovalCall, ...],
+    runtime_model_name: str | None = None,
+    response_text: str | None = None,
+    response_tool_trace: tuple[dict[str, object], ...] | None = None,
+    response_presentation_state: dict[str, object] | None = None,
+    delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
+    continuation_count: int | None = None,
+) -> ApprovalContinuation | None:
+    """Replace one claimed generation with the next exact Agno pause."""
+    current = get(transaction, principal_id, approval_id=approval_id)
+    if current is None:
+        return None
+    next_generation = claimant_generation + 1
+    # Every chained generation stays fenced until its ordered Matrix edit and
+    # any cards are published. Even an automatically decided generation must
+    # not become executable in the persist-before-ack crash window.
+    state: ApprovalContinuationState = "waiting"
+    publication_owner = current.runtime_generation
+    advanced = replace(
+        current,
+        run_id=run_id,
+        session_id=session_id,
+        calls=calls,
+        runtime_model_name=runtime_model_name or current.runtime_model_name,
+        continuation_count=current.continuation_count if continuation_count is None else continuation_count,
+        response_text=current.response_text if response_text is None else response_text,
+        response_tool_trace=current.response_tool_trace if response_tool_trace is None else response_tool_trace,
+        response_presentation_state=(
+            current.response_presentation_state if response_presentation_state is None else response_presentation_state
+        ),
+        delegation_storage_bindings=(
+            current.delegation_storage_bindings if delegation_storage_bindings is None else delegation_storage_bindings
+        ),
+        state=state,
+        runtime_generation=publication_owner,
+        failure_reason=None,
+        generation=next_generation,
+    )
+    updated = transaction.fetchone(
+        """
+        UPDATE approval_continuations
+        SET state = ?, generation = ?, runtime_generation = ?,
+            failure_reason = NULL, context_json = ?
+        WHERE principal_id = ? AND approval_id = ?
+          AND state = 'claimed' AND generation = ?
+        RETURNING approval_id
+        """,
+        (
+            state,
+            next_generation,
+            publication_owner,
+            _json(_context(advanced)),
+            principal_id,
+            approval_id,
+            claimant_generation,
+        ),
+    )
+    if updated is None:
+        return None
+    _insert_calls(transaction, principal_id, approval_id, next_generation, calls)
+    return get(transaction, principal_id, approval_id=approval_id)
+
+
+def activate(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    expected_generation: int,
+) -> ApprovalContinuation | None:
+    """Release one publication lease and make its generation decidable or executable."""
+    undecided = transaction.fetchone(
+        """
+        SELECT 1 AS present FROM approval_continuation_calls
+        WHERE principal_id = ? AND approval_id = ? AND generation = ? AND decision IS NULL
+        LIMIT 1
+        """,
+        (principal_id, approval_id, expected_generation),
+    )
+    state: Literal["waiting", "ready"] = "waiting" if undecided is not None else "ready"
+    updated = transaction.fetchone(
+        """
+        UPDATE approval_continuations SET state = ?, runtime_generation = NULL
+        WHERE principal_id = ? AND approval_id = ? AND state = 'waiting'
+          AND generation = ? AND runtime_generation IS NOT NULL
+        RETURNING approval_id
+        """,
+        (state, principal_id, approval_id, expected_generation),
+    )
+    return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
+
+
+def request_failure(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    reason: str,
+    expected_state: ApprovalContinuationState,
+    expected_generation: int,
+    expected_runtime_generation: str | None,
+) -> ApprovalContinuation | None:
+    """Fence one observed continuation state against any later execution."""
+    updated = transaction.fetchone(
+        """
+        UPDATE approval_continuations
+        SET state = 'failing', failure_reason = ?
+        WHERE principal_id = ? AND approval_id = ? AND state = ? AND generation = ?
+          AND runtime_generation IS NOT DISTINCT FROM ?
+          AND NOT EXISTS (
+            SELECT 1 FROM matrix_delivery_outbox AS final
+            WHERE final.principal_id = approval_continuations.principal_id
+              AND final.delivery_id = (
+                SELECT source.event_id FROM approval_continuation_sources AS source
+                WHERE source.principal_id = approval_continuations.principal_id
+                  AND source.approval_id = approval_continuations.approval_id
+                  AND source.source_ordinal = 0
+              )
+              AND final.stage = 'final'
+              AND final.permanent_failure_reason IS NULL
+          )
+        RETURNING approval_id
+        """,
+        (
+            reason,
+            principal_id,
+            approval_id,
+            expected_state,
+            expected_generation,
+            expected_runtime_generation,
+        ),
+    )
+    return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
+
+
+def interruption_is_recoverable(
+    transaction: Transaction,
+    principal_id: str,
+    delivery_id: str,
+    *,
+    visible_text: str,
+    failure_reason: str | None,
+) -> bool:
+    """Require the exact acknowledged interruption and retain shared ownership fences."""
+    attempt = response_attempts.load_response_attempt(transaction, principal_id, delivery_id)
+    if attempt is None or attempt.response_event_id is None or failure_reason == "cancelled_by_user":
+        return False
+    final = outbox.load(transaction, principal_id, delivery_id=attempt.driving_event_id, stage=DeliveryStage.FINAL)
+    if (
+        final is None
+        or final.acknowledged_event_id is None
+        or final.retired
+        or final.permanently_failed
+        or final.room_id != attempt.room_id
+        or final.membership_epoch != attempt.membership_epoch
+        or final.edits_event_id != attempt.response_event_id
+    ):
+        return False
+    content = final.payload.get("m.new_content", final.payload)
+    if not isinstance(content, dict) or cast("dict[str, object]", content).get("body") != visible_text:
+        return False
+    if any(
+        is_tombstoned(transaction, principal_id, room_id=attempt.room_id, event_id=event_id)
+        for event_id in (*attempt.logical_source_event_ids, attempt.response_event_id)
+    ):
+        return False
+    current = turn_records.load_record(transaction, attempt.entity_name, attempt.logical_source_event_ids[0])
+    if current is not None and (current.user_stop_receipt_order or 0) >= (
+        attempt.edit_receipt_order or attempt.selected_receipt_order
+    ):
+        return False
+    return (
+        response_attempts.approval_failure_disposition(
+            transaction,
+            principal_id,
+            attempt=attempt,
+            current_record=current,
+            failure_reason=failure_reason,
+        )
+        is response_attempts.ApprovalFailureDisposition.PUBLISH
+    )
+
+
+def finish(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+) -> bool:
+    """Release sources after terminal FINAL delivery or proven failed-response deletion."""
+    continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
+    if continuation is None:
+        return False
+    delivered = transaction.fetchone(
+        """
+        SELECT 1 AS present FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+          AND (acknowledged_event_id IS NOT NULL OR permanent_failure_reason IS NOT NULL)
+        """,
+        (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
+    )
+    if (
+        delivered is None
+        and not deleted_delivery_is_terminal(transaction, principal_id, continuation)
+        and not _settle_superseded_failure_delivery(transaction, principal_id, continuation)
+    ):
+        return False
+    journal.settle_many(transaction, principal_id, continuation.source_event_ids)
+    transaction.execute(
+        "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
+        (principal_id, approval_id),
+    )
+    return True
+
+
+def retire_superseded_failure_for_source(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    event_id: str,
+) -> bool:
+    """Fence obsolete approval failure debt before a generic outbox retry can send it."""
+    observed = for_source(transaction, principal_id, event_id=event_id)
+    if observed is None or observed.state != "failing" or observed.source_event_ids[0] != event_id:
+        return False
+    continuation = _get_locked(transaction, principal_id, approval_id=observed.approval_id)
+    return continuation is not None and _settle_superseded_failure_delivery(transaction, principal_id, continuation)
+
+
+def _settle_superseded_failure_delivery(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+) -> bool:
+    """Apply the shared exact disposition while retaining frozen successful debt."""
+    if continuation.state != "failing":
+        return False
+    attempt = response_attempts.load_response_attempt(transaction, principal_id, continuation.source_event_ids[0])
+    if attempt is None:
+        return False
+    current = turn_records.load_record(transaction, attempt.entity_name, attempt.logical_source_event_ids[0])
+    disposition = response_attempts.approval_failure_disposition(
+        transaction,
+        principal_id,
+        attempt=attempt,
+        current_record=current,
+        failure_reason=continuation.failure_reason,
+    )
+    if disposition is not response_attempts.ApprovalFailureDisposition.RETIRE:
+        return False
+    final = outbox.load(transaction, principal_id, delivery_id=attempt.driving_event_id, stage=DeliveryStage.FINAL)
+    if final is None:
+        return True
+    retired = outbox.retire(
+        transaction,
+        principal_id,
+        delivery_id=final.delivery_id,
+        stage=DeliveryStage.FINAL,
+        room_id=final.room_id,
+        membership_epoch=final.membership_epoch,
+    )
+    return retired is not None and (retired.retired or retired.acknowledged_event_id is not None)
+
+
+def discard_unavailable(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    notice_principal_id: str,
+) -> bool:
+    """Release a permanently unavailable owner's sources after visible card cleanup."""
+    observed = get(transaction, principal_id, approval_id=approval_id)
+    if observed is None or observed.state != "failing":
+        return False
+    membership_epoch = membership_state.claim_active_membership_epoch(
+        transaction,
+        notice_principal_id,
+        room_id=observed.room_id,
+    )
+    if membership_epoch is None:
+        return False
+    continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
+    if continuation is None or continuation.state != "failing" or continuation.room_id != observed.room_id:
+        return False
+    delivery_id = _unavailable_notice_delivery_id(approval_id, membership_epoch)
+    # The membership row is already held before the cross-principal
+    # continuation lock. The helper's membership claim is therefore reentrant;
+    # its new lock is only the outbox row, preserving membership ->
+    # continuation -> delivery order against router departure.
+    ownership = outbox.claim_active_delivery_ownership(
+        transaction,
+        notice_principal_id,
+        delivery_id=delivery_id,
+        stage=DeliveryStage.FINAL,
+        expected_room_id=continuation.room_id,
+    )
+    if ownership is None:
+        return False
+    delivered = transaction.fetchone(
+        """
+        SELECT 1 AS present FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+          AND acknowledged_event_id IS NOT NULL
+        """,
+        (notice_principal_id, delivery_id, DeliveryStage.FINAL.value),
+    )
+    if delivered is None:
+        return False
+    journal.settle_many(transaction, principal_id, continuation.source_event_ids)
+    transaction.execute(
+        "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
+        (principal_id, approval_id),
+    )
+    return True
+
+
+def _get_locked(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+) -> ApprovalContinuation | None:
+    """Lock one aggregate before terminal paths settle its journal sources."""
+    transaction.execute(
+        """
+        UPDATE approval_continuations SET state = state
+        WHERE principal_id = ? AND approval_id = ?
+        """,
+        (principal_id, approval_id),
+    )
+    return get(transaction, principal_id, approval_id=approval_id)

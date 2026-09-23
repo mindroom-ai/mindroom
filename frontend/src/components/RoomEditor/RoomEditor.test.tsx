@@ -40,7 +40,7 @@ describe("RoomEditor", () => {
   const mockConfig: Partial<Config> = {
     models: {
       default: { provider: "ollama", id: "llama2" },
-      gpt4: { provider: "openai", id: "gpt-4" },
+      gpt4: { provider: "openai", id: "gpt-6-astra" },
     },
   };
 

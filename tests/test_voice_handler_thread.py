@@ -11,6 +11,7 @@ import pytest
 
 from mindroom import voice_handler
 from mindroom.config.main import Config
+from tests.authorization_helpers import isolated_membership_index
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
@@ -58,7 +59,14 @@ async def test_voice_handler_returns_transcription() -> None:
         patch("mindroom.voice_handler._transcribe_audio", return_value="what is the weather today"),
         patch("mindroom.voice_handler._process_transcription", return_value="what is the weather today"),
     ):
-        result = await voice_handler._handle_voice_message(client, room, voice_event, config, runtime_paths_for(config))
+        result = await voice_handler._handle_voice_message(
+            client,
+            room,
+            voice_event,
+            config,
+            runtime_paths_for(config),
+            isolated_membership_index(),
+        )
 
         # Verify the handler returns the transcribed message with voice prefix
         assert result == "🎤 what is the weather today"

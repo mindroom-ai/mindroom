@@ -14,10 +14,11 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="scheduler",
     display_name="Scheduler",
-    description="Schedule, edit, list, and cancel tasks and reminders",
+    description="Schedule tasks and reminders, and manage upcoming runs",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_room_context=True,
     icon="Calendar",
     icon_color="text-emerald-500",
     dependencies=["agno"],

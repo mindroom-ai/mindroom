@@ -42,16 +42,3 @@ class MediaInputs:
     def has_any(self) -> bool:
         """Return whether any media collection contains items."""
         return bool(self.audio or self.images or self.files or self.videos)
-
-    def kinds(self) -> frozenset[MediaKind]:
-        """Return the media kinds with at least one item."""
-        kinds: set[MediaKind] = set()
-        if self.audio:
-            kinds.add("audio")
-        if self.images:
-            kinds.add("image")
-        if self.files:
-            kinds.add("file")
-        if self.videos:
-            kinds.add("video")
-        return frozenset(kinds)

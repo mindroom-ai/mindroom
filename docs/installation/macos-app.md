@@ -1,81 +1,129 @@
-# macOS Menu Bar App
+# macOS App
 
-MindRoom ships as a native macOS menu bar app for running the local MindRoom service without using terminal commands.
-The app bundles `uv`, installs the `mindroom` CLI through `uv tool install`, and manages the existing launchd service through `mindroom service`.
-MindRoom config, secrets, and runtime state stay in `~/.mindroom`, so the app and CLI use the same files.
+MindRoom provides a native macOS window with a small menu bar companion.
+Open the app from Applications or Spotlight to manage two independent roles:
+
+- **Local agents** run MindRoom on this Mac and connect to your Matrix chat account.
+- **Computer access** lets a paired agent running elsewhere observe or control selected applications on this Mac.
+
+Use either role, or both.
+Starting local agents does not enable computer access, and starting computer access does not start local agents.
+The app bundles the official M SVG from `assets/logo/logo-mark.svg` and its generated PNG companion for native display.
 
 ## Requirements
 
-- macOS 13 Ventura or later.
-- An Apple silicon or 64-bit Intel Mac.
-- Network access for installing the `mindroom` package and pairing with hosted MindRoom.
-- A model provider credential in `~/.mindroom/.env`, unless you configure a local provider or a Codex ChatGPT login.
+- macOS 14 Sonoma or later, on Apple silicon or Intel.
+- Network access to install the MindRoom runtime and connect to your Matrix server.
+- For local agents, a configured model provider credential, local model, or supported provider login.
+- For computer access, an existing Desktop-enabled MindRoom agent and the macOS permissions described in the [Desktop guide](../tools/desktop.md).
 
 ## Install
-
-Install the signed app release with Homebrew.
 
 ```bash
 brew install --cask mindroom-ai/tap/mindroom
 ```
 
-Open **MindRoom** from `/Applications` or Spotlight.
+Open **MindRoom** from Applications or Spotlight.
+The window has **Overview**, **Local agents**, **Computer access**, and **Settings** sections.
+Overview explains the two roles and shows their status separately.
 
-## First Launch
+## Set Up Local Agents
 
-The menu lists the setup steps in order under **Set Up Hosted MindRoom**.
-Each step shows a dialog when it finishes, confirming what happened and what to do next.
+Open **Local agents** and expand **Set up or reconnect local agents**.
 
-1. **Install MindRoom Runtime** installs the `mindroom` CLI with the bundled `uv`.
-2. **Initialize Hosted Config** writes `config.yaml` and `.env` to `~/.mindroom`, preconfigured for the hosted `chat.mindroom.chat` Matrix server.
-   Re-running this step keeps existing files unchanged and recreates any missing ones.
-3. **Open chat.mindroom.chat** opens the hosted MindRoom chat in your browser.
-   Sign in to create your hosted account, then click the Local MindRoom icon in the left sidebar to generate a pair code.
-4. **Pair Hosted MindRoom...** links this Mac to your hosted account using the pair code.
-5. **Install/Ensure Service** installs and starts the MindRoom background service via launchd.
+1. **Install MindRoom** installs the command-line runtime using the bundled `uv`.
+2. **Prepare Configuration** creates missing `config.yaml` and `.env` files in `~/.mindroom`, preserves an existing config and env values, and appends missing hosted Matrix defaults to `.env`.
+   **Open MindRoom Chat**, sign in, and use **Local MindRoom** in the chat sidebar to generate a pair code.
+   Enter the code and choose **Pair Account**.
+3. **Open Config Folder** and configure your AI provider in `.env`, or configure a local model in `config.yaml`.
+4. **Install and Start Agents** installs and starts the launchd background service.
 
-Then use **Open Dashboard** to open the local dashboard at `http://localhost:8765`.
+Commands show progress and their results in the window.
+Once the service is running, **Configure Agents…** opens the existing web dashboard at `http://localhost:8765`.
+Use that dashboard for agent and model configuration.
+**Open Chat** opens `https://chat.mindroom.chat` in your browser.
 
-### Why sign in to chat.mindroom.chat?
+### Where do my agents run?
 
-`chat.mindroom.chat` is MindRoom's hosted Matrix service.
-Signing in with Apple, Google, or GitHub creates a hosted Matrix account for you on the `mindroom.chat` homeserver, so you do not need to run or configure a homeserver yourself.
-Pairing connects the MindRoom runtime on your Mac to that account: your agents run locally, and the hosted server only relays your Matrix messages.
-If you want to use your own Matrix homeserver instead, use **Initialize Self-Hosted Config** under **Other Setup**.
+Your agents run on this Mac.
+The hosted `mindroom.chat` Matrix server relays their chat messages.
+Signing in to `chat.mindroom.chat` creates your hosted Matrix account; it does not move the agent runtime into the cloud.
 
-## Other Setup Modes
+### Your own Matrix server
 
-The **Other Setup** submenu holds the non-hosted flows.
-Use **Initialize Self-Hosted Config** when you want to connect to your own Matrix homeserver.
-Use **Run Local Stack Setup** when you want the local Matrix stack flow.
-These actions still write to `~/.mindroom`.
+Under **Use your own Matrix server**, choose **Prepare Self-Hosted Configuration**, then edit `config.yaml` and `.env` for that server and your model provider.
+Start and manage the Matrix server separately from this app.
+The initialization actions explicitly target `~/.mindroom`.
 
-## Service Controls
+## Computer Access
 
-The menu exposes **Start Service**, **Stop Service**, **Restart Service**, and **Refresh Status**.
-The service is managed by launchd, so MindRoom keeps running after the menu bar app quits.
-Logs are available through **Open Logs Folder** at `~/Library/Logs/mindroom`.
-Configuration is available through **Open Config Folder** at `~/.mindroom`.
+Computer access uses the bundled Desktop Helper and does not require the local-agent runtime or background service.
+Open **Computer access** to manage its session independently.
 
-## Troubleshooting
+1. In a private chat with your Desktop-enabled agent, send `!desktop setup` and copy its JSON setup data.
+2. In **Computer access**, choose the allowed applications and select **Continue Setup**.
+3. Paste the copied data into the **Setup data** field under **Setup or reconnect** and select **Import Setup**.
+4. Review the controller fingerprint, requester, and agent, then sign in or use the saved Matrix device.
+5. Confirm the displayed identities and select **Save Setup**, then confirm the saved identities again and select **Claim Pairing**.
+6. Send the displayed `!desktop confirm ...` command back to the same chat.
+7. Check macOS permissions and start observation.
 
-**The dashboard at `http://localhost:8765` does not respond.**
-The dashboard is served by the MindRoom service, so check the status line at the top of the menu.
-If the service is stopped or not installed, **Open Dashboard** offers the matching fix (for example **Start Service**).
-If the service is running but the dashboard still fails, check **Open Logs Folder** for startup errors.
-A common cause is a missing model provider credential in `~/.mindroom/.env` (for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`).
+For a homeserver behind Cloudflare Access, complete the Terminal authentication flow shown in chat first.
+The existing native helper owns authentication, pairing, permissions, browser sessions, and control leases.
 
-**A setup step failed.**
-The failure dialog shows the command output, and **Copy Last Output** in the menu copies the full output for a bug report.
+The session card explains unavailable Start and Stop buttons and provides shortcuts to the next required step.
+If you select apps before saving a connection, **Continue Setup** opens the connection form; **Save Setup** saves your selected apps with that connection.
+Once setup is saved, **Save App Access** updates app selections independently.
 
-**Pairing fails or the pair code expired.**
-Generate a fresh pair code in `chat.mindroom.chat` (Local MindRoom icon in the left sidebar) and run **Pair Hosted MindRoom...** again.
+Permission status applies to the running copy of MindRoom.
+If System Settings already shows MindRoom enabled but the app reports **Not granted to this copy**, quit and reopen MindRoom first.
+Replacing the signed release with a local build can invalidate the saved approval while leaving the old entry enabled.
+In that case, reinstall the signed release or remove the old permission entry and approve the current copy in System Settings, then select **Check Again**.
 
-## Updates
+Observation and control are separate choices.
+**Grant Control…** shows the saved identities, allowed applications, and duration for explicit confirmation.
+**Revoke Now** immediately removes input authority while observation continues; **Stop** ends the bridge session.
+Control expires according to the helper's bounded lease and is never renewed automatically at app launch or restart.
+The menu also provides an immediate control-revoke action while a lease is active.
+Optional browser settings and redacted diagnostics are available in expandable sections.
+See the [Desktop guide](../tools/desktop.md) for macOS permissions, pairing recovery, and browser-extension setup.
 
-Use **Update MindRoom Runtime** to run `uv tool install --managed-python --python 3.13 --force mindroom`.
-Use **Check for App Updates...** to update the signed macOS app through Sparkle.
-Homebrew users can also update with Homebrew.
+## Window, Menu Bar, and Login
+
+Opening MindRoom presents its window and Dock icon.
+Closing the window leaves the app available in the menu bar and keeps its background work running.
+Reopen the window with **Open MindRoom…** in the menu or by opening the application again.
+
+The menu shows local-agent and computer-access status as clickable shortcuts to their app sections, plus chat, start/stop, settings, and quit actions.
+**Service running** reports the local process state; use Chat or the dashboard to confirm that agents are ready.
+
+In **Settings**, **Open menu bar app at login** launches the menu app quietly.
+Local agents use their own launchd service and start independently at login.
+Computer access always requires an explicit start in the app.
+
+**Quit MindRoom** stops computer access owned by the app and closes its menu.
+Hover over that item for a reminder of its effect on background work.
+The local-agent launchd service keeps running after the app quits.
+Use **Stop Local Agents** when you want to stop that service.
+If a runtime action is still in progress, let it finish before quitting.
+
+## Updates and Troubleshooting
+
+**Settings** separates app updates from runtime updates.
+**Check App Updates…** uses Sparkle for signed releases configured with an update feed.
+**Update Local Runtime** updates the installed CLI.
+Afterward, **Apply Runtime to Service…** rewrites the version-pinned launchd service and starts or restarts local agents after confirmation.
+App updates include the bundled Desktop Helper; updating the local-agent CLI does not replace that helper.
+
+**Open Logs Folder** opens `~/Library/Logs/mindroom`.
+Background services disable terminal colors; redirected output and runtime log files use plain text unless JSON logging is configured.
+The service appends to its existing logs, so records written by older versions may still contain terminal escape codes.
+**Open Config Folder** opens `~/.mindroom`, which is shared with the CLI.
+Failed local-agent actions show their output in the window with a copy action.
+If the dashboard cannot be opened, start the service and check its logs for missing provider credentials or startup errors.
+If pairing expires, generate a new code in the relevant chat flow.
+
+Homebrew users can also update the app with:
 
 ```bash
 brew update
@@ -88,11 +136,7 @@ brew upgrade --cask mindroom
 brew uninstall --cask mindroom
 ```
 
-Use Homebrew zap to remove app preferences and logs.
-
-```bash
-brew uninstall --zap --cask mindroom
-```
-
-The zap command intentionally does not delete `~/.mindroom`.
-Remove that directory manually only when you want to delete MindRoom config, credentials, and persistent agent data.
+Use `brew uninstall --zap --cask mindroom` to also remove app preferences and logs.
+Uninstall and zap preserve `~/.mindroom` and the uv-installed runtime.
+Remove configuration, credentials, and agent data only when you intend to delete them.
+Use `uv tool uninstall mindroom` to remove the CLI separately.

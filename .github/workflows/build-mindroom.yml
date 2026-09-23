@@ -2,10 +2,10 @@ name: Build MindRoom
 # Builds MindRoom instance images in parallel using native ARM64 runners
 
 on:
-  # Validate MindRoom images on direct pushes to main.
-  push:
-    branches: [ main ]
-  # Build (no push) on PRs to validate Dockerfiles
+  # Build (no push) on PRs to validate Dockerfiles. Merges to main are not
+  # rebuilt here: the same commits were already validated on their PR, and every
+  # main push is released by calver-auto-release.yml, which dispatches the
+  # publishing build below.
   pull_request:
     branches: [ main ]
     paths:
@@ -76,7 +76,7 @@ jobs:
           network=host
 
     - name: Login to GitHub Container Registry
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ github.actor }}
@@ -92,7 +92,7 @@ jobs:
             exit 1
           fi
           version="${ref_name#v}"
-        elif [[ "${{ github.event_name }}" == "pull_request" || "${{ github.event_name }}" == "push" ]]; then
+        elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
           ref_name="$GITHUB_REF_NAME"
           version="0.0.0"
         else
@@ -119,7 +119,8 @@ jobs:
         build-args: |
           VERSION=${{ steps.vars.outputs.version }}
         cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:buildcache-${{ matrix.platform_suffix }}
-        cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:buildcache-${{ matrix.platform_suffix }},mode=max
+        # Fork PRs get a read-only GITHUB_TOKEN and cannot write the ghcr build cache.
+        cache-to: ${{ (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork) && format('type=registry,ref={0}/{1}/{2}:buildcache-{3},mode=max', env.REGISTRY, env.OWNER, matrix.target.image_name, matrix.platform_suffix) || '' }}
         provenance: false
         sbom: false
 
@@ -139,7 +140,7 @@ jobs:
 
     steps:
     - name: Login to GitHub Container Registry
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ github.actor }}

@@ -43,12 +43,9 @@ from mindroom.runtime_env_policy import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
-    import yaml  # type: ignore[import-untyped]
-    from pydantic import ValidationError
-
-    from mindroom.config.main import Config, ConfigRuntimeValidationError
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 console = Console()
@@ -74,6 +71,7 @@ _ProviderPreset = Literal[
     "bedrock_claude",
     "azure",
     "codex",
+    "kimi",
     "llama_cpp",
     "ollama",
     "openai",
@@ -91,6 +89,7 @@ _PROVIDER_PRESET_ALIASES: dict[str, _ProviderPreset] = {
     "azure-openai": "azure",
     "claude": "anthropic",
     "codex": "codex",
+    "kimi": "kimi",
     "llama.cpp": "llama_cpp",
     "llama-cpp": "llama_cpp",
     "llama_cpp": "llama_cpp",
@@ -117,7 +116,7 @@ _MATRIX_SERVER_HELP = (
 )
 _PROVIDER_HELP = "Default model provider for the generated config."
 _PROVIDER_CHOICES_TEXT = (
-    "anthropic, azure, bedrock_claude, codex, llama.cpp, ollama, openai, openrouter, or vertexai_claude"
+    "anthropic, azure, bedrock_claude, codex, kimi, llama.cpp, ollama, openai, openrouter, or vertexai_claude"
 )
 
 
@@ -255,6 +254,7 @@ def _config_init_env_hint(matrix_server: _MatrixServerPreset, selected_preset: _
         "azure": "Set your Azure OpenAI key/endpoint and confirm the config model deployment name",
         "bedrock_claude": "Set AWS Bedrock region and credentials (Matrix homeserver is prefilled)",
         "codex": "Run `codex login` before starting MindRoom (Matrix homeserver is prefilled)",
+        "kimi": "Run `kimi` and `/login` before starting MindRoom (Matrix homeserver is prefilled)",
         "vertexai_claude": "Set your Vertex AI project/region and Google auth (Matrix homeserver is prefilled)",
         "ollama": "Start Ollama and pull the local models (Matrix homeserver is prefilled)",
         "llama_cpp": "Start llama.cpp server with the local model (Matrix homeserver is prefilled)",
@@ -263,6 +263,7 @@ def _config_init_env_hint(matrix_server: _MatrixServerPreset, selected_preset: _
         "azure": "Set your Matrix homeserver, Azure OpenAI key/endpoint, and config model deployment name",
         "bedrock_claude": "Set your Matrix homeserver, AWS Bedrock region, and AWS credentials",
         "codex": "Set your Matrix homeserver and run `codex login` before starting MindRoom",
+        "kimi": "Set your Matrix homeserver and run `kimi` and `/login` before starting MindRoom",
         "vertexai_claude": "Set your Matrix homeserver, Vertex AI project/region, and Google auth",
         "ollama": "Set your Matrix homeserver, start Ollama, and pull the local models",
         "llama_cpp": "Set your Matrix homeserver and start llama.cpp server with the local model",
@@ -384,7 +385,7 @@ def _get_editor() -> str:
 
 
 def format_validation_errors(
-    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+    exc: Exception,
     config_path: Path | None = None,
 ) -> None:
     """Print config validation errors in a user-friendly format."""
@@ -692,12 +693,8 @@ def config_path_cmd(
 # ---------------------------------------------------------------------------
 
 
-def load_config_quiet(
-    runtime_paths: RuntimePaths,
-    *,
-    tolerate_plugin_load_errors: bool = False,
-) -> Config:
-    """Load config while temporarily suppressing structlog output.
+def _call_config_loader_quietly(loader: Callable[[], Config]) -> Config:
+    """Call one config loader while temporarily suppressing structlog output.
 
     structlog's default PrintLogger bypasses stdlib log levels, so we
     route it through stdlib with the root level at WARNING for the
@@ -705,8 +702,6 @@ def load_config_quiet(
     can configure structlog themselves.
     """
     import structlog  # noqa: PLC0415
-
-    from mindroom.config.main import load_config  # noqa: PLC0415
 
     was_configured = structlog.is_configured()
     if not was_configured:
@@ -716,13 +711,55 @@ def load_config_quiet(
             logger_factory=structlog.stdlib.LoggerFactory(),
         )
     try:
-        return load_config(
-            runtime_paths,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
+        return loader()
     finally:
         if not was_configured:
             structlog.reset_defaults()
+
+
+def load_config_quiet(
+    runtime_paths: RuntimePaths,
+    *,
+    tolerate_plugin_load_errors: bool = False,
+) -> Config:
+    """Load config while temporarily suppressing structlog output."""
+    from mindroom.config.main import load_config  # noqa: PLC0415
+
+    return _call_config_loader_quietly(
+        lambda: load_config(
+            runtime_paths,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        ),
+    )
+
+
+def validate_config_source_quiet(
+    runtime_paths: RuntimePaths,
+    *,
+    source: bytes,
+    original: bytes,
+    tolerate_plugin_load_errors: bool = False,
+) -> Config:
+    """Validate one supplied source and apply automatic migrations without config logs."""
+    from mindroom.config.main import validate_loaded_config_source  # noqa: PLC0415
+    from mindroom.config.yaml_includes import load_yaml_config_source_with_digests  # noqa: PLC0415
+
+    def validate() -> Config:
+        data, source_digests, uses_includes = load_yaml_config_source_with_digests(
+            runtime_paths.config_path,
+            source=source,
+        )
+        config, _source_digests = validate_loaded_config_source(
+            data,
+            source_digests,
+            original,
+            runtime_paths,
+            uses_includes=uses_includes,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+        return config
+
+    return _call_config_loader_quietly(validate)
 
 
 def _find_missing_env_keys(
@@ -823,7 +860,7 @@ def _prompt_provider_preset() -> _ProviderPreset:
     """Prompt the user for a starter provider preset."""
     while True:
         raw_value = typer.prompt(
-            "Choose provider preset [anthropic/azure/bedrock_claude/codex/llama.cpp/ollama/openai/openrouter/vertexai_claude]",
+            "Choose provider preset [anthropic/azure/bedrock_claude/codex/kimi/llama.cpp/ollama/openai/openrouter/vertexai_claude]",
             default="openai",
             show_default=True,
         )
@@ -959,6 +996,11 @@ agents:
     rooms:
       - personal
     accept_invites: true
+    access:
+      current_room_members: false
+      members_of_rooms:
+        - personal
+      users: []
     context_files:
       - SOUL.md
       - AGENTS.md
@@ -978,8 +1020,9 @@ agents:
       - scheduler
       - update_awareness
       - todo
-      - subagents
       - matrix_message
+      - name: thread_model
+        defer: true
       - thread_tags
       - thread_summary
     skills:
@@ -997,10 +1040,15 @@ router:
   model: default
   accept_invites: true
 {mindroom_user_block}
-matrix_room_access:
-  mode: single_user_private
-  room_admins:
-    # MindRoom Chat pairing writes the paired owner's Matrix user ID here.
+administrators:
+  # MindRoom Chat pairing writes the paired owner's Matrix user ID here.
+  - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
+room_defaults:
+  join_policy: invite
+  listed: false
+  invite_users:
+    - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
+  admins:
     - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 
 matrix_space:
@@ -1025,15 +1073,7 @@ memory:
     enabled: true
 
 authorization:
-  default_room_access: false
   config_command_enabled: false
-  global_users:
-    # Replace with your Matrix user ID (example: @alice:mindroom.chat).
-    - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
-  agent_reply_permissions:
-    "*":
-      # Replace with your Matrix user ID (example: @alice:mindroom.chat).
-      - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 
 defaults:
   # Execution tools (shell, file, python, coding, docker) run directly in the
@@ -1120,11 +1160,19 @@ def _provider_env_template(provider_preset: _ProviderPreset) -> str:  # noqa: PL
         # CODEX_HOME=~/.codex
         """).rstrip()
 
+    if provider_preset == "kimi":
+        return textwrap.dedent("""\
+        # Kimi Code CLI OAuth authentication
+        # Run `kimi` and `/login` before starting MindRoom.
+        # MindRoom reads OAuth tokens from ~/.kimi-code/credentials/kimi-code.json by default.
+        # KIMI_CODE_HOME=~/.kimi-code
+        """).rstrip()
+
     if provider_preset == "vertexai_claude":
         return textwrap.dedent(f"""\
         # Vertex AI Claude configuration
         {VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]}=your-gcp-project-id
-        {VERTEXAI_CLAUDE_ENV_BY_KEY["region"]}=us-central1
+        {VERTEXAI_CLAUDE_ENV_BY_KEY["region"]}=global
 
         # Authenticate with Google Application Default Credentials before running:
         # gcloud auth application-default login

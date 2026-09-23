@@ -29,28 +29,39 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, TypeGuard
+from functools import partial
+from typing import TYPE_CHECKING, Any
 
 from agno.db.base import SessionType
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
+from mindroom.agent_storage import (
+    replace_runs,
+    runs_without,
+    save_compaction_usage,
+    save_runs,
+)
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import (
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
 from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.metadata_merge import deep_merge_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from agno.db.base import BaseDb
+    from agno.models.base import Model
+    from agno.models.response import ModelResponse
+    from agno.run.agent import RunOutput
 
 _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
@@ -58,12 +69,27 @@ _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_
 _COMPACTED_RUN_ID_RETENTION_LIMIT = 1_024
 
 
-def is_model_history_visible_run(run: object) -> TypeGuard[RunOutput | TeamRunOutput]:
-    """Return whether one run is represented in Agno model history."""
-    return (
-        isinstance(run, (RunOutput, TeamRunOutput))
-        and run.parent_run_id is None
-        and run.status not in {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
+async def record_summary_usage(
+    model: Model,
+    response: ModelResponse,
+    *,
+    storage: BaseDb,
+    session_id: str,
+    requester_id: str | None,
+) -> None:
+    """Record returned counters even when the summary is rejected or later cancelled."""
+    if response.response_usage is None:
+        return
+    await run_blocking_until_complete(
+        partial(
+            save_compaction_usage,
+            storage,
+            session_id=session_id,
+            requester_id=requester_id,
+            model_provider=model.get_provider(),
+            model=model.id,
+            metrics=response.response_usage.to_dict(),
+        ),
     )
 
 
@@ -264,6 +290,13 @@ def _run_seen_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
     raw_seen_ids = metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
     if isinstance(raw_seen_ids, list):
         seen_event_ids.update(event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id)
+    raw_revisions = metadata.get(MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY)
+    if isinstance(raw_revisions, dict):
+        seen_event_ids.update(
+            revision[1]
+            for revision in raw_revisions.values()
+            if isinstance(revision, list | tuple) and len(revision) == 2 and isinstance(revision[1], str)
+        )
     response_event_id = metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
     if isinstance(response_event_id, str) and response_event_id:
         seen_event_ids.add(response_event_id)
@@ -395,49 +428,19 @@ def remove_runs_by_id(
     compacted_run_ids: Iterable[str],
 ) -> list[RunOutput | TeamRunOutput]:
     """Return runs with the compacted run ids, and all their descendants, removed."""
-    remove_ids = {run_id for run_id in compacted_run_ids if run_id}
-    if not remove_ids:
-        return list(runs)
-
-    run_list = list(runs)
-    children_by_parent: dict[str, list[str]] = {}
-    for run in run_list:
-        parent_run_id = run.parent_run_id
-        run_id = run.run_id
-        if isinstance(parent_run_id, str) and parent_run_id and isinstance(run_id, str) and run_id:
-            children_by_parent.setdefault(parent_run_id, []).append(run_id)
-
-    stack = list(remove_ids)
-    while stack:
-        run_id = stack.pop()
-        for child_run_id in children_by_parent.get(run_id, []):
-            if child_run_id not in remove_ids:
-                remove_ids.add(child_run_id)
-                stack.append(child_run_id)
-
-    return [
-        run
-        for run in run_list
-        if not (
-            (isinstance(run.run_id, str) and run.run_id in remove_ids)
-            or (isinstance(run.parent_run_id, str) and run.parent_run_id in remove_ids)
-        )
-    ]
+    return runs_without(runs, compacted_run_ids)
 
 
 def prune_reintroduced_runs(
+    storage: BaseDb,
     session: AgentSession | TeamSession,
     state: HistoryScopeState,
 ) -> bool:
-    """Remove runs that a stale session write resurrected after compaction (invariant 1)."""
+    """Delete runs that a stale session write resurrected after compaction (invariant 1)."""
     if not state.compacted_run_ids:
         return False
     runs = session.runs or []
-    pruned_runs = remove_runs_by_id(runs, state.compacted_run_ids)
-    if len(pruned_runs) == len(runs):
-        return False
-    session.runs = pruned_runs
-    return True
+    return bool(replace_runs(storage, session, remove_runs_by_id(runs, state.compacted_run_ids)))
 
 
 def _latest_persisted_session(
@@ -529,29 +532,31 @@ def record_compaction_chunk(
             ),
         ),
     )
-    target_session.runs = remove_runs_by_id(target_session.runs or [], chunk_run_ids)
-    if sync_remaining_runs:
-        target_session.runs = _sync_remaining_runs_from_working(
-            target_session.runs or [],
-            working_session.runs or [],
-        )
+    # The summary and tombstones land before the run rows go: if the deletes never
+    # happen, the next run prunes the tombstoned runs again instead of replaying them.
     storage.upsert_session(target_session)
+    replace_runs(storage, target_session, remove_runs_by_id(target_session.runs or [], chunk_run_ids))
+    if sync_remaining_runs:
+        save_runs(
+            storage,
+            target_session,
+            _runs_changed_by_working(target_session.runs or [], working_session.runs or []),
+        )
     _adopt_session_fields(persisted_session, target_session)
 
 
-def _sync_remaining_runs_from_working(
+def _runs_changed_by_working(
     target_runs: list[RunOutput | TeamRunOutput],
     working_runs: list[RunOutput | TeamRunOutput],
 ) -> list[RunOutput | TeamRunOutput]:
+    """Copies of the working-session versions of stored runs whose contents changed."""
     working_by_id = {run.run_id: run for run in working_runs if isinstance(run.run_id, str) and run.run_id}
-    synced_runs: list[RunOutput | TeamRunOutput] = []
+    changed: list[RunOutput | TeamRunOutput] = []
     for run in target_runs:
-        run_id = run.run_id
-        if isinstance(run_id, str) and run_id in working_by_id:
-            synced_runs.append(deepcopy(working_by_id[run_id]))
-        else:
-            synced_runs.append(run)
-    return synced_runs
+        working_run = working_by_id.get(run.run_id) if isinstance(run.run_id, str) else None
+        if working_run is not None and working_run.to_dict() != run.to_dict():
+            changed.append(deepcopy(working_run))
+    return changed
 
 
 def _read_preserved_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> set[str]:

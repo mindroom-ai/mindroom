@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 
@@ -21,4 +23,4 @@ def require_external_trigger_owner_context(tool_name: str) -> ToolRuntimeContext
     if not context.requester_id or context.requester_id == context.client.user_id:
         msg = "External trigger owner must be a human Matrix requester."
         raise ExternalTriggerContextError(msg)
-    return context
+    return replace(context, config=context.current_config, config_provider=None)

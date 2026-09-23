@@ -9,10 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mindroom import model_loading
 from mindroom.agent_descriptions import describe_agent
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
 from mindroom.matrix.identity import MatrixID
+from mindroom.routing_judgment import ResponderSelection, judge_responder
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -38,7 +40,10 @@ async def suggest_responder(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_context: Sequence[ResolvedVisibleMessage] | None = None,
-) -> str | None:
+    *,
+    room_id: str | None = None,
+    thread_id: str | None = None,
+) -> ResponderSelection | None:
     """Use AI to suggest which configured responder should answer a message.
 
     This is the core routing logic, independent of any transport layer.
@@ -50,12 +55,18 @@ async def suggest_responder(
         runtime_paths: Explicit runtime context for model and Matrix identity resolution.
         thread_context: Optional recent messages for context.
             Each message should expose visible sender/body fields.
+        room_id: Optional Matrix room whose runtime model default applies.
+        thread_id: Optional Matrix thread whose model override takes precedence.
 
     Returns:
-        The suggested responder name, or None if routing fails.
+        An accepted selection (entity_name=None means no fit), or None if routing fails.
 
     """
     try:
+        if config.router.judgment is not None:
+            selection = await judge_responder(message, available_entity_names, config, runtime_paths, thread_context)
+            if selection is not None:
+                return selection
         entity_descriptions = []
         for entity_name in available_entity_names:
             description = describe_agent(entity_name, config)
@@ -77,7 +88,12 @@ async def suggest_responder(
                 context += f"{sender}: {body}\n"
             prompt = context + "\n" + prompt
 
-        router_model_name = config.router.model
+        router_model_name = config.resolve_runtime_model(
+            entity_name=ROUTER_AGENT_NAME,
+            room_id=room_id,
+            thread_id=thread_id,
+            runtime_paths=runtime_paths,
+        ).model_name
 
         model = model_loading.get_model_instance(config, runtime_paths, router_model_name)
         logger.info(
@@ -119,7 +135,7 @@ async def suggest_responder(
         logger.exception("Routing failed", error=str(e))
         return None
     else:
-        return suggestion.entity_name
+        return ResponderSelection(suggestion.entity_name)
 
 
 async def suggest_responder_for_message(
@@ -128,6 +144,9 @@ async def suggest_responder_for_message(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_context: Sequence[ResolvedVisibleMessage] | None = None,
+    *,
+    room_id: str | None = None,
+    thread_id: str | None = None,
 ) -> str | None:
     """Use AI to suggest which configured responder should answer a message.
 
@@ -153,10 +172,21 @@ async def suggest_responder_for_message(
                 sender = sender_name if sender_name is not None else MatrixID.parse(sender).domain
             resolved_context.append(replace_visible_message(msg, sender=sender))
 
-    return await suggest_responder(message, entity_names, config, runtime_paths, resolved_context)
+    selection = await suggest_responder(
+        message,
+        entity_names,
+        config,
+        runtime_paths,
+        resolved_context,
+        room_id=room_id,
+        thread_id=thread_id,
+    )
+
+    return selection.entity_name if selection is not None else None
 
 
 __all__ = [
+    "ResponderSelection",
     "suggest_responder",
     "suggest_responder_for_message",
 ]

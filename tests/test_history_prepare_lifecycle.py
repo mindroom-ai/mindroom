@@ -23,20 +23,14 @@ from mindroom.execution_preparation import (
     prepare_agent_execution_context,
     prepare_bound_team_run_context,
 )
-from mindroom.history.compaction import (
-    _build_summary_input,
-    estimate_prompt_visible_history_tokens,
-    estimate_session_summary_tokens,
-)
-from mindroom.history.runtime import (
-    open_scope_session_context,
-    prepare_bound_scope_history,
-    prepare_scope_history,
-)
+from mindroom.history.replay import _estimate_session_summary_tokens, estimate_prompt_visible_history_tokens
+from mindroom.history.runtime import prepare_bound_scope_history, prepare_scope_history
+from mindroom.history.session_context import open_scope_session_context
 from mindroom.history.storage import (
     read_scope_state,
     write_scope_state,
 )
+from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleProgress,
@@ -52,6 +46,7 @@ from mindroom.session_ids import create_session_id
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
+    seed_session,
 )
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
@@ -96,7 +91,7 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
             runs=[_completed_team_run("team-1", team_id="team-123")],
             summary=SessionSummary(summary="team summary", updated_at=datetime.now(UTC)),
         )
-        scope_context.storage.upsert_session(session)
+        seed_session(scope_context.storage, session)
 
     prepared = await prepare_history_for_run_for_test(
         agent=agent,
@@ -131,7 +126,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     agent = _agent(db=storage)
     with (
@@ -198,7 +193,7 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
     async def _summary_after_notice(*_args: object, **_kwargs: object) -> SessionSummary:
@@ -257,7 +252,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_mo
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
     with patch("mindroom.model_loading.get_model_instance", side_effect=ValueError("bad summary model")):
@@ -307,7 +302,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_ca
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
     with (
@@ -359,7 +354,7 @@ async def test_prepare_history_for_run_required_compaction_classifies_provider_t
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
     with (
@@ -394,9 +389,9 @@ async def test_prepare_history_for_run_uses_provided_storage_without_reopening_s
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1")])
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
-    with patch("mindroom.history.runtime.open_scope_session_context") as mock_open_scope_context:
+    with patch("mindroom.history.session_context.create_scope_session_storage") as mock_create_scope_storage:
         prepared = await prepare_history_for_run_for_test(
             agent=_agent(db=storage),
             agent_name="test_agent",
@@ -409,7 +404,7 @@ async def test_prepare_history_for_run_uses_provided_storage_without_reopening_s
             session=session,
         )
 
-    mock_open_scope_context.assert_not_called()
+    mock_create_scope_storage.assert_not_called()
     assert prepared.replay_plan is not None
 
 
@@ -442,8 +437,8 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(thread_session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(room_session)
-    storage.upsert_session(thread_session)
+    seed_session(storage, room_session)
+    seed_session(storage, thread_session)
 
     with (
         patch(
@@ -525,10 +520,10 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
             ),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
@@ -543,7 +538,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
         budget: int,
     ) -> int:
         return len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=previous_summary,
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
@@ -589,6 +584,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
         replay_budget_tokens=replay_budget,
         hard_replay_budget_tokens=replay_budget,
         summary_input_budget_tokens=summary_input_budget,
+        compaction_timeout_seconds=600.0,
     )
 
     summary_mock = AsyncMock(
@@ -670,7 +666,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
             ),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
@@ -686,7 +682,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
         budget: int,
     ) -> int:
         return len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=previous_summary,
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
@@ -714,6 +710,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
         replay_budget_tokens=1,
         hard_replay_budget_tokens=1,
         summary_input_budget_tokens=summary_input_budget,
+        compaction_timeout_seconds=600.0,
     )
 
     summary_mock = AsyncMock(
@@ -783,7 +780,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(compacted_run_ids=("prior-tombstone",)))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
@@ -796,7 +793,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         budget
         for budget in range(1, 20_000)
         if len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=None,
                 compacted_runs=visible_runs,
                 history_settings=history_settings,
@@ -835,6 +832,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         replay_budget_tokens=replay_budget,
         hard_replay_budget_tokens=replay_budget,
         summary_input_budget_tokens=summary_input_budget,
+        compaction_timeout_seconds=600.0,
     )
 
     async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
@@ -881,7 +879,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     outcome = prepared.compaction_outcomes[0]
     assert outcome.compacted_run_count == 23
     assert outcome.runs_after == 0
-    summary_only_tokens = estimate_session_summary_tokens(persisted.summary.summary)
+    summary_only_tokens = _estimate_session_summary_tokens(persisted.summary.summary)
     assert outcome.after_tokens == summary_only_tokens
     assert outcome.after_tokens < replay_budget
     state = read_scope_state(persisted, scope)
@@ -904,7 +902,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
             ],
         ),
     ]
-    storage.upsert_session(persisted)
+    seed_session(storage, persisted)
     current_run_session = get_agent_session(storage, "session-1")
     assert current_run_session is not None
     assert [run.run_id for run in current_run_session.runs or []] == ["run-24"]
@@ -955,10 +953,10 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
             ),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
@@ -972,7 +970,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         budget: int,
     ) -> int:
         return len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=previous_summary,
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
@@ -1010,6 +1008,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         replay_budget_tokens=replay_budget,
         hard_replay_budget_tokens=replay_budget,
         summary_input_budget_tokens=summary_input_budget,
+        compaction_timeout_seconds=600.0,
     )
     summary_mock = AsyncMock(
         side_effect=[
@@ -1084,7 +1083,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     visible_runs = list(session.runs or [])
     first_summary_text = "first chunk summary"
 
@@ -1092,7 +1091,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         budget
         for budget in range(1, 10_000)
         if len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=None,
                 compacted_runs=visible_runs,
                 max_input_tokens=budget,
@@ -1101,7 +1100,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         )
         == 1
         and len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=first_summary_text,
                 compacted_runs=visible_runs[1:],
                 max_input_tokens=budget,
@@ -1123,7 +1122,9 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         replay_budget_tokens=1,
         hard_replay_budget_tokens=1,
         summary_input_budget_tokens=summary_input_budget,
+        compaction_timeout_seconds=600.0,
         compaction_fallback_model_name="fallback-model",
+        compaction_fallback_summary_input_budget_tokens=summary_input_budget,
     )
     # Chunk 1: primary refuses, the fallback serves the retry; chunk 2 then
     # fails hard on the fallback.
@@ -1188,7 +1189,7 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
     session = _session("session-1", runs=[_completed_run("run-1")])
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_enabled=True,
         destructive_compaction_available=True,
@@ -1202,7 +1203,9 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
         replay_budget_tokens=1,
         hard_replay_budget_tokens=1,
         summary_input_budget_tokens=16_000,
+        compaction_timeout_seconds=600.0,
         compaction_fallback_model_name="fallback-model",
+        compaction_fallback_summary_input_budget_tokens=16_000,
     )
 
     def _load_model(_config: object, _paths: object, name: str = "default", **_kwargs: object) -> FakeModel:
@@ -1297,7 +1300,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
             ),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     summary_mock = AsyncMock(
         return_value=SessionSummary(summary="all runs summary", updated_at=datetime.now(UTC)),
@@ -1322,7 +1325,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
             execution_identity=None,
             storage=storage,
             session=session,
-            available_history_budget=1,
+            available_history_budget=100,
         )
         persisted_before_second = get_agent_session(storage, "session-1")
         assert persisted_before_second is not None
@@ -1336,7 +1339,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
             execution_identity=None,
             storage=storage,
             session=persisted_before_second,
-            available_history_budget=1,
+            available_history_budget=100,
         )
 
     persisted = get_agent_session(storage, "session-1")
@@ -1382,7 +1385,7 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
             ),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
     agent = _agent(db=storage)
     prepared = await prepare_history_for_run_for_test(
         agent=agent,
@@ -1434,7 +1437,7 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
             ),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     agent = _agent(db=storage)
@@ -1484,7 +1487,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     with (
         patch(
@@ -1538,7 +1541,7 @@ async def test_prepare_history_for_run_without_context_window_skips_auto_compact
             _completed_run("run-3"),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
         agent=_agent(db=storage),

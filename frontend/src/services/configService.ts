@@ -20,6 +20,7 @@ export type ConfigSavePayload = RawConfig;
 const API_BASE = "/api";
 const CONFIG_GENERATION_HEADER = "x-mindroom-config-generation";
 const CONFIG_USES_INCLUDES_HEADER = "x-mindroom-config-uses-includes";
+const CONFIG_PENDING_RESTART_HEADER = "x-mindroom-config-pending-restart";
 const COMPOSED_FROM_INCLUDES_ERROR_CODE = "config_composed_from_includes";
 
 function isConfigValidationIssue(
@@ -110,10 +111,22 @@ function responseUsesIncludes(response: Response): boolean {
   return headerValue === "true";
 }
 
+// The saved event_journal is read once, when the store is opened, so an edit
+// to it is accepted and then does nothing until a restart. The editor shows
+// the saved value either way; this is what stops that from being a lie.
+function responsePendingRestart(response: Response): boolean {
+  const headerValue =
+    typeof response.headers?.get === "function"
+      ? response.headers.get(CONFIG_PENDING_RESTART_HEADER)
+      : null;
+  return headerValue === "true";
+}
+
 export async function loadConfig(): Promise<{
   config: RawConfig;
   generation: number;
   usesIncludes: boolean;
+  pendingRestart: boolean;
 }> {
   const response = await fetch(`${API_BASE}/config/load`, {
     method: "POST",
@@ -146,6 +159,7 @@ export async function loadConfig(): Promise<{
     config: (await response.json()) as RawConfig,
     generation: responseGeneration(response, 0),
     usesIncludes: responseUsesIncludes(response),
+    pendingRestart: responsePendingRestart(response),
   };
 }
 

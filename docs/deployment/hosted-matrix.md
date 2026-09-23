@@ -40,12 +40,14 @@ Use `uvx mindroom config init --provider codex` if you want the starter config t
 
 ## 2. Add AI Provider Key
 
-Edit `~/.mindroom/.env` and set at least one provider key:
+Edit `~/.mindroom/.env` and set credentials matching the provider selected during `config init`.
+The default provider is OpenAI:
 
 ```bash
 OPENAI_API_KEY=...
-# or OPENROUTER_API_KEY=...
 ```
+
+To use OpenRouter instead, regenerate with `uvx mindroom config init --provider openrouter` and then set `OPENROUTER_API_KEY`.
 
 For Codex CLI ChatGPT authentication, run `codex login` instead of adding an API key.
 MindRoom reads `~/.codex/auth.json` by default.
@@ -113,10 +115,14 @@ Rotate the Google OAuth client in response to observed client abuse or as an ope
 
 ## Trust Model (Hosted Server vs Message Privacy)
 
-For message *content*, this setup can be effectively zero-trust toward the homeserver operator when rooms are end-to-end encrypted.
+In end-to-end encrypted rooms, the homeserver stores message bodies as ciphertext.
+The local `mindroom run` process holds your agent account keys and performs decryption locally.
+Content privacy depends on authentic recipient devices and trusted clients.
 
-- In E2EE rooms, the homeserver stores ciphertext and cannot read message bodies.
-- The local `mindroom run` process holds your agent account keys and performs decryption locally.
+MindRoom currently shares outbound encryption keys with unverified devices belonging to room members; it does not require recipient-device verification before sending.
+An actively malicious homeserver that advertises an attacker-controlled device for a participating account can therefore receive keys when MindRoom next shares an outbound session with that device.
+This limits protection against an active homeserver operator; it does not imply access to arbitrary stored history.
+See the [Matrix E2EE implementation guide](https://matrix.org/docs/matrix-concepts/end-to-end-encryption/) for device discovery, session sharing, and verification.
 
 Important limits:
 
@@ -124,13 +130,14 @@ Important limits:
 - If a room is not encrypted, the homeserver can read plaintext.
 - Any model/tool providers you send content to can still see the prompts/data you send to them.
 
-So the precise claim is: encrypted Matrix message content is protected from the hosted homeserver, not that every part of the system is universally invisible.
-
 ## If You Self-Host Later
 
 You can keep the same local flow and switch endpoints:
 
 - `MATRIX_HOMESERVER=https://your-matrix.example.com`
+- `MATRIX_SERVER_NAME=your-matrix.example.com`
 - `MINDROOM_PROVISIONING_URL=https://your-matrix.example.com` (or your dedicated provisioning host)
+
+If the homeserver requires a registration token for managed agent accounts, also set `MATRIX_REGISTRATION_TOKEN`.
 
 Then run `mindroom connect` again with a fresh pair code from your own UI.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
@@ -74,6 +75,11 @@ def _entity_user_ids(config: Config) -> dict[str, str]:
     return {name: matrix_id.full_id for name, matrix_id in entity_ids(config, runtime_paths).items() if matrix_id}
 
 
+def _room() -> nio.MatrixRoom:
+    """Return an empty room for managed-mention parsing tests."""
+    return nio.MatrixRoom("!test:localhost", "@mindroom_router:localhost")
+
+
 class TestAgentOrderPreservation:
     """Test that agent order is preserved in various functions."""
 
@@ -93,7 +99,13 @@ class TestAgentOrderPreservation:
             },
         }
 
-        agents, _, _ = check_agent_mentioned(event_source, None, mock_config, runtime_paths)
+        agents, _, _ = check_agent_mentioned(
+            event_source,
+            None,
+            mock_config,
+            runtime_paths,
+            room=_room(),
+        )
 
         # Order should be preserved as phone, email, research
         agent_names = [entity_name_for_id(mid, mock_config, runtime_paths) for mid in agents]
@@ -237,8 +249,20 @@ class TestAgentOrderPreservation:
             },
         }
 
-        agents1, _, _ = check_agent_mentioned(event_source1, None, mock_config, runtime_paths)
-        agents2, _, _ = check_agent_mentioned(event_source2, None, mock_config, runtime_paths)
+        agents1, _, _ = check_agent_mentioned(
+            event_source1,
+            None,
+            mock_config,
+            runtime_paths,
+            room=_room(),
+        )
+        agents2, _, _ = check_agent_mentioned(
+            event_source2,
+            None,
+            mock_config,
+            runtime_paths,
+            room=_room(),
+        )
 
         # Different orders should be preserved
         agent_names1 = [entity_name_for_id(mid, mock_config, runtime_paths) for mid in agents1]

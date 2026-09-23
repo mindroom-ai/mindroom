@@ -12,6 +12,7 @@ from mindroom.matrix.client_room_admin import get_joined_rooms
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -23,6 +24,7 @@ class ExternalTriggerRuntimeCoordinator:
     """Own external trigger API runtime binding and live deliverability state."""
 
     runtime_paths: RuntimePaths
+    agent_reply_memberships: AgentReplyMembershipIndex
     api_enabled: bool = True
 
     def bind_if_ready(
@@ -40,15 +42,18 @@ class ExternalTriggerRuntimeCoordinator:
             return
 
         async def is_trigger_snapshot_ready(snapshot: TriggerDeliverySnapshot) -> bool:
-            return await self.is_ready(snapshot, bots)
+            return await self._is_ready(snapshot, bots)
 
         from mindroom.api import main as api_main  # noqa: PLC0415
 
         api_main.bind_external_trigger_runtime(
             api_main.app,
             client=router_bot.client,
-            conversation_cache=router_bot._conversation_cache,
+            conversation_reader=router_bot._conversation_reader,
             is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+            agent_reply_memberships=self.agent_reply_memberships,
+            response_admission_gate=router_bot.admission_gate,
+            wait_for_admission_or_shutdown=router_bot.wait_for_admission_or_shutdown,
         )
 
     def unbind(self) -> None:
@@ -69,7 +74,7 @@ class ExternalTriggerRuntimeCoordinator:
             return
         self.unbind()
 
-    async def is_ready(
+    async def _is_ready(
         self,
         snapshot: TriggerDeliverySnapshot,
         bots: Mapping[str, AgentBot | TeamBot],

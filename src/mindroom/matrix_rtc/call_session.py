@@ -54,6 +54,10 @@ class CallJoinError(RuntimeError):
     """Joining the call failed before the media bridge came up."""
 
 
+class CallStartRevokedError(CallJoinError):
+    """The owning runtime withdrew permission while the call was starting."""
+
+
 def required_device_id(client: nio.AsyncClient) -> str:
     """The client's device ID, which a logged-in call participant must have."""
     device_id = client.device_id
@@ -112,6 +116,7 @@ class CallSessionDeps:
     fetch_grant: Callable[[], Coroutine[None, None, SfuGrant]]
     agent_options: CallVoiceAgentOptions
     livekit_service_url: str
+    start_is_allowed: Callable[[], bool]
     clock_ms: Callable[[], int] = lambda: int(time.time() * 1000)
     #: Awaited once after the session fully stopped (transcript finalization).
     on_stopped: Callable[[], Coroutine[None, None, None]] | None = None
@@ -152,7 +157,7 @@ class CallSession:
         )
 
     @property
-    def local_identity(self) -> str:
+    def _local_identity(self) -> str:
         """Our LiveKit participant identity (``user_id:device_id``)."""
         client = self.deps.client
         return f"{client.user_id}:{required_device_id(client)}"
@@ -165,6 +170,7 @@ class CallSession:
         self._sync_bridge_participants()
         try:
             grant = await self.deps.fetch_grant()
+            self._require_start_allowed()
             try:
                 await self.deps.bridge.connect(grant)
             except Exception as error:
@@ -172,13 +178,17 @@ class CallSession:
                 # manager's join guard handles them as an ordinary failed join.
                 msg = f"LiveKit SFU connect failed: {error}"
                 raise CallJoinError(msg) from error
+            self._require_start_allowed()
             await self._publish_membership(initial=True)
+            self._require_start_allowed()
             if self.e2ee_enabled:
                 await self._distribute_keys()
+                self._require_start_allowed()
                 self._spawn(
                     self._report_missing_inbound_key_after_timeout(roster_generation),
                 )
             self._spawn(self._membership_refresh_loop())
+            self._require_start_allowed()
             try:
                 await self.deps.bridge.start_agent(self.deps.agent_options)
             except Exception as error:
@@ -186,10 +196,16 @@ class CallSession:
                     raise
                 msg = f"Voice agent start failed: {error}"
                 raise CallJoinError(msg) from error
+            self._require_start_allowed()
         except BaseException:
             await self.stop()
             raise
-        logger.info("call_joined", room_id=self.room_id, identity=self.local_identity)
+        logger.info("call_joined", room_id=self.room_id, identity=self._local_identity)
+
+    def _require_start_allowed(self) -> None:
+        """Abort before the next call-start side effect when ownership was revoked."""
+        if not self.deps.start_is_allowed():
+            raise CallStartRevokedError
 
     async def on_members_changed(self, members: list[CallMember]) -> None:
         """React to remote membership changes (key rotation/sharing)."""
@@ -293,7 +309,7 @@ class CallSession:
             finally:
                 if self.deps.on_stopped is not None:
                     await self.deps.on_stopped()
-        logger.info("call_left", room_id=self.room_id, identity=self.local_identity)
+        logger.info("call_left", room_id=self.room_id, identity=self._local_identity)
 
     async def _distribute_keys(self) -> None:
         async with self._key_distribution_lock:
@@ -400,7 +416,7 @@ class CallSession:
         self._spawn(self.deps.on_failure(message))
 
     def _apply_own_key(self, key: bytes, key_index: int) -> None:
-        self.deps.bridge.set_frame_key(self.local_identity, key, key_index)
+        self.deps.bridge.set_frame_key(self._local_identity, key, key_index)
 
     def _sync_bridge_participants(self) -> None:
         """Apply the authoritative Matrix call roster to the SFU bridge."""

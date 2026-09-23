@@ -14,7 +14,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.history.policy import classify_compaction_decision
-from mindroom.history.runtime import create_scope_session_storage
+from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import (
     CompactionOutcome,
@@ -25,7 +25,7 @@ from mindroom.history.types import (
     ResolvedReplayPlan,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -73,6 +73,7 @@ def _make_execution_plan(**overrides: object) -> ResolvedHistoryExecutionPlan:
         "static_prompt_tokens": 0,
         "replay_budget_tokens": 10_000,
         "summary_input_budget_tokens": 20_000,
+        "compaction_timeout_seconds": 600.0,
         "hard_replay_budget_tokens": 59_904,
     }
     defaults.update(overrides)
@@ -92,6 +93,7 @@ def _make_policy_plan() -> ResolvedHistoryExecutionPlan:
         static_prompt_tokens=0,
         replay_budget_tokens=10_000,
         summary_input_budget_tokens=20_000,
+        compaction_timeout_seconds=600.0,
         hard_replay_budget_tokens=59_904,
     )
 
@@ -270,7 +272,7 @@ def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_pat
             models={
                 "default": ModelConfig(
                     provider="vertexai_claude",
-                    id="claude-opus-4-8",
+                    id="claude-opus-5",
                     context_window=200_000,
                 ),
             },
@@ -284,7 +286,7 @@ def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_pat
         run_id="run-1",
         session_id="session-1",
         status="completed",
-        model="claude-opus-4-8",
+        model="claude-opus-5",
         model_provider="VertexAI",
         metrics={"input_tokens": 153_294, "cache_read_tokens": 281_264},
         context_input_tokens=153_294,
@@ -354,7 +356,7 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
             scope,
             HistoryScopeState(force_compact_before_next_run=True, last_summary_model="summary-model"),
         )
-        first_storage.upsert_session(session)
+        seed_session(first_storage, session)
 
         persisted = second_storage.get_session("session-1", SessionType.TEAM)
 

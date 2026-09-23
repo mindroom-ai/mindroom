@@ -13,25 +13,26 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
-from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
+from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     message_origin,
     runtime_paths_for,
     test_runtime_paths,
@@ -43,17 +44,19 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.dispatch_handoff import MediaDispatchEvent
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
 def _config(tmp_path: Path) -> Config:
     return bind_runtime_paths(
-        Config(
-            agents={"general": AgentConfig(display_name="General", rooms=["!room:localhost"])},
-            teams={},
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={"general": AgentConfig(display_name="General", rooms=["!room:localhost"])},
+                teams={},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+            ),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -67,10 +70,10 @@ def _bot(tmp_path: Path) -> AgentBot:
         display_name="General",
         user_id="@mindroom_general:localhost",
     )
-    bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
 
@@ -139,6 +142,10 @@ def _request(
     thread_history: Sequence[ResolvedVisibleMessage],
 ) -> ResponseRequest:
     return ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=("$event",),
+            logical_source_event_ids=("$event",),
+        ),
         thread_history=thread_history,
         prompt=preparation.prompt,
         user_id="@user:localhost",
@@ -336,8 +343,12 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="built")),
         ),
-        patch.object(coordinator, "run_cancellable_response", new=AsyncMock(side_effect=fake_run_cancellable_response)),
-        patch.object(coordinator, "process_and_respond", new=AsyncMock(side_effect=fake_process_and_respond)),
+        patch.object(
+            coordinator,
+            "_run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=fake_process_and_respond)),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
     ):
         result = await coordinator.generate_response(

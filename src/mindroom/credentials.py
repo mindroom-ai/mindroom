@@ -24,6 +24,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from mindroom import runtime_env_policy as _runtime_env_policy
 from mindroom.credential_policy import credential_service_policy
+from mindroom.durable_write import create_directory_durable, replace_file_durable
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.worker_routing import worker_root_path
 
@@ -142,15 +143,24 @@ def _ensure_private_directory(path: Path, *, harden_existing: bool = False) -> N
         missing_paths.append(current_path)
         current_path = current_path.parent
 
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-
     directories_to_chmod = list(reversed(missing_paths))
     if harden_existing:
         for directory_path in _credential_owned_directory_chain(path):
             if directory_path not in directories_to_chmod:
                 directories_to_chmod.append(directory_path)
     for directory_path in directories_to_chmod:
-        _set_private_permissions(directory_path, 0o700)
+        try:
+            create_directory_durable(directory_path, mode=0o700)
+        except PermissionError as exc:
+            raise _private_permissions_error(directory_path, 0o700) from exc
+
+
+def _private_permissions_error(path: Path, mode: int) -> PermissionError:
+    """Build actionable ownership guidance for one credential permission failure."""
+    return PermissionError(
+        f"Cannot secure credential path '{path}' with mode {mode:#05o}. "
+        "Ensure the MindRoom OS user owns this path and can change its permissions.",
+    )
 
 
 def _set_private_permissions(path: Path, mode: int) -> None:
@@ -158,11 +168,7 @@ def _set_private_permissions(path: Path, mode: int) -> None:
     try:
         path.chmod(mode)
     except PermissionError as exc:
-        msg = (
-            f"Cannot secure credential path '{path}' with mode {mode:#05o}. "
-            "Ensure the MindRoom OS user owns this path and can change its permissions."
-        )
-        raise PermissionError(msg) from exc
+        raise _private_permissions_error(path, mode) from exc
 
 
 def _credential_owned_directory_chain(path: Path) -> list[Path]:
@@ -207,7 +213,7 @@ def _atomic_write_private_file(path: Path, payload: bytes) -> None:
             f.write(payload)
             f.flush()
             os.fsync(f.fileno())
-        tmp_path.replace(path)
+        replace_file_durable(tmp_path, path)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
@@ -334,6 +340,32 @@ class CredentialsManager:
     def _credentials_file(self, normalized_service: str) -> Path:
         return self.base_path / f"{normalized_service}_credentials.json"
 
+    def encode_credentials(self, service: str, credentials: dict[str, Any]) -> bytes:
+        """Serialize credentials with the same policy used by the file store."""
+        normalized_service = validate_service_name(service)
+        if self._encryption_key is not None:
+            return _encrypted_credentials_payload(
+                credentials,
+                service=normalized_service,
+                key=self._encryption_key,
+            )
+        return json.dumps(credentials, indent=2).encode("utf-8")
+
+    def decode_credentials(self, service: str, payload: bytes) -> dict[str, Any]:
+        """Deserialize credentials with the same policy used by the file store."""
+        normalized_service = validate_service_name(service)
+        if self._encryption_key is not None:
+            return _decrypt_credentials_payload(
+                payload,
+                service=normalized_service,
+                key=self._encryption_key,
+            )
+        data = json.loads(payload.decode("utf-8"))
+        if not isinstance(data, dict):
+            msg = "Credential payload must contain a JSON object"
+            raise TypeError(msg)
+        return data
+
     def load_credentials(self, service: str) -> dict[str, Any] | None:
         """Load credentials for a service.
 
@@ -350,28 +382,13 @@ class CredentialsManager:
 
     def _load_credentials_file(self, normalized_service: str, credentials_path: Path) -> dict[str, Any] | None:
         if credentials_path.exists():
-            if self._encryption_key is not None:
-                try:
-                    return _decrypt_credentials_payload(
-                        credentials_path.read_bytes(),
-                        service=normalized_service,
-                        key=self._encryption_key,
-                    )
-                except (OSError, TypeError, ValueError, InvalidTag) as exc:
-                    logger.warning(
-                        "Failed to load encrypted credentials",
-                        service=normalized_service,
-                        path=str(credentials_path),
-                        error_type=type(exc).__name__,
-                    )
-                    return None
             try:
-                with credentials_path.open(encoding="utf-8") as f:
-                    data: dict[str, Any] = json.load(f)
-                    return data
-            except (OSError, TypeError, ValueError) as exc:
+                return self.decode_credentials(normalized_service, credentials_path.read_bytes())
+            except (OSError, TypeError, ValueError, InvalidTag) as exc:
                 logger.warning(
-                    "Failed to load credentials",
+                    "Failed to load encrypted credentials"
+                    if self._encryption_key is not None
+                    else "Failed to load credentials",
                     service=normalized_service,
                     path=str(credentials_path),
                     error_type=type(exc).__name__,
@@ -401,17 +418,13 @@ class CredentialsManager:
             if credentials_path.exists() and self._load_credentials_file(normalized_service, credentials_path) is None:
                 msg = f"Stored credentials for {normalized_service} could not be loaded; refusing to overwrite"
                 raise ValueError(msg)
-            payload = _encrypted_credentials_payload(
-                credentials,
-                service=normalized_service,
-                key=self._encryption_key,
-            )
+            payload = self.encode_credentials(normalized_service, credentials)
             _atomic_write_private_file(credentials_path, payload)
             return
         if credentials_path.exists() and _has_encrypted_credentials_magic(credentials_path):
             msg = f"Stored credentials for {normalized_service} are encrypted; refusing to overwrite without a key"
             raise ValueError(msg)
-        _atomic_write_private_file(credentials_path, json.dumps(credentials, indent=2).encode("utf-8"))
+        _atomic_write_private_file(credentials_path, self.encode_credentials(normalized_service, credentials))
 
     def delete_credentials(self, service: str) -> None:
         """Delete credentials for a service.
@@ -687,7 +700,6 @@ def sync_shared_credentials_to_worker(
     """
     manager = credentials_manager
     worker_shared_manager = manager.for_worker(worker_key).shared_manager()
-    source_manager = _shared_credentials_manager(manager)
     mirrored_services = set(worker_shared_manager.list_services())
     copied_services: set[str] = set()
     logger.debug(
@@ -696,23 +708,29 @@ def sync_shared_credentials_to_worker(
         allowed_services=sorted(allowed_services),
     )
 
-    for service in source_manager.list_services():
-        shared_credentials = load_worker_grantable_shared_credentials(
-            service,
-            shared_manager=source_manager,
-            allowed_services=allowed_services,
-        )
-        if shared_credentials is None:
-            if service not in allowed_services:
-                logger.info(
-                    "Skipping non-grantable shared credentials during worker sync",
-                    worker_key=worker_key,
-                    service=service,
-                )
-            continue
+    # An empty allowlist can grant nothing, so the copy loop is a guaranteed no-op that would only
+    # re-scan the shared-credential store from disk and log one skip per service. This is the
+    # default configuration and it runs on every worker-routed tool call, so short-circuit it and
+    # fall straight through to the cleanup pass, which still tears down any stale mirror.
+    if allowed_services:
+        source_manager = _shared_credentials_manager(manager)
+        for service in source_manager.list_services():
+            shared_credentials = load_worker_grantable_shared_credentials(
+                service,
+                shared_manager=source_manager,
+                allowed_services=allowed_services,
+            )
+            if shared_credentials is None:
+                if service not in allowed_services:
+                    logger.debug(
+                        "Skipping non-grantable shared credentials during worker sync",
+                        worker_key=worker_key,
+                        service=service,
+                    )
+                continue
 
-        copied_services.add(service)
-        worker_shared_manager.save_credentials(service, shared_credentials)
+            copied_services.add(service)
+            worker_shared_manager.save_credentials(service, shared_credentials)
 
     for service in mirrored_services - copied_services:
         worker_shared_manager.delete_credentials(service)
@@ -746,6 +764,7 @@ def _scoped_credentials_target_manager(
     *,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
+    worker_credentials_manager: CredentialsManager | None = None,
 ) -> CredentialsManager:
     manager = credentials_manager
     if worker_target is None or worker_target.worker_scope is None:
@@ -762,7 +781,7 @@ def _scoped_credentials_target_manager(
     if primary_runtime_manager is not None:
         return primary_runtime_manager
 
-    worker_manager = _resolve_worker_credentials_manager(
+    worker_manager = worker_credentials_manager or _resolve_worker_credentials_manager(
         credentials_manager=manager,
         worker_target=worker_target,
     )
@@ -790,8 +809,15 @@ def load_scoped_credentials(
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
     allowed_shared_services: frozenset[str] | None = None,
+    worker_credentials_manager: CredentialsManager | None = None,
+    allow_shared_mirror: bool = True,
 ) -> dict[str, Any] | None:
-    """Load credentials for a service, resolving worker-scoped overrides when available."""
+    """Load scoped overrides over the service's permitted shared credential layer.
+
+    Callers with an authorized worker store can supply it without resolving it
+    again. Dashboard reads disable ``allow_shared_mirror`` so their committed
+    allowlist still applies when the base manager has a separate shared layer.
+    """
     manager = credentials_manager
     shared_manager = _shared_credentials_manager(manager)
     if worker_target is None or worker_target.worker_scope is None:
@@ -812,30 +838,21 @@ def load_scoped_credentials(
         service,
         worker_target.worker_scope,
     ).uses_local_shared_credentials
-    worker_manager = (
-        _resolve_worker_credentials_manager(
+    worker_manager = None
+    if primary_runtime_manager is None and not uses_local_shared_credentials:
+        worker_manager = worker_credentials_manager or _resolve_worker_credentials_manager(
             credentials_manager=manager,
             worker_target=worker_target,
         )
-        if primary_runtime_manager is None and not uses_local_shared_credentials
-        else None
-    )
-    resolved_allowed_shared_services = allowed_shared_services
-    if resolved_allowed_shared_services is None and manager.shared_base_path == manager.base_path:
-        resolved_allowed_shared_services = frozenset()
     if primary_runtime_manager is not None:
         shared_credentials = None
-    elif (
-        uses_local_shared_credentials
-        or manager.shared_base_path != manager.base_path
-        or resolved_allowed_shared_services is None
-    ):
+    elif uses_local_shared_credentials or (allow_shared_mirror and manager.shared_base_path != manager.base_path):
         shared_credentials = shared_manager.load_credentials(service)
     else:
         shared_credentials = load_worker_grantable_shared_credentials(
             service,
             shared_manager=shared_manager,
-            allowed_services=resolved_allowed_shared_services,
+            allowed_services=allowed_shared_services or frozenset(),
         )
     scoped_manager = primary_runtime_manager or worker_manager
     worker_credentials = scoped_manager.load_credentials(service) if scoped_manager is not None else None
@@ -848,13 +865,15 @@ def save_scoped_credentials(
     *,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
+    worker_credentials_manager: CredentialsManager | None = None,
 ) -> None:
-    """Save credentials for a service to the current worker scope when available."""
+    """Save to the service's scope, reusing an already authorized worker store when supplied."""
     normalized_service = validate_service_name(service)
     target_manager = _scoped_credentials_target_manager(
         normalized_service,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
+        worker_credentials_manager=worker_credentials_manager,
     )
     target_manager.save_credentials(normalized_service, credentials)
 
@@ -864,12 +883,14 @@ def delete_scoped_credentials(
     *,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
+    worker_credentials_manager: CredentialsManager | None = None,
 ) -> None:
-    """Delete credentials for a service from the current worker scope when available."""
+    """Delete from the service's scope, reusing an already authorized worker store when supplied."""
     normalized_service = validate_service_name(service)
     target_manager = _scoped_credentials_target_manager(
         normalized_service,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
+        worker_credentials_manager=worker_credentials_manager,
     )
     target_manager.delete_credentials(normalized_service)

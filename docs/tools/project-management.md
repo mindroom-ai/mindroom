@@ -29,7 +29,7 @@ Use these tools when you need repository context, issue tracking, documentation 
 
 The `todo` tool is available without credentials.
 The other tools on this page are registered as `status=requires_config`, so they stay unavailable in the dashboard until their required credentials or connection fields are present.
-None of these tools declare an `auth_provider`, and `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes, so project-management tools are configured through stored tool credentials or environment variables rather than a dedicated dashboard OAuth flow.
+GitHub supports requester-scoped OAuth through MindRoom's built-in `github` provider, while the remaining project-management tools use stored tool credentials or environment variables.
 Password and token fields should be stored through the dashboard or credential store instead of inline YAML.
 Most upstream SDKs also read environment variables, including `GITHUB_ACCESS_TOKEN`, `BITBUCKET_USERNAME`, `BITBUCKET_PASSWORD`, `BITBUCKET_TOKEN`, `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_PASSWORD`, `JIRA_TOKEN`, `LINEAR_API_KEY`, `CLICKUP_API_KEY`, `MASTER_SPACE_ID`, `CONFLUENCE_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_KEY`, `CONFLUENCE_PASSWORD`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`, `TRELLO_API_KEY`, `TRELLO_API_SECRET`, `TRELLO_TOKEN`, `TODOIST_API_TOKEN`, `ZENDESK_USERNAME`, `ZENDESK_PASSWORD`, and `ZENDESK_COMPANY_NAME`.
 Several registry fields on this page are marked optional in metadata even though the upstream tool effectively requires them at runtime, so the notes below call out the practical requirement level for each tool.
@@ -50,8 +50,21 @@ The file-management surface includes `create_file()`, `get_file_content()`, `upd
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `access_token` | `password` | `no` | `null` | GitHub personal access token or GitHub App token. |
+| `access_token` | `password` | `no` | `null` | Optional explicit GitHub access token; takes precedence over OAuth when non-blank. |
 | `base_url` | `url` | `no` | `null` | Optional GitHub Enterprise API base URL such as `https://github.example.com/api/v3`. |
+
+### OAuth Setup
+
+Choose **Connect with GitHub** on the Tools dashboard to use requester-scoped GitHub App user OAuth.
+For a self-hosted installation, configure the GitHub App client ID and client secret under the `github_oauth_client` credential service and register `/api/oauth/github/callback` on the installation's public URL as the callback URL.
+MindRoom requests no classic OAuth scopes because GitHub App user tokens use the app's fine-grained permissions.
+Managed GitHub credentials follow the requester independently of the agent's worker scope and stay in the primary MindRoom runtime.
+When a requester has not connected GitHub, tool calls return a structured `OAuthConnectionRequired` result containing that requester's connect URL.
+MindRoom refreshes expiring access tokens through the existing scoped OAuth refresh flow and persists rotated access and refresh tokens.
+
+Choose **Use access token** instead to save an explicit token, or set `GITHUB_ACCESS_TOKEN` in the runtime environment.
+A non-blank saved `access_token` takes precedence over a non-blank `GITHUB_ACCESS_TOKEN`, which takes precedence over requester-scoped OAuth credentials.
+Whitespace-only token values are treated as absent.
 
 ### Example
 
@@ -71,7 +84,7 @@ get_pull_request("mindroom-ai/mindroom", 123)
 
 ### Notes
 
-- `access_token` is marked optional in MindRoom metadata, but the upstream client raises at startup if neither `access_token` nor `GITHUB_ACCESS_TOKEN` is present.
+- The tool can start without credentials; its functions return a requester-bound OAuth connection link until GitHub is connected or an explicit token is configured.
 - Use `base_url` only for GitHub Enterprise, and set it to the API endpoint such as `/api/v3` rather than the human-facing site root.
 - `github` is the best fit on this page when you need repository file operations or rich pull-request inspection in addition to issue tracking.
 
@@ -140,16 +153,17 @@ apply_template("mindroom-dev", {"ISSUE_REF": "ISSUE-123", "REPO": "mindroom"})
 ### What It Does
 
 `bitbucket` exposes `list_repositories()`, `get_repository_details()`, `create_repository()`, `list_repository_commits()`, `list_all_pull_requests()`, `get_pull_request_details()`, `get_pull_request_changes()`, and `list_issues()`.
-The tool always authenticates with a configured `username` plus either `password` or `token`, and it scopes most operations to the configured `workspace` and `repo_slug`.
+The tool always uses HTTP Basic authentication with `username` and either `token` or `password`, with `token` taking precedence.
+It scopes most operations to the configured `workspace` and `repo_slug`.
 If `server_url` has no scheme, the upstream tool normalizes it to `https://<server_url>/<api_version>`.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `username` | `text` | `yes` | `null` | Bitbucket username. |
-| `password` | `password` | `no` | `null` | App password, used when `token` is not supplied. |
-| `token` | `password` | `no` | `null` | Access token, used instead of `password` when present. |
+| `username` | `text` | `yes` | `null` | Atlassian account email for Bitbucket Cloud; the deployment's Basic-auth username otherwise. |
+| `password` | `password` | `no` | `null` | Basic-auth password for deployments that support it, used when `token` is not supplied. |
+| `token` | `password` | `no` | `null` | Scoped Bitbucket Cloud API token, stored through the dashboard or credential store. |
 | `workspace` | `text` | `yes` | `null` | Bitbucket workspace name. |
 | `repo_slug` | `text` | `yes` | `null` | Repository slug used by most repository-scoped calls. |
 | `server_url` | `url` | `no` | `api.bitbucket.org` | Bitbucket host or full base URL. |
@@ -162,7 +176,8 @@ agents:
   maintainer:
     tools:
       - bitbucket:
-          username: buildbot
+          username: buildbot@example.com
+          # Store the scoped API token in the token credential field.
           workspace: mindroom
           repo_slug: docs
 ```
@@ -175,7 +190,8 @@ list_repository_commits(count=10)
 
 ### Notes
 
-- Provide either `password` or `token`, and use an app password for Bitbucket Cloud unless you have a reason to use token-based auth.
+- For Bitbucket Cloud, [create a scoped API token](https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/) and store it in `token`, with your Atlassian account email in `username`, following [Atlassian's REST API authentication instructions](https://support.atlassian.com/bitbucket-cloud/docs/using-api-tokens/).
+- For a non-Cloud deployment, use credentials accepted by that deployment's Basic-auth API; this toolkit does not implement a separate bearer-token flow.
 - `repo_slug` is not just a default, because most methods are hard-scoped to that repository and the current `create_repository()` call path also posts through the configured `repo_slug` endpoint on this branch.
 - `list_repositories()` is the workspace-wide overview method, while the pull-request, commit, and issue methods all use the configured repository context.
 
@@ -236,7 +252,7 @@ add_comment("PROJ-123", "Reviewed and ready for testing.")
 
 `linear` exposes `get_user_details()`, `get_teams_details()`, `get_issue_details()`, `create_issue()`, `update_issue()`, `get_user_assigned_issues()`, `get_workflow_issues()`, and `get_high_priority_issues()`.
 All calls go to `https://api.linear.app/graphql`, and the tool expects a Linear API key in either `api_key` or `LINEAR_API_KEY`.
-The read methods are useful for discovering the IDs you need before calling `create_issue()` or `update_issue()`.
+For `create_issue()`, obtain a `team_id` with `get_teams_details()` and, to assign the issue to yourself, use the current-user ID from `get_user_details()` as `assignee_id`.
 
 ### Configuration
 
@@ -256,13 +272,14 @@ agents:
 ```python
 get_user_details()
 get_teams_details()
+get_issue_details("BLA-123")
 get_high_priority_issues()
 ```
 
 ### Notes
 
 - `api_key` is marked optional in metadata, but the upstream client raises if neither `api_key` nor `LINEAR_API_KEY` is present.
-- `get_issue_details()` takes a Linear issue ID rather than an issue key, so use `get_teams_details()` or other Linear discovery steps first when you only know the human-readable issue key from the UI.
+- `get_issue_details(issue_id)` accepts an issue UUID or a human-readable issue key such as `BLA-123`, matching [Linear's issue query](https://linear.app/developers/graphql).
 - `linear` is the best fit on this page when your workflow is already centered on Linear IDs, teams, and workflow states rather than repository-native pull requests.
 
 ## [`clickup`]

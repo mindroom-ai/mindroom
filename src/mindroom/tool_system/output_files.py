@@ -5,20 +5,24 @@ from __future__ import annotations
 import inspect
 import json
 import os
-import tempfile
+import stat
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path
-from types import MethodType
-from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
+from typing import TYPE_CHECKING, Literal, cast, get_type_hints
 
 from agno.tools.function import Function, ToolResult
 from pydantic import BaseModel
 
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root
+from mindroom.tool_system.agno_compat_function_schema import install_schema_postprocessor, uses_schema_postprocessor
+from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if TYPE_CHECKING:
@@ -76,6 +80,31 @@ class _ValidatedOutputPath:
     relative_path: Path
     absolute_path: Path
     overwritten: bool
+
+
+@dataclass(frozen=True)
+class ToolOutputFileRequest:
+    """Validated output destination for a direct or externally executed tool call."""
+
+    policy: ToolOutputFilePolicy
+    tool_name: str
+    path: _ValidatedOutputPath | None
+
+
+@dataclass(frozen=True)
+class ToolOutputFileHandled:
+    """A tool owner has accepted responsibility for publishing its output file."""
+
+    result: object
+
+
+_active_output_request: ContextVar[ToolOutputFileRequest | None] = ContextVar("tool_output_file_request", default=None)
+
+
+def current_tool_output_file_request() -> ToolOutputFileRequest | None:
+    """Return the current explicit redirect, for tools that capture before returning."""
+    request = _active_output_request.get()
+    return request if request is not None and request.path is not None else None
 
 
 @dataclass(frozen=True)
@@ -239,47 +268,9 @@ def normalize_output_path_argument(raw_path: object) -> object | None:
     return _normalize_output_path_argument(raw_path)
 
 
-def _process_entrypoint_with_output_path_schema(self: Function, strict: bool = False) -> None:
-    effective_strict = False if self.strict is False else strict
-    Function.process_entrypoint(self, strict=effective_strict)
-    ensure_output_path_schema_optional(self)
-
-
-def _copy_function_model(self: Function, *, update: Mapping[str, object] | None, deep: bool) -> Function:
-    model_copy_parameters = inspect.signature(Function.model_copy).parameters
-    if "update" in model_copy_parameters:
-        copied = cast("Any", Function.model_copy)(self, update=update, deep=deep)
-    else:
-        copied = Function.model_copy(self, deep=deep)
-        if update:
-            for field_name, value in update.items():
-                object.__setattr__(copied, field_name, value)
-    return copied
-
-
-def _model_copy_with_output_path_schema(
-    self: Function,
-    *,
-    update: Mapping[str, object] | None = None,
-    deep: bool = False,
-) -> Function:
-    copied = _copy_function_model(self, update=update, deep=deep)
-    _install_output_path_schema_postprocessor(copied)
-    return copied
-
-
-def _install_output_path_schema_postprocessor(function: Function) -> None:
-    """Install a per-function schema sanitizer that survives Agno's Function copies."""
-    object.__setattr__(
-        function,
-        "process_entrypoint",
-        MethodType(_process_entrypoint_with_output_path_schema, function),
-    )
-    object.__setattr__(
-        function,
-        "model_copy",
-        MethodType(_model_copy_with_output_path_schema, function),
-    )
+def uses_output_file_schema(function: Function) -> bool:
+    """Whether this Function uses our known output-path schema processor."""
+    return uses_schema_postprocessor(function, ensure_output_path_schema_optional)
 
 
 def _path_has_environment_expansion(raw_path: str) -> bool:
@@ -361,49 +352,15 @@ def validate_output_path_syntax(raw_path: object) -> str | None:
 
 
 def _validate_parent_components(workspace_root: Path, relative_parent: Path) -> str | None:
-    """Reject existing unsafe parent components without creating anything."""
-    if relative_parent == Path():
+    """Retain directory-type diagnostics after shared symlink validation."""
+    message = "mindroom_output_path parent components must be directories."
+    try:
+        mode = (workspace_root.expanduser() / relative_parent).stat().st_mode
+    except FileNotFoundError:
         return None
-
-    current = workspace_root.expanduser()
-    for part in relative_parent.parts:
-        current = current / part
-        if component_error := _existing_parent_component_error(current):
-            return component_error
-    return None
-
-
-def _existing_parent_component_error(path: Path) -> str | None:
-    if path.is_symlink():
-        return "mindroom_output_path parent must stay inside the workspace."
-    if path.exists() and not path.is_dir():
-        return "mindroom_output_path parent components must be directories."
-    return None
-
-
-def _ensure_parent_directory(workspace_root: Path, relative_parent: Path) -> str | None:
-    """Create parent directories one component at a time without accepting symlinks."""
-    resolved_root = workspace_root.resolve()
-    current = workspace_root.expanduser()
-    for part in relative_parent.parts:
-        current = current / part
-        if component_error := _existing_parent_component_error(current):
-            return component_error
-        try:
-            current.mkdir()
-        except FileExistsError:
-            if component_error := _existing_parent_component_error(current):
-                return component_error
-        except OSError:
-            return "Failed to prepare redirected tool output path."
-
-        try:
-            resolved_current = current.resolve()
-        except OSError:
-            return "Failed to prepare redirected tool output path."
-        if not resolved_current.is_relative_to(resolved_root):
-            return "mindroom_output_path parent escaped the workspace before write."
-    return None
+    except NotADirectoryError:
+        return message
+    return None if stat.S_ISDIR(mode) else message
 
 
 def _normalize_json_value(value: object) -> object:
@@ -477,44 +434,20 @@ def _auto_output_relative_path(tool_name: str, output_format: Literal["text", "j
 
 
 def _write_atomic(
-    path: Path,
     payload: bytes,
     workspace_root: Path,
     relative_path: Path,
     *,
     file_mode: int | None = None,
 ) -> str | None:
-    parent_error = _ensure_parent_directory(workspace_root, relative_path.parent)
-    if parent_error is not None:
-        return parent_error
-
-    resolved_root = workspace_root.resolve()
     try:
-        resolved_parent = path.parent.resolve()
-    except OSError:
-        return "Failed to prepare redirected tool output path."
-    if not resolved_parent.is_relative_to(resolved_root):
-        return "mindroom_output_path parent escaped the workspace before write."
-
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            dir=path.parent,
-            delete=False,
-        ) as temp_file:
-            temp_file.write(payload)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-            temp_path = Path(temp_file.name)
-        if file_mode is not None:
-            temp_path.chmod(file_mode)
-        os.replace(temp_path, path)  # noqa: PTH105
+        with open_directory_within_root(
+            workspace_root.expanduser().resolve(),
+            relative_path.parent,
+            create=True,
+        ) as directory_fd:
+            atomic_write_bytes_at(directory_fd, relative_path.name, payload, file_mode=file_mode)
     except OSError as exc:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
         logger.warning("tool_output_redirect_write_failed", error_type=type(exc).__name__)
         return "Failed to write redirected tool output."
     return None
@@ -538,7 +471,6 @@ def write_bytes_to_output_path(
         return f"Redirected tool output is {byte_count} bytes, which exceeds the {policy.max_bytes} byte limit."
 
     write_error = _write_atomic(
-        validated_path.absolute_path,
         payload,
         policy.workspace_root,
         validated_path.relative_path,
@@ -577,7 +509,6 @@ def _redirect_result_to_file(
         )
 
     write_error = _write_atomic(
-        validated_path.absolute_path,
         serialized.payload,
         policy.workspace_root,
         validated_path.relative_path,
@@ -638,7 +569,6 @@ def _write_auto_saved_result(
         return _error_receipt(validated_path)
 
     write_error = _write_atomic(
-        validated_path.absolute_path,
         serialized.payload,
         policy.workspace_root,
         validated_path.relative_path,
@@ -690,6 +620,29 @@ def _docstring_with_output_path(original_doc: str | None) -> str:
     return f"{base}\n\n{output_arg_doc}"
 
 
+def prepare_tool_output_file(
+    policy: ToolOutputFilePolicy,
+    *,
+    tool_name: str,
+    output_path: object = None,
+) -> ToolOutputFileRequest | dict[str, object]:
+    """Validate before tool execution, without creating files or directories."""
+    normalized = _normalize_output_path_argument(output_path)
+    validated = _validate_output_path(policy, normalized) if normalized is not None else None
+    if isinstance(validated, str):
+        return _error_receipt(validated)
+    return ToolOutputFileRequest(policy=policy, tool_name=tool_name, path=validated)
+
+
+def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) -> object:
+    """Apply the shared explicit redirect or large-result policy after execution."""
+    if isinstance(result, ToolOutputFileHandled):
+        return result.result
+    if request.path is None:
+        return _auto_save_large_result(result, policy=request.policy, tool_name=request.tool_name)
+    return _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
+
+
 def _wrap_entrypoint(
     entrypoint: Callable[..., object],
     policy: ToolOutputFilePolicy,
@@ -700,29 +653,29 @@ def _wrap_entrypoint(
         async_entrypoint = cast("Callable[..., Awaitable[object]]", entrypoint)
 
         async def async_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
-            normalized_output_path = _normalize_output_path_argument(mindroom_output_path)
-            if normalized_output_path is None:
+            request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
+            if isinstance(request, dict):
+                return request
+            token = _active_output_request.set(request)
+            try:
                 result = await async_entrypoint(*args, **kwargs)
-                return _auto_save_large_result(result, policy=policy, tool_name=tool_name)
-            validated_path = _validate_output_path(policy, normalized_output_path)
-            if isinstance(validated_path, str):
-                return _error_receipt(validated_path)
-            result = await async_entrypoint(*args, **kwargs)
-            return _redirect_result_to_file(result, policy=policy, validated_path=validated_path)
+            finally:
+                _active_output_request.reset(token)
+            return finalize_tool_output_file(request, result)
 
         wrapper = async_wrapper
     else:
 
         def sync_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
-            normalized_output_path = _normalize_output_path_argument(mindroom_output_path)
-            if normalized_output_path is None:
+            request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
+            if isinstance(request, dict):
+                return request
+            token = _active_output_request.set(request)
+            try:
                 result = entrypoint(*args, **kwargs)
-                return _auto_save_large_result(result, policy=policy, tool_name=tool_name)
-            validated_path = _validate_output_path(policy, normalized_output_path)
-            if isinstance(validated_path, str):
-                return _error_receipt(validated_path)
-            result = entrypoint(*args, **kwargs)
-            return _redirect_result_to_file(result, policy=policy, validated_path=validated_path)
+            finally:
+                _active_output_request.reset(token)
+            return finalize_tool_output_file(request, result)
 
         wrapper = sync_wrapper
 
@@ -731,6 +684,7 @@ def _wrap_entrypoint(
     wrapper.__module__ = getattr(entrypoint, "__module__", __name__)
     wrapper.__dict__["__signature__"] = _signature_with_output_path(entrypoint)
     _copy_annotations_with_output_path(wrapper, entrypoint)
+    declare_tool_schema_source(wrapper, entrypoint)
     setattr(wrapper, _WRAPPED_ATTR, True)
     return wrapper
 
@@ -740,7 +694,7 @@ def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePol
     if function.entrypoint is None or getattr(function.entrypoint, _WRAPPED_ATTR, False):
         return function
     if _has_output_path_argument(function):
-        logger.warning(
+        logger.debug(
             "tool_output_path_argument_collision",
             function_name=function.name,
             argument_name=OUTPUT_PATH_ARGUMENT,
@@ -750,7 +704,7 @@ def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePol
     uses_custom_parameters = function.skip_entrypoint_processing or function.parameters != _DEFAULT_PARAMETERS
     function.entrypoint = _wrap_entrypoint(function.entrypoint, policy, tool_name=function.name)
     function.strict = False
-    _install_output_path_schema_postprocessor(function)
+    install_schema_postprocessor(function, ensure_output_path_schema_optional)
     if uses_custom_parameters:
         ensure_output_path_schema_optional(function)
     return function

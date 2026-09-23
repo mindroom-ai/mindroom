@@ -26,11 +26,9 @@ Use these tools when you need outbound communication, mailbox access, team-chat 
 
 `gmail` uses `auth_provider="google_gmail"` and connects through the generic `/api/oauth/google_gmail/*` flow.
 Its OAuth tokens are stored separately from editable Gmail tool settings.
-`homeassistant` stays local even when other tools are routed through the sandbox proxy.
-MindRoom enforces that restriction both at config-validation time and again during tool construction.
 Password fields should be stored through the dashboard or credential store instead of inline YAML.
 Several metadata fields on this page are marked `required: false`, but the installed SDKs still need the corresponding token or secret in practice.
-Useful environment fallbacks on this page include `SLACK_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
+Useful environment fallbacks on this page include `SLACK_TOKEN`, `SLACK_USER_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
 The generic-looking `email` tool is not a fully configurable SMTP client on this branch.
 Its installed upstream implementation is hard-wired to Gmail SMTP over `smtp.gmail.com:465` and does not expose SMTP host, port, or TLS configuration fields.
 
@@ -44,7 +42,10 @@ MindRoom wraps Agno's `GmailTools` with `ScopedOAuthClientMixin`, so Gmail crede
 The wrapper refreshes stored Google tokens when needed and raises `OAuthConnectionRequired` with a connect URL when no usable stored OAuth credentials are available.
 It does not fall back to Agno's local OAuth flow when MindRoom credentials are missing.
 It only bypasses MindRoom OAuth when configured for Google service-account auth.
-The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`.
+The default MindRoom Gmail toolkit exposes 26 functions for stars, drafts, message and thread retrieval, search, label mutation, sending, and replies.
+Its exact function names are `apply_label()`, `create_draft_email()`, `delete_custom_label()`, `get_draft()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `get_emails_from_user()`, `get_latest_emails()`, `get_message()`, `get_starred_emails()`, `get_thread()`, `get_unread_emails()`, `list_custom_labels()`, `list_drafts()`, `mark_email_as_read()`, `mark_email_as_unread()`, `remove_label()`, `search_emails()`, `search_threads()`, `send_email()`, `send_email_reply()`, `send_email_to_self()`, `star_email()`, `unstar_email()`, and `update_draft()`.
+`send_email_to_self(subject, body)` derives its sole recipient from the connected Gmail profile and accepts no recipient, CC, BCC, or attachment arguments.
+The function follows the configured tool approval policy, so operators can match `send_email_to_self` separately from other send functions.
 Draft and send operations accept local file-system paths for attachments.
 
 ### Configuration
@@ -74,6 +75,7 @@ agents:
 get_latest_emails(10)
 search_emails("label:unread from:billing@example.com", 10)
 send_email("alice@example.com", "Project update", "Here is the latest status.")
+send_email_to_self("Automation finished", "The scheduled report is ready.")
 send_email_reply("thread_id", "message_id", "alice@example.com", "Re: Project update", "Thanks for the update.")
 apply_label("is:unread category:promotions", "Needs Review", count=10)
 ```
@@ -83,17 +85,18 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 - Connect Gmail through the `google_gmail` OAuth provider rather than storing a Gmail-specific API key.
 - The Gmail provider requests `gmail.modify`, which is the narrowest single scope that preserves mailbox reading, drafting, sending, labeling, and organization.
 - `gmail` always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets.
-- Agno's Gmail constructor accepts per-method selector kwargs (`get_latest_emails`, `get_unread_emails`, `search_emails`, etc.), and the MindRoom wrapper forwards them via `**kwargs`.
-- Use those selector kwargs to disable specific methods you do not want the agent calling.
+- The configuration flags listed above can disable their corresponding methods; `include_tools` and `exclude_tools` can further filter the constructed toolkit.
+- Agno's optional archive, trash, attachment-download, raw label-modification, label-listing, and draft-send methods are not exposed through MindRoom's authored selector fields.
+- `include_tools` filters existing functions and cannot enable those additional SDK methods.
 - Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
 
 ## [`slack`]
 
-`slack` is the Slack bot toolkit for posting to channels, replying in threads, listing channels, and reading recent channel history.
+`slack` is the Slack toolkit for messaging, threaded replies, channel and user inspection, history and thread reads, optional search, and file transfer.
 
 ### What It Does
 
-The installed upstream tool exposes `send_message()`, `send_message_thread()`, `list_channels()`, and `get_channel_history()`.
+The installed upstream tool exposes `send_message()`, `send_message_thread()`, `list_channels()`, `get_channel_history()`, `upload_file()`, `download_file()`, `search_messages()`, `search_workspace()`, `get_thread()`, `list_users()`, `get_user_info()`, and `get_channel_info()`.
 It uses Slack's `WebClient` from `slack_sdk`.
 `markdown` maps to the `mrkdwn` flag on `chat_postMessage()`.
 Channel-history responses are normalized into a smaller JSON structure instead of returning the full Slack API payload.
@@ -102,13 +105,26 @@ Channel-history responses are normalized into a smaller JSON structure instead o
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `token` | `password` | `no` | `null` | Slack bot token, or use `SLACK_TOKEN`. Required in practice. |
+| `token` | `password` | `no` | `null` | Primary Slack bot or user token, or use `SLACK_TOKEN`. Required in practice. |
+| `user_token` | `password` | `no` | `null` | User token for `search_messages()`, or use `SLACK_USER_TOKEN`; requires `search:read`. |
 | `markdown` | `boolean` | `no` | `true` | Enable Slack markdown rendering on sent messages. |
+| `output_directory` | `text` | `no` | `null` | Directory for saved downloads. |
+| `save_downloads` | `boolean` | `no` | `false` | Save downloaded files instead of returning base64-only content. |
 | `enable_send_message` | `boolean` | `no` | `true` | Enable `send_message()`. |
 | `enable_send_message_thread` | `boolean` | `no` | `true` | Enable `send_message_thread()`. |
 | `enable_list_channels` | `boolean` | `no` | `true` | Enable `list_channels()`. |
 | `enable_get_channel_history` | `boolean` | `no` | `true` | Enable `get_channel_history()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+| `enable_upload_file` | `boolean` | `no` | `true` | Enable `upload_file()`. |
+| `enable_download_file` | `boolean` | `no` | `true` | Enable `download_file()`. |
+| `enable_search_messages` | `boolean` | `no` | `false` | Enable `search_messages()` when a user token is available. |
+| `enable_search_workspace` | `boolean` | `no` | `false` | Enable `search_workspace()`; the installed SDK also requires an action token at call time. |
+| `enable_get_thread` | `boolean` | `no` | `false` | Enable `get_thread()`. |
+| `enable_list_users` | `boolean` | `no` | `false` | Enable `list_users()`. |
+| `enable_get_user_info` | `boolean` | `no` | `false` | Enable `get_user_info()`. |
+| `enable_get_channel_info` | `boolean` | `no` | `false` | Enable `get_channel_info()`. |
+| `all` | `boolean` | `no` | `false` | Enable all function flags; `search_messages()` still requires a user token. |
+| `max_file_size` | `number` | `no` | `1073741824` | Maximum upload or download size in bytes. |
+| `thread_message_limit` | `number` | `no` | `20` | Maximum messages returned by `get_thread()`. |
 
 ### Example
 
@@ -131,6 +147,10 @@ get_channel_history("C0123456789", limit=25)
 ### Notes
 
 - Although `token` is marked optional in metadata, the installed Slack toolkit raises if no token or `SLACK_TOKEN` is present.
+- For `search_messages()`, enable `enable_search_messages` and store a user token with [`search:read`](https://docs.slack.dev/reference/methods/search.messages/) in the dashboard's `user_token` password field or credential store; `SLACK_USER_TOKEN` is the environment fallback.
+- A bot token alone does not register `search_messages()`; a user token supplied as the primary `token` can also satisfy its user-token requirement.
+- With the pinned Agno SDK, `search_workspace()` requires `run_context.metadata.action_token` before making a request, and ordinary Matrix turns do not supply it; use `search_messages()` with a user token for those turns.
+- This unconditional action-token guard belongs to the SDK integration: the [Slack API](https://docs.slack.dev/reference/methods/assistant.search.context/) requires an action token for bot-token requests but permits user-token requests without one.
 - Use channel IDs for the most reliable calls, especially for threaded replies and history reads.
 - `get_channel_history()` returns a simplified JSON view rather than the raw Slack response.
 
@@ -182,14 +202,15 @@ send_message("123456789012345678", "Hello from MindRoom.")
 
 ## [`telegram`]
 
-`telegram` is the simplest chat-delivery tool on this page, with one configured destination and one send function.
+`telegram` sends text and media to one configured chat, with optional message management, chat details, and file downloads.
 
 ### What It Does
 
-The installed upstream tool exposes only `send_message()`.
-It posts to Telegram Bot API `sendMessage` for the configured `chat_id`.
-The tool instance is bound to one chat destination, so callers do not pass a chat ID per request.
-Responses are returned as the raw Telegram API response text.
+Only `send_message()` is enabled by default.
+Optional functions are `send_photo()`, `send_document()`, `send_video()`, `send_audio()`, `send_animation()`, `send_sticker()`, `edit_message()`, `delete_message()`, `react_with_emoji()`, `pin_message()`, `get_chat()`, and `get_file()`.
+Enable individual functions with the flags below, or set `all: true` to enable all 13 functions.
+Sends use the configured `chat_id`, so callers do not pass a destination per send.
+`send_message()` returns normalized JSON with `status: "success"` and `message_id`, or `status: "error"` and `message` for Telegram API errors.
 
 ### Configuration
 
@@ -197,7 +218,21 @@ Responses are returned as the raw Telegram API response text.
 | --- | --- | --- | --- | --- |
 | `chat_id` | `text` | `yes` | `null` | Telegram chat or channel ID that this tool instance will target. |
 | `token` | `password` | `no` | `null` | Telegram bot token, or use `TELEGRAM_TOKEN`. Required in practice. |
+| `output_directory` | `text` | `no` | `null` | Directory for downloaded files; setting it also enables saving. |
+| `save_downloads` | `boolean` | `no` | `false` | Save downloads to disk; without `output_directory`, use the current working directory. |
 | `enable_send_message` | `boolean` | `no` | `true` | Enable `send_message()`. |
+| `enable_send_photo` | `boolean` | `no` | `false` | Enable `send_photo()`. |
+| `enable_send_document` | `boolean` | `no` | `false` | Enable `send_document()`. |
+| `enable_send_video` | `boolean` | `no` | `false` | Enable `send_video()`. |
+| `enable_send_audio` | `boolean` | `no` | `false` | Enable `send_audio()`. |
+| `enable_send_animation` | `boolean` | `no` | `false` | Enable `send_animation()`. |
+| `enable_send_sticker` | `boolean` | `no` | `false` | Enable `send_sticker()`. |
+| `enable_edit_message` | `boolean` | `no` | `false` | Enable `edit_message()`. |
+| `enable_delete_message` | `boolean` | `no` | `false` | Enable `delete_message()`. |
+| `enable_react_with_emoji` | `boolean` | `no` | `false` | Enable `react_with_emoji()`. |
+| `enable_pin_message` | `boolean` | `no` | `false` | Enable `pin_message()`. |
+| `enable_get_chat` | `boolean` | `no` | `false` | Enable `get_chat()`. |
+| `enable_get_file` | `boolean` | `no` | `false` | Enable `get_file()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 ### Example
@@ -217,16 +252,18 @@ send_message("Nightly backup completed.")
 ### Notes
 
 - Set both `chat_id` and `token` for a usable configuration.
+- `get_file()` returns base64 content by default; `save_downloads: true` or a configured `output_directory` saves the file and returns `local_path` instead.
 - Because the destination chat is fixed in config, this tool is best for one bot-to-room delivery path rather than general multi-room Telegram automation.
 - If you need different Telegram destinations, configure different agents or different tool credentials per scope.
 
 ## [`whatsapp`]
 
-`whatsapp` is the WhatsApp Business API toolkit for text messages and template messages through Meta's Graph API.
+`whatsapp` is the WhatsApp Business API toolkit for text, template, interactive, image, document, location, and reaction messages through Meta's Graph API.
 
 ### What It Does
 
-The installed upstream tool can expose either `send_text_message_sync()` and `send_template_message_sync()` or their async variants, depending on `async_mode`.
+The installed upstream tool exposes `send_text_message()` and `send_template_message()` by default.
+Optional functions include `send_reply_buttons()`, `send_list_message()`, `send_image()`, `send_document()`, `send_location()`, and `send_reaction()`.
 It posts to `https://graph.facebook.com/<version>/<phone_number_id>/messages`.
 `recipient_waid` sets a default recipient so callers can omit the `recipient` argument.
 If no default recipient is configured, every send call must provide one.
@@ -239,7 +276,15 @@ If no default recipient is configured, every send call must provide one.
 | `phone_number_id` | `text` | `no` | `null` | WhatsApp Business phone number ID, or use `WHATSAPP_PHONE_NUMBER_ID`. Required in practice. |
 | `version` | `text` | `no` | `v22.0` | Graph API version prefix. |
 | `recipient_waid` | `text` | `no` | `null` | Default recipient phone number or WhatsApp ID. |
-| `async_mode` | `boolean` | `no` | `false` | Register async send functions instead of sync send functions. |
+| `enable_send_text_message` | `boolean` | `no` | `true` | Enable `send_text_message()`. |
+| `enable_send_template_message` | `boolean` | `no` | `true` | Enable `send_template_message()`. |
+| `enable_send_reply_buttons` | `boolean` | `no` | `false` | Enable `send_reply_buttons()`. |
+| `enable_send_list_message` | `boolean` | `no` | `false` | Enable `send_list_message()`. |
+| `enable_send_image` | `boolean` | `no` | `false` | Enable `send_image()`. |
+| `enable_send_document` | `boolean` | `no` | `false` | Enable `send_document()`. |
+| `enable_send_location` | `boolean` | `no` | `false` | Enable `send_location()`. |
+| `enable_send_reaction` | `boolean` | `no` | `false` | Enable `send_reaction()`. |
+| `all` | `boolean` | `no` | `false` | Enable every WhatsApp function. |
 
 ### Example
 
@@ -250,18 +295,18 @@ agents:
       - whatsapp:
           version: v22.0
           recipient_waid: "+15551234567"
-          async_mode: false
+          enable_send_reply_buttons: true
 ```
 
 ```python
-send_text_message_sync("The deployment finished.")
-send_template_message_sync(template_name="deployment_notice", language_code="en_US")
+send_text_message("The deployment finished.")
+send_template_message(template_name="deployment_notice", language_code="en_US")
 ```
 
 ### Notes
 
 - Set both `access_token` and `phone_number_id` even though the metadata marks them optional.
-- `async_mode: true` changes the registered function names to the async variants, which matters if you are debugging tool traces or reading model-generated tool calls.
+- Plain-text and template sends are enabled by default, while interactive and media functions are opt-in unless `all: true` is set.
 - Template sends expect a preapproved WhatsApp template name and, optionally, template `components`.
 
 ## [`twilio`]
@@ -485,7 +530,6 @@ reply_to_post("1890123456789012345", "Thanks for the feedback.")
 ### Notes
 
 - A bearer token can support read-style endpoints such as search, but posting, replying, DMs, and home-timeline access generally need full OAuth user credentials.
-- The toolkit also defines `get_my_info()`, but MindRoom's current registered tool list on this branch does not advertise a separate config flag for it.
 - `reply_to_post()` builds a `twitter.com` URL in its response, while `create_post()` builds an `x.com` URL, so response formatting is currently inconsistent upstream.
 
 ## [`reddit`]
@@ -509,6 +553,7 @@ If `username` and `password` are also configured, the tool enables posting and r
 | `user_agent` | `text` | `no` | `null` | Optional custom user agent, with `RedditTools v1.0` as the upstream fallback. |
 | `username` | `text` | `no` | `null` | Reddit username for posting and replying. |
 | `password` | `password` | `no` | `null` | Reddit password for posting and replying. |
+| `allowed_subreddits` | `string[]` | `no` | `null` | Optional subreddit names permitted for posts and replies; matching is case-insensitive. |
 
 ### Example
 
@@ -518,6 +563,7 @@ agents:
     tools:
       - reddit:
           user_agent: MindRoomResearchBot/1.0
+          allowed_subreddits: [matrixdotorg]
 ```
 
 ```python
@@ -531,6 +577,8 @@ get_user_info("spez")
 
 - `client_id` and `client_secret` are enough for read-only operations.
 - `create_post()`, `reply_to_post()`, and `reply_to_comment()` additionally require `username` and `password`.
+- A nonempty `allowed_subreddits` list restricts only those three write methods, using case-insensitive community names without the `r/` prefix.
+- Reads are unaffected; `null` or `[]` leaves writes unrestricted by this optional guard.
 - The current MindRoom metadata treats `reddit_instance` as text, but the upstream constructor expects an already constructed `praw.Reddit` object.
 
 ## [`zoom`]

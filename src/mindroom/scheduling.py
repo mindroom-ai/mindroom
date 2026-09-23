@@ -9,7 +9,9 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Literal, NamedTuple
+from weakref import WeakValueDictionary
 from zoneinfo import ZoneInfo
 
 import humanize
@@ -20,20 +22,29 @@ from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field, field_validator
 
 from mindroom import model_loading, scheduling_executor
-from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.logging_config import bound_log_context, get_logger
+from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import parse_mentions_in_text
 from mindroom.message_target import MessageTarget
+from mindroom.recurring_schedule import (
+    RecurringCheckpointUnavailableError,
+    complete_recurring_occurrence,
+    plan_recurring_occurrence,
+)
+from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
+    from mindroom.matrix.conversation_reads import ConversationReader
 
 logger = get_logger(__name__)
 
@@ -53,13 +64,30 @@ _TASK_STATE_POLL_INTERVAL_SECONDS = 30
 # Tasks older than this are marked as failed instead of executed.
 _MISSED_TASK_MAX_AGE_SECONDS = 86400  # 24 hours
 
-# Small pause between draining overdue one-time tasks after sync is ready.
+# Small pause between draining restored tasks after sync is ready.
 _DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS = 0.25
 
 # Global task storage for running asyncio tasks
 _running_tasks: dict[str, asyncio.Task] = {}
 _deferred_overdue_tasks: deque[_DeferredOverdueTaskStart] = deque()
 _deferred_overdue_task_ids: set[str] = set()
+
+# Shared by the runtime and API clients in this process; Matrix state has no compare-and-swap.
+_schedule_edit_locks: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = WeakValueDictionary()
+
+
+def _schedule_edit_lock(client: nio.AsyncClient, room_id: str, task_id: str) -> asyncio.Lock:
+    """Serialize edits with creator-departure cancellation across local clients."""
+    key = (client.homeserver, room_id, task_id)
+    lock = _schedule_edit_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _schedule_edit_locks[key] = lock
+    return lock
+
+
+class _ScheduledTaskStateReadError(RuntimeError):
+    """A scheduled-task state read failed without proving the task absent."""
 
 
 class _AgentValidationResult(NamedTuple):
@@ -96,6 +124,18 @@ class CronSchedule(BaseModel):
             return f"Cron: {self.to_cron_string()}"
 
 
+# LEGACY_COMPAT: Scheduled workflows without an explicit new-thread setting.
+# Legacy format: Scheduled workflows omitted new_thread and therefore reused their persisted thread by default.
+# Last legacy release: v2026.3.109; replacement: v2026.3.110 persisted explicit thread-creation mode.
+# Handling: Pydantic defaults missing new_thread to false, preserving the old same-thread behavior.
+# Coverage: tests/test_workflow_scheduling.py::TestScheduledWorkflow::test_workflow_old_payload_defaults_new_thread_false.
+
+
+# LEGACY_COMPAT: Scheduled workflows without a history limit.
+# Legacy format: Scheduled workflows omitted history_limit and exposed the full available thread history.
+# Last legacy release: v2026.7.136; replacement: v2026.7.137 persisted the optional history bound.
+# Handling: Pydantic defaults absence to None, which retains unlimited history for old workflows.
+# Coverage: tests/test_workflow_scheduling.py::TestScheduledWorkflow::test_persisted_workflow_without_history_limit_loads_as_unlimited.
 class ScheduledWorkflow(BaseModel):
     """Structured representation of a scheduled task or workflow."""
 
@@ -110,10 +150,12 @@ class ScheduledWorkflow(BaseModel):
         ge=0,
         description="Max recent thread messages the responding agent sees when the task fires; 0 means no history",
     )
+    model: str | None = Field(default=None, description="Configured model alias for this scheduled run only")
     created_by: str | None = None
     thread_id: str | None = None
     room_id: str | None = None
     new_thread: bool = False
+    silent: bool = False
 
     @field_validator("execute_at")
     @classmethod
@@ -140,6 +182,7 @@ class ScheduledTaskRecord:
     status: str
     created_at: datetime | None
     workflow: ScheduledWorkflow
+    revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +202,7 @@ class ScheduledTaskReadModel:
     history_limit: int | None
     thread_id: str | None
     new_thread: bool
+    silent: bool
     created_by: str | None
     created_at: datetime | None
 
@@ -171,14 +215,16 @@ class SchedulingRuntime:
     config: Config
     runtime_paths: RuntimePaths
     room: nio.MatrixRoom
-    conversation_cache: ConversationCacheProtocol
-    event_cache: ConversationEventCache
+    conversation_reader: ConversationReader
+    agent_reply_memberships: AgentReplyMembershipIndex
+    responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
     matrix_admin: HookMatrixAdmin | None = None
+    config_provider: Callable[[], Config | None] | None = None
 
 
 @dataclass
 class _DeferredOverdueTaskStart:
-    """A one-time scheduled task that should start after Matrix sync is live."""
+    """A scheduled task that should start after Matrix sync is live."""
 
     task_id: str
     workflow: ScheduledWorkflow
@@ -238,6 +284,7 @@ def build_scheduled_task_read_model(
         history_limit=workflow.history_limit,
         thread_id=workflow.thread_id,
         new_thread=workflow.new_thread,
+        silent=workflow.silent,
         created_by=workflow.created_by,
         created_at=task.created_at,
     )
@@ -259,6 +306,7 @@ def build_edited_scheduled_workflow(  # noqa: C901
     schedule_type: Literal["once", "cron"] | None = None,
     execute_at: datetime | None = None,
     cron_expression: str | None = None,
+    silent: bool | None = None,
 ) -> ScheduledWorkflow:
     """Build a validated patch-style workflow edit while preserving immutable metadata."""
     if schedule_type and schedule_type != existing_workflow.schedule_type:
@@ -305,10 +353,12 @@ def build_edited_scheduled_workflow(  # noqa: C901
         message=message_value,
         description=description_value or message_value,
         history_limit=existing_workflow.history_limit,
+        model=existing_workflow.model,
         created_by=existing_workflow.created_by,
         thread_id=existing_workflow.thread_id,
         room_id=room_id,
         new_thread=existing_workflow.new_thread,
+        silent=existing_workflow.silent if silent is None else silent,
     )
 
 
@@ -330,12 +380,14 @@ def _parse_scheduled_task_record(
         return None
 
     created_at = _parse_datetime(content.get("created_at"))
+    revision = content.get("revision")
     return ScheduledTaskRecord(
         task_id=task_id,
         room_id=room_id,
         status=status,
         created_at=created_at,
         workflow=workflow,
+        revision=revision if isinstance(revision, str) else None,
     )
 
 
@@ -407,9 +459,9 @@ def _start_scheduled_task(
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     matrix_admin: HookMatrixAdmin | None = None,
+    config_provider: Callable[[], Config | None] | None = None,
 ) -> bool:
     """Start the asyncio task for a scheduled workflow and track it globally."""
     existing_task = _running_tasks.get(task_id)
@@ -428,9 +480,9 @@ def _start_scheduled_task(
                 workflow,
                 config,
                 runtime_paths,
-                event_cache,
-                conversation_cache,
+                conversation_reader,
                 matrix_admin,
+                config_provider=config_provider,
             ),
         )
     else:
@@ -442,8 +494,9 @@ def _start_scheduled_task(
                 _running_tasks,
                 config,
                 runtime_paths,
-                conversation_cache,
+                conversation_reader,
                 matrix_admin,
+                config_provider=config_provider,
             ),
         )
     _running_tasks[task_id] = task
@@ -451,7 +504,7 @@ def _start_scheduled_task(
 
 
 def _queue_deferred_overdue_task(task_id: str, workflow: ScheduledWorkflow) -> bool:
-    """Queue one missed one-time task to be started after Matrix sync is ready."""
+    """Queue one restored task to be started after Matrix sync is ready."""
     existing_task = _running_tasks.get(task_id)
     if existing_task is not None and not existing_task.done():
         logger.debug("Scheduled task already running; skipping deferred queue", task_id=task_id)
@@ -470,10 +523,10 @@ async def drain_deferred_overdue_tasks(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
+    config_provider: Callable[[], Config | None] | None = None,
 ) -> int:
-    """Start queued overdue one-time tasks after Matrix sync is ready."""
+    """Start queued restored tasks after Matrix sync is ready."""
     drained_count = 0
     matrix_admin = build_hook_matrix_admin(client, runtime_paths)
 
@@ -488,9 +541,9 @@ async def drain_deferred_overdue_tasks(
                 queued_task.workflow,
                 config,
                 runtime_paths,
-                event_cache,
-                conversation_cache,
+                conversation_reader,
                 matrix_admin=matrix_admin,
+                config_provider=config_provider,
             ):
                 drained_count += 1
         except Exception:
@@ -509,7 +562,7 @@ async def drain_deferred_overdue_tasks(
 
 
 def clear_deferred_overdue_tasks() -> int:
-    """Clear queued overdue one-time tasks that have not started yet."""
+    """Clear queued restored tasks that have not started yet."""
     queued_count = len(_deferred_overdue_tasks)
     _deferred_overdue_tasks.clear()
     _deferred_overdue_task_ids.clear()
@@ -517,7 +570,7 @@ def clear_deferred_overdue_tasks() -> int:
 
 
 def has_deferred_overdue_tasks() -> bool:
-    """Return whether any overdue one-time tasks are still queued."""
+    """Return whether any restored tasks are still queued."""
     return bool(_deferred_overdue_tasks)
 
 
@@ -618,22 +671,48 @@ async def get_pending_schedule_thread_ids_for_room(
     )
 
 
+async def _read_scheduled_task_state(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+) -> dict[str, typing.Any] | None:
+    """Fetch and validate one scheduled-task state payload."""
+    try:
+        response = await client.room_get_state_event(
+            room_id=room_id,
+            event_type=_SCHEDULED_TASK_EVENT_TYPE,
+            state_key=task_id,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}"
+        raise _ScheduledTaskStateReadError(msg) from exc
+    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+        return None
+    if not isinstance(response, nio.RoomGetStateEventResponse):
+        msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}: {response}"
+        raise _ScheduledTaskStateReadError(msg)
+    if not isinstance(response.content, dict):
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state content"
+        raise TypeError(msg)
+    return response.content
+
+
 async def get_scheduled_task(
     client: nio.AsyncClient,
     room_id: str,
     task_id: str,
 ) -> ScheduledTaskRecord | None:
     """Fetch and parse a single scheduled task from Matrix state."""
-    response = await client.room_get_state_event(
-        room_id=room_id,
-        event_type=_SCHEDULED_TASK_EVENT_TYPE,
-        state_key=task_id,
-    )
-    if not isinstance(response, nio.RoomGetStateEventResponse):
+    content = await _read_scheduled_task_state(client, room_id, task_id)
+    if content is None:
         return None
-    if not isinstance(response.content, dict):
-        return None
-    return _parse_scheduled_task_record(room_id, task_id, response.content)
+    task = _parse_scheduled_task_record(room_id, task_id, content)
+    if task is None:
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state"
+        raise RuntimeError(msg)
+    return task
 
 
 async def _get_pending_task_record(
@@ -649,6 +728,116 @@ async def _get_pending_task_record(
     if not task_record or task_record.status != "pending":
         return None
     return task_record
+
+
+async def _scheduled_task_creator_is_joined(
+    client: nio.AsyncClient,
+    task: ScheduledTaskRecord,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Check live membership for the creator or a permitted human alias."""
+    creator = task.workflow.created_by
+    if not creator:
+        return True
+    requester_ids = equivalent_requester_ids(creator, config, runtime_paths)
+    membership_unknown = False
+    for requester_id in sorted(requester_ids, key=lambda user_id: (user_id != creator, user_id)):
+        try:
+            response = await client.room_get_state_event(
+                room_id=task.room_id,
+                event_type="m.room.member",
+                state_key=requester_id,
+            )
+        except Exception:
+            membership_unknown = True
+            continue
+        if isinstance(response, nio.RoomGetStateEventResponse) and isinstance(response.content, dict):
+            membership = response.content.get("membership")
+            if membership == "join":
+                return True
+            if membership in ("leave", "ban", "invite", "knock"):
+                continue
+        # Errors (including missing/inaccessible state) do not prove a departure.
+        membership_unknown = True
+    if membership_unknown:
+        msg = f"Could not establish schedule creator membership for {creator!r} in room {task.room_id!r}"
+        raise _ScheduledTaskStateReadError(msg)
+    return False
+
+
+async def _reconcile_runnable_task_retrying(  # noqa: C901
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    matrix_admin: HookMatrixAdmin | None = None,
+    config_provider: Callable[[], Config | None] | None = None,
+) -> ScheduledTaskRecord | None:
+    """Return runnable state, cancelling departed creators' tasks and retrying uncertainty."""
+    departed_task: ScheduledTaskRecord | None = None
+    while True:
+        try:
+            task = await _get_pending_task_record(client=client, room_id=room_id, task_id=task_id)
+            if task is None:
+                return None
+            if departed_task != task:
+                membership_config = config_provider() if config_provider is not None else config
+                if membership_config is None:
+                    msg = "Scheduled task membership configuration is unavailable"
+                    raise _ScheduledTaskStateReadError(msg)  # noqa: TRY301
+                creator_joined = await _scheduled_task_creator_is_joined(
+                    client,
+                    task,
+                    membership_config,
+                    runtime_paths,
+                )
+                if config_provider is not None and config_provider() is not membership_config:
+                    continue
+                if creator_joined:
+                    return task
+                departed_task = task
+
+            async with _schedule_edit_lock(client, room_id, task_id):
+                current_task = await _get_pending_task_record(client=client, room_id=room_id, task_id=task_id)
+                if current_task is None:
+                    return None
+                if current_task != departed_task:
+                    continue
+                await _persist_scheduled_task_state(
+                    client=client,
+                    room_id=room_id,
+                    task_id=task_id,
+                    workflow=current_task.workflow,
+                    status="cancelled",
+                    created_at=current_task.created_at,
+                    matrix_admin=matrix_admin,
+                )
+        except _ScheduledTaskStateReadError as exc:
+            logger.warning(
+                "scheduled_task_state_read_failed_retrying",
+                room_id=room_id,
+                task_id=task_id,
+                error=str(exc),
+            )
+            await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+        except ValueError as exc:
+            logger.warning(
+                "scheduled_task_owner_cancellation_failed_retrying",
+                room_id=room_id,
+                task_id=task_id,
+                error=str(exc),
+            )
+            await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+        else:
+            logger.info(
+                "scheduled_task_cancelled_after_creator_left",
+                room_id=room_id,
+                task_id=task_id,
+                created_by=task.workflow.created_by,
+            )
+            return None
 
 
 def _serialize_scheduled_task_created_at(created_at: datetime | str | None) -> str:
@@ -716,26 +905,30 @@ async def _persist_scheduled_task_state(
     status: str = "pending",
     created_at: datetime | str | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
-) -> None:
-    """Persist scheduled task state to Matrix."""
+) -> str:
+    """Persist scheduled task state to Matrix and return its unique revision."""
+    revision = str(uuid.uuid4())
+    content = {
+        "task_id": task_id,
+        "revision": revision,
+        "workflow": workflow.model_dump_json(),
+        "cron_description": (
+            workflow.cron_schedule.to_natural_language()
+            if workflow.schedule_type == "cron" and workflow.cron_schedule is not None
+            else None
+        ),
+        "status": status,
+        "created_at": _serialize_scheduled_task_created_at(created_at),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
     await _put_scheduled_task_state_content(
         client=client,
         room_id=room_id,
         task_id=task_id,
-        content={
-            "task_id": task_id,
-            "workflow": workflow.model_dump_json(),
-            "cron_description": (
-                workflow.cron_schedule.to_natural_language()
-                if workflow.schedule_type == "cron" and workflow.cron_schedule is not None
-                else None
-            ),
-            "status": status,
-            "created_at": _serialize_scheduled_task_created_at(created_at),
-            "updated_at": datetime.now(UTC).isoformat(),
-        },
+        content=content,
         matrix_admin=matrix_admin,
     )
+    return revision
 
 
 async def _save_pending_scheduled_task(
@@ -745,10 +938,10 @@ async def _save_pending_scheduled_task(
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     created_at: datetime | str | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
+    config_provider: Callable[[], Config | None] | None = None,
 ) -> None:
     """Persist one pending task and start or replace its in-memory runner."""
     _cancel_running_task(task_id)
@@ -767,9 +960,9 @@ async def _save_pending_scheduled_task(
         workflow,
         config,
         runtime_paths,
-        event_cache,
-        conversation_cache,
+        conversation_reader,
         matrix_admin,
+        config_provider=config_provider,
     )
 
 
@@ -807,15 +1000,23 @@ async def save_edited_scheduled_task(
     if workflow.schedule_type != existing_task.workflow.schedule_type:
         raise ValueError(_SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
 
-    await _persist_scheduled_task_state(
-        client=client,
-        room_id=room_id,
-        task_id=task_id,
-        workflow=workflow,
-        status="pending",
-        created_at=existing_task.created_at,
-        matrix_admin=matrix_admin,
-    )
+    async with _schedule_edit_lock(client, room_id, task_id):
+        current_task = await get_scheduled_task(client, room_id, task_id)
+        if current_task is None or current_task.status != "pending":
+            msg = f"Task `{task_id}` cannot be edited because it is no longer pending."
+            raise ValueError(msg)
+        if current_task != existing_task:
+            msg = f"Task `{task_id}` changed while it was being edited; refresh and retry."
+            raise ValueError(msg)
+        revision = await _persist_scheduled_task_state(
+            client=client,
+            room_id=room_id,
+            task_id=task_id,
+            workflow=workflow,
+            status="pending",
+            created_at=current_task.created_at,
+            matrix_admin=matrix_admin,
+        )
 
     return ScheduledTaskRecord(
         task_id=task_id,
@@ -823,6 +1024,7 @@ async def save_edited_scheduled_task(
         status="pending",
         created_at=existing_task.created_at,
         workflow=workflow,
+        revision=revision,
     )
 
 
@@ -837,6 +1039,7 @@ def _existing_task_parse_context(workflow: ScheduledWorkflow) -> str:
             "message": workflow.message,
             "description": workflow.description,
             "history_limit": workflow.history_limit,
+            "silent": workflow.silent,
         },
         ensure_ascii=False,
         indent=2,
@@ -929,18 +1132,28 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     running_tasks: dict[str, asyncio.Task],
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     matrix_admin: HookMatrixAdmin | None = None,
+    config_provider: Callable[[], Config | None] | None = None,
 ) -> None:
     """Run a recurring task based on cron schedule."""
     if not workflow.room_id:
         logger.error("No room_id provided for recurring task", task_id=task_id)
         return
 
+    task_room_id = workflow.room_id
     current_target = MessageTarget.for_scheduled_task(workflow)
     try:
         while True:
-            latest_task = await _get_pending_task_record(client=client, room_id=workflow.room_id, task_id=task_id)
+            latest_task = await _reconcile_runnable_task_retrying(
+                client=client,
+                room_id=task_room_id,
+                task_id=task_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                matrix_admin=matrix_admin,
+                config_provider=config_provider,
+            )
             if not latest_task:
                 with bound_log_context(**current_target.log_context):
                     logger.info("Recurring task is no longer pending, stopping", task_id=task_id)
@@ -956,7 +1169,23 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     return
 
                 cron_string = cron_schedule.to_cron_string()
-                next_run = croniter(cron_string, datetime.now(UTC)).get_next(datetime)
+                plan_occurrence = partial(
+                    plan_recurring_occurrence,
+                    runtime_paths,
+                    homeserver=client.homeserver,
+                    sender=client.user_id,
+                    room_id=task_room_id,
+                    task_id=task_id,
+                    workflow_json=workflow.model_dump_json(),
+                    cron=cron_string,
+                    grace_seconds=config.scheduler_catch_up_grace_seconds,
+                )
+                try:
+                    occurrence = await plan_occurrence(now=datetime.now(UTC))
+                except RecurringCheckpointUnavailableError:
+                    await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+                    continue
+                next_run = occurrence.checkpoint.next_run_at
                 workflow_changed = False
 
                 while True:
@@ -965,10 +1194,14 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         break
                     await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
 
-                    refreshed_task = await _get_pending_task_record(
+                    refreshed_task = await _reconcile_runnable_task_retrying(
                         client=client,
-                        room_id=workflow.room_id,
+                        room_id=task_room_id,
                         task_id=task_id,
+                        config=config,
+                        runtime_paths=runtime_paths,
+                        matrix_admin=matrix_admin,
+                        config_provider=config_provider,
                     )
                     if not refreshed_task:
                         logger.info("Recurring task cancelled while waiting, stopping", task_id=task_id)
@@ -988,10 +1221,14 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 if workflow_changed:
                     continue
 
-                latest_before_execute = await _get_pending_task_record(
+                latest_before_execute = await _reconcile_runnable_task_retrying(
                     client=client,
-                    room_id=workflow.room_id,
+                    room_id=task_room_id,
                     task_id=task_id,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    matrix_admin=matrix_admin,
+                    config_provider=config_provider,
                 )
                 if not latest_before_execute:
                     logger.info("Recurring task cancelled before execution, stopping", task_id=task_id)
@@ -1006,15 +1243,32 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     current_target = MessageTarget.for_scheduled_task(workflow)
                     continue
 
-                await scheduling_executor.execute_scheduled_workflow(
+                # A timer or state read may have stalled across more due slots.
+                # Cron has second precision; normal subsecond wake-up jitter
+                # must still fire a live timer when catch-up is disabled.
+                execute_now = datetime.now(UTC).replace(microsecond=0)
+                try:
+                    occurrence = await plan_occurrence(now=execute_now)
+                except RecurringCheckpointUnavailableError:
+                    await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+                    continue
+                if occurrence.checkpoint.next_run_at > execute_now:
+                    continue
+
+                outcome = await scheduling_executor.execute_scheduled_workflow(
                     client,
                     workflow,
                     config,
                     runtime_paths,
-                    conversation_cache,
+                    conversation_reader,
                     task_id,
                     matrix_admin,
+                    occurrence=occurrence,
                 )
+                if outcome.status in {"retry", "held"}:
+                    await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+                    continue
+                await complete_recurring_occurrence(occurrence, cron_string, datetime.now(UTC))
                 if task_id not in running_tasks:
                     logger.info("scheduled_task_missing_from_running_tasks", task_id=task_id)
                     return
@@ -1032,7 +1286,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     workflow,
                     current_target,
                     error_message,
-                    conversation_cache,
+                    conversation_reader,
                 )
     finally:
         _cleanup_task_if_current(task_id, running_tasks)
@@ -1044,20 +1298,29 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    _event_cache: ConversationEventCache,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     matrix_admin: HookMatrixAdmin | None = None,
+    config_provider: Callable[[], Config | None] | None = None,
 ) -> None:
     """Run a one-time scheduled task."""
     if not workflow.room_id:
         logger.error("No room_id provided for one-time task", task_id=task_id)
         return
 
+    task_room_id = workflow.room_id
     current_target = MessageTarget.for_scheduled_task(workflow)
     latest_pending_task: ScheduledTaskRecord | None = None
     try:
         while True:
-            latest_task = await _get_pending_task_record(client=client, room_id=workflow.room_id, task_id=task_id)
+            latest_task = await _reconcile_runnable_task_retrying(
+                client=client,
+                room_id=task_room_id,
+                task_id=task_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                matrix_admin=matrix_admin,
+                config_provider=config_provider,
+            )
             if not latest_task:
                 with bound_log_context(**current_target.log_context):
                     logger.info("One-time task is no longer pending, stopping", task_id=task_id)
@@ -1077,10 +1340,14 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     break
                 await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
 
-        latest_before_execute = await _get_pending_task_record(
+        latest_before_execute = await _reconcile_runnable_task_retrying(
             client=client,
-            room_id=workflow.room_id,
+            room_id=task_room_id,
             task_id=task_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            matrix_admin=matrix_admin,
+            config_provider=config_provider,
         )
         if not latest_before_execute:
             with bound_log_context(**current_target.log_context):
@@ -1101,11 +1368,11 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 latest_workflow,
                 config,
                 runtime_paths,
-                conversation_cache,
+                conversation_reader,
                 task_id,
                 matrix_admin,
             )
-            final_status = "completed" if outcome.delivered else "failed"
+            final_status = "completed" if outcome.status == "delivered" else "failed"
 
             try:
                 await _save_one_time_task_status(
@@ -1140,7 +1407,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     workflow,
                     current_target,
                     error_message,
-                    conversation_cache,
+                    conversation_reader,
                 )
             if latest_pending_task is not None:
                 try:
@@ -1252,7 +1519,41 @@ def _history_limit_display(history_limit: int) -> str:
     return f"last {history_limit} message{'s' if history_limit != 1 else ''}"
 
 
-async def schedule_task(  # noqa: C901, PLR0912, PLR0915
+def _scheduled_task_response_text(
+    workflow: ScheduledWorkflow,
+    *,
+    task_id: str,
+    new_thread: bool,
+    config: Config,
+) -> str:
+    """Render the stable response persisted with one command-owned mutation."""
+    if workflow.schedule_type == "once" and workflow.execute_at:
+        response_text = f"✅ Scheduled for {_format_scheduled_time(workflow.execute_at, config.timezone)}\n"
+    elif workflow.cron_schedule:
+        natural_desc = workflow.cron_schedule.to_natural_language()
+        cron_str = workflow.cron_schedule.to_cron_string()
+        response_text = f"✅ Scheduled recurring task: **{natural_desc}**\n"
+        response_text += f"   _(Cron: `{cron_str}`)_\n"
+    else:
+        response_text = "✅ Task scheduled\n"
+
+    response_text += f"\n**Task:** {workflow.description}\n"
+    response_text += f"**Will post:** {workflow.message}\n"
+    if workflow.model is not None:
+        response_text += f"**Model:** {workflow.model}\n"
+    if workflow.history_limit is not None:
+        response_text += f"**History:** {_history_limit_display(workflow.history_limit)}\n"
+    mode = "Silent (hidden trigger; no-report final omitted)" if workflow.silent else "Visible"
+    response_text += f"**Mode:** {mode}\n"
+    if new_thread and workflow.silent:
+        delivery = "Room-level roots for findings/failures"
+    else:
+        delivery = "New thread per fire" if new_thread else "Current room/thread scope"
+    response_text += f"**Delivery:** {delivery}\n"
+    return response_text + f"\n**Task ID:** `{task_id}`"
+
+
+async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     runtime: SchedulingRuntime,
     room_id: str,
     thread_id: str | None,
@@ -1263,6 +1564,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     task_id: str | None = None,
     existing_task: ScheduledTaskRecord | None = None,
     history_limit: int | None = None,
+    silent: bool | None = None,
+    model: str | None = None,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -1277,23 +1580,23 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     ):
         return (None, "❌ history_limit must be a non-negative integer.")
 
+    selected_model = existing_task.workflow.model if existing_task else None
+    if model is not None:
+        selected_model = model.strip() or None
+    if selected_model is not None and selected_model not in runtime.config.models:
+        available = ", ".join(sorted(runtime.config.models))
+        return (None, f"❌ Unknown model: {selected_model}. Available models: {available}")
+
     client = runtime.client
     config = runtime.config
     runtime_paths = runtime.runtime_paths
     room = runtime.room
-    conversation_cache = runtime.conversation_cache
-    event_cache = runtime.event_cache
+    conversation_reader = runtime.conversation_reader
 
     if mentioned_agents is None:
         mentioned_agents = _extract_mentioned_agents_from_text(full_text, config, runtime_paths)
 
-    sender_visible_room_responders = await responder_candidate_entities_for_room(
-        client,
-        room,
-        scheduled_by,
-        config,
-        runtime_paths,
-    )
+    sender_visible_room_responders = await runtime.responder_candidates_for_room(room, scheduled_by)
 
     available_responders: list[MatrixID] = []
     if new_thread:
@@ -1301,17 +1604,14 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     else:
         if thread_id:
             thread_history = list(
-                await conversation_cache.get_thread_history(
-                    room_id,
-                    thread_id,
-                    caller_label="schedule_existing_thread",
-                ),
+                await complete_thread_history(conversation_reader, room_id, thread_id),
             )
             available_responders = filter_thread_agents_for_sender(
                 get_agents_in_thread(thread_history, config, runtime_paths),
                 scheduled_by,
                 config,
                 runtime_paths,
+                runtime.agent_reply_memberships,
                 available_responders_in_room=sender_visible_room_responders,
             )
 
@@ -1341,6 +1641,9 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         if workflow_result.suggestion:
             error_msg += f"\n\n💡 {workflow_result.suggestion}"
         return (None, error_msg)
+
+    if existing_task is not None and silent is None and "silent" not in workflow_result.model_fields_set:
+        workflow_result.silent = existing_task.workflow.silent
 
     # Validate that all mentioned agents or teams are accessible.
     validation_result = await _validate_agent_mentions(
@@ -1372,6 +1675,9 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
 
         return (None, error_msg)
 
+    # The explicit tool choice or saved choice is authoritative, not the parser.
+    workflow_result.model = selected_model
+
     # Add metadata to workflow
     workflow_result.created_by = scheduled_by
     workflow_result.thread_id = None if new_thread else thread_id
@@ -1379,9 +1685,17 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     workflow_result.new_thread = new_thread
     if history_limit is not None:
         workflow_result.history_limit = history_limit
+    if silent is not None:
+        workflow_result.silent = silent
 
     # Create task ID for new tasks (or reuse existing ID when editing)
     task_id = task_id or (existing_task.task_id if existing_task else str(uuid.uuid4())[:8])
+    response_text = _scheduled_task_response_text(
+        workflow_result,
+        task_id=task_id,
+        new_thread=new_thread,
+        config=config,
+    )
 
     logger.info(
         "Storing workflow task in Matrix state",
@@ -1410,37 +1724,15 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 workflow=workflow_result,
                 config=config,
                 runtime_paths=runtime_paths,
-                event_cache=event_cache,
-                conversation_cache=conversation_cache,
+                conversation_reader=conversation_reader,
                 created_at=datetime.now(UTC).isoformat(),
                 matrix_admin=runtime.matrix_admin,
+                config_provider=runtime.config_provider,
             )
     except ValueError as e:
         return (None, f"❌ Failed to schedule: {e!s}")
 
-    # Build success message
-    if workflow_result.schedule_type == "once" and workflow_result.execute_at:
-        # Format time with timezone and relative delta
-        formatted_time = _format_scheduled_time(workflow_result.execute_at, config.timezone)
-        success_msg = f"✅ Scheduled for {formatted_time}\n"
-    elif workflow_result.cron_schedule:
-        # Show both natural language and cron syntax
-        natural_desc = workflow_result.cron_schedule.to_natural_language()
-        cron_str = workflow_result.cron_schedule.to_cron_string()
-        success_msg = f"✅ Scheduled recurring task: **{natural_desc}**\n"
-        success_msg += f"   _(Cron: `{cron_str}`)_\n"
-    else:
-        success_msg = "✅ Task scheduled\n"
-
-    success_msg += f"\n**Task:** {workflow_result.description}\n"
-    success_msg += f"**Will post:** {workflow_result.message}\n"
-    if workflow_result.history_limit is not None:
-        success_msg += f"**History:** {_history_limit_display(workflow_result.history_limit)}\n"
-    delivery = "New thread per fire" if new_thread else "Current room/thread scope"
-    success_msg += f"**Delivery:** {delivery}\n"
-    success_msg += f"\n**Task ID:** `{task_id}`"
-
-    return (task_id, success_msg)
+    return (task_id, response_text)
 
 
 async def edit_scheduled_task(
@@ -1451,8 +1743,11 @@ async def edit_scheduled_task(
     scheduled_by: str,
     thread_id: str | None = None,
     history_limit: int | None = None,
+    silent: bool | None = None,
+    model: str | None = None,
 ) -> str:
-    """Edit an existing scheduled task by replacing its workflow details."""
+    """Edit an existing scheduled task while preserving its saved delivery scope."""
+    del thread_id
     client = runtime.client
     existing_task = await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
     if not existing_task:
@@ -1461,7 +1756,7 @@ async def edit_scheduled_task(
         return f"❌ Task `{task_id}` cannot be edited because it is `{existing_task.status}`."
 
     target_new_thread = existing_task.workflow.new_thread
-    target_thread_id = None if target_new_thread else existing_task.workflow.thread_id or thread_id
+    target_thread_id = None if target_new_thread else existing_task.workflow.thread_id
 
     edited_task_id, response_text = await schedule_task(
         runtime=runtime,
@@ -1473,6 +1768,8 @@ async def edit_scheduled_task(
         task_id=task_id,
         existing_task=existing_task,
         history_limit=history_limit,
+        silent=silent,
+        model=model,
     )
 
     if edited_task_id is None:
@@ -1538,8 +1835,11 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
                 "..." if len(workflow.message) > _MESSAGE_PREVIEW_LENGTH else ""
             )
             task_line = f'• `{record.task_id}` - {time_str}\n  {workflow.description}\n  Message: "{msg_preview}"'
+            if workflow.model is not None:
+                task_line += f"\n  Model: {workflow.model}"
             if workflow.history_limit is not None:
                 task_line += f"\n  History: {_history_limit_display(workflow.history_limit)}"
+            task_line += f"\n  Mode: {'Silent' if workflow.silent else 'Visible'}"
             lines.append(task_line)
 
     if tasks:
@@ -1570,18 +1870,11 @@ async def cancel_scheduled_task(
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> str:
     """Cancel a scheduled task."""
-    # First check if task exists
-    response = await client.room_get_state_event(
-        room_id=room_id,
-        event_type=_SCHEDULED_TASK_EVENT_TYPE,
-        state_key=task_id,
-    )
-
-    if not isinstance(response, nio.RoomGetStateEventResponse):
+    existing_content = await _read_scheduled_task_state(client, room_id, task_id)
+    if existing_content is None:
         return f"❌ Task `{task_id}` not found."
 
     # Update to cancelled
-    existing_content = response.content if isinstance(response.content, dict) else None
     try:
         await _put_scheduled_task_state_content(
             client=client,
@@ -1628,7 +1921,10 @@ async def cancel_all_scheduled_tasks(
                         client=client,
                         room_id=room_id,
                         task_id=task_id,
-                        content=_cancelled_task_content(task_id, existing_content),
+                        content=_cancelled_task_content(
+                            task_id,
+                            existing_content,
+                        ),
                         matrix_admin=matrix_admin,
                     )
                     _cancel_running_task(task_id)
@@ -1637,7 +1933,6 @@ async def cancel_all_scheduled_tasks(
                 except Exception:
                     logger.exception("scheduled_task_cancel_failed", task_id=task_id)
                     failed_count += 1
-
     if cancelled_count == 0:
         if failed_count > 0:
             return f"❌ Failed to cancel {failed_count} scheduled task(s)"
@@ -1650,13 +1945,13 @@ async def cancel_all_scheduled_tasks(
     return result
 
 
-async def restore_scheduled_tasks(  # noqa: C901
+async def restore_scheduled_tasks(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
+    config_provider: Callable[[], Config | None] | None = None,
 ) -> int:
     """Restore scheduled tasks from Matrix state after bot restart.
 
@@ -1712,6 +2007,10 @@ async def restore_scheduled_tasks(  # noqa: C901
         elif workflow.schedule_type == "cron" and not workflow.cron_schedule:
             logger.warning("skipping_recurring_task_without_cron_schedule", task_id=task_id)
             continue
+        elif workflow.schedule_type == "cron":
+            if _queue_deferred_overdue_task(task_id, workflow):
+                restored_count += 1
+            continue
 
         # Start the appropriate task
         if _start_scheduled_task(
@@ -1720,9 +2019,9 @@ async def restore_scheduled_tasks(  # noqa: C901
             workflow,
             config,
             runtime_paths,
-            event_cache,
-            conversation_cache,
+            conversation_reader,
             matrix_admin=matrix_admin,
+            config_provider=config_provider,
         ):
             restored_count += 1
 

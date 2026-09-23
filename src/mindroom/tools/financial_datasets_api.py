@@ -28,6 +28,13 @@ if TYPE_CHECKING:
             required=False,
             default=None,
         ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
+        ),
     ],
     dependencies=["requests"],  # Only standard dependency needed
     docs_url="https://docs.agno.com/tools/toolkits/others/financial_datasets",

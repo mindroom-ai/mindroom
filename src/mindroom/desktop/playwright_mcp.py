@@ -7,13 +7,12 @@ import base64
 import json
 import shutil
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import get_default_environment, stdio_client
+from mcp import StdioServerParameters
+from mcp.client.stdio import get_default_environment
 from mcp.types import ImageContent, TextContent
 
 if TYPE_CHECKING:
@@ -21,13 +20,16 @@ if TYPE_CHECKING:
 
     from mcp.types import CallToolResult
 
-PLAYWRIGHT_MCP_PACKAGE = "@playwright/mcp@0.0.78"
+from mindroom.playwright_mcp_session import PLAYWRIGHT_MCP_PACKAGE, PlaywrightMCPSession
+
 _MAX_RESULT_CHARS = 32_000
 _MAX_RESULT_JSON_BYTES = 24_000
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _TRUNCATION_SUFFIX = "\n…"
 _OBSERVE_ACTIONS = frozenset({"status", "profiles", "tabs", "snapshot", "screenshot", "console"})
 _CONTROL_ACTIONS = frozenset({"start", "stop", "open", "focus", "close", "navigate", "pdf", "upload", "dialog", "act"})
+_SUPPORTED_CONTROL_ACTIONS = ("start", "stop", "open")
+_UNBOUND_PAGE_ACTIONS = _CONTROL_ACTIONS - frozenset(_SUPPORTED_CONTROL_ACTIONS)
 BROWSER_ACTIONS = _OBSERVE_ACTIONS | _CONTROL_ACTIONS
 
 
@@ -67,13 +69,6 @@ class BrowserProvider(Protocol):
         ...
 
 
-@dataclass(slots=True)
-class _QueuedCall:
-    tool_name: str
-    arguments: dict[str, object]
-    future: asyncio.Future[CallToolResult]
-
-
 @dataclass(frozen=True, slots=True)
 class _MCPCall:
     tool_name: str
@@ -87,7 +82,17 @@ class _ScreenshotOutput:
 
 
 class PlaywrightMCPBrowserProvider:
-    """Drive the user's existing browser profile through Playwright MCP extension mode."""
+    """Own extension launch policy, action restrictions, and browser result handling.
+
+    Each shared session owns its MCP transport and subprocesses. User-facing
+    stop retires that session before a later start creates a fresh one; close
+    permanently forbids restart. Screenshot files are removed after the shared
+    session settles each call, including cancellation and late process output.
+
+    Callers must serialize execute calls, including stop and observations, as
+    the desktop bridge does. Observation gating and session selection assume
+    that ordering; concurrent execute calls are not supported.
+    """
 
     def __init__(
         self,
@@ -116,12 +121,11 @@ class PlaywrightMCPBrowserProvider:
         self._package = package
         self._call_timeout_seconds = float(call_timeout_seconds)
         self._extension_token = extension_token
-        self._queue: asyncio.Queue[_QueuedCall | None] | None = None
-        self._actor_task: asyncio.Task[None] | None = None
+        self._session: PlaywrightMCPSession | None = None
         self._actor_lock = asyncio.Lock()
         self._closed = False
 
-    async def execute(self, action: str, parameters: dict[str, object]) -> BrowserProviderResult:  # noqa: C901
+    async def execute(self, action: str, parameters: dict[str, object]) -> BrowserProviderResult:
         """Translate the stable MindRoom browser surface into Playwright MCP calls."""
         if action not in BROWSER_ACTIONS:
             msg = f"Unsupported Playwright browser action: {action}."
@@ -130,6 +134,7 @@ class PlaywrightMCPBrowserProvider:
             _reject_unexpected(parameters, frozenset())
             return BrowserProviderResult(
                 {
+                    **_browser_capabilities(),
                     "action": action,
                     "profiles": ["extension"],
                     "provider": "playwright_mcp_extension",
@@ -141,6 +146,7 @@ class PlaywrightMCPBrowserProvider:
             _reject_unexpected(parameters, frozenset())
             return BrowserProviderResult(
                 {
+                    **_browser_capabilities(),
                     "action": action,
                     "provider": "playwright_mcp_extension",
                     "running": False,
@@ -152,6 +158,7 @@ class PlaywrightMCPBrowserProvider:
             await self._stop_actor(permanent=False)
             return BrowserProviderResult(
                 {
+                    **_browser_capabilities(),
                     "action": action,
                     "provider": "playwright_mcp_extension",
                     "running": False,
@@ -166,8 +173,6 @@ class PlaywrightMCPBrowserProvider:
             )
             raise PlaywrightBrowserError(msg)
 
-        if action == "upload":
-            parameters = {**parameters, "paths": self._upload_paths(parameters)}
         calls, screenshot_output = self._calls_with_screenshot_output(action, parameters)
         try:
             last_result: CallToolResult | None = None
@@ -189,122 +194,64 @@ class PlaywrightMCPBrowserProvider:
     @property
     def running(self) -> bool:
         """Return whether the local MCP actor is alive."""
-        return self._actor_task is not None and not self._actor_task.done()
+        return self._session is not None and self._session.running
 
     async def close(self) -> None:
-        """Permanently close the provider after its already queued calls finish."""
+        """Permanently close the provider and all owned transport resources."""
         await self._stop_actor(permanent=True)
 
     async def _stop_actor(self, *, permanent: bool) -> None:
-        """Stop the current actor, optionally rejecting every later MCP call."""
         async with self._actor_lock:
             if permanent:
                 self._closed = True
-            task = self._actor_task
-            queue = self._queue
-            self._actor_task = None
-            self._queue = None
-            if task is None:
-                return
-            if queue is not None:
-                queue.put_nowait(None)
-        await task
+            session = self._session
+            if session is not None:
+                await session.close()
+                self._session = None
 
     async def _call_tool(self, tool_name: str, arguments: dict[str, object]) -> CallToolResult:
         async with self._actor_lock:
             if self._closed:
                 msg = "Playwright browser provider is closed."
                 raise PlaywrightBrowserError(msg)
-            future: asyncio.Future[CallToolResult] = asyncio.get_running_loop().create_future()
-            queued_call = _QueuedCall(tool_name=tool_name, arguments=arguments, future=future)
-            if self.running:
-                assert self._queue is not None
-                self._queue.put_nowait(queued_call)
-            else:
-                self._start_actor(queued_call)
+            if self._session is None or not self._session.running:
+                self._session = self._new_session()
+            session = self._session
         try:
-            async with asyncio.timeout(self._call_timeout_seconds):
-                return await future
+            return await session.call_tool(tool_name, arguments)
         except TimeoutError as exc:
-            future.cancel()
             msg = f"Playwright MCP tool {tool_name} did not answer within {self._call_timeout_seconds:g} seconds."
             raise PlaywrightBrowserError(msg) from exc
+        except Exception as exc:
+            raise _browser_error(tool_name, exc) from exc
 
-    def _start_actor(self, first_call: _QueuedCall) -> None:
-        """Start one MCP actor with work already queued so startup failures reach the caller."""
+    def _new_session(self) -> PlaywrightMCPSession:
         if shutil.which(self._command) is None:
             msg = f"Playwright browser support requires '{self._command}' on the local computer."
             raise PlaywrightBrowserError(msg)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._output_dir.chmod(0o700)
-        queue: asyncio.Queue[_QueuedCall | None] = asyncio.Queue()
-        queue.put_nowait(first_call)
-        self._queue = queue
-        self._actor_task = asyncio.create_task(self._run_actor(queue), name="playwright_mcp_extension")
+        return PlaywrightMCPSession(
+            StdioServerParameters(
+                command=self._command,
+                args=self._server_args(),
+                env=self._server_environment(),
+                cwd=str(self._output_dir),
+            ),
+            call_timeout_seconds=self._call_timeout_seconds,
+            cancelled_call_cleanup=self._remove_cancelled_call_screenshot,
+        )
 
-    def _remove_cancelled_call_screenshot(self, call: _QueuedCall) -> None:
-        """Remove a screenshot only after its timed-out MCP call has actually returned."""
-        if call.tool_name != "browser_take_screenshot":
+    def _remove_cancelled_call_screenshot(self, tool_name: str, arguments: dict[str, object]) -> None:
+        """Remove late output only after the abandoned MCP call has stopped."""
+        if tool_name != "browser_take_screenshot":
             return
-        filename = call.arguments.get("filename")
+        filename = arguments.get("filename")
         if not isinstance(filename, str) or Path(filename).name != filename:
             return
         path = (self._output_dir / filename).resolve()
         if path.parent == self._output_dir:
             path.unlink(missing_ok=True)
-
-    async def _run_actor(self, queue: asyncio.Queue[_QueuedCall | None]) -> None:  # noqa: C901, PLR0912
-        active: _QueuedCall | None = None
-        try:
-            parameters = StdioServerParameters(
-                command=self._command,
-                args=self._server_args(),
-                env=self._server_environment(),
-                cwd=str(self._output_dir),
-            )
-            async with (
-                stdio_client(parameters) as (read_stream, write_stream),
-                ClientSession(
-                    read_stream,
-                    write_stream,
-                    read_timeout_seconds=timedelta(seconds=self._call_timeout_seconds),
-                ) as session,
-            ):
-                await session.initialize()
-                while True:
-                    active = await queue.get()
-                    if active is None:
-                        return
-                    if active.future.done():
-                        active = None
-                        continue
-                    try:
-                        result = await session.call_tool(
-                            active.tool_name,
-                            active.arguments,
-                            read_timeout_seconds=timedelta(seconds=self._call_timeout_seconds),
-                        )
-                        if not active.future.done():
-                            active.future.set_result(result)
-                    except Exception as exc:
-                        if not active.future.done():
-                            active.future.set_exception(_browser_error(active.tool_name, exc))
-                    finally:
-                        if active.future.cancelled():
-                            self._remove_cancelled_call_screenshot(active)
-                        active = None
-        except Exception as exc:
-            error = _browser_error(active.tool_name if active is not None else "startup", exc)
-            if active is not None and not active.future.done():
-                active.future.set_exception(error)
-            while not queue.empty():
-                queued = queue.get_nowait()
-                if queued is not None and not queued.future.done():
-                    queued.future.set_exception(error)
-        finally:
-            if self._actor_task is asyncio.current_task():
-                self._actor_task = None
-                self._queue = None
 
     def _server_args(self) -> list[str]:
         args = [
@@ -312,7 +259,7 @@ class PlaywrightMCPBrowserProvider:
             self._package,
             "--extension",
             "--caps",
-            "vision,pdf",
+            "vision",
             "--output-dir",
             str(self._output_dir),
             "--output-mode",
@@ -329,19 +276,6 @@ class PlaywrightMCPBrowserProvider:
         if self._extension_token is not None:
             environment["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] = self._extension_token
         return environment
-
-    def _upload_paths(self, parameters: Mapping[str, object]) -> list[str]:
-        paths: list[str] = []
-        for raw_path in _required_str_list(parameters, "paths"):
-            candidate = Path(raw_path).expanduser()
-            if not candidate.is_absolute():
-                candidate = self._output_dir / candidate
-            resolved = candidate.resolve()
-            if not resolved.is_relative_to(self._output_dir) or not resolved.is_file():
-                msg = f"Browser upload file must exist under {self._output_dir}: {raw_path}"
-                raise PlaywrightBrowserError(msg)
-            paths.append(str(resolved))
-        return paths
 
     def _calls_with_screenshot_output(
         self,
@@ -369,14 +303,23 @@ def browser_action_requires_control(action: str) -> bool:
     return action in _CONTROL_ACTIONS
 
 
-def _mcp_calls(  # noqa: C901, PLR0911, PLR0912, PLR0915
+def _mcp_calls(  # noqa: C901
     action: str,
     parameters: dict[str, object],
 ) -> list[_MCPCall]:
     if parameters.get("targetId") is not None:
         msg = (
             "Playwright extension targetId is unsupported because MCP tab indices can change; "
-            "operate the current tab or open a new one."
+            "stable page identity is unavailable. Only observation, start, stop, and open are supported."
+        )
+        raise PlaywrightBrowserError(msg)
+    if action in _UNBOUND_PAGE_ACTIONS:
+        msg = (
+            f"Playwright extension cannot execute {action}: stable page identity is unavailable. "
+            "Existing-page control requires upstream stable targeting; reconnecting, reselecting, "
+            "or refreshing a snapshot cannot make it safe. Use the host browser for page control, "
+            "or select this browser through local desktop controls. "
+            "Supported extension control actions: start, stop, open."
         )
         raise PlaywrightBrowserError(msg)
     if action in {"start", "status", "tabs"}:
@@ -385,12 +328,6 @@ def _mcp_calls(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if action == "open":
         _reject_unexpected(parameters, frozenset({"targetUrl"}))
         return [_MCPCall("browser_tabs", {"action": "new", "url": _required_str(parameters, "targetUrl")})]
-    if action == "focus":
-        msg = "Playwright extension focus is unsupported because MCP exposes only mutable tab indices."
-        raise PlaywrightBrowserError(msg)
-    if action == "close":
-        _reject_unexpected(parameters, frozenset())
-        return [_MCPCall("browser_tabs", {"action": "close"})]
     if action == "snapshot":
         allowed = frozenset({"selector", "depth", "maxChars"})
         _reject_unexpected(parameters, allowed)
@@ -414,149 +351,20 @@ def _mcp_calls(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if target is not None:
             arguments.update({"element": target, "target": target})
         return [_MCPCall("browser_take_screenshot", arguments)]
-    if action == "navigate":
-        _reject_unexpected(parameters, frozenset({"targetUrl"}))
-        return [_MCPCall("browser_navigate", {"url": _required_str(parameters, "targetUrl")})]
     if action == "console":
         _reject_unexpected(parameters, frozenset({"level"}))
         level = _optional_str(parameters, "level") or "info"
         return [_MCPCall("browser_console_messages", {"level": level})]
-    if action == "pdf":
-        _reject_unexpected(parameters, frozenset())
-        return [_MCPCall("browser_pdf_save", {})]
-    if action == "upload":
-        _reject_unexpected(parameters, frozenset({"paths"}))
-        return [_MCPCall("browser_file_upload", {"paths": _required_str_list(parameters, "paths")})]
-    if action == "dialog":
-        _reject_unexpected(parameters, frozenset({"accept", "promptText"}))
-        arguments: dict[str, object] = {"accept": bool(parameters.get("accept", False))}
-        prompt_text = _optional_str(parameters, "promptText")
-        if prompt_text is not None:
-            arguments["promptText"] = prompt_text
-        return [_MCPCall("browser_handle_dialog", arguments)]
-    if action == "act":
-        _reject_unexpected(parameters, frozenset({"request"}))
-        error = "Browser act requires a request object with string keys."
-        request = _string_keyed_object(parameters.get("request"), error)
-        if request.get("targetId") is not None:
-            msg = (
-                "Playwright extension request.targetId is unsupported because MCP tab indices can change; "
-                "operate the current tab or open a new one."
-            )
-            raise PlaywrightBrowserError(msg)
-        return [_act_call(request)]
     msg = f"Unsupported Playwright browser action: {action}."
     raise PlaywrightBrowserError(msg)
 
 
-def _act_call(request: Mapping[str, object]) -> _MCPCall:  # noqa: C901, PLR0911, PLR0912
-    kind = _required_str(request, "kind")
-    if kind == "click":
-        target = _required_str(request, "ref")
-        arguments: dict[str, object] = {"element": target, "target": target}
-        if request.get("doubleClick") is True:
-            arguments["doubleClick"] = True
-        button = _optional_str(request, "button")
-        if button is not None:
-            arguments["button"] = button
-        modifiers = request.get("modifiers")
-        if isinstance(modifiers, list):
-            arguments["modifiers"] = [str(value) for value in modifiers]
-        return _MCPCall("browser_click", arguments)
-    if kind == "type":
-        target = _required_str(request, "ref")
-        return _MCPCall(
-            "browser_type",
-            {
-                "element": target,
-                "target": target,
-                "text": _string_value(request, "text"),
-                "submit": request.get("submit") is True,
-                "slowly": request.get("slowly") is True,
-            },
-        )
-    if kind == "press":
-        return _MCPCall("browser_press_key", {"key": _required_str(request, "key")})
-    if kind == "hover":
-        target = _required_str(request, "ref")
-        return _MCPCall("browser_hover", {"element": target, "target": target})
-    if kind == "drag":
-        start = _required_str(request, "startRef")
-        end = _required_str(request, "endRef")
-        return _MCPCall(
-            "browser_drag",
-            {"startElement": start, "startTarget": start, "endElement": end, "endTarget": end},
-        )
-    if kind == "select":
-        target = _required_str(request, "ref")
-        return _MCPCall(
-            "browser_select_option",
-            {"element": target, "target": target, "values": _required_str_list(request, "values")},
-        )
-    if kind == "fill":
-        return _MCPCall("browser_fill_form", {"fields": _fill_fields(request)})
-    if kind == "resize":
-        return _MCPCall(
-            "browser_resize",
-            {"width": _required_positive_int(request, "width"), "height": _required_positive_int(request, "height")},
-        )
-    if kind == "wait":
-        arguments: dict[str, object] = {}
-        time_ms = request.get("timeMs")
-        if isinstance(time_ms, int) and not isinstance(time_ms, bool) and time_ms >= 0:
-            arguments["time"] = time_ms / 1000
-        text = _optional_str(request, "text")
-        text_gone = _optional_str(request, "textGone")
-        if text is not None:
-            arguments["text"] = text
-        if text_gone is not None:
-            arguments["textGone"] = text_gone
-        return _MCPCall("browser_wait_for", arguments)
-    if kind == "evaluate":
-        arguments: dict[str, object] = {"function": _required_str(request, "fn")}
-        target = _optional_str(request, "ref")
-        if target is not None:
-            arguments.update({"element": target, "target": target})
-        return _MCPCall("browser_evaluate", arguments)
-    if kind == "close":
-        return _MCPCall("browser_close", {})
-    msg = f"Unsupported browser act kind: {kind}."
-    raise PlaywrightBrowserError(msg)
-
-
-def _fill_fields(request: Mapping[str, object]) -> list[dict[str, str]]:
-    raw_fields = request.get("fields")
-    if not isinstance(raw_fields, list) or not raw_fields:
-        msg = "Browser fill requires a non-empty fields list."
-        raise PlaywrightBrowserError(msg)
-    fields: list[dict[str, str]] = []
-    for raw_field in raw_fields:
-        field = _string_keyed_object(raw_field, "Every browser fill field must be an object with string keys.")
-        target = _optional_str(field, "ref") or _optional_str(field, "selector")
-        if target is None:
-            msg = "Every browser fill field requires ref or selector."
-            raise PlaywrightBrowserError(msg)
-        fields.append(
-            {
-                "element": _optional_str(field, "name") or target,
-                "name": _optional_str(field, "name") or target,
-                "target": target,
-                "type": _optional_str(field, "type") or "textbox",
-                "value": _string_value(field, "value"),
-            },
-        )
-    return fields
-
-
-def _string_keyed_object(value: object, error_message: str) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise PlaywrightBrowserError(error_message)
-    result: dict[str, object] = {}
-    for key, item in value.items():
-        if not isinstance(key, str):
-            raise PlaywrightBrowserError(error_message)
-        result[key] = item
-    return result
+def _browser_capabilities() -> dict[str, object]:
+    """Report the extension's supported control contract without inventing target IDs."""
+    return {
+        "stable_targeting": False,
+        "supported_control_actions": list(_SUPPORTED_CONTROL_ACTIONS),
+    }
 
 
 def _provider_result(action: str, result: CallToolResult, *, max_chars: int) -> BrowserProviderResult:
@@ -566,6 +374,7 @@ def _provider_result(action: str, result: CallToolResult, *, max_chars: int) -> 
     image = _browser_image(images[0]) if images else None
     return BrowserProviderResult(
         payload={
+            **_browser_capabilities(),
             "action": action,
             "provider": "playwright_mcp_extension",
             "result": text or "Playwright browser action completed.",
@@ -665,36 +474,6 @@ def _optional_str(parameters: Mapping[str, object], key: str) -> str | None:
         msg = f"Browser parameter {key} must be a non-empty string of at most 8000 characters."
         raise PlaywrightBrowserError(msg)
     return value.strip()
-
-
-def _string_value(parameters: Mapping[str, object], key: str) -> str:
-    value = parameters.get(key, "")
-    if not isinstance(value, str) or len(value) > 8_000:
-        msg = f"Browser parameter {key} must be a string of at most 8000 characters."
-        raise PlaywrightBrowserError(msg)
-    return value
-
-
-def _required_str_list(parameters: Mapping[str, object], key: str) -> list[str]:
-    values = parameters.get(key)
-    if not isinstance(values, list) or not values or len(values) > 20:
-        msg = f"Browser parameter {key} must be a non-empty list of at most 20 strings."
-        raise PlaywrightBrowserError(msg)
-    result: list[str] = []
-    for value in values:
-        if not isinstance(value, str) or not value or len(value) > 2_000:
-            msg = f"Browser parameter {key} contains an invalid string."
-            raise PlaywrightBrowserError(msg)
-        result.append(value)
-    return result
-
-
-def _required_positive_int(parameters: Mapping[str, object], key: str) -> int:
-    value = _optional_positive_int(parameters, key)
-    if value is None:
-        msg = f"Browser parameter {key} must be a positive integer."
-        raise PlaywrightBrowserError(msg)
-    return value
 
 
 def _optional_positive_int(parameters: Mapping[str, object], key: str) -> int | None:

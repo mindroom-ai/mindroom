@@ -12,11 +12,10 @@ from zoneinfo import ZoneInfo
 from mindroom.constants import resolve_config_relative_path
 from mindroom.embedding_errors import classified_embedder_error
 from mindroom.logging_config import get_logger
+from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id
 from mindroom.timing import timed
 
 from ._policy import (
-    agent_name_from_scope_user_id,
-    agent_scope_user_id,
     allowed_scope_storage_paths,
     build_team_user_id,
     effective_storage_paths_for_context,
@@ -36,6 +35,7 @@ from ._shared import (
     FILE_MEMORY_ENTRYPOINT,
     FILE_MEMORY_PATH_ID_PATTERN,
     FileMemoryResolution,
+    MemoryEntrypointContext,
     MemoryNotFoundError,
     MemoryResult,
     MemorySearchOutcome,
@@ -43,7 +43,7 @@ from ._shared import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -198,6 +198,19 @@ def _load_scope_id_entries(
     return results, id_to_file
 
 
+def _iter_scope_unstructured_lines(scope_path: Path) -> Iterator[tuple[str, int, str]]:
+    """Yield relative paths, line numbers, and eligible snippets in file order."""
+    entrypoint_path = _scope_entrypoint_path(scope_path)
+    for file_path in _scope_markdown_files(scope_path):
+        if file_path == entrypoint_path:
+            continue
+        relative_path = file_path.relative_to(scope_path).as_posix()
+        for line_no, raw_line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), 1):
+            snippet = raw_line.strip()
+            if _is_unstructured_memory_line(snippet):
+                yield relative_path, line_no, snippet
+
+
 def _load_scope_unstructured_entries(
     scope_user_id: str,
     resolution: FileMemoryResolution,
@@ -210,27 +223,19 @@ def _load_scope_unstructured_entries(
 
     results: list[MemoryResult] = []
     seen_memory_text = set(existing_memory_text)
-    entrypoint_path = _scope_entrypoint_path(scope_path)
-    for file_path in _scope_markdown_files(scope_path):
-        if file_path == entrypoint_path:
+    for relative_path, line_no, snippet in _iter_scope_unstructured_lines(scope_path):
+        normalized_snippet = _normalize_memory_text_for_dedup(snippet)
+        if normalized_snippet in seen_memory_text:
             continue
-        relative_path = file_path.relative_to(scope_path).as_posix()
-        for line_no, raw_line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), 1):
-            snippet = raw_line.strip()
-            if not _is_unstructured_memory_line(snippet):
-                continue
-            normalized_snippet = _normalize_memory_text_for_dedup(snippet)
-            if normalized_snippet in seen_memory_text:
-                continue
-            seen_memory_text.add(normalized_snippet)
-            results.append(
-                {
-                    "id": f"file:{relative_path}:{line_no}",
-                    "memory": snippet,
-                    "user_id": scope_user_id,
-                    "metadata": {"source_file": relative_path, "line": line_no},
-                },
-            )
+        seen_memory_text.add(normalized_snippet)
+        results.append(
+            {
+                "id": f"file:{relative_path}:{line_no}",
+                "memory": snippet,
+                "user_id": scope_user_id,
+                "metadata": {"source_file": relative_path, "line": line_no},
+            },
+        )
     return results
 
 
@@ -377,7 +382,6 @@ def _search_scope_memory_entries(
         return scored_entries
 
     remaining_limit = limit - len(scored_entries)
-    entrypoint_path = _scope_entrypoint_path(scope_path)
     snippet_results: list[MemoryResult] = []
     existing_memory_text = {
         memory_text
@@ -388,7 +392,6 @@ def _search_scope_memory_entries(
         scope_user_id,
         query_tokens,
         scope_path,
-        entrypoint_path,
         existing_memory_text,
     )
 
@@ -401,34 +404,26 @@ def _scan_scope_memory_snippets(
     scope_user_id: str,
     query_tokens: set[str],
     scope_path: Path,
-    entrypoint_path: Path,
     existing_memory_text: set[str],
 ) -> list[MemoryResult]:
     snippet_results: list[MemoryResult] = []
-    for file_path in _scope_markdown_files(scope_path):
-        if file_path == entrypoint_path:
+    for relative_path, line_no, snippet in _iter_scope_unstructured_lines(scope_path):
+        normalized_snippet = _normalize_memory_text_for_dedup(snippet)
+        if normalized_snippet in existing_memory_text:
             continue
-        relative_path = file_path.relative_to(scope_path).as_posix()
-        for line_no, raw_line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), 1):
-            snippet = raw_line.strip()
-            if not _is_unstructured_memory_line(snippet):
-                continue
-            normalized_snippet = _normalize_memory_text_for_dedup(snippet)
-            if normalized_snippet in existing_memory_text:
-                continue
-            score = _match_score(query_tokens, snippet)
-            if score <= 0:
-                continue
-            existing_memory_text.add(normalized_snippet)
-            snippet_results.append(
-                {
-                    "id": f"file:{relative_path}:{line_no}",
-                    "memory": snippet,
-                    "user_id": scope_user_id,
-                    "metadata": {"source_file": relative_path, "line": line_no},
-                    "score": score,
-                },
-            )
+        score = _match_score(query_tokens, snippet)
+        if score <= 0:
+            continue
+        existing_memory_text.add(normalized_snippet)
+        snippet_results.append(
+            {
+                "id": f"file:{relative_path}:{line_no}",
+                "memory": snippet,
+                "user_id": scope_user_id,
+                "metadata": {"source_file": relative_path, "line": line_no},
+                "score": score,
+            },
+        )
     return snippet_results
 
 
@@ -572,16 +567,22 @@ def _load_scope_entrypoint_context(
     scope_user_id: str,
     resolution: FileMemoryResolution,
     config: Config,
-) -> str:
-    """Load the scoped `MEMORY.md` entrypoint text."""
+) -> MemoryEntrypointContext:
+    """Load the scoped `MEMORY.md` entrypoint text and what the cap withheld."""
     entrypoint_path = _scope_entrypoint_path(_scope_dir(scope_user_id, resolution, config, create=False))
     if not entrypoint_path.exists():
-        return ""
+        return MemoryEntrypointContext()
     max_lines = config.memory.file.max_entrypoint_lines
     lines = entrypoint_path.read_text(encoding="utf-8").splitlines()
-    if max_lines < len(lines):
+    total_lines = len(lines)
+    if max_lines < total_lines:
         lines = lines[:max_lines]
-    return "\n".join(lines).strip()
+    return MemoryEntrypointContext(
+        text="\n".join(lines).strip(),
+        source_path=entrypoint_path,
+        included_lines=len(lines),
+        total_lines=total_lines,
+    )
 
 
 def _find_file_replica_memory_ids(
@@ -1189,8 +1190,8 @@ class FileMemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
-    ) -> str:
-        """Load the stable scoped `MEMORY.md` entrypoint text for one agent."""
+    ) -> MemoryEntrypointContext:
+        """Load the stable scoped `MEMORY.md` entrypoint context for one agent."""
         resolution = resolve_file_memory_resolution(
             storage_path,
             config,

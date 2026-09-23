@@ -19,7 +19,6 @@ SPLIT_MATRIX_CLIENT_MODULES = {
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
-    "mindroom.matrix.client_thread_history",
     "mindroom.matrix.client_visible_messages",
 }
 RUNTIME_PROTOCOL_MODULE = "mindroom.runtime_protocols"
@@ -28,7 +27,9 @@ RUNTIME_VIEW_STRUCTURAL_MEMBER = "orchestrator"
 RUNTIME_PROTOCOL_PRIVATE_SYMBOL = "_check_narrow_protocols_are_subsets_of_bot_runtime_view"
 RUNTIME_PROTOCOL_PUBLIC_SYMBOLS = [
     "OrchestratorRuntime",
+    "SupportsAgentReplyMemberships",
     "SupportsClientConfig",
+    "SupportsClientConfigMemberships",
     "SupportsClientConfigOrchestrator",
     "SupportsConfig",
     "SupportsConfigOrchestrator",
@@ -36,6 +37,7 @@ RUNTIME_PROTOCOL_PUBLIC_SYMBOLS = [
 ]
 RUNTIME_PROTOCOL_IMPORTERS = {
     "mindroom.bot_room_lifecycle",
+    "mindroom.commands.config_confirmation",
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
@@ -43,15 +45,12 @@ RUNTIME_PROTOCOL_IMPORTERS = {
     "mindroom.hooks.context",
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge.utils",
+    "mindroom.matrix.conversation_hydration",
     "mindroom.post_response_effects",
     "mindroom.turn_policy",
 }
 BOT_RUNTIME_VIEW_ALLOWED_IMPORTERS = {
     "mindroom.bot",
-    "mindroom.matrix.cache.thread_reads",
-    "mindroom.matrix.cache.thread_write_cache_ops",
-    "mindroom.matrix.conversation_cache",
-    "mindroom.matrix.thread_bookkeeping",
     "mindroom.response_runner",
     "mindroom.tool_system.runtime_context",
     "mindroom.turn_controller",
@@ -342,8 +341,8 @@ def test_tach_rejects_forbidden_boundary_imports(tmp_path: Path) -> None:
             "from __future__ import annotations\n\n",
             f"from __future__ import annotations\n\n{runtime_view_probe}",
         ).replace(
-            "from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001\n",
-            f"from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001\n{private_protocol_probe}",
+            "from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001\n",
+            f"from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001\n{private_protocol_probe}",
         ),
     )
 

@@ -504,6 +504,7 @@ def build_thread_relation(
 def build_matrix_edit_content(event_id: str, new_content: Mapping[str, Any]) -> dict[str, Any]:
     """Wrap replacement content in one Matrix ``m.replace`` edit envelope."""
     replacement_content = dict(new_content)
+    replacement_content.pop("m.relates_to", None)
     return {
         **replacement_content,
         "m.new_content": replacement_content,

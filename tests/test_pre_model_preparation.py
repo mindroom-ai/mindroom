@@ -1,22 +1,25 @@
-"""Tests for concurrent Mem0 prompt preparation."""
+"""Tests for concurrent prompt preparation."""
 
 from __future__ import annotations
 
 import asyncio
 import threading
-from unittest.mock import MagicMock
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 import mindroom.pre_model_preparation as pre_model_preparation_module
 from mindroom.config.main import ResolvedRuntimeModel
 from mindroom.memory import MemoryPromptParts
-from mindroom.pre_model_preparation import prepare_mem0_prompt_branches
+from mindroom.pre_model_preparation import prepare_prompt_branches
+from mindroom.response_runner import ResponseRunner
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failing_branch", ["memory", "agent", "both", "memory_cancelled"])
-async def test_prepare_mem0_prompt_branches_propagates_failure_directly(
+async def test_prepare_prompt_branches_propagates_failure_directly(
     monkeypatch: pytest.MonkeyPatch,
     failing_branch: str,
 ) -> None:
@@ -31,6 +34,7 @@ async def test_prepare_mem0_prompt_branches_propagates_failure_directly(
     built_agent = MagicMock()
     runtime_model = ResolvedRuntimeModel(model_name="default", context_window=None)
     close_unreturned = MagicMock()
+    close_client = AsyncMock()
     test_logger = MagicMock()
 
     async def memory_branch() -> MemoryPromptParts:
@@ -46,11 +50,17 @@ async def test_prepare_mem0_prompt_branches_propagates_failure_directly(
         return runtime_model, built_agent
 
     monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_unreturned)
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "aclose_anthropic_async_client",
+        close_client,
+        raising=False,
+    )
     monkeypatch.setattr(pre_model_preparation_module, "logger", test_logger)
 
     expected_error_type = asyncio.CancelledError if failing_branch == "memory_cancelled" else RuntimeError
     with pytest.raises(expected_error_type) as raised:
-        await prepare_mem0_prompt_branches(
+        await prepare_prompt_branches(
             prepare_memory=memory_branch,
             build_agent=agent_branch,
             agent_name="general",
@@ -62,8 +72,10 @@ async def test_prepare_mem0_prompt_branches_propagates_failure_directly(
     assert raised.value is expected_error
     if failing_branch in {"memory", "memory_cancelled"}:
         close_unreturned.assert_called_once_with(built_agent, shared_scope_storage=None)
+        close_client.assert_awaited_once_with(built_agent.model)
     else:
         close_unreturned.assert_not_called()
+        close_client.assert_not_awaited()
     if failing_branch == "both":
         test_logger.error.assert_called_once()
     else:
@@ -71,13 +83,75 @@ async def test_prepare_mem0_prompt_branches_propagates_failure_directly(
 
 
 @pytest.mark.asyncio
-async def test_prepare_mem0_prompt_branches_preserves_caller_owned_agent_on_memory_failure(
+async def test_prepare_prompt_branches_memory_failure_joins_agent_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Memory failure waits for uninterruptible construction and closes its agent."""
+    agent_started = threading.Event()
+    agent_release = threading.Event()
+    agent_finished = threading.Event()
+    memory_failed = asyncio.Event()
+    memory_error = RuntimeError("memory failed")
+    runtime_model = ResolvedRuntimeModel(model_name="default", context_window=None)
+    built_agent = MagicMock()
+    close_unreturned = MagicMock()
+    close_client = AsyncMock()
+
+    async def failed_memory() -> MemoryPromptParts:
+        assert await asyncio.to_thread(agent_started.wait, 5.0)
+        memory_failed.set()
+        raise memory_error
+
+    def blocked_agent() -> tuple[ResolvedRuntimeModel, MagicMock]:
+        agent_started.set()
+        if not agent_release.wait(5.0):
+            msg = "timed out waiting to release agent construction"
+            raise TimeoutError(msg)
+        agent_finished.set()
+        return runtime_model, built_agent
+
+    monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_unreturned)
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "aclose_anthropic_async_client",
+        close_client,
+        raising=False,
+    )
+
+    prepare_task = asyncio.create_task(
+        prepare_prompt_branches(
+            prepare_memory=failed_memory,
+            build_agent=blocked_agent,
+            agent_name="general",
+            shared_scope_storage=None,
+            pipeline_timing=None,
+        ),
+    )
+    try:
+        await asyncio.wait_for(memory_failed.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        assert not prepare_task.done()
+        agent_release.set()
+        with pytest.raises(RuntimeError) as raised:
+            await prepare_task
+    finally:
+        agent_release.set()
+
+    assert raised.value is memory_error
+    assert agent_finished.is_set()
+    close_unreturned.assert_called_once_with(built_agent, shared_scope_storage=None)
+    close_client.assert_awaited_once_with(built_agent.model)
+
+
+@pytest.mark.asyncio
+async def test_prepare_prompt_branches_preserves_caller_owned_agent_on_memory_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A failed memory branch must not close a reusable agent owned by its caller."""
     built_agent = MagicMock()
     runtime_model = ResolvedRuntimeModel(model_name="default", context_window=None)
     close_unreturned = MagicMock()
+    close_client = AsyncMock()
 
     async def memory_branch() -> MemoryPromptParts:
         await asyncio.sleep(0)
@@ -85,9 +159,15 @@ async def test_prepare_mem0_prompt_branches_preserves_caller_owned_agent_on_memo
         raise RuntimeError(msg)
 
     monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_unreturned)
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "aclose_anthropic_async_client",
+        close_client,
+        raising=False,
+    )
 
     with pytest.raises(RuntimeError, match="memory failed"):
-        await prepare_mem0_prompt_branches(
+        await prepare_prompt_branches(
             prepare_memory=memory_branch,
             build_agent=lambda: (runtime_model, built_agent),
             agent_name="general",
@@ -97,6 +177,59 @@ async def test_prepare_mem0_prompt_branches_preserves_caller_owned_agent_on_memo
         )
 
     close_unreturned.assert_not_called()
+    close_client.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prepare_prompt_branches_cancellation_discards_queued_agent_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation removes a build that never acquired its dedicated worker."""
+    worker_started = threading.Event()
+    worker_release = threading.Event()
+    memory_started = asyncio.Event()
+    agent_started = threading.Event()
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test_agent_build")
+
+    def occupy_worker() -> None:
+        worker_started.set()
+        assert worker_release.wait(5.0)
+
+    blocker = executor.submit(occupy_worker)
+    assert await asyncio.to_thread(worker_started.wait, 1.0)
+    monkeypatch.setattr(pre_model_preparation_module, "_AGENT_BUILD_EXECUTOR", executor)
+
+    async def blocked_memory() -> MemoryPromptParts:
+        memory_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    def queued_agent() -> tuple[ResolvedRuntimeModel, MagicMock]:
+        agent_started.set()
+        return ResolvedRuntimeModel(model_name="default", context_window=None), MagicMock()
+
+    prepare_task = asyncio.create_task(
+        prepare_prompt_branches(
+            prepare_memory=blocked_memory,
+            build_agent=queued_agent,
+            agent_name="general",
+            shared_scope_storage=None,
+            pipeline_timing=None,
+        ),
+    )
+    try:
+        await asyncio.wait_for(memory_started.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        assert not agent_started.is_set()
+
+        prepare_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(prepare_task, timeout=0.5)
+        assert not agent_started.is_set()
+    finally:
+        worker_release.set()
+        await asyncio.to_thread(blocker.result, 1.0)
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 @pytest.mark.asyncio
@@ -110,7 +243,7 @@ async def test_prepare_mem0_prompt_branches_preserves_caller_owned_agent_on_memo
         ("finished", True),
     ],
 )
-async def test_prepare_mem0_prompt_branches_cancellation_settles_agent_build(  # noqa: C901, PLR0915
+async def test_prepare_prompt_branches_cancellation_settles_agent_build(  # noqa: C901, PLR0915
     monkeypatch: pytest.MonkeyPatch,
     agent_outcome: str,
     caller_owned: bool,
@@ -124,6 +257,7 @@ async def test_prepare_mem0_prompt_branches_cancellation_settles_agent_build(  #
     built_agent = MagicMock()
     runtime_model = ResolvedRuntimeModel(model_name="default", context_window=None)
     close_unreturned = MagicMock()
+    close_client = AsyncMock()
     test_logger = MagicMock()
 
     async def blocked_memory() -> MemoryPromptParts:
@@ -150,11 +284,17 @@ async def test_prepare_mem0_prompt_branches_cancellation_settles_agent_build(  #
         return runtime_model, built_agent
 
     monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_unreturned)
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "aclose_anthropic_async_client",
+        close_client,
+        raising=False,
+    )
     monkeypatch.setattr(pre_model_preparation_module, "logger", test_logger)
 
     baseline_tasks = set(asyncio.all_tasks())
     prepare_task = asyncio.create_task(
-        prepare_mem0_prompt_branches(
+        prepare_prompt_branches(
             prepare_memory=blocked_memory,
             build_agent=blocked_agent,
             agent_name="general",
@@ -187,8 +327,10 @@ async def test_prepare_mem0_prompt_branches_cancellation_settles_agent_build(  #
     assert agent_finished.is_set()
     if agent_outcome in {"fails", "cancelled"} or caller_owned:
         close_unreturned.assert_not_called()
+        close_client.assert_not_awaited()
     else:
         close_unreturned.assert_called_once_with(built_agent, shared_scope_storage=None)
+        close_client.assert_awaited_once_with(built_agent.model)
     if agent_outcome == "fails":
         test_logger.error.assert_called_once()
     else:
@@ -196,3 +338,57 @@ async def test_prepare_mem0_prompt_branches_cancellation_settles_agent_build(  #
     await asyncio.sleep(0)
     leaked_tasks = {task for task in asyncio.all_tasks() - baseline_tasks if not task.done()}
     assert leaked_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_blocked_agent_build_exposes_fixed_response_shutdown_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retained response owner identifies its real blocked preparation phase."""
+    agent_started = threading.Event()
+    agent_release = threading.Event()
+    runtime_model = ResolvedRuntimeModel(model_name="default", context_window=None)
+    built_agent = MagicMock()
+    runner = ResponseRunner(deps=MagicMock())
+
+    async def prepared_memory() -> MemoryPromptParts:
+        return MemoryPromptParts()
+
+    def blocked_agent() -> tuple[ResolvedRuntimeModel, MagicMock]:
+        agent_started.set()
+        if not agent_release.wait(5.0):
+            msg = "timed out waiting to release diagnostic agent construction"
+            raise TimeoutError(msg)
+        return runtime_model, built_agent
+
+    async def blocked_response() -> None:
+        await prepare_prompt_branches(
+            prepare_memory=prepared_memory,
+            build_agent=blocked_agent,
+            agent_name="general",
+            shared_scope_storage=None,
+            pipeline_timing=None,
+        )
+
+    monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", MagicMock())
+    response_task = runner.track_inbox_response(
+        blocked_response(),
+        name="test_blocked_agent_build_shutdown_phase",
+        recovery_proof_ready=lambda: True,
+        room_id="!room:example.org",
+    )
+    try:
+        assert await asyncio.to_thread(agent_started.wait, 1.0)
+        runner.begin_process_shutdown()
+        await asyncio.sleep(0)
+
+        assert not response_task.done()
+        assert runner.pending_response_phase_counts == {"agent_preparation": 1}
+    finally:
+        agent_release.set()
+
+    assert await runner.drain_inbox_responses(
+        cancel_after_seconds=0.1,
+        shutdown_intent=ORDERLY_SHUTDOWN,
+    )
+    await asyncio.gather(response_task, return_exceptions=True)

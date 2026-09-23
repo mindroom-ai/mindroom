@@ -79,7 +79,7 @@ def _valid_plugin(root: Path) -> Path:
                 "        authorization_url='https://example.com/authorize',\n"
                 "        token_url='https://example.com/token',\n"
                 "        scopes=('read',),\n"
-                "        credential_service='compat_demo_credentials',\n"
+                "        credential_service='compat_demo_oauth',\n"
                 "        tool_config_service='compat_demo_tool',\n"
                 "        client_config_services=('compat_demo_oauth_client',),\n"
                 "    )]\n"

@@ -143,7 +143,7 @@ class _MindroomSkills(Skills):
     def _get_skill_script(
         self,
         skill_name: str,
-        script_path: str,
+        script_path: str | None = None,
         execute: bool = False,
         args: list[str] | None = None,
         timeout: int = 30,

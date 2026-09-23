@@ -1,17 +1,16 @@
-"""One-shot re-dispatch of responses cancelled by sync-restart recovery.
+"""Track exact sources whose responses reached visible terminal interruption.
 
-When the Matrix sync watchdog restarts a stalled sync loop, in-flight
-responses are cancelled and their placeholder becomes a terminal
-"[Response interrupted by service restart]" note. The turn controller
-registers a retry here, and the bot flushes the queue once its sync loop
-reports a healthy sync response again. Each source event is retried at
-most once; a retry that is itself interrupted is not requeued. Pending
-room ids also let the orchestrator hand retries to a replacement bot.
+A registered source reached a visible terminal Matrix interruption note: the
+service-restart note for replacement or the generic note for orderly shutdown.
+A later restart scan can find either note without replaying the handled source.
+Replacement recovery can use the registered rooms directly, while orderly
+restart recovery discovers the note through that scan. Whether a discovered
+interruption resumes remains controlled by the runtime's auto-resume policy.
+Each exact source event is recorded once.
 """
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -19,27 +18,18 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
-from mindroom.history.storage import is_model_history_visible_run
+from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Sequence
 
     from mindroom.history.types import HistoryScope
 
 logger = get_logger(__name__)
 
-_MAX_ATTEMPTED_KEYS = 512
 _INTERRUPTED_REPLAY_STATE_KEY = "mindroom_replay_state"
 _INTERRUPTED_REPLAY_STATE = "interrupted"
-
-
-@dataclass(frozen=True)
-class _PendingRetry:
-    """One retry callback plus the Matrix room containing its terminal marker."""
-
-    room_id: str
-    callback: Callable[[], Awaitable[None]]
 
 
 def _run_matches_scope(run: RunOutput | TeamRunOutput, scope: HistoryScope) -> bool:
@@ -94,49 +84,24 @@ def interrupted_source_needs_retry(
 
 
 @dataclass
-class SyncRestartRetryQueue:
-    """Hold one-shot retry callbacks keyed by source event id."""
+class InterruptedTurnRooms:
+    """Track rooms containing exact-source terminal interruption proofs."""
 
-    _pending: dict[str, _PendingRetry] = field(default_factory=dict)
-    _attempted: dict[str, None] = field(default_factory=dict)
-
-    @property
-    def has_pending(self) -> bool:
-        """Return whether any retry is waiting for sync recovery."""
-        return bool(self._pending)
+    _pending: dict[str, str] = field(default_factory=dict)
 
     @property
     def pending_room_ids(self) -> frozenset[str]:
-        """Return rooms whose interrupted turns still await a retry."""
-        return frozenset(pending.room_id for pending in self._pending.values())
+        """Return rooms available to replacement recovery."""
+        return frozenset(self._pending.values())
 
-    def register(self, key: str, retry: Callable[[], Awaitable[None]], *, room_id: str) -> bool:
-        """Queue one retry for a source event; refuse anything already seen."""
-        if key in self._attempted or key in self._pending:
+    def contains(self, key: str) -> bool:
+        """Return whether one exact source reached a visible terminal interruption."""
+        return key in self._pending
+
+    def register(self, key: str, *, room_id: str) -> bool:
+        """Record one exact source's terminal interruption proof once."""
+        if key in self._pending:
             return False
-        self._pending[key] = _PendingRetry(room_id=room_id, callback=retry)
-        logger.info("sync_restart_retry_queued", source_event_id=key, pending_count=len(self._pending))
+        self._pending[key] = room_id
+        logger.info("interrupted_turn_recovery_recorded", source_event_id=key, pending_count=len(self._pending))
         return True
-
-    def _mark_attempted(self, key: str) -> None:
-        """Record one attempted key, bounding the dedup memory."""
-        self._attempted[key] = None
-        while len(self._attempted) > _MAX_ATTEMPTED_KEYS:
-            self._attempted.pop(next(iter(self._attempted)))
-
-    async def flush(self) -> None:
-        """Run every queued retry exactly once in FIFO order, isolating individual failures."""
-        while self._pending:
-            key = next(iter(self._pending))
-            retry = self._pending.pop(key).callback
-            self._mark_attempted(key)
-            logger.info("sync_restart_retry_started", source_event_id=key)
-            try:
-                await retry()
-            except asyncio.CancelledError:
-                # The flush task is being torn down mid-retry; the key was already
-                # promoted to attempted, so log the dead end before propagating.
-                logger.warning("sync_restart_retry_cancelled", source_event_id=key)
-                raise
-            except Exception:
-                logger.exception("sync_restart_retry_failed", source_event_id=key)

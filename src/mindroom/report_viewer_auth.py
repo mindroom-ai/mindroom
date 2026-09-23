@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from mindroom.email_to_matrix_mapping import email_to_matrix_template_error
-
 
 class _RuntimeEnvironment(Protocol):
     def env_flag(self, name: str, *, default: bool = False) -> bool: ...
@@ -41,7 +39,7 @@ def report_viewer_auth_configuration_error(runtime_paths: _RuntimeEnvironment) -
             if email_template is None:
                 error = "strict trusted upstream auth has no verified Matrix identity claim or email mapping"
             else:
-                error = email_to_matrix_template_error(email_template)
+                error = _email_mapping_error(runtime_paths, email_template)
     elif not _env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER"):
         email_template = _env_text(
             runtime_paths,
@@ -50,10 +48,24 @@ def report_viewer_auth_configuration_error(runtime_paths: _RuntimeEnvironment) -
         if email_template is None:
             error = "trusted upstream auth has no Matrix identity header or email mapping"
         else:
-            error = email_to_matrix_template_error(email_template)
+            error = _email_mapping_error(runtime_paths, email_template)
             if error is None and not _env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER"):
                 error = "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER is required by the email-to-Matrix mapping"
     return error
+
+
+def _email_mapping_error(runtime_paths: _RuntimeEnvironment, template: str) -> str | None:
+    # Keep Matrix state out of the slim config import path until a template needs validation.
+    from mindroom.matrix.identity import validate_email_to_matrix_mapping  # noqa: PLC0415
+
+    try:
+        validate_email_to_matrix_mapping(
+            template,
+            _env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"),
+        )
+    except ValueError:
+        return "trusted upstream email mapping requires a valid template and MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"
+    return None
 
 
 def _env_text(runtime_paths: _RuntimeEnvironment, name: str) -> str | None:

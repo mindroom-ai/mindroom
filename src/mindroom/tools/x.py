@@ -87,7 +87,6 @@ if TYPE_CHECKING:
     function_names=(
         "create_post",
         "get_home_timeline",
-        "get_my_info",
         "get_user_info",
         "reply_to_post",
         "search_posts",

@@ -78,6 +78,20 @@ def test_worker_serialized_runtime_paths_excludes_control_state(tmp_path: Path) 
     assert CONTROL_STATE_PATH_ENV not in payload["env_file_values"]
 
 
+def test_worker_serialized_runtime_paths_excludes_session_storage(tmp_path: Path) -> None:
+    """Workers must not receive the control-plane-only session volume path."""
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SESSION_STORAGE_PATH": str(tmp_path / "sessions")},
+    )
+
+    payload = constants.serialize_public_runtime_paths(runtime_paths)
+
+    assert "MINDROOM_SESSION_STORAGE_PATH" not in payload["process_env"]
+    assert "MINDROOM_SESSION_STORAGE_PATH" not in payload["env_file_values"]
+
+
 def test_deserialized_public_runtime_paths_cannot_recover_control_state(tmp_path: Path) -> None:
     """Worker startup deserialization keeps control state absent."""
     runtime_paths = constants.resolve_primary_runtime_paths(

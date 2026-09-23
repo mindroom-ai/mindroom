@@ -1,6 +1,6 @@
 'use client'
 
-import { useAuth } from '@/hooks/useAuth'
+import { AuthProvider, useAuth } from '@/hooks/useAuth'
 import { Sidebar } from '@/components/dashboard/Sidebar'
 import { Header } from '@/components/dashboard/Header'
 import { useRouter } from 'next/navigation'
@@ -8,6 +8,18 @@ import { useEffect, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 
 export default function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  return (
+    <AuthProvider>
+      <AuthenticatedDashboardLayout>{children}</AuthenticatedDashboardLayout>
+    </AuthProvider>
+  )
+}
+
+function AuthenticatedDashboardLayout({
   children,
 }: {
   children: React.ReactNode

@@ -3,19 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
 
-import nio
 import pytest
 
-from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
+from mindroom.event_journal import thread_root
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadResolutionState,
-    ThreadRootProof,
+    _ThreadRootProof,
     resolve_event_thread_membership,
     resolve_related_event_thread_id_best_effort,
     resolve_related_event_thread_membership,
@@ -23,256 +19,58 @@ from mindroom.matrix.thread_membership import (
     thread_messages_thread_membership_access,
 )
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
-from tests.conftest import (
-    drain_coalescing,
-)
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
-    _matrix_room,
-    _wait_for_room_cache_idle,
 )
-
-if TYPE_CHECKING:
-    from mindroom.bot import AgentBot
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):
     """Threading behavior tests moved verbatim from tests/test_threading_error.py."""
 
     @pytest.mark.asyncio
-    async def test_live_plain_reply_to_threaded_event_persists_event_thread_membership(
+    @pytest.mark.parametrize("malformed_thread_root", ["", 7])
+    async def test_malformed_thread_relation_resolves_room_level_like_the_journal(
         self,
-        bot: AgentBot,
+        malformed_thread_root: object,
     ) -> None:
-        """Plain replies to threaded events should keep a durable event-to-thread mapping."""
+        """A thread relation naming no event must resolve room level, as the journal admitted it.
+
+        ``event_journal.projection.thread_root`` keeps only a non-empty string, so an
+        ``m.relates_to`` carrying ``""`` or a non-string lands in the journal as a
+        room-level row. Resolving the same event as ``THREADED`` here would split the
+        live turn away from the durable projection of the very event that admitted it.
+        """
         room_id = "!test:localhost"
-        thread_root_id = "$thread_root:localhost"
-        thread_reply_id = "$thread_reply:localhost"
-        plain_reply_id = "$plain_reply:localhost"
+        content = {
+            "body": "malformed thread relation",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": malformed_thread_root},
+        }
+        assert thread_root(content) is None
 
-        real_event_cache = SqliteEventCache(bot.storage_path / "plain-reply-thread-membership.db")
-        await real_event_cache.initialize()
-        bot.event_cache = real_event_cache
-        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
-            logger=MagicMock(),
-            background_task_owner=bot._runtime_view,
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, _event_id: str) -> EventInfo | None:
+            return None
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.proven()
+
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            EventInfo.from_event({"type": "m.room.message", "content": content}),
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+            event_id="$malformed:localhost",
+            allow_current_root=True,
         )
-        try:
-            await real_event_cache.store_event(
-                thread_reply_id,
-                room_id,
-                {
-                    "content": {
-                        "body": "Thread reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {
-                            "rel_type": "m.thread",
-                            "event_id": thread_root_id,
-                        },
-                    },
-                    "event_id": thread_reply_id,
-                    "sender": "@mindroom_general:localhost",
-                    "origin_server_ts": 1234567894,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            )
 
-            plain_reply_event = nio.RoomMessageText.from_dict(
-                {
-                    "content": {
-                        "body": "bridged plain reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
-                    },
-                    "event_id": plain_reply_id,
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567895,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            )
-
-            await bot._conversation_cache.append_live_event(
-                room_id,
-                plain_reply_event,
-                event_info=EventInfo.from_event(plain_reply_event.source),
-            )
-            await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
-
-            assert await real_event_cache.get_thread_id_for_event(room_id, plain_reply_id) == thread_root_id
-        finally:
-            await real_event_cache.close()
-
-    @pytest.mark.asyncio
-    async def test_live_plain_reply_chain_persists_thread_membership_transitively(
-        self,
-        bot: AgentBot,
-    ) -> None:
-        """A plain-reply chain should persist thread membership transitively once it reaches a thread."""
-        room_id = "!test:localhost"
-        thread_root_id = "$thread_root:localhost"
-        thread_reply_id = "$thread_reply:localhost"
-        plain_reply_id = "$plain_reply:localhost"
-        second_plain_reply_id = "$second_plain_reply:localhost"
-
-        real_event_cache = SqliteEventCache(bot.storage_path / "plain-reply-second-hop-membership.db")
-        await real_event_cache.initialize()
-        bot.event_cache = real_event_cache
-        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
-            logger=MagicMock(),
-            background_task_owner=bot._runtime_view,
-        )
-        try:
-            await real_event_cache.store_event(
-                thread_reply_id,
-                room_id,
-                {
-                    "content": {
-                        "body": "Thread reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {
-                            "rel_type": "m.thread",
-                            "event_id": thread_root_id,
-                        },
-                    },
-                    "event_id": thread_reply_id,
-                    "sender": "@mindroom_general:localhost",
-                    "origin_server_ts": 1234567894,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            )
-            await real_event_cache.store_event(
-                plain_reply_id,
-                room_id,
-                {
-                    "content": {
-                        "body": "first bridge reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
-                    },
-                    "event_id": plain_reply_id,
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567895,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            )
-
-            second_plain_reply_event = nio.RoomMessageText.from_dict(
-                {
-                    "content": {
-                        "body": "second bridge reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": plain_reply_id}},
-                    },
-                    "event_id": second_plain_reply_id,
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567896,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            )
-
-            await bot._conversation_cache.append_live_event(
-                room_id,
-                second_plain_reply_event,
-                event_info=EventInfo.from_event(second_plain_reply_event.source),
-            )
-            await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
-
-            assert await real_event_cache.get_thread_id_for_event(room_id, second_plain_reply_id) == thread_root_id
-        finally:
-            await real_event_cache.close()
-
-    @pytest.mark.asyncio
-    async def test_media_ingress_primes_transitive_ancestors_before_persisting_membership(
-        self,
-        bot: AgentBot,
-    ) -> None:
-        """Cold-start media ingress should persist the same transitive thread membership used at runtime."""
-        room_id = "!test:localhost"
-        thread_root_id = "$thread_root:localhost"
-        thread_reply_id = "$thread_reply:localhost"
-        plain_reply_id = "$plain_reply:localhost"
-        audio_event_id = "$audio_reply:localhost"
-        room = _matrix_room(room_id)
-        real_event_cache = SqliteEventCache(bot.storage_path / "media-ingress-thread-membership.db")
-        await real_event_cache.initialize()
-        bot.event_cache = real_event_cache
-        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
-            logger=MagicMock(),
-            background_task_owner=bot._runtime_view,
-        )
-        audio_event = nio.RoomMessageAudio.from_dict(
-            {
-                "content": {
-                    "body": "voice-note.ogg",
-                    "msgtype": "m.audio",
-                    "url": "mxc://localhost/voice-note",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": plain_reply_id}},
-                },
-                "event_id": audio_event_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 1234567896,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
-        )
-        prechecked_event = MagicMock(event=audio_event, requester_user_id="@user:localhost")
-        bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
-        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=True)
-        bot._turn_controller._enqueue_for_dispatch = AsyncMock()
-
-        def room_get_event_response(event_id: str, content: dict[str, object]) -> nio.RoomGetEventResponse:
-            return nio.RoomGetEventResponse.from_dict(
-                {
-                    "content": content,
-                    "event_id": event_id,
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567890,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            )
-
-        async def fetch_related_event(fetch_room_id: str, event_id: str) -> nio.RoomGetEventResponse:
-            assert fetch_room_id == room_id
-            if event_id == plain_reply_id:
-                return room_get_event_response(
-                    plain_reply_id,
-                    {
-                        "body": "bridge reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
-                    },
-                )
-            if event_id == thread_reply_id:
-                return room_get_event_response(
-                    thread_reply_id,
-                    {
-                        "body": "thread reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {
-                            "rel_type": "m.thread",
-                            "event_id": thread_root_id,
-                        },
-                    },
-                )
-            msg = f"unexpected event lookup: {event_id}"
-            raise AssertionError(msg)
-
-        bot.client.room_get_event = AsyncMock(side_effect=fetch_related_event)
-
-        try:
-            await bot._turn_controller.handle_media_event(room, audio_event)
-            await drain_coalescing(bot)
-            await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
-
-            assert await real_event_cache.get_thread_id_for_event(room_id, audio_event_id) == thread_root_id
-        finally:
-            await real_event_cache.close()
+        assert resolution.state is ThreadResolutionState.ROOM_LEVEL
+        assert resolution.thread_id is None
 
     @pytest.mark.asyncio
     async def test_transitive_thread_membership_handles_long_reply_chains(
@@ -326,8 +124,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
             return event_infos.get(event_id)
 
-        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
-            return ThreadRootProof.not_a_thread_root()
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.not_a_thread_root()
 
         resolution = await resolve_event_thread_membership(
             room_id,
@@ -481,8 +279,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
             return event_infos.get(event_id)
 
-        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
-            return ThreadRootProof.not_a_thread_root()
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.not_a_thread_root()
 
         resolution = await resolve_event_thread_membership(
             room_id,
@@ -677,6 +475,202 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert resolution.thread_id is None
 
     @pytest.mark.asyncio
+    async def test_edit_resolves_through_its_original_not_the_thread_it_names(
+        self,
+    ) -> None:
+        """The thread inside an edit's ``m.new_content`` loses to the thread of the event it edits.
+
+        Matrix applies ``m.new_content`` by keeping the original event's relation and ignoring
+        every ``m.relates_to`` written there, so that value is a claim its author chose. Answering
+        from it would let anyone who can edit a message declare which conversation the edit joins.
+        """
+        room_id = "!test:localhost"
+        original_id = "$original:localhost"
+        edit_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "updated",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed:localhost"},
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+                },
+                "event_id": "$edit:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 2,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
+            return "$real_thread:localhost" if event_id == original_id else None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            if event_id != original_id:
+                return None
+            return EventInfo.from_event(
+                {
+                    "content": {
+                        "body": "original",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$real_thread:localhost"},
+                    },
+                    "event_id": original_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            )
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.not_a_thread_root()
+
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            edit_event_info,
+            event_id="$edit:localhost",
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == "$real_thread:localhost"
+
+    @pytest.mark.asyncio
+    async def test_walking_onto_an_edit_keeps_walking_to_the_message_it_replaces(
+        self,
+    ) -> None:
+        """Reaching an edit mid-walk resolves the edited message, not the thread the edit names.
+
+        Implied membership makes this reachable from any plain reply or reaction: the walk lands on
+        a replacement, and the replacement's ``m.new_content`` is the one relation on the path that
+        Matrix throws away. The hop to the original is what the walk exists for.
+        """
+        room_id = "!test:localhost"
+        original_id = "$original:localhost"
+        edit_id = "$edit:localhost"
+        reply_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "a reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": edit_id}},
+                },
+                "event_id": "$reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 3,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+        edit_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "updated",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed:localhost"},
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+                },
+                "event_id": edit_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 2,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
+            return "$real_thread:localhost" if event_id == original_id else None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            return edit_event_info if event_id == edit_id else None
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.not_a_thread_root()
+
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            reply_event_info,
+            event_id="$reply:localhost",
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == "$real_thread:localhost"
+
+    @pytest.mark.asyncio
+    async def test_edit_of_an_unreadable_original_is_indeterminate_not_the_thread_it_names(
+        self,
+    ) -> None:
+        """An edit whose original nobody can read is unplaced, not placed where the edit says.
+
+        This is the case the claim used to answer, and answering it is exactly what an outsider
+        wants: the original is the only authority, and it is unavailable. Fail closed on the
+        candidate so dispatch coalesces and retries rather than acting on an attacker's choice.
+        """
+        room_id = "!test:localhost"
+        original_id = "$original:localhost"
+        edit_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "updated",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed:localhost"},
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+                },
+                "event_id": "$edit:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 2,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, _event_id: str) -> EventInfo | None:
+            return None
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.not_a_thread_root()
+
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            edit_event_info,
+            event_id="$edit:localhost",
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.INDETERMINATE
+        assert resolution.thread_id is None
+        assert resolution.candidate_thread_root_id == original_id
+
+    @pytest.mark.asyncio
     async def test_related_thread_resolution_marks_event_lookup_failure_indeterminate(
         self,
     ) -> None:
@@ -691,8 +685,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             msg = "lookup unavailable"
             raise RuntimeError(msg)
 
-        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
-            return ThreadRootProof.not_a_thread_root()
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.not_a_thread_root()
 
         resolution = await resolve_related_event_thread_membership(
             room_id,
@@ -884,8 +878,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             msg = "lookup unavailable"
             raise RuntimeError(msg)
 
-        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
-            return ThreadRootProof.not_a_thread_root()
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.not_a_thread_root()
 
         resolved_thread_id = await resolve_related_event_thread_id_best_effort(
             room_id,
@@ -914,8 +908,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             msg = "lookup unavailable"
             raise RuntimeError(msg)
 
-        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
-            return ThreadRootProof.not_a_thread_root()
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.not_a_thread_root()
 
         resolution = await resolve_related_event_thread_membership(
             room_id,
@@ -944,8 +938,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         async def fetch_event_info(_room_id: str, _event_id: str) -> EventInfo | None:
             return None
 
-        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
-            return ThreadRootProof.not_a_thread_root()
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.not_a_thread_root()
 
         resolution = await resolve_related_event_thread_membership(
             room_id,
@@ -1002,93 +996,3 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         assert resolved_thread_id is None
-
-    @pytest.mark.asyncio
-    async def test_live_edit_of_promoted_plain_reply_persists_event_thread_membership(
-        self,
-        bot: AgentBot,
-    ) -> None:
-        """Edits of promoted plain replies should keep the same durable thread membership."""
-        room_id = "!test:localhost"
-        thread_root_id = "$thread_root:localhost"
-        thread_reply_id = "$thread_reply:localhost"
-        plain_reply_id = "$plain_reply:localhost"
-        plain_reply_edit_id = "$plain_reply_edit:localhost"
-
-        real_event_cache = SqliteEventCache(bot.storage_path / "plain-reply-edit-thread-membership.db")
-        await real_event_cache.initialize()
-        bot.event_cache = real_event_cache
-        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
-            logger=MagicMock(),
-            background_task_owner=bot._runtime_view,
-        )
-        try:
-            await real_event_cache.store_event(
-                thread_reply_id,
-                room_id,
-                {
-                    "content": {
-                        "body": "Thread reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {
-                            "rel_type": "m.thread",
-                            "event_id": thread_root_id,
-                        },
-                    },
-                    "event_id": thread_reply_id,
-                    "sender": "@mindroom_general:localhost",
-                    "origin_server_ts": 1234567894,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            )
-            plain_reply_event = nio.RoomMessageText.from_dict(
-                {
-                    "content": {
-                        "body": "bridged plain reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
-                    },
-                    "event_id": plain_reply_id,
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567895,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            )
-            await bot._conversation_cache.append_live_event(
-                room_id,
-                plain_reply_event,
-                event_info=EventInfo.from_event(plain_reply_event.source),
-            )
-            await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
-
-            edit_event = nio.RoomMessageText.from_dict(
-                {
-                    "content": {
-                        "body": "* updated bridged plain reply",
-                        "msgtype": "m.text",
-                        "m.new_content": {
-                            "body": "updated bridged plain reply",
-                            "msgtype": "m.text",
-                        },
-                        "m.relates_to": {"rel_type": "m.replace", "event_id": plain_reply_id},
-                    },
-                    "event_id": plain_reply_edit_id,
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567896,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            )
-
-            await bot._conversation_cache.append_live_event(
-                room_id,
-                edit_event,
-                event_info=EventInfo.from_event(edit_event.source),
-            )
-            await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
-
-            assert await real_event_cache.get_thread_id_for_event(room_id, plain_reply_edit_id) == thread_root_id
-        finally:
-            await real_event_cache.close()

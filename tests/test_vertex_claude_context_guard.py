@@ -21,8 +21,8 @@ from mindroom.claude_prompt_cache import (
     TOOL_SEARCH_RESULT_BLOCK_TYPE,
     TOOL_SEARCH_TOOL_TYPE,
 )
-from mindroom.claude_stream_retry import install_claude_stream_retry_hook
-from mindroom.error_handling import ModelSafeguardRefusalError
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
+from mindroom.provider_stream_retry import install_provider_stream_retry_hook
 from mindroom.vertex_claude_compat import (
     _VERTEX_TOOL_SEARCH_TOKEN_RESERVE,
     MindroomVertexAIClaude,
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 def _model() -> MindroomVertexAIClaude:
     return MindroomVertexAIClaude(
-        id="claude-sonnet-4-6",
+        id="claude-sonnet-5",
         project_id="demo-project",
         region="us-central1",
         cache_system_prompt=False,
@@ -68,7 +68,7 @@ def _safeguard_refusal_message() -> AnthropicMessage:
     return AnthropicMessage(
         id="msg-refusal",
         content=[],
-        model="claude-fable-5",
+        model="claude-fable-5-1",
         role="assistant",
         stop_reason="refusal",
         stop_sequence=None,
@@ -99,7 +99,7 @@ def test_safeguard_refusal_survives_agno_error_translation() -> None:
     """Agno must not replace the typed refusal with a generic provider error."""
     model = _model()
     error = ModelSafeguardRefusalError(
-        message="Vertex Claude returned stop_reason=refusal",
+        message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
         model_name=model.name,
         model_id=model.id,
     )
@@ -114,7 +114,7 @@ def test_safeguard_refusal_is_not_retryable_by_agno() -> None:
     """Agno's configured model retry loop must not repeat a refusal."""
     model = _model()
     error = ModelSafeguardRefusalError(
-        message="Vertex Claude returned stop_reason=refusal",
+        message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
         model_name=model.name,
         model_id=model.id,
     )
@@ -231,7 +231,7 @@ def test_vertex_token_count_request_preserves_native_tool_search_as_countable_te
         },
     }
     request_kwargs = {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-sonnet-5",
         "messages": [
             {
                 "role": "assistant",
@@ -297,7 +297,7 @@ def test_vertex_token_count_request_preserves_native_tool_search_as_countable_te
 def test_vertex_token_count_adapts_search_history_without_current_search_tool() -> None:
     """Replayed search blocks remain countable after the current tool surface changes."""
     request_kwargs = {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-sonnet-5",
         "messages": [
             {
                 "role": "assistant",
@@ -327,7 +327,7 @@ def test_vertex_token_count_adapts_search_history_without_current_search_tool() 
 def test_vertex_token_count_request_leaves_regular_requests_unchanged() -> None:
     """Requests without native search keep their original count payload."""
     request_kwargs = {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-sonnet-5",
         "messages": [{"role": "user", "content": "hello"}],
         "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
     }
@@ -506,7 +506,7 @@ async def test_fit_request_messages_skips_exact_count_below_half_budget() -> Non
             compress_tool_results=False,
         )
 
-    assert fitted is messages
+    assert fitted == messages
     counter.assert_not_awaited()
 
 
@@ -528,7 +528,7 @@ async def test_fit_request_messages_counts_exactly_at_half_budget() -> None:
             compress_tool_results=False,
         )
 
-    assert fitted is messages
+    assert fitted == messages
     counter.assert_awaited_once()
 
 
@@ -550,7 +550,7 @@ async def test_fit_request_messages_counts_media_exactly() -> None:
             compress_tool_results=False,
         )
 
-    assert fitted is messages
+    assert fitted == messages
     counter.assert_awaited_once()
 
 
@@ -576,7 +576,7 @@ async def test_fit_request_messages_rejects_current_turn_that_cannot_fit() -> No
 async def test_stream_retry_does_not_repeat_current_turn_fit_failure() -> None:
     """The installed stream wrapper preserves one typed local fit failure."""
     model = _model()
-    install_claude_stream_retry_hook(model)
+    install_provider_stream_retry_hook(model)
     counter = AsyncMock(return_value=90)
 
     with (

@@ -1,0 +1,4538 @@
+"""Provenance mapping, durable admission, and pending-event execution."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock
+
+import nio
+import pytest
+from structlog.testing import capture_logs
+
+from mindroom.constants import (
+    SILENT_SCHEDULE_EVENT_TYPE,
+    SOURCE_KIND_KEY,
+    STREAM_STATUS_CANCELLED,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_INTERRUPTED,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
+)
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.event_journal import (
+    ApprovalDecisionMetadata,
+    EventClass,
+    EventKind,
+    PendingPage,
+    SemanticConsumer,
+    VisibleMessage,
+)
+from mindroom.journal_dispatch import _BINDINGS, JournalCallbacks, JournalDispatcher
+from mindroom.matrix.client_delivery import build_edit_event_content
+from mindroom.matrix.client_visible_messages import is_visible_room_message
+from mindroom.matrix.conversation_hydration import _projected_from_event
+from mindroom.matrix.event_types import CALL_MEMBER_EVENT_TYPE
+from mindroom.matrix.journal_ingress import (
+    JournalCorruptionError,
+    _event_class_for,
+    _event_kind,
+    _inbound_event,
+    _projected_event,
+    ingestion_timeline_views,
+    parse_journal_event,
+)
+from mindroom.pending_event_worker import _BATCH_SIZE, PendingEventWorker
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
+from tests.conftest import request_envelope
+from tests.journal_helpers import admit_dispatch_event
+from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
+from tests.test_event_journal_store import corrupt
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Sized
+
+    from mindroom.event_journal import EventJournalStore, JournalEvent, PrincipalStore
+
+pytestmark = pytest.mark.asyncio
+
+ROOM = "!room:example.org"
+ALICE = "@alice:example.org"
+BOT = "@mindroom_general:example.org"
+
+
+@pytest.fixture
+def alice(journal_store: EventJournalStore) -> PrincipalStore:
+    """Return one bound principal view."""
+    return journal_store.principal("agent@alice")
+
+
+def text_event(
+    event_id: str,
+    body: str = "hello",
+    *,
+    thread_id: str | None = None,
+    ts: int = 1_000,
+) -> nio.Event:
+    """Return a parsed text message event."""
+    content: dict[str, Any] = {"msgtype": "m.text", "body": body}
+    if thread_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": ALICE,
+            "origin_server_ts": ts,
+            "type": "m.room.message",
+            "content": content,
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+def schedule_trigger_event(
+    event_id: str,
+    body: object = "Run the scheduled task",
+    *,
+    event_type: str = SILENT_SCHEDULE_EVENT_TYPE,
+    sender: str = BOT,
+    extra_content: dict[str, Any] | None = None,
+    ts: int = 1_000,
+) -> nio.UnknownEvent:
+    """Return a parsed silent scheduled trigger."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": ts,
+            "type": event_type,
+            "content": {
+                "msgtype": "m.text",
+                "body": body,
+                SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+                **(extra_content or {}),
+            },
+        },
+    )
+    assert isinstance(event, nio.UnknownEvent)
+    return event
+
+
+def bot_event(event_id: str, body: str = "the answer", *, ts: int = 1_100) -> nio.Event:
+    """Return this bot's own message as it comes back on the sync timeline."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": BOT,
+            "origin_server_ts": ts,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": body},
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+def image_event(
+    event_id: str,
+    body: str = "photo.png",
+    *,
+    ts: int = 1_000,
+    encrypted: bool = False,
+) -> nio.Event:
+    """Return a parsed image message, optionally with its decryption keys."""
+    content: dict[str, Any] = {
+        "msgtype": "m.image",
+        "body": body,
+        "info": {"mimetype": "image/png", "size": 4_096, "w": 64, "h": 64},
+    }
+    if encrypted:
+        content["file"] = {
+            "url": f"mxc://example.org/{event_id.lstrip('$')}",
+            "key": {
+                "k": "cipher-key-material",
+                "alg": "A256CTR",
+                "ext": True,
+                "key_ops": ["encrypt", "decrypt"],
+                "kty": "oct",
+            },
+            "iv": "initialization-vector",
+            "hashes": {"sha256": "content-hash"},
+            "v": "v2",
+        }
+    else:
+        content["url"] = f"mxc://example.org/{event_id.lstrip('$')}"
+    source = {
+        "event_id": event_id,
+        "sender": ALICE,
+        "origin_server_ts": ts,
+        "type": "m.room.message",
+        "content": content,
+    }
+    event = nio.RoomMessage.parse_decrypted_event(source) if encrypted else nio.Event.parse_event(source)
+    assert isinstance(event, nio.Event)
+    return event
+
+
+def redaction_event(event_id: str, redacts: str, *, ts: int = 2_000) -> nio.Event:
+    """Return a parsed redaction event."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": ALICE,
+            "origin_server_ts": ts,
+            "type": "m.room.redaction",
+            "redacts": redacts,
+            "content": {},
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+def reaction_event(event_id: str, *, target: str = "$target", key: str = "OK") -> nio.Event:
+    """Return a parsed annotation, whose callback finishes when it returns."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": ALICE,
+            "origin_server_ts": 1_000,
+            "type": "m.reaction",
+            "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": target, "key": key}},
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+def room() -> nio.MatrixRoom:
+    """Return a minimal joined room."""
+    return nio.MatrixRoom(ROOM, ALICE)
+
+
+async def _noop_callback(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+    """Accept one event and do nothing with it."""
+
+
+PLACEHOLDER_ID = "$placeholder"
+PLACEHOLDER_BODY = "Thinking..."
+
+
+def placeholder_event(*, ts: int = 1_000, msgtype: str = "m.notice") -> nio.Event:
+    """Return the visible message a streamed answer starts life as.
+
+    ``m.notice``, because that is what the runtime sends: every `pending` and
+    `streaming` frame is a notice so Matrix suppresses it before evaluating
+    mention rules, and only the terminal frame reverts to ``m.text``
+    (`streaming.py`, `_prepare_delivery_from_snapshot`).
+
+    This fixture used to hard-code ``m.text`` while claiming it was built the
+    way the runtime builds it. It was not, and the difference was the whole
+    bug: a notice is a sibling of `RoomMessageText` in nio, not a subclass, so
+    the real placeholder was never admitted and every streamed answer's
+    terminal edit had no original to reduce onto.
+    """
+    event = nio.Event.parse_event(
+        {
+            "event_id": PLACEHOLDER_ID,
+            "sender": BOT,
+            "origin_server_ts": ts,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": msgtype,
+                "body": PLACEHOLDER_BODY,
+                STREAM_STATUS_KEY: STREAM_STATUS_PENDING,
+            },
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+def stream_event(
+    event_id: str,
+    body: str,
+    status: str,
+    *,
+    replaces: str,
+    sender: str = BOT,
+    msgtype: str = "m.text",
+    ts: int = 1_100,
+) -> nio.Event:
+    """Return one revision of a streamed answer, in the real edit envelope.
+
+    Uses the production builder rather than a hand-written shape, so a change
+    to where the stream status lands inside an edit breaks these tests instead
+    of quietly making them test nothing.
+    """
+    content = build_edit_event_content(
+        event_id=replaces,
+        new_content={"msgtype": msgtype, "body": body},
+        new_text=body,
+        extra_content={STREAM_STATUS_KEY: status},
+    )
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": ts,
+            "type": "m.room.message",
+            "content": content,
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+class TestProvenanceMapping:
+    """nio owns provenance; MindRoom owns only what it means."""
+
+    @pytest.mark.parametrize(
+        ("provenance", "expected"),
+        [
+            (nio.TimelineEventProvenance.LIVE, EventClass.ACTIONABLE),
+            (nio.TimelineEventProvenance.RECOVERED, EventClass.ACTIONABLE),
+            (nio.TimelineEventProvenance.HISTORY, EventClass.CONTEXT_ONLY),
+        ],
+    )
+    async def test_provenance_decides_whether_work_may_start(
+        self,
+        provenance: nio.TimelineEventProvenance,
+        expected: EventClass,
+    ) -> None:
+        """Provenance decides whether work may start."""
+        assert _event_class_for(provenance, text_event("$m", "hi")) is expected
+
+    async def test_every_provenance_is_mapped(self) -> None:
+        """A new provenance must not silently default to actionable."""
+        for provenance in nio.TimelineEventProvenance:
+            assert _event_class_for(provenance, text_event("$m", "hi")) in EventClass
+
+
+class TestEventKinds:
+    """One event carries at most one semantic purpose."""
+
+    async def test_a_text_message_is_a_message(self) -> None:
+        """A text message is a message."""
+        assert _event_kind(text_event("$m")) is EventKind.MESSAGE
+
+    async def test_a_redaction_is_a_redaction(self) -> None:
+        """A redaction is a redaction."""
+        assert _event_kind(redaction_event("$r", "$m")) is EventKind.REDACTION
+
+    async def test_an_unrelated_event_has_no_kind(self) -> None:
+        """An unrelated event has no kind."""
+        event = nio.Event.parse_event(
+            {
+                "event_id": "$topic",
+                "sender": ALICE,
+                "origin_server_ts": 1,
+                "type": "m.room.topic",
+                "state_key": "",
+                "content": {"topic": "hi"},
+            },
+        )
+        assert isinstance(event, nio.Event)
+        assert _event_kind(event) is None
+
+    @pytest.mark.parametrize(
+        ("msgtype", "extra_content"),
+        [
+            ("m.text", {}),
+            ("m.emote", {}),
+            ("m.notice", {}),
+            ("m.image", {"url": "mxc://example.org/i"}),
+            ("m.file", {"url": "mxc://example.org/f"}),
+            ("m.video", {"url": "mxc://example.org/v"}),
+            ("m.audio", {"url": "mxc://example.org/a"}),
+        ],
+    )
+    async def test_every_room_message_admission_matches_what_hydration_projects(
+        self,
+        msgtype: str,
+        extra_content: dict[str, str],
+    ) -> None:
+        """Watching a conversation and rebuilding it must agree on what is in it.
+
+        Hydration admits any `m.room.message`, so admission has to as well. It
+        did not: the rules enumerated msgtypes, and each one left out was found
+        only after shipping -- notices first, then emotes. A user sending
+        `/me waves` was journaled live as nothing at all, and then appeared out
+        of nowhere the first time the thread was rebuilt.
+
+        Parametrized over msgtypes rather than asserting the base class so the
+        two implementations are compared against each other rather than against
+        the same assumption twice.
+        """
+        source = {
+            "event_id": f"$msg-{msgtype}",
+            "sender": ALICE,
+            "origin_server_ts": 1,
+            "type": "m.room.message",
+            "content": {"msgtype": msgtype, "body": "body", **extra_content},
+        }
+        event = nio.Event.parse_event(source)
+        assert not isinstance(event, nio.BadEvent), f"{msgtype} fixture is malformed"
+
+        projected = _projected_from_event(ROOM, event, self_sender="@someone-else:localhost")
+
+        assert (_event_kind(event) is not None) == (projected is not None)
+
+
+class TestAdmissionAdapter:
+    """The translation from a nio event to a durable row."""
+
+    @pytest.mark.parametrize("kind", [EventKind.REACTION, EventKind.REDACTION])
+    @pytest.mark.parametrize(
+        "provenance",
+        [nio.TimelineEventProvenance.LIVE, nio.TimelineEventProvenance.RECOVERED],
+    )
+    async def test_media_extensions_do_not_change_a_non_message_event_kind(
+        self,
+        kind: EventKind,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        """Extension fields cannot turn a reaction or redaction into an image."""
+        event = (
+            reaction_event("$extended", target="$target")
+            if kind is EventKind.REACTION
+            else redaction_event("$extended", "$target")
+        )
+        event.source["content"].update(
+            {"msgtype": "m.image", "body": "extension.png", "url": "mxc://example.org/extension"},
+        )
+
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=event.source,
+            self_sender=BOT,
+            provenance=provenance,
+        )
+
+        assert views is not None
+        inbound, projection = views
+        assert inbound.kind is kind
+        assert inbound.event_class is EventClass.ACTIONABLE
+        if kind is EventKind.REACTION:
+            assert projection is None
+        else:
+            assert projection is not None
+            assert projection.redacts_event_id == "$target"
+
+    @pytest.mark.parametrize("kind", [EventKind.REACTION, EventKind.REDACTION])
+    async def test_valid_non_message_ingress_has_no_message_validation_warning(
+        self,
+        kind: EventKind,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Valid event content is validated against its own Matrix event type."""
+        event = (
+            reaction_event("$valid", target="$target")
+            if kind is EventKind.REACTION
+            else redaction_event("$valid", "$target")
+        )
+        with caplog.at_level("WARNING", logger="nio.events.misc"):
+            views = ingestion_timeline_views(
+                room_id=ROOM,
+                source=event.source,
+                self_sender=BOT,
+                provenance=nio.TimelineEventProvenance.RECOVERED,
+            )
+
+        assert views is not None
+        assert views[0].kind is kind
+        assert not any("Error validating event" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.parametrize("encrypted", [False, True])
+    async def test_malformed_media_ingress_has_no_semantic_disposition(
+        self,
+        encrypted: bool,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The media parser choice cannot admit a missing attachment URL."""
+        source = image_event("$invalid", encrypted=encrypted).source
+        if encrypted:
+            source["content"]["file"] = {}
+        else:
+            del source["content"]["url"]
+        with caplog.at_level("WARNING", logger="nio.events.misc"):
+            views = ingestion_timeline_views(
+                room_id=ROOM,
+                source=source,
+                self_sender=BOT,
+                provenance=nio.TimelineEventProvenance.RECOVERED,
+            )
+
+        assert views is None
+        assert any("ValidationError" in record.getMessage() for record in caplog.records)
+
+    async def test_a_threaded_message_lands_in_its_thread(self) -> None:
+        """A threaded message lands in its thread."""
+        inbound = _inbound_event(
+            ROOM,
+            text_event("$m", thread_id="$root"),
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+        )
+        assert inbound.thread_id == "$root"
+
+    async def test_an_unthreaded_message_has_no_thread(self) -> None:
+        """An unthreaded message has no thread."""
+        inbound = _inbound_event(ROOM, text_event("$m"), EventKind.MESSAGE, EventClass.ACTIONABLE)
+        assert inbound.thread_id is None
+
+    async def test_a_delivery_echo_keeps_its_matrix_transaction_id(self) -> None:
+        """Projection can identify an owned echo before outbox acknowledgement."""
+        event = nio.Event.parse_event(
+            {
+                "event_id": "$echo",
+                "sender": BOT,
+                "origin_server_ts": 1,
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": "answer"},
+                "unsigned": {"transaction_id": "tx-final"},
+            },
+        )
+        assert isinstance(event, nio.Event)
+
+        projected = _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT)
+
+        assert projected is not None
+        assert projected.transaction_id == "tx-final"
+
+    async def test_a_reaction_does_not_touch_the_projection(self) -> None:
+        """A reaction does not touch the projection."""
+        event = nio.Event.parse_event(
+            {
+                "event_id": "$reaction",
+                "sender": ALICE,
+                "origin_server_ts": 1,
+                "type": "m.reaction",
+                "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$m", "key": "x"}},
+            },
+        )
+        assert isinstance(event, nio.Event)
+        assert _projected_event(ROOM, event, EventKind.REACTION, self_sender=BOT) is None
+
+    async def test_a_redaction_projects_onto_its_target(self) -> None:
+        """A redaction projects onto its target."""
+        projected = _projected_event(ROOM, redaction_event("$r", "$m"), EventKind.REDACTION, self_sender=BOT)
+        assert projected is not None
+        assert projected.redacts_event_id == "$m"
+
+    async def test_a_redaction_without_a_target_never_reaches_the_journal(self) -> None:
+        """Nio's schema requires the target, so such an event is never parsed.
+
+        Worth pinning: the projection reads the typed ``redacts`` attribute
+        rather than probing the source, and that is only safe while nio refuses
+        to produce a redaction with no target.
+        """
+        event = nio.Event.parse_event(
+            {
+                "event_id": "$r",
+                "sender": ALICE,
+                "origin_server_ts": 1,
+                "type": "m.room.redaction",
+                "content": {},
+            },
+        )
+        assert not isinstance(event, nio.RedactionEvent)
+        assert _event_kind(event) is not EventKind.REDACTION
+
+
+def sidecar_event(event_id: str, preview: str, mxc: str, *, ts: int = 5_000) -> nio.Event:
+    """Return a message whose real body lives in a v2 JSON sidecar."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": BOT,
+            "origin_server_ts": ts,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.file",
+                "body": preview,
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+                "url": mxc,
+            },
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+class TestSidecarContent:
+    """A message too large for one Matrix event never reaches a prompt truncated."""
+
+    async def test_an_unresolved_sidecar_is_owed_rather_than_served(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Most agent answers exceed the event size limit and live in a sidecar.
+
+        The event itself says only "[Message continues in attached file]".
+        Storing that would feed a model a placeholder in place of its own
+        previous answer, for the majority of its own history, and no reader
+        could tell by looking that the body it got was a stub.
+
+        So the message is reported as owing a resolution instead, which is the
+        same shape a redaction leaves behind, and the readers that already know
+        how to wait for one repair it.
+        """
+        preview = "The answer beg [Message continues in attached file]"
+        event = sidecar_event("$long", preview, "mxc://server/long-answer")
+        await alice.admit(
+            _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+        )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert page.messages == (), "the projection served an unresolved sidecar as a message"
+        assert [request.logical_event_id for request in page.refresh_pending] == ["$long"]
+
+    async def test_an_ordinary_message_alongside_it_is_still_served(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Owing one resolution must not hide the rest of the conversation.
+
+        Pins that the sidecar rule is about the one message whose text is
+        missing. A rule that withheld the whole page would be indistinguishable
+        from the correct one in a test that only ever admits a sidecar.
+        """
+        plain = text_event("$plain", "a short answer", ts=4_000)
+        sidecar = sidecar_event("$long", "truncated [Message continues in attached file]", "mxc://server/long")
+        for event in (plain, sidecar):
+            await alice.admit(
+                _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+            )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.content["body"] for message in page.messages] == ["a short answer"]
+        assert [request.logical_event_id for request in page.refresh_pending] == ["$long"]
+
+    async def test_resolved_content_is_stored_whole(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Content carrying no sidecar reference is the resolved form.
+
+        This is what makes the rule self-clearing: the payload inside the
+        attachment has no sidecar metadata of its own, so storing it settles
+        the debt without anything having to remember to clear a flag.
+        """
+        whole = "The answer begins here and runs on for many thousands of characters."
+        event = text_event("$long", whole, ts=5_000)
+        await alice.admit(
+            _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+        )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.content["body"] for message in page.messages] == [whole]
+        assert page.refresh_pending == ()
+
+
+class TestEchoOrdering:
+    """The sync echo is the route this bot's own answers take into a conversation.
+
+    These pin the guarantee the outbound path relies on instead of writing its
+    own answers into the projection: an answer and any later user message reach
+    this bot on one server-ordered timeline, so a turn resolved after the user's
+    message already sees the answer that preceded it.
+    """
+
+    async def test_an_answer_reaches_the_conversation_through_its_echo(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A self-authored echo is projected like any other timeline event."""
+        echo = bot_event("$answer", "the answer")
+        await alice.admit(
+            _inbound_event(ROOM, echo, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, echo, EventKind.MESSAGE, self_sender=BOT),
+        )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.logical_event_id for message in page.messages] == ["$answer"]
+        assert page.messages[0].sender == BOT
+
+    async def test_a_later_user_turn_sees_the_answer_that_preceded_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Timeline order puts the echo before the message that follows it."""
+        for event in (
+            text_event("$ask", "question", ts=1_000),
+            bot_event("$answer", "the answer", ts=1_100),
+            text_event("$follow_up", "and then?", ts=1_200),
+        ):
+            await alice.admit(
+                _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+            )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.logical_event_id for message in page.messages] == [
+            "$ask",
+            "$answer",
+            "$follow_up",
+        ]
+
+    async def test_one_sync_carrying_both_still_orders_the_answer_first(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Batching an echo and the next message together changes nothing.
+
+        The ordering comes from the server timestamps the server assigned, not
+        from how many sync responses the events were split across.
+        """
+        batch = (
+            bot_event("$answer", "the answer", ts=2_100),
+            text_event("$follow_up", "and then?", ts=2_200),
+        )
+        await asyncio.gather(
+            *(
+                alice.admit(
+                    _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                    _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+                )
+                for event in batch
+            ),
+        )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.logical_event_id for message in page.messages] == ["$answer", "$follow_up"]
+
+    @pytest.mark.parametrize(
+        "provenance",
+        [nio.TimelineEventProvenance.LIVE, nio.TimelineEventProvenance.RECOVERED],
+    )
+    async def test_ingress_admits_this_bot_s_own_echo(
+        self,
+        alice: PrincipalStore,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        """Admission is decided by provenance, never by who sent the event.
+
+        The tests below reach the store directly, which would keep passing even
+        if ingress learned to discard self-authored events on the way in. This
+        one goes through `_admit` so that a sender filter added there fails
+        here, because the echo route depends on there not being one.
+        """
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=bot_event("$answer", "the answer").source,
+            self_sender=BOT,
+            provenance=provenance,
+        )
+        assert views is not None
+        await alice.admit(*views)
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert [message.logical_event_id for message in page.messages] == ["$answer"]
+        assert page.messages[0].sender == BOT
+        # Admitted as actionable like any other live event; the echo is dropped
+        # later, by ingress validation, not by refusing to record it.
+        assert [event.event_id for event in await alice.pending()] == ["$answer"]
+
+    async def test_a_recovered_answer_orders_with_the_live_message_after_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A gap-recovered echo still lands before the live message that follows."""
+        recovered = bot_event("$answer", "the answer", ts=3_100)
+        await alice.admit(
+            _inbound_event(ROOM, recovered, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, recovered, EventKind.MESSAGE, self_sender=BOT),
+        )
+        live = text_event("$follow_up", "and then?", ts=3_200)
+        await alice.admit(
+            _inbound_event(ROOM, live, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, live, EventKind.MESSAGE, self_sender=BOT),
+        )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.logical_event_id for message in page.messages] == ["$answer", "$follow_up"]
+
+
+class TestStreamingProgressIsTransport:
+    """A streamed answer is one message, however many edits it took to write.
+
+    A progress edit is how the answer travels, not something the conversation
+    gained: the room still holds one reply, whose body is whatever the stream
+    settled on. Reducing every progress echo would rewrite that row once per
+    edit and arrive where it was going anyway.
+
+    MindRoom sends in-progress updates as ``m.notice`` so Matrix suppresses
+    the push notification each edit would otherwise fire, and only the terminal
+    frame reverts to ``m.text``. A notice is not a kind journal admission owns,
+    so recognising this bot's own frames is what puts the placeholder in the
+    conversation for that terminal edit to land on. Most tests here use
+    ``m.text`` frames so the transport rule is exercised on its own; the last
+    two run the exact sequence production sends.
+    """
+
+    @staticmethod
+    async def _admit_live(store: PrincipalStore, *events: nio.Event) -> None:
+        for event in events:
+            views = ingestion_timeline_views(
+                room_id=ROOM,
+                source=event.source,
+                self_sender=BOT,
+                provenance=nio.TimelineEventProvenance.LIVE,
+            )
+            assert views is not None
+            await store.admit(*views)
+
+    @staticmethod
+    async def _one_visible(store: PrincipalStore) -> VisibleMessage:
+        page = await store.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert len(page.messages) == 1, f"expected one logical message, got {len(page.messages)}"
+        return page.messages[0]
+
+    @pytest.mark.parametrize("status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
+    async def test_this_bots_progress_edit_leaves_the_placeholder_on_screen(
+        self,
+        alice: PrincipalStore,
+        status: str,
+    ) -> None:
+        """A self-authored in-flight revision must not move the visible row."""
+        await self._admit_live(
+            alice,
+            placeholder_event(),
+            stream_event("$progress", "half an ans", status, replaces=PLACEHOLDER_ID, ts=1_100),
+        )
+
+        visible = await self._one_visible(alice)
+        assert visible.content["body"] == PLACEHOLDER_BODY
+        assert visible.revision_event_id == PLACEHOLDER_ID
+
+    async def test_a_thread_summary_reads_the_same_watched_as_hydrated(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """One conversation must not depend on how the bot came to see it.
+
+        Hydration accepts any `m.room.message`, notices included
+        (`conversation_hydration._projected_from_event`). Live admission used
+        to match `RoomMessageText` alone, so a thread summary -- sent as
+        `m.notice` -- was in a hydrated conversation and absent from a watched
+        one. The prompt then differed by nothing but whether the bot had
+        restarted, which is the divergence the projection exists to remove.
+        """
+        summary = nio.Event.parse_event(
+            {
+                "event_id": "$summary",
+                "sender": BOT,
+                "origin_server_ts": 1_000,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.notice",
+                    "body": "So far: they asked about X.",
+                    "io.mindroom.thread_summary": {"message_count": 12},
+                },
+            },
+        )
+        assert isinstance(summary, nio.Event)
+
+        await self._admit_live(alice, summary)
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert [message.logical_event_id for message in page.messages] == ["$summary"]
+        # Present in the conversation, and never a turn to answer.
+        assert await alice.pending() == ()
+
+    async def test_someone_elses_notice_is_not_treated_as_our_stream(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A stream status on someone else's notice buys them nothing.
+
+        Notices are admitted now -- the conversation contains them and
+        hydration always kept them -- but only ever as context. That is what
+        makes the status key safe to ignore: it is an ordinary content field
+        any member can set, so if it could promote a notice to work, decorating
+        one would be a way to make the bot answer something it should not.
+        """
+        foreign = nio.Event.parse_event(
+            {
+                "event_id": "$theirs",
+                "sender": ALICE,
+                "origin_server_ts": 1_000,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.notice",
+                    "body": "not mine",
+                    STREAM_STATUS_KEY: STREAM_STATUS_PENDING,
+                },
+            },
+        )
+        assert isinstance(foreign, nio.Event)
+
+        await self._admit_live(alice, foreign)
+
+        assert _event_kind(foreign) is EventKind.MESSAGE
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert [message.logical_event_id for message in page.messages] == ["$theirs"]
+        # Admitted, projected, and never work.
+        assert await alice.pending() == ()
+
+    async def test_the_production_stream_sequence_leaves_one_visible_answer(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The exact shapes production sends, in the order it sends them.
+
+        `m.notice` placeholder, `m.notice` progress, `m.text` terminal. The
+        whole point of the notice/text split is invisible to every other test
+        here, and it is what broke: with the placeholder unadmitted the
+        terminal edit had no original, parked in `unresolved_edits`, and the
+        conversation this projection exists to serve never saw the answer.
+        """
+        await self._admit_live(
+            alice,
+            placeholder_event(),
+            stream_event(
+                "$progress",
+                "half an ans",
+                STREAM_STATUS_STREAMING,
+                replaces=PLACEHOLDER_ID,
+                msgtype="m.notice",
+                ts=1_100,
+            ),
+            stream_event(
+                "$terminal",
+                "the whole answer",
+                STREAM_STATUS_COMPLETED,
+                replaces=PLACEHOLDER_ID,
+                msgtype="m.text",
+                ts=1_200,
+            ),
+        )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert len(page.messages) == 1, f"expected one logical message, got {len(page.messages)}"
+        visible = page.messages[0]
+        assert visible.logical_event_id == PLACEHOLDER_ID
+        assert visible.revision_event_id == "$terminal"
+        assert visible.content["body"] == "the whole answer"
+        assert page.refresh_pending == ()
+
+    async def test_a_skipped_progress_edit_is_still_an_admitted_event(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Skipping is a projection policy, not a refusal to accept the event.
+
+        Admission is what deduplicates a redelivered echo and what a restart
+        replays from. Dropping the event instead of only its projection would
+        make nio's redelivery of it look like something new.
+        """
+        await self._admit_live(
+            alice,
+            placeholder_event(),
+            stream_event(
+                "$progress",
+                "half an ans",
+                STREAM_STATUS_STREAMING,
+                replaces=PLACEHOLDER_ID,
+                msgtype="m.notice",
+                ts=1_100,
+            ),
+        )
+
+        # Admitted, and neither is work: a bot answering its own streaming
+        # frames is the loop the echo drop exists to prevent, refused here one
+        # layer earlier by admitting them as context.
+        assert await alice.pending() == ()
+        assert await alice.load_event(PLACEHOLDER_ID) is not None
+        assert await alice.load_event("$progress") is not None
+
+    async def test_the_placeholder_is_the_message_the_answer_lands_on(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The placeholder advertises ``pending`` too, and must still project.
+
+        It is an original, not a replacement. Skipping it would leave the
+        terminal edit with no logical message to revise, and the answer would
+        never become visible at all.
+        """
+        await self._admit_live(alice, placeholder_event())
+
+        visible = await self._one_visible(alice)
+        assert visible.logical_event_id == PLACEHOLDER_ID
+        assert visible.content["body"] == PLACEHOLDER_BODY
+        assert visible.content[STREAM_STATUS_KEY] == STREAM_STATUS_PENDING
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            STREAM_STATUS_COMPLETED,
+            STREAM_STATUS_CANCELLED,
+            STREAM_STATUS_ERROR,
+            STREAM_STATUS_INTERRUPTED,
+        ],
+    )
+    async def test_a_terminal_edit_installs_its_body_and_its_status(
+        self,
+        alice: PrincipalStore,
+        status: str,
+    ) -> None:
+        """Every way a stream ends is content, and the four are not the same.
+
+        ``completed`` is the answer; the other three are the answer being cut
+        short. Prompt preparation tells all four apart when it decides whether
+        to resume a partial reply, so a rule that kept only ``completed`` would
+        strand an interrupted answer on its placeholder.
+        """
+        await self._admit_live(
+            alice,
+            placeholder_event(),
+            stream_event("$progress", "half an ans", STREAM_STATUS_STREAMING, replaces=PLACEHOLDER_ID, ts=1_100),
+            stream_event("$terminal", "the whole answer", status, replaces=PLACEHOLDER_ID, ts=1_200),
+        )
+
+        visible = await self._one_visible(alice)
+        assert visible.content["body"] == "the whole answer"
+        assert visible.content[STREAM_STATUS_KEY] == status
+        assert visible.revision_event_id == "$terminal"
+
+    @pytest.mark.parametrize("status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
+    async def test_an_edit_claiming_a_transport_status_from_someone_else_reduces(
+        self,
+        alice: PrincipalStore,
+        status: str,
+    ) -> None:
+        """A stream status is a claim, not a permission.
+
+        Anyone can put this key in their own edit. Only this bot's own
+        revisions are transport, so a user's edit reduces whatever it says —
+        otherwise a correction could be suppressed by spelling it right.
+        """
+        await self._admit_live(
+            alice,
+            text_event("$ask", "frist question", ts=1_000),
+            stream_event("$fix", "first question", status, sender=ALICE, replaces="$ask", ts=1_100),
+        )
+
+        visible = await self._one_visible(alice)
+        assert visible.content["body"] == "first question"
+        assert visible.revision_event_id == "$fix"
+
+    async def test_a_crash_mid_stream_leaves_the_placeholder_until_cleanup_speaks(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The row a crash leaves behind is the placeholder, and that is correct.
+
+        No intermediate body was durable, so there is nothing to half-restore.
+        Startup stale-stream cleanup rewrites the visible message with a
+        terminal status, and that echo reduces like any other terminal edit —
+        which is what makes skipping progress safe rather than lossy.
+        """
+        progress = [
+            stream_event(
+                f"$progress{index}",
+                f"partial {index}",
+                STREAM_STATUS_STREAMING,
+                replaces=PLACEHOLDER_ID,
+                ts=1_100 + index,
+            )
+            for index in range(1, 6)
+        ]
+
+        await self._admit_live(alice, placeholder_event(), *progress)
+
+        crashed = await self._one_visible(alice)
+        assert crashed.content["body"] == PLACEHOLDER_BODY
+        assert crashed.revision_event_id == PLACEHOLDER_ID
+
+        await self._admit_live(
+            alice,
+            stream_event(
+                "$cleanup",
+                "partial 5 [interrupted]",
+                STREAM_STATUS_ERROR,
+                replaces=PLACEHOLDER_ID,
+                ts=1_200,
+            ),
+        )
+
+        repaired = await self._one_visible(alice)
+        assert repaired.content["body"] == "partial 5 [interrupted]"
+        assert repaired.content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+        assert repaired.revision_event_id == "$cleanup"
+
+    async def test_a_notice_typed_progress_edit_never_reaches_the_projection_policy(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A notice-typed progress echo reaches this rule and is refused by it.
+
+        This test used to assert the opposite, and the difference was a real
+        bug. MindRoom sends in-progress updates as ``m.notice`` so they raise
+        no push notification, and `RoomMessageNotice` is a sibling of
+        `RoomMessageText` in nio rather than a subclass -- so admission
+        silently owned neither the progress edits nor the placeholder they
+        replace. The terminal frame reverts to ``m.text``, arrived with no
+        original to reduce onto, and parked in `unresolved_edits`, which meant
+        the live projection was missing every streamed answer this bot gave.
+
+        Admission now owns this bot's own stream frames, and the projection
+        policy is what drops the intermediate ones -- which is where that
+        decision belonged all along, rather than resting on a
+        notification-semantics choice made on the delivery side.
+        """
+        await self._admit_live(
+            alice,
+            placeholder_event(),
+            stream_event(
+                "$notice",
+                "half an ans",
+                STREAM_STATUS_STREAMING,
+                replaces=PLACEHOLDER_ID,
+                msgtype="m.notice",
+                ts=1_100,
+            ),
+        )
+
+        assert await alice.pending() == ()
+        assert (await self._one_visible(alice)).revision_event_id == PLACEHOLDER_ID
+
+
+class TestReplayFidelity:
+    """A recovered event must be the same event that was admitted."""
+
+    async def test_a_message_replays_as_itself(self, alice: PrincipalStore) -> None:
+        """A message replays as itself."""
+        original = text_event("$m", "hello")
+        await alice.admit(
+            _inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, original, EventKind.MESSAGE, self_sender=BOT),
+        )
+
+        stored = (await alice.pending())[0]
+        replayed = parse_journal_event(stored)
+
+        assert isinstance(replayed, nio.RoomMessageText)
+        assert replayed.event_id == "$m"
+        assert replayed.body == "hello"
+
+    async def test_decryption_results_survive_replay(self, alice: PrincipalStore) -> None:
+        """Nio attaches these after parsing, so they are not in the source.
+
+        Losing them would replay a decrypted event as an untrusted one, which
+        changes what the authorization layer is allowed to do with it.
+        """
+        original = text_event("$m", "secret")
+        original.decrypted = True
+        original.verified = True
+        original.sender_key = "key"
+        original.session_id = "session"
+
+        await alice.admit(
+            _inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, original, EventKind.MESSAGE, self_sender=BOT),
+        )
+        replayed = parse_journal_event((await alice.pending())[0])
+
+        assert replayed.decrypted
+        assert replayed.verified
+        assert replayed.sender_key == "key"
+        assert replayed.session_id == "session"
+
+    async def test_an_image_replays_with_the_reference_the_model_needs(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A media turn is only replayable if its content reference survives.
+
+        The prompt for a media turn is not the event body; it is the file the
+        body points at. A replay that produced the caption without the MXC
+        reference would run the turn again against different input and call
+        that recovery.
+        """
+        original = image_event("$img", "diagram.png")
+        await alice.admit(
+            _inbound_event(ROOM, original, EventKind.MEDIA, EventClass.ACTIONABLE),
+            _projected_event(ROOM, original, EventKind.MEDIA, self_sender=BOT),
+        )
+
+        replayed = parse_journal_event((await alice.pending())[0])
+
+        assert isinstance(replayed, nio.RoomMessageImage)
+        assert replayed.url == "mxc://example.org/img"
+        assert replayed.body == "diagram.png"
+
+    async def test_an_encrypted_image_replays_with_its_decryption_keys(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Without the key material the reference is a file nobody can open."""
+        original = image_event("$sealed", "sealed.png", encrypted=True)
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=original.source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.RECOVERED,
+        )
+        assert views is not None
+        assert views[0].kind is EventKind.MEDIA
+        await alice.admit(*views)
+
+        replayed = parse_journal_event((await alice.pending())[0])
+
+        assert isinstance(replayed, nio.RoomEncryptedImage)
+        assert replayed.url == "mxc://example.org/sealed"
+        assert replayed.key["k"] == "cipher-key-material"
+        assert replayed.iv == "initialization-vector"
+        assert replayed.hashes["sha256"] == "content-hash"
+
+    async def test_a_coalesced_batch_of_text_and_media_replays_whole_and_in_order(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The unit that replays is the batch, not the last event of it.
+
+        Three images and a caption are one turn to the model. Recovering the
+        caption alone, or recovering the images in the wrong order, both change
+        the input the turn runs on.
+        """
+        sources = (
+            image_event("$one", "first.png", ts=1_000),
+            image_event("$two", "second.png", ts=1_001),
+            image_event("$three", "third.png", ts=1_002),
+            text_event("$caption", "what do these three have in common?", ts=1_003),
+        )
+        for source in sources:
+            kind = EventKind.MESSAGE if isinstance(source, nio.RoomMessageText) else EventKind.MEDIA
+            await alice.admit(
+                _inbound_event(ROOM, source, kind, EventClass.ACTIONABLE),
+                _projected_event(ROOM, source, kind, self_sender=BOT),
+            )
+
+        replayed = [parse_journal_event(stored) for stored in await alice.pending()]
+
+        assert [event.event_id for event in replayed] == ["$one", "$two", "$three", "$caption"]
+        assert [
+            event.url  # type: ignore[attr-defined]
+            for event in replayed
+            if isinstance(event, nio.RoomMessageImage)
+        ] == [
+            "mxc://example.org/one",
+            "mxc://example.org/two",
+            "mxc://example.org/three",
+        ]
+
+    async def test_a_corrupt_payload_is_refused_not_guessed(self, alice: PrincipalStore) -> None:
+        """A corrupt payload is refused not guessed."""
+        original = text_event("$m")
+        await alice.admit(
+            _inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            None,
+        )
+        stored = (await alice.pending())[0]
+        corrupted = replace(stored, source={**stored.source, "event_id": "$different"})
+
+        with pytest.raises(JournalCorruptionError):
+            parse_journal_event(corrupted)
+
+
+class TestPendingEventWorker:
+    """Execution order, failure isolation, and crash behavior."""
+
+    @staticmethod
+    async def _admit(store: PrincipalStore, event: nio.Event, room_id: str = ROOM) -> None:
+        await store.admit(
+            _inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
+        )
+
+    @staticmethod
+    async def _admit_reaction(store: PrincipalStore, event: nio.Event) -> None:
+        await store.admit(_inbound_event(ROOM, event, EventKind.REACTION, EventClass.ACTIONABLE))
+
+    @pytest.mark.parametrize("error_type", [None, asyncio.CancelledError, RuntimeError])
+    async def test_reserved_response_wakes_idle_lane_with_fresh_lifecycle(
+        self,
+        alice: PrincipalStore,
+        error_type: type[BaseException] | None,
+    ) -> None:
+        """A resumed response queues behind its waking turn without reusing its reservation."""
+        coordinator = ResponseLifecycleCoordinator()
+        envelope = request_envelope(
+            room_id=ROOM,
+            thread_id="$thread",
+            reply_to_event_id="$selection",
+            agent_name="general",
+        )
+        attempted = asyncio.Event()
+        resumed: list[asyncio.Task[str]] = []
+        order: list[str] = []
+
+        async def deliver(_target: object) -> str:
+            order.append("resume")
+            return "approved response"
+
+        async def resume() -> str:
+            attempted.set()
+            return await coordinator.run_locked_response(
+                target=envelope.target,
+                response_envelope=replace(envelope, source_event_id="$approval"),
+                pipeline_timing=None,
+                locked_operation=deliver,
+            )
+
+        async def handle(event: JournalEvent) -> bool:
+            if event.event_id == "$seed":
+                return True
+            assert event.event_id == "$source"
+            response = asyncio.create_task(resume())
+            resumed.append(response)
+            await response
+            return True
+
+        await self._admit(alice, text_event("$seed"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        reservation = await coordinator.reserve_response_lifecycle(envelope)
+
+        async def publish(_target: object) -> None:
+            order.append("selection")
+            await self._admit(alice, text_event("$source"))
+            assert not worker._lanes
+            worker.wake(room_id=ROOM)
+            await asyncio.wait_for(attempted.wait(), timeout=1.0)
+            assert not resumed[0].done(), resumed[0].exception()
+            assert order == ["selection"]
+            order.append("selection finished")
+            if error_type is not None:
+                msg = "selection failed"
+                raise error_type(msg)
+
+        try:
+            await _eventually_async(alice.pending)
+            await _eventually(lambda: not worker._lanes)
+            with (
+                response_lifecycle_reservation_context(reservation),
+                contextlib.nullcontext() if error_type is None else pytest.raises(error_type, match="selection failed"),
+            ):
+                await coordinator.run_locked_response(
+                    target=envelope.target,
+                    response_envelope=envelope,
+                    pipeline_timing=None,
+                    locked_operation=publish,
+                )
+            assert await asyncio.wait_for(resumed[0], timeout=1.0) == "approved response"
+            await _eventually_async(alice.pending)
+            assert len(resumed) == 1
+            assert order == ["selection", "selection finished", "resume"]
+            assert not coordinator.has_active_response_for_target(envelope.target)
+        finally:
+            await worker.stop()
+            await reservation.release()
+
+    async def test_a_rooms_events_run_in_receipt_order(self, alice: PrincipalStore) -> None:
+        """A rooms events run in receipt order."""
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        await self._admit(alice, text_event("$second", ts=9_000))
+        await self._admit(alice, text_event("$first", ts=1_000))
+
+        await PendingEventWorker(store=alice, handle=handle).drain_once()
+
+        assert handled == ["$second", "$first"]
+
+    async def test_a_settled_event_never_runs_again(self, alice: PrincipalStore) -> None:
+        """A settled event never runs again."""
+        runs = 0
+
+        async def handle(event: JournalEvent) -> bool:
+            nonlocal runs
+            runs += 1
+            del event
+            return True
+
+        await self._admit(alice, text_event("$m"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+
+        await worker.drain_once()
+        await worker.drain_once()
+
+        assert runs == 1
+
+    async def test_a_failed_event_stays_pending(self, alice: PrincipalStore) -> None:
+        """A failed event stays pending."""
+
+        async def handle(event: JournalEvent) -> bool:
+            del event
+            msg = "model unavailable"
+            raise RuntimeError(msg)
+
+        await self._admit(alice, text_event("$m"))
+
+        await PendingEventWorker(store=alice, handle=handle).drain_once()
+
+        assert [event.event_id for event in await alice.pending()] == ["$m"]
+
+    async def test_a_failure_stops_that_rooms_later_events(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Otherwise the room is answered out of order, and the retry lands last."""
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            if event.event_id == "$first":
+                msg = "model unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await self._admit(alice, text_event("$first", ts=1_000))
+        await self._admit(alice, text_event("$second", ts=2_000))
+
+        await PendingEventWorker(store=alice, handle=handle).drain_once()
+
+        assert handled == ["$first"]
+        assert {event.event_id for event in await alice.pending()} == {"$first", "$second"}
+
+    async def test_owner_completion_within_one_page_rewinds_before_later_callback(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """An earlier owner returns its source while the page checks its next source."""
+        owner_live = True
+        handled: list[str] = []
+
+        class OwnerLostDuringRead(_FlakyReplayView):
+            async def is_pending(self, event_id: str) -> bool:
+                nonlocal owner_live
+                if event_id == "$later" and owner_live:
+                    owner_live = False
+                    worker.release(("$earlier",))
+                    worker.wake(room_id=ROOM)
+                return await super().is_pending(event_id)
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return event.event_id != "$earlier" or not owner_live
+
+        for event_id in ("$earlier", "$later"):
+            await self._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(
+            store=OwnerLostDuringRead(alice),
+            handle=handle,
+            deferral_is_live=lambda _event: owner_live,
+        )
+        try:
+            await asyncio.wait_for(worker.drain_once(), timeout=5)
+            assert handled == ["$earlier"]
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            worker.start()
+            retry_sleeps[0][1].set()
+            await _eventually_async(alice.pending)
+            assert handled == ["$earlier", "$earlier", "$later"]
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("boundary", ["handler", "pending_check"])
+    async def test_shutdown_stops_admission_after_cancellation_is_absorbed(
+        self,
+        alice: PrincipalStore,
+        boundary: str,
+    ) -> None:
+        """Cleanup may finish, but no later callback may enter a stopped worker."""
+        entered = asyncio.Event()
+        handled: list[str] = []
+        stopping = True
+
+        async def finish_on_cancel() -> None:
+            entered.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
+
+        class FinishingRead(_FlakyReplayView):
+            async def is_pending(self, event_id: str) -> bool:
+                if stopping and boundary == "pending_check" and event_id == "$head":
+                    await finish_on_cancel()
+                return await super().is_pending(event_id)
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            if stopping and boundary == "handler" and event.event_id == "$head":
+                await finish_on_cancel()
+            return True
+
+        for event_id in ("$head", "$tail"):
+            await self._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=FinishingRead(alice), handle=handle)
+        worker.start()
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            await asyncio.wait_for(worker.stop(), timeout=5)
+            assert handled == (["$head"] if boundary == "handler" else [])
+            assert await alice.unsettled_event_ids() == (
+                frozenset({"$tail"}) if boundary == "handler" else frozenset({"$head", "$tail"})
+            )
+            stopping = False
+            worker.start()
+            await _eventually_async(alice.pending)
+            assert handled == ["$head", "$tail"]
+        finally:
+            await worker.stop()
+
+    async def test_a_recovery_drain_runs_a_room_through_its_lane_not_beside_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A room has one lane, and a drain has to take it rather than add one.
+
+        Recovery is not a phase that finishes before the pump starts:
+        `JournalDispatcher.drain_once` is scheduled every time a bot reports
+        ready, so it runs against a live pump. A drain that dispatched beside
+        the room's lane would break both halves of what a lane guarantees --
+        one event would be inside two handlers at once, and event three would
+        overtake event two.
+
+        The handler claims a semantic consumer the way a reaction's does, so
+        the second handler is not merely wasteful: its claim raises against
+        the row the first one already settled, and the room owner logs that and
+        stops the room mid-pass. The claim is right to raise. Nothing settles
+        an event while its own handler is running, so a settled row there
+        means the event was already being run somewhere else.
+        """
+        handled: list[str] = []
+        concurrent = 0
+        peak_concurrent = 0
+        inside_first = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def handle(event: JournalEvent) -> bool:
+            nonlocal concurrent, peak_concurrent
+            handled.append(event.event_id)
+            concurrent += 1
+            peak_concurrent = max(peak_concurrent, concurrent)
+            try:
+                if event.event_id == "$first":
+                    # Held open so a drain has a window to start while the
+                    # pump's lane is demonstrably inside this event.
+                    inside_first.set()
+                    await release_first.wait()
+                await alice.claim_semantic_consumer(event.event_id, SemanticConsumer.REACTION_HOOKS)
+            finally:
+                concurrent -= 1
+            return True
+
+        for event_id in ("$first", "$second", "$third"):
+            await self._admit_reaction(alice, reaction_event(event_id))
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        await asyncio.wait_for(inside_first.wait(), timeout=5)
+
+        draining = asyncio.create_task(worker.drain_once())
+        # Enough turns of the loop for a drain to scan the store and dispatch.
+        for _ in range(50):
+            await asyncio.sleep(0)
+        release_first.set()
+
+        await asyncio.wait_for(draining, timeout=5)
+        await worker.stop()
+
+        assert handled == ["$first", "$second", "$third"]
+        assert peak_concurrent == 1
+        assert await alice.unsettled_event_ids() == frozenset()
+
+    async def test_stop_prevents_a_waiting_recovery_drain_from_starting_a_late_lane(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A drain already waiting on a lane cannot outlive worker shutdown."""
+        existing_lane_started = asyncio.Event()
+        existing_lane_cancelled = asyncio.Event()
+        finish_cancellation = asyncio.Event()
+        late_lane_started = asyncio.Event()
+
+        async def handle(event: JournalEvent) -> bool:
+            del event
+            late_lane_started.set()
+            await asyncio.Event().wait()
+            return True
+
+        async def existing_lane() -> None:
+            existing_lane_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                existing_lane_cancelled.set()
+                await finish_cancellation.wait()
+                raise
+
+        await self._admit(alice, text_event("$message"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        lane = asyncio.create_task(existing_lane())
+        worker._lanes[ROOM] = lane
+        await existing_lane_started.wait()
+
+        draining = asyncio.create_task(worker.drain_once())
+        await asyncio.sleep(0)
+        stopping = asyncio.create_task(worker.stop())
+        try:
+            await existing_lane_cancelled.wait()
+            finish_cancellation.set()
+
+            await stopping
+            await asyncio.wait_for(draining, timeout=1.0)
+            await asyncio.sleep(0)
+
+            assert not late_lane_started.is_set()
+            assert worker._lanes == {}
+        finally:
+            finish_cancellation.set()
+            draining.cancel()
+            for tracked_lane in worker._lanes.values():
+                tracked_lane.cancel()
+            await asyncio.gather(stopping, draining, *worker._lanes.values(), return_exceptions=True)
+
+    async def test_a_pre_stop_recovery_drain_cannot_dispatch_after_restart(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Restarting does not make an old drain current again."""
+        first_read_started = asyncio.Event()
+        release_first_read = asyncio.Event()
+        handled = asyncio.Event()
+
+        @dataclass
+        class BlockingFirstRead:
+            inner: PrincipalStore
+            pending_calls: int = 0
+
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                self.pending_calls += 1
+                if self.pending_calls == 1:
+                    page = await self.inner.pending(
+                        limit=limit,
+                        after_receipt_order=after_receipt_order,
+                        runtime_generation=runtime_generation,
+                    )
+                    first_read_started.set()
+                    await release_first_read.wait()
+                    return page
+                return PendingPage((), resume_after=None, reached_end=True, unreadable_rows=0)
+
+            async def is_pending(self, event_id: str) -> bool:
+                return await self.inner.is_pending(event_id)
+
+            async def settle(self, event_id: str) -> None:
+                await self.inner.settle(event_id)
+
+        async def handle(event: JournalEvent) -> bool:
+            del event
+            handled.set()
+            return True
+
+        await self._admit(alice, text_event("$message"))
+        worker = PendingEventWorker(store=BlockingFirstRead(alice), handle=handle)
+        stale_drain = asyncio.create_task(worker.drain_once())
+        await first_read_started.wait()
+
+        await worker.stop()
+        worker.start()
+        try:
+            release_first_read.set()
+            await asyncio.wait_for(stale_drain, timeout=1.0)
+            await asyncio.sleep(0)
+
+            assert not handled.is_set()
+        finally:
+            release_first_read.set()
+            await worker.stop()
+            stale_drain.cancel()
+            await asyncio.gather(stale_drain, return_exceptions=True)
+
+    async def test_one_stalled_room_does_not_block_another(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """One stalled room does not block another."""
+        other_room = "!other:example.org"
+        released = asyncio.Event()
+        fast_finished = asyncio.Event()
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            if event.room_id == ROOM:
+                await released.wait()
+            handled.append(event.event_id)
+            if event.room_id == other_room:
+                fast_finished.set()
+            return True
+
+        await self._admit(alice, text_event("$slow"))
+        await self._admit(alice, text_event("$fast"), room_id=other_room)
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        draining = asyncio.create_task(worker.drain_once())
+
+        # The other room finishes while this one is still blocked, which is
+        # only possible if the lanes are genuinely independent.
+        await asyncio.wait_for(fast_finished.wait(), timeout=5)
+        assert handled == ["$fast"]
+
+        released.set()
+        await draining
+        assert handled == ["$fast", "$slow"]
+
+    async def test_cancellation_leaves_the_event_pending(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A crash mid-turn must make the event eligible again, not stranded."""
+        started = asyncio.Event()
+
+        async def handle(event: JournalEvent) -> bool:
+            del event
+            started.set()
+            await asyncio.sleep(3600)
+            return True
+
+        await self._admit(alice, text_event("$m"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        await worker.stop()
+
+        assert [event.event_id for event in await alice.pending()] == ["$m"]
+
+    async def test_a_restart_resumes_what_the_previous_process_left(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A restart resumes what the previous process left."""
+        handled: list[str] = []
+
+        async def never(event: JournalEvent) -> bool:
+            del event
+            await asyncio.sleep(3600)
+            return True
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        await self._admit(alice, text_event("$m"))
+        crashed = PendingEventWorker(store=alice, handle=never)
+        crashed.start()
+        await asyncio.sleep(0.05)
+        await crashed.stop()
+
+        restarted = PendingEventWorker(store=alice, handle=handle)
+        await restarted.drain_once()
+
+        assert handled == ["$m"]
+
+    async def test_a_backlog_larger_than_one_batch_is_fully_drained(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A bound that drops the remainder abandons durable work silently.
+
+        Driven through the pump rather than a drain, because only the pump has
+        to arrange its own next look: nothing admits a further event afterwards
+        to wake it, so a scan that stops at one page strands the rest forever.
+        """
+        count = _BATCH_SIZE + 1
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        for index in range(count):
+            await self._admit(alice, text_event(f"$m{index:04d}", ts=1_000 + index))
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        await _eventually_async(lambda: alice.pending())
+        await worker.stop()
+
+        assert len(handled) == count
+
+    async def test_work_admitted_while_a_lane_runs_is_still_dispatched(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The lost wakeup that leaves a live room permanently unanswered.
+
+        The pump is woken while the room's lane is busy, so it cannot start a
+        second one. Unless the finishing lane arranges another look, the event
+        admitted during that window stays pending forever even though the
+        process is healthy and still syncing.
+        """
+        released = asyncio.Event()
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            if event.event_id == "$slow":
+                await released.wait()
+            handled.append(event.event_id)
+            return True
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        await self._admit(alice, text_event("$slow", ts=1_000))
+        worker.start()
+        await _eventually(lambda: worker._lanes != {})
+
+        await self._admit(alice, text_event("$late", ts=2_000))
+        worker.wake()
+        # Waited on rather than yielded to: the point of the test is that the
+        # busy room was noted as still owing work *before* its lane finished,
+        # because that note is the only thing that arranges the second look. A
+        # bare yield cannot fail -- a second lane over one room is impossible
+        # either way -- so it proved the wakeup without exercising it.
+        await _eventually(lambda: worker._ready_rooms == {ROOM})
+        released.set()
+
+        await _eventually(lambda: handled == ["$slow", "$late"])
+        await worker.stop()
+
+    async def test_a_deferred_turn_does_not_hide_the_events_behind_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A turn still running stays pending, so a scan must look past it.
+
+        A full page of in-flight turns is exactly what a busy bot looks like.
+        If the scan stops at the first one it cannot act on, every event queued
+        behind them is invisible until those turns happen to finish.
+        """
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return not event.event_id.startswith("$busy")
+
+        for index in range(_BATCH_SIZE):
+            await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index), room_id=f"!r{index}:x")
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        # The deferrals, not the handler calls: a handler has appended before
+        # the lane that called it has recorded the deferral, so clearing on the
+        # call count can clear part way through the pass and let a straggler
+        # land in the list the assertion below has to match exactly.
+        await _eventually(lambda: len(worker._deferred) == _BATCH_SIZE)
+        handled.clear()
+
+        await self._admit(alice, text_event("$behind", ts=9_000), room_id="!behind:x")
+        worker.wake()
+
+        await _eventually(lambda: handled == ["$behind"])
+        await worker.stop()
+
+    async def test_a_failed_lane_is_retried_without_another_admission(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Nothing else wakes the pump, so the failure has to schedule its own retry."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if len(attempts) == 1:
+                msg = "model unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await self._admit(alice, text_event("$m"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker._retry_delay_seconds = 0.01
+        worker.start()
+
+        await _eventually(lambda: len(attempts) >= 2, seconds=10)
+        await worker.stop()
+
+        assert attempts == ["$m", "$m"]
+
+    async def test_a_deferral_survives_a_worker_that_cannot_probe_its_owner(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A worker with no probe has to believe the handoff, as it always did.
+
+        Pins the default so the opposite one cannot be introduced by accident:
+        assuming every owner is gone would re-dispatch every in-flight turn on
+        every scan, which answers live conversations twice.
+        """
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> None:
+            attempts.append(event.event_id)
+
+        await self._admit(alice, text_event("$m"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+
+        await worker.drain_once()
+        await worker.drain_once()
+
+        assert attempts == ["$m"]
+        assert [event.event_id for event in await alice.pending()] == ["$m"]
+
+    async def test_a_deferral_whose_owner_is_alive_is_never_taken_back(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The turn is still running, so re-dispatching would answer twice."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> None:
+            attempts.append(event.event_id)
+
+        await self._admit(alice, text_event("$m"))
+        worker = PendingEventWorker(
+            store=alice,
+            handle=handle,
+            deferral_is_live=lambda _event: True,
+        )
+
+        await worker.drain_once()
+        await worker.drain_once()
+        await worker.drain_once()
+
+        assert attempts == ["$m"]
+
+    async def test_a_deferral_whose_owner_died_is_dispatched_again(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """The hole this closes: durable work owed to an owner that is gone.
+
+        Deferral is a promise to call ``release``. An owner that dies without
+        keeping it leaves the event pending forever while the process looks
+        healthy, because no admission and no retry ever reconsiders it.
+        """
+        attempts: list[str] = []
+        owner_alive = True
+
+        async def handle(event: JournalEvent) -> None:
+            attempts.append(event.event_id)
+
+        await self._admit(alice, text_event("$m"))
+        worker = PendingEventWorker(
+            store=alice,
+            handle=handle,
+            deferral_is_live=lambda _event: owner_alive,
+        )
+
+        await worker.drain_once()
+        await worker.drain_once()
+        assert attempts == ["$m"], "a live owner must keep its event"
+
+        owner_alive = False
+        await worker.drain_once()
+        worker.start()
+        try:
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: attempts == ["$m", "$m"])
+        finally:
+            await worker.stop()
+
+    async def test_a_reclaimed_deferral_does_not_jump_ahead_of_an_earlier_event(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Reclaiming a later deferral still starts with the room's earliest work."""
+        handled: list[str] = []
+        owner_alive = True
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        await self._admit(alice, text_event("$early", ts=1_000))
+        await self._admit(alice, text_event("$late", ts=2_000))
+        worker = PendingEventWorker(
+            store=alice,
+            handle=handle,
+            deferral_is_live=lambda _event: owner_alive,
+        )
+
+        # A lost owner requests replay; the room query determines its order.
+        late = await alice.load_event("$late")
+        assert late is not None
+        worker._defer(late)
+
+        owner_alive = False
+        await worker.drain_once()
+
+        assert handled == ["$early", "$late"]
+
+    async def test_a_wrapped_discovery_keeps_room_callbacks_in_receipt_order(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Discovery can start at the tail without handing that tail to the lane."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 3)
+        for index in range(8):
+            await self._admit(alice, text_event(f"$m{index}", ts=1_000 + index))
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker._scan_cursor = (await alice.pending(limit=6))[-1].receipt_order
+        worker.start()
+        try:
+            await _eventually_async(alice.pending)
+            assert handled == ["$m0", "$m1", "$m2", "$m3", "$m4", "$m5", "$m6", "$m7"]
+        finally:
+            await worker.stop()
+
+    async def test_a_lost_owner_is_noticed_without_any_further_admission(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Nothing wakes the pump when an owner dies, so it has to look again.
+
+        Driven through the pump rather than a drain: a drain is an explicit
+        "look now", and the failure being closed is precisely that a quiet room
+        never gets one.
+        """
+        attempts: list[str] = []
+        owner_alive = True
+
+        async def handle(event: JournalEvent) -> None:
+            attempts.append(event.event_id)
+
+        await self._admit(alice, text_event("$m"))
+        worker = PendingEventWorker(
+            store=alice,
+            handle=handle,
+            deferral_is_live=lambda _event: owner_alive,
+            deferral_scan_seconds=0.01,
+        )
+        worker.start()
+        await _eventually(lambda: attempts == ["$m"])
+
+        # Several scan periods pass with the owner alive and nothing is retaken.
+        await asyncio.sleep(0.1)
+        assert attempts == ["$m"]
+
+        owner_alive = False
+
+        await _eventually(lambda: attempts == ["$m", "$m"], seconds=10)
+        await worker.stop()
+
+
+@pytest.fixture
+def retry_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[tuple[float, asyncio.Event]]:
+    """Hold only worker retry timers, leaving real journal I/O and loop scheduling intact."""
+    sleeping: list[tuple[float, asyncio.Event]] = []
+    original_sleep = asyncio.sleep
+
+    async def sleep(delay: float) -> None:
+        task = asyncio.current_task()
+        if task is not None and "retry" in task.get_name():
+            release = asyncio.Event()
+            sleeping.append((delay, release))
+            await release.wait()
+        else:
+            await original_sleep(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    return sleeping
+
+
+async def _dispatch_worker_pass(worker: PendingEventWorker) -> None:
+    """Finish one real scan and its room lanes without running the background pump."""
+    await worker._dispatch_ready_rooms()
+    await asyncio.gather(*worker._lanes.values())
+    await asyncio.sleep(0)
+
+
+class TestRoomRetryBackoff:
+    """Only a room's own successful work resets its bounded retry delay."""
+
+    async def test_worker_restart_retains_a_live_downstream_handoff(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Restarting discovery does not duplicate a response or lose its release bookkeeping."""
+        owner_live = True
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            return not owner_live
+
+        await TestPendingEventWorker._admit(alice, text_event("$source"))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: owner_live)
+        worker.start()
+        try:
+            await _eventually(lambda: "$source" in worker._deferred and not worker._lanes)
+            await worker.stop()
+            worker.start()
+            await worker.drain_once()
+            assert attempts == ["$source"]
+            owner_live = False
+            worker.release(("$source",))
+            worker.wake(room_id=ROOM)
+            await _eventually_async(alice.pending)
+            assert attempts == ["$source", "$source"]
+        finally:
+            await worker.stop()
+
+    async def test_terminal_release_cleans_up_an_idle_rooms_ownership(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A terminal-only release needs no later admission to discard room history."""
+        await TestPendingEventWorker._admit(alice, text_event("$source"))
+
+        async def handle(_event: JournalEvent) -> bool:
+            return False
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        try:
+            await _eventually(lambda: "$source" in worker._deferred and not worker._lanes)
+            await alice.settle("$source")
+            worker.release(("$source",))
+            await _eventually(lambda: ROOM not in worker._rooms)
+            assert not worker._deferred
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("lose_after_first_sweep", [False, True])
+    async def test_fallback_sweep_reaches_owners_beyond_one_probe_batch(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        lose_after_first_sweep: bool,
+    ) -> None:
+        """A quiet backlog is swept in yielding batches without waiting extra periods."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
+        attempts: list[str] = []
+        lost: set[str] = set()
+        sources = [f"$source-{index}" for index in range(5)]
+        block_discovery = False
+        discovery_blocked = asyncio.Event()
+        release_discovery = asyncio.Event()
+        last_owner_probed = asyncio.Event()
+
+        class SlowDiscovery(_FlakyReplayView):
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                room_id: str | None = None,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                if room_id is None and block_discovery:
+                    discovery_blocked.set()
+                    await release_discovery.wait()
+                return await super().pending(
+                    limit=limit,
+                    room_id=room_id,
+                    after_receipt_order=after_receipt_order,
+                    runtime_generation=runtime_generation,
+                )
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            return event.event_id in lost
+
+        def owner_is_live(event: JournalEvent) -> bool:
+            if discovery_blocked.is_set() and event.event_id == sources[-1]:
+                last_owner_probed.set()
+            return event.event_id not in lost
+
+        for event_id in sources:
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(
+            store=SlowDiscovery(alice),
+            handle=handle,
+            deferral_is_live=owner_is_live,
+            deferral_scan_seconds=0.01,
+        )
+        worker.start()
+        try:
+            await _eventually(lambda: len(worker._deferred) == len(sources))
+            block_discovery = True
+            worker.wake()
+            await asyncio.wait_for(discovery_blocked.wait(), timeout=5)
+            if lose_after_first_sweep:
+                await asyncio.wait_for(last_owner_probed.wait(), timeout=5)
+            lost.add(sources[-1])
+            await _eventually(lambda: attempts.count(sources[-1]) == 2, seconds=5)
+            assert attempts == [*sources, sources[-1]]
+        finally:
+            release_discovery.set()
+            await worker.stop()
+
+    async def test_owner_failure_after_lane_completion_keeps_exponential_cooldown(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A detached response owns retry history after its admission lane exits."""
+        attempts: list[str] = []
+        owner_live = False
+
+        async def handle(event: JournalEvent) -> bool:
+            nonlocal owner_live
+            attempts.append(event.event_id)
+            owner_live = True
+            return False
+
+        await TestPendingEventWorker._admit(alice, text_event("$source"))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: owner_live)
+        worker.start()
+        try:
+            for index, delay in enumerate((1, 2, 4)):
+                await _eventually(lambda index=index: len(attempts) == index + 1 and not worker._lanes)
+                owner_live = False
+                worker.release(("$source",))
+                worker.wake(room_id=ROOM)
+                await _eventually(lambda index=index: len(retry_sleeps) > index or len(attempts) > index + 1)
+                assert len(attempts) == index + 1
+                assert retry_sleeps[index][0] == delay
+                retry_sleeps[index][1].set()
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("count", [128, 256])
+    async def test_bulk_handoffs_require_only_linear_owner_probes(
+        self,
+        alice: PrincipalStore,
+        count: int,
+    ) -> None:
+        """Each admission must not rescan all previously handed-off sources."""
+        probes = 0
+        handled: list[str] = []
+
+        def owner_is_live(_event: JournalEvent) -> bool:
+            nonlocal probes
+            probes += 1
+            return True
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return False
+
+        sources = [f"$source-{index}" for index in range(count)]
+        for event_id in sources:
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=owner_is_live)
+        try:
+            await worker.drain_once()
+            assert handled == sources
+            assert probes <= count * 2
+        finally:
+            await worker.stop()
+
+    async def test_alternating_failed_owners_cannot_keep_a_drain_running(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A lifecycle lock handoff may lose the previous source's owner each time."""
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        attempts: list[str] = []
+        live: set[str] = set()
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if live:
+                worker.release(tuple(live))
+                worker.wake(room_id=event.room_id)
+            live.clear()
+            live.add(event.event_id)
+            return False
+
+        for event_id in ("$first", "$second"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda event: event.event_id in live)
+        try:
+            await asyncio.wait_for(worker.drain_once(), timeout=1)
+            assert attempts == ["$first", "$second"]
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            assert retry_sleeps[0][0] == 1
+            assert await alice.unsettled_event_ids() == frozenset({"$first", "$second"})
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("max_pages", [1, 16])
+    @pytest.mark.parametrize("wake_on_return", [False, True])
+    async def test_ownerless_handoffs_pause_the_room_without_trapping_a_drain(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        max_pages: int,
+        *,
+        wake_on_return: bool,
+    ) -> None:
+        """A promptly failed downstream owner cannot spin or let later work pass."""
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", max_pages)
+        attempts: list[str] = []
+        failing = True
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id != "$earlier" or not failing:
+                return True
+            if wake_on_return:
+                worker.release((event.event_id,))
+                worker.wake(room_id=event.room_id)
+            return False
+
+        for event_id in ("$earlier", "$later"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        await TestPendingEventWorker._admit(alice, text_event("$healthy"), "!healthy:example.org")
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: False)
+        try:
+            await asyncio.wait_for(worker.drain_once(), timeout=1)
+            assert sorted(attempts) == ["$earlier", "$healthy"]
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            assert retry_sleeps[0][0] == 1
+            worker.start()
+            worker.wake(room_id=ROOM)
+            await worker.drain_once()
+            assert attempts.count("$earlier") == 1
+
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: len(retry_sleeps) == 2)
+            assert attempts.count("$earlier") == 2
+            assert "$later" not in attempts
+            assert retry_sleeps[1][0] == 2
+
+            failing = False
+            retry_sleeps[1][1].set()
+            await _eventually_async(alice.pending)
+            assert attempts.count("$earlier") == 3
+            assert attempts[-1] == "$later"
+        finally:
+            await worker.stop()
+
+    async def test_busy_room_keeps_work_skipped_by_discovery_in_order(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A busy lane cannot lose its earlier messages as discovery moves on."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$first":
+                entered.set()
+                await release.wait()
+            return True
+
+        for event_id in ("$first", "$second", "$third", "$fourth"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await worker._dispatch_ready_rooms()
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            await worker._dispatch_ready_rooms()
+            await worker._dispatch_ready_rooms()
+            release.set()
+            await asyncio.gather(*worker._lanes.values())
+            await asyncio.sleep(0)
+            await _dispatch_worker_pass(worker)
+            assert attempts[:2] == ["$first", "$second"]
+            for _ in range(4):
+                await _dispatch_worker_pass(worker)
+            assert attempts == ["$first", "$second", "$third", "$fourth"]
+        finally:
+            release.set()
+            await worker.stop()
+
+    async def test_ready_retry_runs_while_new_admissions_keep_discovery_advancing(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recovery must not depend on reaching the end of a growing global scan."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if attempts == ["$head"]:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$head"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await worker._room_retries[ROOM].task
+            for index in range(8):
+                await TestPendingEventWorker._admit(alice, text_event(f"$later-{index}"))
+                await _dispatch_worker_pass(worker)
+            assert attempts[:2] == ["$head", "$head"]
+            assert not await alice.is_pending("$head")
+        finally:
+            await worker.stop()
+
+    async def test_wrapped_retry_wakes_the_skipped_tail(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recovering the head must wake work skipped before the scan wrapped."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 4)
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$head" and attempts.count("$head") == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        for event_id, room_id in (
+            ("$head", ROOM),
+            ("$filler1", "!healthy1:example.org"),
+            ("$filler2", "!healthy2:example.org"),
+            ("$filler3", "!healthy3:example.org"),
+            ("$tail", ROOM),
+        ):
+            await TestPendingEventWorker._admit(alice, text_event(event_id), room_id)
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await worker._room_retries[ROOM].task
+            worker.start()
+            await _eventually_async(alice.pending)
+            assert [event_id for event_id in attempts if event_id in {"$head", "$tail"}] == ["$head", "$head", "$tail"]
+        finally:
+            await worker.stop()
+
+    async def test_room_read_respects_approval_handoff_after_discovery(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A source transferred to an approval must not fence later room work."""
+        for event_id in ("$source-1", "$source-2", "$later"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        approval_created = False
+
+        class ApprovalDuringScan(_FlakyReplayView):
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                room_id: str | None = None,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                nonlocal approval_created
+                page = await super().pending(
+                    limit=limit,
+                    room_id=room_id,
+                    after_receipt_order=after_receipt_order,
+                    runtime_generation=runtime_generation,
+                )
+                if not approval_created:
+                    approval_created = True
+                    await alice.create_approval_continuation(_ApprovalContinuations.continuation(state="waiting"))
+                return page
+
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        worker = PendingEventWorker(
+            store=ApprovalDuringScan(alice),
+            handle=handle,
+        )
+        try:
+            worker.start()
+            await _eventually_async(alice.pending)
+            assert handled == ["$later"]
+            assert await alice.is_pending("$source-1")
+            assert await alice.is_pending("$source-2")
+        finally:
+            await worker.stop()
+
+    async def test_room_approval_wake_invalidates_a_pending_tail_read(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A retry handoff invalidates room admission before any further awaited lookup."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        generation = "runtime-a"
+        store = _ApprovalWakeReplayView(alice)
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id != "$source-1":
+                return True
+            if attempts.count("$source-1") == 1:
+                created = await alice.create_approval_continuation(
+                    replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation=generation),
+                )
+                assert created is not None
+                await _ApprovalContinuations.remember_card(alice)
+            else:
+                claimed = await alice.claim_approval_continuation("approval-1", runtime_generation=generation)
+                assert claimed is not None
+                assert claimed.state == "claimed"
+            return False
+
+        for event_id in ("$source-1", "$source-2", "$middle", "$tail"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        middle = (await alice.pending())[2]
+        worker = PendingEventWorker(store=store, handle=handle, runtime_generation=generation)
+        try:
+            worker.start()
+            await asyncio.wait_for(store.tail_read_entered.wait(), timeout=5)
+            assert attempts == ["$source-1", "$middle"]
+            assert store.tail_read_after == middle.receipt_order
+            worker.release(("$source-1",))
+            recorded = await alice.resolve_continuation_approval_card(
+                card_event_id="$approval",
+                requested_status="approved",
+                reason=None,
+                metadata=ApprovalDecisionMetadata(),
+            )
+            assert recorded.continuation_ready
+            assert recorded.continuation_room_id == ROOM
+            worker.wake(room_id=ROOM)
+            # Release the stale tail immediately; retry admission must already
+            # be invalidated when the synchronous handoff returns.
+            store.release_tail_read.set()
+            await _eventually_async(lambda: alice.pending(runtime_generation=generation))
+            assert attempts == ["$source-1", "$middle", "$source-1", "$tail"]
+            assert await alice.is_pending("$source-1")
+            assert await alice.is_pending("$source-2")
+            assert not await alice.is_pending("$tail")
+        finally:
+            store.release_tail_read.set()
+            await worker.stop()
+
+    @pytest.mark.parametrize("drain", [False, True])
+    async def test_admissions_do_not_bypass_a_failed_rooms_cooldown(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        *,
+        drain: bool,
+    ) -> None:
+        """An unrelated wake runs healthy rooms without retrying a failed head early."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$failed":
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            assert len(retry_sleeps) == 1
+            await TestPendingEventWorker._admit(alice, text_event("$later"))
+            await TestPendingEventWorker._admit(alice, text_event("$healthy"), "!healthy:example.org")
+            if drain:
+                await asyncio.wait_for(worker.drain_once(), timeout=1)
+            else:
+                await _dispatch_worker_pass(worker)
+
+            assert attempts == ["$failed", "$healthy"]
+            assert await alice.unsettled_event_ids() == frozenset({"$failed", "$later"})
+        finally:
+            await worker.stop()
+
+    async def test_consecutive_room_failures_back_off_to_cap_and_success_resets(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """Lane starts and successful work in another room cannot reset failure history."""
+        attempts: list[str] = []
+        failing = True
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.room_id == ROOM and failing:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            for index, expected_delay in enumerate((1, 2, 4, 8, 16, 30, 30)):
+                await _dispatch_worker_pass(worker)
+                assert retry_sleeps[-1][0] == expected_delay
+                assert attempts.count("$failed") == index + 1
+                await TestPendingEventWorker._admit(alice, text_event(f"$healthy{index}"), "!healthy:example.org")
+                await _dispatch_worker_pass(worker)
+                assert attempts[-1] == f"$healthy{index}"
+                retry_sleeps[-1][1].set()
+                await asyncio.sleep(0)
+
+            failing = False
+            await _dispatch_worker_pass(worker)
+            assert not await alice.is_pending("$failed")
+            failing = True
+            await TestPendingEventWorker._admit(alice, text_event("$new-failure"))
+            await _dispatch_worker_pass(worker)
+            assert retry_sleeps[-1][0] == 1
+        finally:
+            await worker.stop()
+
+    async def test_each_room_wakes_at_its_own_retry_without_new_admission(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """One timer cannot release another failing room or strand its pending event."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if attempts.count(event.event_id) == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        await TestPendingEventWorker._admit(alice, text_event("$first"))
+        worker.start()
+        try:
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            await TestPendingEventWorker._admit(alice, text_event("$second"), "!second:example.org")
+            worker.wake()
+            await _eventually(lambda: len(retry_sleeps) == 2)
+            retry_sleeps[1][1].set()
+            await _eventually(lambda: attempts.count("$second") == 2)
+            assert attempts.count("$first") == 1
+            retry_sleeps[0][1].set()
+            await _eventually_async(alice.pending)
+            assert attempts == ["$first", "$second", "$second", "$first"]
+        finally:
+            await worker.stop()
+        assert worker.pending_task_count == 0
+
+    async def test_retry_waits_for_failed_head_when_scan_resumes_in_later_page(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A rotating scan must not dispatch later room events ahead of the failed head."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if attempts == ["$first"]:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        for event_id in ("$first", "$second", "$third"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            for _ in range(6):
+                await _dispatch_worker_pass(worker)
+            assert attempts == ["$first", "$first", "$second", "$third"]
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            await worker.stop()
+
+    async def test_settled_failed_head_releases_later_events_after_cooldown(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """External settlement cannot leave an absent failed head blocking later work."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$failed":
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        await TestPendingEventWorker._admit(alice, text_event("$later"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            await alice.settle("$failed")
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            await _dispatch_worker_pass(worker)
+            assert attempts == ["$failed", "$later"]
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("cooldown_passes", [0, 4])
+    @pytest.mark.parametrize("earlier_fails", [False, True])
+    async def test_reclaimed_earlier_event_does_not_release_later_slice_before_failed_head(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        cooldown_passes: int,
+        *,
+        earlier_fails: bool,
+    ) -> None:
+        """Reclaimed work before the failure cannot make a later scan slice safe."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        attempts: list[str] = []
+        owner_live = True
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$earlier":
+                if earlier_fails and not owner_live and attempts.count("$earlier") == 2:
+                    msg = "earlier callback unavailable"
+                    raise RuntimeError(msg)
+                return not owner_live
+            if event.event_id == "$failed" and attempts.count("$failed") == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        for event_id in ("$earlier", "$failed", "$later", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: owner_live)
+        try:
+            await _dispatch_worker_pass(worker)
+            await _dispatch_worker_pass(worker)
+            owner_live = False
+            worker.release(("$earlier",))
+            worker.wake(room_id=ROOM)
+            for _ in range(cooldown_passes):
+                await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            if earlier_fails:
+                await _dispatch_worker_pass(worker)
+                assert attempts == ["$earlier", "$failed", "$earlier"]
+                retry_sleeps[-1][1].set()
+                await asyncio.sleep(0)
+            for _ in range(8):
+                await _dispatch_worker_pass(worker)
+            if earlier_fails:
+                assert attempts == ["$earlier", "$failed", "$earlier", "$earlier", "$failed", "$later", "$last"]
+            else:
+                assert attempts == ["$earlier", "$failed", "$earlier", "$failed", "$later", "$last"]
+        finally:
+            await worker.stop()
+
+    async def test_failed_head_read_does_not_block_other_rooms(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """Checking a failed head must keep store failures scoped to that room."""
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        store = _FlakyReplayView(alice, fail_is_pending={"$failed"})
+        worker = PendingEventWorker(store=store, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            failed = (await alice.pending())[0]
+            store.fail_pending_after.add(failed.receipt_order - 1)
+            await TestPendingEventWorker._admit(alice, text_event("$healthy"), "!healthy:example.org")
+            await _dispatch_worker_pass(worker)
+            assert handled == ["$healthy"]
+            assert retry_sleeps[-1][0] == 2
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("owner_dies_during_scan", [False, True])
+    async def test_retry_admission_reclaims_earlier_deferral_after_awaited_page(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        owner_dies_during_scan: bool,
+    ) -> None:
+        """Owner loss before or during a room read preserves earlier work."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        owner_live = True
+        block_next_room_page = False
+        page_entered = asyncio.Event()
+        release_page = asyncio.Event()
+        blocked_event_ids: list[str] = []
+        attempts: list[str] = []
+
+        class BlockingRoomRead(_FlakyReplayView):
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                room_id: str | None = None,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                nonlocal block_next_room_page
+                page = await super().pending(
+                    limit=limit,
+                    room_id=room_id,
+                    after_receipt_order=after_receipt_order,
+                    runtime_generation=runtime_generation,
+                )
+                if room_id == ROOM and block_next_room_page:
+                    block_next_room_page = False
+                    blocked_event_ids.extend(event.event_id for event in page)
+                    page_entered.set()
+                    await release_page.wait()
+                return page
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$earlier":
+                return not owner_live
+            if event.event_id == "$failed" and attempts.count("$failed") == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        for event_id in ("$earlier", "$failed", "$later", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(
+            store=BlockingRoomRead(alice),
+            handle=handle,
+            deferral_is_live=lambda _event: owner_live,
+        )
+        try:
+            await asyncio.wait_for(worker.drain_once(), timeout=5)
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            assert attempts == ["$earlier", "$failed"]
+            owner_live = owner_dies_during_scan
+            if not owner_live:
+                worker.release(("$earlier",))
+                worker.wake(room_id=ROOM)
+            block_next_room_page = True
+            worker.start()
+            retry_sleeps[0][1].set()
+            await asyncio.wait_for(page_entered.wait(), timeout=5)
+            assert blocked_event_ids == ["$failed" if owner_dies_during_scan else "$earlier"]
+            assert attempts == ["$earlier", "$failed"]
+            owner_live = False
+            if owner_dies_during_scan:
+                worker.release(("$earlier",))
+                worker.wake(room_id=ROOM)
+            release_page.set()
+            await _eventually_async(alice.pending)
+            assert attempts == ["$earlier", "$failed", "$earlier", "$failed", "$later", "$last"]
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            release_page.set()
+            await worker.stop()
+
+    @pytest.mark.parametrize("drain", [False, True])
+    async def test_concurrent_drain_respects_room_read_ownership_and_failure(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        drain: bool,
+    ) -> None:
+        """A reserved room read excludes another drain through head failure."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        store = _ReservedRoomReplayView(alice)
+        attempts: list[str] = []
+        first_drain: asyncio.Task[int] | None = None
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$head" and attempts.count("$head") == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        for event_id in ("$head", "$tail", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=store, handle=handle)
+        try:
+            if drain:
+                first_drain = asyncio.create_task(worker.drain_once())
+            else:
+                worker.start()
+            await asyncio.wait_for(store.page_entered.wait(), timeout=5)
+            store.competing_drain = asyncio.create_task(worker.drain_once())
+            await asyncio.wait_for(store.competing_discovered.wait(), timeout=5)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(store.overlapping_reads.wait(), timeout=0.1)
+            assert not store.overlapping_reads.is_set()
+            assert store.room_reads == 1
+            assert attempts == []
+            store.release_page.set()
+            await asyncio.wait_for(store.competing_drain, timeout=5)
+            if first_drain is not None:
+                await asyncio.wait_for(first_drain, timeout=5)
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            assert attempts == ["$head"]
+            assert store.room_reads == 1
+            assert await alice.unsettled_event_ids() == frozenset({"$head", "$tail", "$last"})
+            worker.start()
+            retry_sleeps[0][1].set()
+            await _eventually_async(alice.pending)
+            assert attempts == ["$head", "$head", "$tail", "$last"]
+        finally:
+            store.release_page.set()
+            drains = [task for task in (first_drain, store.competing_drain) if task is not None]
+            for task in drains:
+                task.cancel()
+            await asyncio.gather(*drains, return_exceptions=True)
+            await worker.stop()
+
+    @pytest.mark.parametrize("fails_first", [False, True])
+    async def test_room_progress_does_not_wait_for_stalled_discovery(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        fails_first: bool,
+    ) -> None:
+        """A discovered room owns page continuation and retry despite slow discovery."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        discovery_started = asyncio.Event()
+        release_discovery = asyncio.Event()
+        release_head = asyncio.Event()
+        attempts: list[str] = []
+        global_reads = 0
+
+        class SlowDiscovery(_FlakyReplayView):
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                room_id: str | None = None,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                nonlocal global_reads
+                if room_id is None:
+                    global_reads += 1
+                    if global_reads > 1:
+                        discovery_started.set()
+                        await release_discovery.wait()
+                return await super().pending(
+                    limit=limit,
+                    room_id=room_id,
+                    after_receipt_order=after_receipt_order,
+                    runtime_generation=runtime_generation,
+                )
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if len(attempts) == 1:
+                if fails_first:
+                    msg = "callback unavailable"
+                    raise RuntimeError(msg)
+                await release_head.wait()
+            return True
+
+        for event_id in ("$head", "$tail", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=SlowDiscovery(alice), handle=handle)
+        worker.start()
+        try:
+            await asyncio.wait_for(discovery_started.wait(), timeout=5)
+            if fails_first:
+                await _eventually(lambda: len(retry_sleeps) == 1)
+                retry_sleeps[0][1].set()
+            else:
+                release_head.set()
+            await _eventually_async(alice.pending)
+            assert attempts == (["$head", "$head"] if fails_first else ["$head"]) + ["$tail", "$last"]
+        finally:
+            release_head.set()
+            release_discovery.set()
+            await worker.stop()
+
+    async def test_shutdown_cancels_room_cooldown_and_restart_replays_pending_work(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A cooling room owns a cancellable timer and leaves its journal work durable."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if len(attempts) == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        await _dispatch_worker_pass(worker)
+        assert len(retry_sleeps) == 1
+        worker.begin_shutdown()
+        assert await worker.wait_stopped(timeout_seconds=0.1)
+        assert worker.pending_task_count == 0
+        assert await alice.is_pending("$failed")
+        worker.start()
+        try:
+            await _eventually_async(alice.pending)
+        finally:
+            await worker.stop()
+        assert attempts == ["$failed", "$failed"]
+
+
+class TestOutOfBandDispatch:
+    """An event its caller runs itself is still an event with one handler."""
+
+    @staticmethod
+    def _dispatcher(
+        store: PrincipalStore,
+        on_room_lifecycle: Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]],
+    ) -> JournalDispatcher:
+        """Build a dispatcher whose only interesting callback is the lifecycle one."""
+
+        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+            return None
+
+        return JournalDispatcher(
+            store=store,
+            callbacks=JournalCallbacks(
+                on_message=cast("Any", noop),
+                on_media=cast("Any", noop),
+                on_reaction=cast("Any", noop),
+                on_approval=cast("Any", noop),
+                on_room_lifecycle=on_room_lifecycle,
+                on_redaction=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
+                source_has_live_owner=lambda _event_id: False,
+                turn_has_live_claim=lambda _event_id: False,
+            ),
+            room_for_id=lambda _room_id: room(),
+        )
+
+    async def test_concurrent_drains_keep_one_handler(self, alice: PrincipalStore) -> None:
+        """Concurrent pump and explicit drains must share one room lane."""
+        handled: list[str] = []
+        concurrent = 0
+        peak_concurrent = 0
+        inside_handler = asyncio.Event()
+        second_handler = asyncio.Event()
+        release_handler = asyncio.Event()
+
+        async def on_room_lifecycle(_room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
+            nonlocal concurrent, peak_concurrent
+            handled.append(event.event_id)
+            concurrent += 1
+            peak_concurrent = max(peak_concurrent, concurrent)
+            if concurrent > 1:
+                second_handler.set()
+            try:
+                # Held open so the pump has a window to collect an event that
+                # is pending precisely because its handler has not finished.
+                inside_handler.set()
+                await release_handler.wait()
+            finally:
+                concurrent -= 1
+
+        dispatcher = self._dispatcher(alice, on_room_lifecycle)
+        await admit_dispatch_event(
+            dispatcher,
+            room(),
+            member_event("$join"),
+            EventKind.ROOM_LIFECYCLE,
+            EventClass.ACTIONABLE,
+        )
+        running = asyncio.create_task(dispatcher.drain_once())
+        dispatcher.start()
+        await asyncio.wait_for(inside_handler.wait(), timeout=5)
+        with contextlib.suppress(TimeoutError):
+            # A second handler has to wake the pump, read a page of pending
+            # events and start a lane, so this waits on wall time rather than
+            # loop turns. Reaching the timeout is the passing case.
+            await asyncio.wait_for(second_handler.wait(), timeout=0.5)
+        release_handler.set()
+
+        await asyncio.wait_for(running, timeout=5)
+        await dispatcher.stop()
+
+        assert handled == ["$join"]
+        assert peak_concurrent == 1
+        assert await alice.unsettled_event_ids() == frozenset()
+
+
+class TestDeferralOwnership:
+    """Which deferrals still have an owner, and which are work nobody holds."""
+
+    @staticmethod
+    def _dispatcher(
+        store: PrincipalStore,
+        *,
+        gate_owns: bool = False,
+        turn_claimed: bool = False,
+    ) -> JournalDispatcher:
+        """Build a dispatcher whose two owner probes answer as configured."""
+
+        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+            return None
+
+        return JournalDispatcher(
+            store=store,
+            callbacks=JournalCallbacks(
+                on_message=cast("Any", noop),
+                on_media=cast("Any", noop),
+                on_reaction=cast("Any", noop),
+                on_approval=cast("Any", noop),
+                on_room_lifecycle=cast("Any", noop),
+                on_redaction=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
+                source_has_live_owner=lambda _event_id: gate_owns,
+                turn_has_live_claim=lambda _event_id: turn_claimed,
+            ),
+            room_for_id=lambda _room_id: room(),
+        )
+
+    @staticmethod
+    async def _admitted(store: PrincipalStore, event: nio.Event, kind: EventKind) -> JournalEvent:
+        """Admit one event and return the journal row the worker would see."""
+        await store.admit(
+            _inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, kind, self_sender=BOT),
+        )
+        return next(item for item in await store.pending() if item.event_id == event.event_id)
+
+    async def test_a_completing_kind_can_never_have_a_lost_owner(self, alice: PrincipalStore) -> None:
+        """A reaction is finished when its handler returns, so it never defers.
+
+        Reporting one of these as lost would take back an event that is not
+        deferred at all, which is how a settled reaction runs twice.
+        """
+        dispatcher = self._dispatcher(alice)
+        dispatcher.release_turn_replay()
+        reaction = await self._admitted(alice, reaction_event("$r"), EventKind.REACTION)
+
+        assert dispatcher._deferral_is_live(reaction) is True
+
+    async def test_approval_owned_source_bypasses_normal_ingress(self, alice: PrincipalStore) -> None:
+        """A prepared paused run resumes before hooks, routing, or ignore settlement can reinterpret it."""
+        dispatcher = self._dispatcher(alice)
+        continuation = AsyncMock(return_value=False)
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher.callbacks = replace(
+            dispatcher.callbacks,
+            on_message=on_message,
+            on_approval_continuation=continuation,
+        )
+        dispatcher.release_turn_replay()
+        message = await self._admitted(alice, text_event("$approval-source"), EventKind.MESSAGE)
+
+        assert not await dispatcher._run_event(message)
+
+        continuation.assert_awaited_once_with("$approval-source")
+        on_message.assert_not_awaited()
+        assert await alice.is_pending("$approval-source")
+
+    async def test_replay_parked_on_the_fleet_is_not_a_lost_owner(self, alice: PrincipalStore) -> None:
+        """Turn replay waits for responders to exist, and is released by draining.
+
+        Nothing calls back to hand these over, so treating the absence of a
+        claim as death would re-dispatch every replayed turn on every scan,
+        before the agents that answer them are even running.
+        """
+        dispatcher = self._dispatcher(alice)
+        message = await self._admitted(alice, text_event("$m"), EventKind.MESSAGE)
+
+        assert dispatcher._deferral_is_live(message) is True
+
+    async def test_interactive_reaction_replay_waits_for_fleet_recovery(self, alice: PrincipalStore) -> None:
+        """A claimed selection needs the same startup boundary as the turn it resumes."""
+        recovered: list[bool] = []
+
+        async def on_reaction(_room: nio.MatrixRoom, _event: nio.Event) -> TurnDispatchOutcome:
+            recovered.append(turn_dispatch_recovery_active())
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        dispatcher = self._dispatcher(alice)
+        dispatcher.callbacks = replace(dispatcher.callbacks, on_reaction=on_reaction)
+        await self._admitted(alice, reaction_event("$r"), EventKind.REACTION)
+        await alice.claim_semantic_consumer("$r", SemanticConsumer.INTERACTIVE_REACTION)
+        reaction = await alice.load_event("$r")
+        assert reaction is not None
+
+        assert await dispatcher._run_event(reaction) is False
+        assert recovered == []
+
+        dispatcher.release_turn_replay()
+        assert await dispatcher._run_event(reaction) is True
+        assert recovered == [True]
+
+    async def test_a_source_the_coalescing_gate_still_holds_is_owned(self, alice: PrincipalStore) -> None:
+        """A batch still debouncing has no turn claim yet, and is not abandoned."""
+        dispatcher = self._dispatcher(alice, gate_owns=True)
+        dispatcher.release_turn_replay()
+        message = await self._admitted(alice, text_event("$m"), EventKind.MESSAGE)
+
+        assert dispatcher._deferral_is_live(message) is True
+
+    async def test_a_source_an_unsettled_turn_still_claims_is_owned(self, alice: PrincipalStore) -> None:
+        """The running turn will answer this message, so nobody else may."""
+        dispatcher = self._dispatcher(alice, turn_claimed=True)
+        dispatcher.release_turn_replay()
+        message = await self._admitted(alice, text_event("$m"), EventKind.MESSAGE)
+
+        assert dispatcher._deferral_is_live(message) is True
+
+    async def test_a_source_with_neither_a_gate_nor_a_claim_is_lost(self, alice: PrincipalStore) -> None:
+        """Both owners are gone and the event is still pending: nobody will release it."""
+        dispatcher = self._dispatcher(alice)
+        dispatcher.release_turn_replay()
+        message = await self._admitted(alice, text_event("$m"), EventKind.MESSAGE)
+
+        assert dispatcher._deferral_is_live(message) is False
+
+
+async def _never_called(event: JournalEvent) -> bool:
+    """Fail loudly, for a worker whose scan is under test rather than its lanes."""
+    msg = f"no handler should have run for {event.event_id}"
+    raise AssertionError(msg)
+
+
+class TestABoundedScanIsFair:
+    """A page budget bounds how much one pass looks at, not what it can reach."""
+
+    @staticmethod
+    async def _admit(store: PrincipalStore, event: nio.Event, room_id: str) -> None:
+        await store.admit(
+            _inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
+        )
+
+    @classmethod
+    async def _admit_unreadable_window(cls, store: PrincipalStore) -> None:
+        """Fill a whole page with rows nothing can decode, then one readable event.
+
+        A page reads ``_BATCH_SIZE`` raw rows, so exactly that many unreadable
+        ones is a pass that decodes nothing and still knows more is behind it.
+        """
+        count = _BATCH_SIZE
+        for index in range(count):
+            # Unprojected: nothing will ever read these rows as conversation,
+            # and a page of this size is expensive enough to build already.
+            await store.admit(
+                _inbound_event(
+                    ROOM,
+                    text_event(f"$corrupt{index:04d}", ts=1_000 + index),
+                    EventKind.MESSAGE,
+                    EventClass.ACTIONABLE,
+                ),
+            )
+        await corrupt(store, *(f"$corrupt{index:04d}" for index in range(count)))
+        await cls._admit(store, text_event("$behind", ts=9_000), "!behind:x")
+
+    async def test_a_full_budget_of_owned_events_does_not_hide_what_is_behind_them(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Restarting at receipt order zero turns the page budget into a ceiling.
+
+        Every pass then spends the whole budget on the same prefix of events it
+        cannot act on -- a busy bot's in-flight turns, a room whose lane keeps
+        failing -- and the dispatchable events behind that prefix are never
+        reached at all, however long the process stays up.
+
+        The budget is cut to one page so the boundary is a page rather than
+        two thousand admissions; the arithmetic being proven is the same.
+        """
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return not event.event_id.startswith("$busy")
+
+        for index in range(_BATCH_SIZE):
+            await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index), f"!r{index}:x")
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_scan_seconds=0.01)
+        worker.start()
+        # The deferrals, not the handler calls: a handler has appended before
+        # the lane that called it has recorded the deferral, so clearing on the
+        # call count can clear part way through the pass and let a straggler
+        # land in the list the assertion below has to match exactly.
+        await _eventually(lambda: len(worker._deferred) == _BATCH_SIZE)
+        handled.clear()
+
+        await self._admit(alice, text_event("$behind", ts=9_000), "!behind:x")
+        worker.wake()
+
+        try:
+            await _eventually(lambda: handled == ["$behind"], seconds=10)
+        finally:
+            await worker.stop()
+
+    async def test_a_scan_that_ran_off_the_end_goes_back_to_the_front(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A cursor that only ever moves forward starves what is behind it.
+
+        Receipt order is not the order events become actionable in. An event
+        the scan has already passed can need dispatching later -- the owner it
+        was handed to died -- and a resume point that never returns to the
+        front of the backlog would leave it there permanently.
+        """
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        handled: list[str] = []
+        lost: set[str] = set()
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            # A source taken back from a dead owner is answered rather than
+            # deferred again, so the count below stays a count of one.
+            return event.event_id in lost
+
+        for index in range(_BATCH_SIZE):
+            await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index), f"!r{index}:x")
+        worker = PendingEventWorker(
+            store=alice,
+            handle=handle,
+            deferral_is_live=lambda event: event.event_id not in lost,
+            deferral_scan_seconds=0.01,
+        )
+        worker.start()
+        # The deferrals, not the handler calls: a handler has appended before
+        # the lane that called it has recorded the deferral, so clearing on the
+        # call count can clear part way through the pass and let a straggler
+        # land in the list the assertion below has to match exactly.
+        await _eventually(lambda: len(worker._deferred) == _BATCH_SIZE)
+        handled.clear()
+
+        # The very first event of the backlog, which the resume point is now
+        # well past, loses its owner.
+        lost.add("$busy0000")
+
+        try:
+            await _eventually(lambda: handled == ["$busy0000"], seconds=10)
+        finally:
+            await worker.stop()
+
+    async def test_a_corrupt_prefix_that_fills_a_page_is_scanned_through(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A page of nothing but unreadable rows still has to move the scan on.
+
+        Bounding what one page reads means a corrupt stretch can now outlast
+        the page it starts in, and such a page decodes no event to take a
+        resume point from. A pass that took its cursor from the events it got
+        back would stall at the front of that stretch and spend every page of
+        its budget re-reading it, and the backlog behind it is then durable
+        work no scan ever reaches.
+        """
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        await self._admit_unreadable_window(alice)
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        try:
+            await _eventually(lambda: handled == ["$behind"], seconds=10)
+        finally:
+            await worker.stop()
+
+    async def test_a_pass_that_dispatched_nothing_arms_its_own_next_pass(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Where a pass stopped short is the scan's position, not any room's.
+
+        Every other bound here is paired with a signal, and each is owned by
+        something: a room skipped because its lane is busy is woken by that
+        lane, a failure arms a retry, a deferral arms a scan. Unreadable rows
+        are owned by nobody. They yield no event, so a window made entirely of
+        them starts no lane and holds no deferral, and a continuation carried
+        by the rooms a pass dispatched to has nothing left to hang off.
+
+        The end state this asserts is the whole defect: the pass moved its
+        cursor, so it knows more of the backlog remains, and then armed
+        nothing -- no lane to finish, no deferral timer, no retry, and the wake
+        flag clear. Everything queued behind the corruption is then durable
+        work no later pass reaches until unrelated traffic happens to arrive.
+        """
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        await self._admit_unreadable_window(alice)
+        worker = PendingEventWorker(store=alice, handle=_never_called)
+
+        await worker._dispatch_ready_rooms()
+
+        try:
+            assert worker._lanes == {}
+            assert worker._deferral_scan is None
+            assert not worker._wake.is_set()
+            assert worker._scan_cursor is not None
+            assert worker._retry is not None
+        finally:
+            await worker.stop()
+
+    async def test_a_backlog_behind_an_unreadable_window_is_still_reached(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """And the rearm has to be real: the events behind it actually run.
+
+        The budget is cut to one page so the window is a page rather than two
+        thousand admissions; the arithmetic being proven is the same. Nothing
+        is admitted after the worker starts, because an admission is the very
+        thing the worker must not have to wait for.
+
+        The retry delay is left at its production value. Compressing one
+        towards the poll interval below is how this suite has flaked before,
+        and a short delay would buy nothing here: without the rearm the events
+        never run however long the wait, and with it they run on the first one.
+        """
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        await self._admit_unreadable_window(alice)
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        try:
+            await _eventually(lambda: handled == ["$behind"], seconds=30)
+        finally:
+            await worker.stop()
+
+    async def test_a_lost_owner_behind_discovery_still_runs_first(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An abandoned source is reclaimed through its room, before later work."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        for index in range(3):
+            await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), ROOM)
+        admitted = await alice.pending(limit=3)
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: False)
+        worker._defer(admitted[0])
+        worker._scan_cursor = admitted[0].receipt_order
+        worker.start()
+        try:
+            await _eventually_async(alice.pending)
+            assert handled == ["$e0", "$e1", "$e2"]
+        finally:
+            await worker.stop()
+
+
+class TestADrainSeesTheWholeBacklog:
+    """A drain loops until nothing moves, so every pass has to see the same set."""
+
+    @staticmethod
+    async def _admit(store: PrincipalStore, event: nio.Event, room_id: str) -> None:
+        await store.admit(
+            _inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
+        )
+
+    async def test_a_backlog_of_failures_larger_than_one_pass_still_returns(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Otherwise recovery never finishes and every later one queues behind it.
+
+        The drain ends when a pass brings back exactly what the last one did,
+        so the two passes have to be looking at the same thing. Reading through
+        the pump's bounded window instead gave each pass a different slice of a
+        backlog this size, and with anything in it that keeps failing the
+        comparison could never come true.
+        """
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+
+        async def handle(event: JournalEvent) -> bool:
+            msg = f"nothing can run {event.event_id}"
+            raise RuntimeError(msg)
+
+        for index in range(5):
+            await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), f"!r{index}:x")
+        worker = PendingEventWorker(store=alice, handle=handle)
+
+        try:
+            drained = await asyncio.wait_for(worker.drain_once(), timeout=10)
+        finally:
+            await worker.stop()
+
+        assert drained == 5
+
+    async def test_a_drain_does_not_move_the_pump_off_its_own_position(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The pump's resume point is the pump's, and a drain runs beside it."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+
+        async def handle(_event: JournalEvent) -> bool:
+            return True
+
+        for index in range(5):
+            await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), f"!r{index}:x")
+        worker = PendingEventWorker(store=alice, handle=handle)
+        admitted = await alice.pending(limit=5)
+        worker._scan_cursor = admitted[3].receipt_order
+
+        drained = await asyncio.wait_for(worker.drain_once(), timeout=10)
+
+        assert drained == 5
+        assert await alice.pending() == ()
+        assert worker._scan_cursor == admitted[3].receipt_order
+
+
+@dataclass
+class _FlakyReplayView:
+    """One principal's replay view whose store I/O can be made to fail once."""
+
+    inner: PrincipalStore
+    fail_is_pending: set[str] = field(default_factory=set)
+    fail_settle: set[str] = field(default_factory=set)
+    fail_pending_after: set[int] = field(default_factory=set)
+
+    async def pending(
+        self,
+        *,
+        limit: int = 256,
+        room_id: str | None = None,
+        after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
+    ) -> PendingPage:
+        if after_receipt_order is not None and after_receipt_order in self.fail_pending_after:
+            self.fail_pending_after.remove(after_receipt_order)
+            msg = "the journal is unreadable"
+            raise RuntimeError(msg)
+        return await self.inner.pending(
+            limit=limit,
+            room_id=room_id,
+            after_receipt_order=after_receipt_order,
+            runtime_generation=runtime_generation,
+        )
+
+    async def is_pending(self, event_id: str) -> bool:
+        if event_id in self.fail_is_pending:
+            self.fail_is_pending.discard(event_id)
+            msg = "the journal is unreadable"
+            raise RuntimeError(msg)
+        return await self.inner.is_pending(event_id)
+
+    async def settle(self, event_id: str) -> None:
+        if event_id in self.fail_settle:
+            self.fail_settle.discard(event_id)
+            msg = "the journal is unwritable"
+            raise RuntimeError(msg)
+        await self.inner.settle(event_id)
+
+
+@dataclass
+class _ReservedRoomReplayView(_FlakyReplayView):
+    """Hold the first room read while another drain finishes discovering it."""
+
+    page_entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release_page: asyncio.Event = field(default_factory=asyncio.Event)
+    competing_discovered: asyncio.Event = field(default_factory=asyncio.Event)
+    overlapping_reads: asyncio.Event = field(default_factory=asyncio.Event)
+    room_reads: int = 0
+    competing_drain: asyncio.Task[int] | None = None
+
+    async def pending(
+        self,
+        *,
+        limit: int = 256,
+        room_id: str | None = None,
+        after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
+    ) -> PendingPage:
+        reading_room = room_id == ROOM
+        if reading_room:
+            self.room_reads += 1
+            if self.room_reads == 2:
+                self.overlapping_reads.set()
+        hold_this_read = reading_room and self.room_reads == 1
+        page = await super().pending(
+            limit=limit,
+            room_id=room_id,
+            after_receipt_order=after_receipt_order,
+            runtime_generation=runtime_generation,
+        )
+        if room_id is None and asyncio.current_task() is self.competing_drain and page.reached_end:
+            self.competing_discovered.set()
+        if hold_this_read:
+            self.page_entered.set()
+            await self.release_page.wait()
+        return page
+
+
+@dataclass
+class _ApprovalWakeReplayView(_FlakyReplayView):
+    """Hold a room snapshot across an approval eligibility change."""
+
+    tail_read_entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release_tail_read: asyncio.Event = field(default_factory=asyncio.Event)
+    tail_read_after: int | None = None
+
+    async def pending(
+        self,
+        *,
+        limit: int = 256,
+        room_id: str | None = None,
+        after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
+    ) -> PendingPage:
+        page = await super().pending(
+            limit=limit,
+            room_id=room_id,
+            after_receipt_order=after_receipt_order,
+            runtime_generation=runtime_generation,
+        )
+        if room_id == ROOM and not self.tail_read_entered.is_set() and any(event.event_id == "$tail" for event in page):
+            self.tail_read_after = after_receipt_order
+            self.tail_read_entered.set()
+            await self.release_tail_read.wait()
+        return page
+
+
+class TestStoreFailuresBelongToTheLane:
+    """A lane owns every store call it makes, not only the handler between them."""
+
+    @staticmethod
+    async def _admit(store: PrincipalStore, event: nio.Event) -> None:
+        await store.admit(
+            _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+        )
+
+    async def test_a_read_that_fails_before_the_handler_is_retried(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Outside the lane's failure, this faults the task and nothing looks again.
+
+        No room is recorded as failed, so no retry is scheduled, and nothing
+        else will wake the pump for a room that is quiet by definition -- the
+        event that would have woken it is the one still sitting there.
+        """
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            return True
+
+        await self._admit(alice, text_event("$m"))
+        store = _FlakyReplayView(alice, fail_is_pending={"$m"})
+        worker = PendingEventWorker(store=cast("Any", store), handle=handle)
+        worker._retry_delay_seconds = 0.01
+        worker.start()
+
+        try:
+            await _eventually_async(lambda: alice.pending(), seconds=10)
+        finally:
+            await worker.stop()
+
+        assert attempts == ["$m"]
+
+    async def test_a_settlement_that_fails_is_retried_rather_than_abandoned(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A settlement that never committed leaves the event owed, so say so.
+
+        Faulting the lane instead loses the failure twice over: the exception
+        is never retrieved and the room is never marked, so the next thing to
+        wake the pump is some unrelated event -- and by then the handler runs
+        again against a source it already answered.
+        """
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            return True
+
+        await self._admit(alice, text_event("$m"))
+        store = _FlakyReplayView(alice, fail_settle={"$m"})
+        worker = PendingEventWorker(store=cast("Any", store), handle=handle)
+        worker._retry_delay_seconds = 0.01
+        worker.start()
+
+        try:
+            await _eventually_async(lambda: alice.pending(), seconds=10)
+        finally:
+            await worker.stop()
+
+        assert attempts == ["$m", "$m"]
+
+
+class TestRecoveryDoesNotReenterALiveTurn:
+    """A drain runs beside live turns, so it must leave the ones it finds alone."""
+
+    @staticmethod
+    def _dispatcher(
+        store: PrincipalStore,
+        on_turn: Callable[[nio.MatrixRoom, nio.Event], Awaitable[TurnDispatchOutcome]],
+        live_claims: set[str],
+        *,
+        gate_owns: bool = False,
+    ) -> JournalDispatcher:
+        """Build a dispatcher whose turn claims are whatever the test says."""
+
+        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+            return None
+
+        return JournalDispatcher(
+            store=store,
+            callbacks=JournalCallbacks(
+                on_message=cast("Any", on_turn),
+                on_media=cast("Any", on_turn),
+                on_reaction=cast("Any", noop),
+                on_approval=cast("Any", noop),
+                on_room_lifecycle=cast("Any", noop),
+                on_redaction=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
+                source_has_live_owner=lambda _event_id: gate_owns,
+                turn_has_live_claim=lambda event_id: event_id in live_claims,
+            ),
+            room_for_id=lambda _room_id: room(),
+        )
+
+    @staticmethod
+    async def _admit(store: PrincipalStore, event: nio.Event, kind: EventKind = EventKind.MESSAGE) -> None:
+        await store.admit(
+            _inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, kind, self_sender=BOT),
+        )
+
+    @pytest.mark.parametrize(
+        ("kind", "event"),
+        [(EventKind.MESSAGE, text_event("$m")), (EventKind.MEDIA, image_event("$m"))],
+        ids=("message", "media"),
+    )
+    async def test_a_source_the_gate_still_holds_is_not_handed_to_a_second_turn(
+        self,
+        alice: PrincipalStore,
+        kind: EventKind,
+        event: nio.Event,
+    ) -> None:
+        """Both turn-backed kinds ask this, so neither may answer it for itself.
+
+        A lane cancelled inside its handler -- a shutdown, a hot reload -- can
+        leave a source with the coalescing gate and nothing in the worker's
+        memory saying so. The next scan is then free to collect it, and the
+        media path refused that while the message path walked straight in.
+        """
+        entered: list[str] = []
+
+        async def on_turn(_room: nio.MatrixRoom, event: nio.Event) -> TurnDispatchOutcome:
+            entered.append(event.event_id)
+            return TurnDispatchOutcome.DEFERRED
+
+        dispatcher = self._dispatcher(alice, on_turn, set(), gate_owns=True)
+        dispatcher.release_turn_replay()
+        await self._admit(alice, event, kind)
+
+        await dispatcher.drain_once()
+
+        assert entered == []
+        assert [item.event_id for item in await alice.pending()] == ["$m"]
+
+    async def test_a_drain_leaves_a_running_turns_room_answering(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Re-entering a live turn wedges the room until that turn finishes.
+
+        The duplicate does not answer twice -- the turn store refuses the
+        second claim -- but refusing is not returning. ``_claim_live_turn``
+        waits for the competing owner to settle, and it does that inside the
+        room's lane, so every message received after it goes unanswered for as
+        long as the original turn runs. A turn parked on a tool approval makes
+        that indefinite.
+        """
+        live_claims: set[str] = set()
+        entered: list[str] = []
+        turn_settled = asyncio.Event()
+
+        async def on_turn(_room: nio.MatrixRoom, event: nio.Event) -> TurnDispatchOutcome:
+            entered.append(event.event_id)
+            if event.event_id in live_claims:
+                # What the real contended claim does: wait for the owner.
+                await turn_settled.wait()
+            live_claims.add(event.event_id)
+            return TurnDispatchOutcome.DEFERRED
+
+        dispatcher = self._dispatcher(alice, on_turn, live_claims)
+        await self._admit(alice, text_event("$live", ts=1_000))
+        await dispatcher.drain_once()
+        assert entered == ["$live"], "the first drain starts the turn"
+
+        await self._admit(alice, text_event("$next", ts=2_000))
+        try:
+            await asyncio.wait_for(dispatcher.drain_once(), timeout=5)
+        finally:
+            turn_settled.set()
+
+        assert entered == ["$live", "$next"]
+
+    async def test_a_deferred_source_is_still_taken_back_when_its_owner_dies(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """Skipping an owned source may not become losing an abandoned one.
+
+        The drain no longer forgets what is in flight, so the liveness probe is
+        the only thing left that can hand an orphaned source back.
+        """
+        live_claims: set[str] = set()
+        entered: list[str] = []
+
+        async def on_turn(_room: nio.MatrixRoom, event: nio.Event) -> TurnDispatchOutcome:
+            entered.append(event.event_id)
+            live_claims.add(event.event_id)
+            return TurnDispatchOutcome.DEFERRED
+
+        dispatcher = self._dispatcher(alice, on_turn, live_claims)
+        await self._admit(alice, text_event("$m"))
+
+        await dispatcher.drain_once()
+        await dispatcher.drain_once()
+        assert entered == ["$m"], "a live owner keeps its source"
+
+        live_claims.clear()
+        await dispatcher.drain_once()
+        dispatcher.start()
+        try:
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: entered == ["$m", "$m"])
+        finally:
+            await dispatcher.stop()
+
+
+async def _eventually_async(query: Callable[[], Awaitable[Sized]], *, seconds: float = 10.0) -> None:
+    """Wait until a durable query comes back empty."""
+    deadline = asyncio.get_running_loop().time() + seconds
+    while asyncio.get_running_loop().time() < deadline:
+        if not len(await query()):
+            return
+        await asyncio.sleep(0.01)
+    msg = "The durable queue never drained"
+    raise AssertionError(msg)
+
+
+async def _eventually(predicate: Callable[[], bool], *, seconds: float = 5.0) -> None:
+    """Wait for a background pump to reach a state, without fixed sleeps."""
+    deadline = asyncio.get_running_loop().time() + seconds
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    msg = "The worker never reached the expected state"
+    raise AssertionError(msg)
+
+
+def member_event(event_id: str, *, user_id: str = ALICE) -> nio.RoomMemberEvent:
+    """Return a parsed room-member join event."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": user_id,
+            "state_key": user_id,
+            "origin_server_ts": 7_000,
+            "type": "m.room.member",
+            "content": {"membership": "join"},
+            "unsigned": {"prev_content": {"membership": "leave"}},
+        },
+    )
+    assert isinstance(event, nio.RoomMemberEvent)
+    return event
+
+
+def message_event(
+    event_id: str,
+    msgtype: str,
+    body: str = "waves at the bot",
+    *,
+    extra_content: dict[str, Any] | None = None,
+    ts: int = 1_000,
+) -> nio.Event:
+    """Return one parsed `m.room.message` of the given msgtype."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": ALICE,
+            "origin_server_ts": ts,
+            "type": "m.room.message",
+            "content": {"msgtype": msgtype, "body": body, **(extra_content or {})},
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+# Every msgtype nio has a parse branch for, plus one it has none for, so a rule
+# that stops agreeing with another rule about any of them fails in a test.
+_ROOM_MESSAGE_MSGTYPES = [
+    ("m.text", {}),
+    ("m.emote", {}),
+    ("m.notice", {}),
+    ("m.image", {"url": "mxc://example.org/i"}),
+    ("m.file", {"url": "mxc://example.org/f"}),
+    ("m.video", {"url": "mxc://example.org/v"}),
+    ("m.audio", {"url": "mxc://example.org/a"}),
+    # Absent from that list, so nio produces `RoomMessageUnknown`, which has no
+    # `body` for a turn to answer.
+    ("m.location", {"geo_uri": "geo:51.5,-0.1"}),
+]
+
+
+@dataclass(frozen=True)
+class _Delivery:
+    """What one admitted event owed, and what actually ran for it."""
+
+    handled: tuple[nio.Event, ...]
+    owed_work: bool
+
+
+class TestAdmittedWorkReachesItsCallback:
+    """What admission calls work and what dispatch will run must be one set.
+
+    Admission was widened to `nio.RoomMessage` so a watched conversation and a
+    rebuilt one agree on what is in it, and the commit that did it said plainly
+    that "an emote is ordinary user input and is actionable". Only half of that
+    shipped: dispatch stayed bound to `RoomMessageText`, so an `m.emote` was
+    committed as actionable work and then discarded by an `isinstance` check
+    that logged nothing. A user typing `/me asks the bot to X` got silence.
+    """
+
+    @staticmethod
+    def _dispatcher(
+        store: PrincipalStore,
+        on_message: Callable[[nio.MatrixRoom, nio.Event], Awaitable[TurnDispatchOutcome]],
+    ) -> JournalDispatcher:
+        """Build a dispatcher whose only interesting callback is the message one."""
+
+        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+            return None
+
+        return JournalDispatcher(
+            store=store,
+            callbacks=JournalCallbacks(
+                on_message=cast("Any", on_message),
+                on_media=cast("Any", noop),
+                on_reaction=cast("Any", noop),
+                on_approval=cast("Any", noop),
+                on_room_lifecycle=cast("Any", noop),
+                on_redaction=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
+                source_has_live_owner=lambda _event_id: False,
+                turn_has_live_claim=lambda _event_id: False,
+            ),
+            room_for_id=lambda _room_id: room(),
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+        )
+
+    async def _deliver(
+        self,
+        store: PrincipalStore,
+        event: nio.Event,
+        provenance: nio.TimelineEventProvenance,
+    ) -> _Delivery:
+        """Admit one event the way nio does and drain whatever it owes."""
+        handled: list[nio.Event] = []
+
+        async def on_message(_room: nio.MatrixRoom, message: nio.Event) -> TurnDispatchOutcome:
+            handled.append(message)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        dispatcher = self._dispatcher(store, on_message)
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=event.source,
+            self_sender=BOT,
+            provenance=provenance,
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+        )
+        if views is not None:
+            await store.admit(*views)
+        # Read before draining: "was this committed as work?" and "did anything
+        # run for it?" are different questions, and a context-only event has to
+        # answer no to both. Work that is committed and then refused by the
+        # binding answers no to the second alone, which is the shape of the bug
+        # these tests exist for.
+        owed_work = await store.is_pending(event.event_id)
+        await dispatcher.drain_once()
+        return _Delivery(handled=tuple(handled), owed_work=owed_work)
+
+    async def _projected_ids(self, store: PrincipalStore) -> list[str]:
+        """Return the conversation the projection would serve."""
+        page = await store.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        return [message.logical_event_id for message in page.messages]
+
+    async def test_a_live_emote_reaches_the_message_callback(self, alice: PrincipalStore) -> None:
+        """`/me asks the bot to X` is a user turn and must be answered like one."""
+        emote = message_event("$emote", "m.emote", "asks the bot to summarise the thread")
+
+        delivery = await self._deliver(alice, emote, nio.TimelineEventProvenance.LIVE)
+
+        assert delivery.owed_work
+        assert [event.event_id for event in delivery.handled] == ["$emote"]
+        delivered = delivery.handled[0]
+        assert isinstance(delivered, nio.RoomMessageEmote)
+        # The body reaches the turn unchanged. An emote is third-person text,
+        # not a distinct kind of utterance, so nothing downstream is told it
+        # was one.
+        assert delivered.body == "asks the bot to summarise the thread"
+        assert await alice.unsettled_event_ids() == frozenset()
+
+    async def test_a_live_notice_is_context_and_never_a_turn(self, alice: PrincipalStore) -> None:
+        """`m.notice` means "automated, do not react", at any provenance.
+
+        Without this the widened binding would have agents answering each
+        other's thread summaries and their own streaming placeholders.
+        """
+        notice = message_event("$notice", "m.notice", "So far: they asked about X.")
+
+        delivery = await self._deliver(alice, notice, nio.TimelineEventProvenance.LIVE)
+
+        assert not delivery.owed_work
+        assert delivery.handled == ()
+        assert await alice.unsettled_event_ids() == frozenset()
+        assert await self._projected_ids(alice) == ["$notice"]
+
+    async def test_an_emote_from_cold_history_is_context_and_never_a_turn(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Cold history is a conversation that already ended, emotes included."""
+        emote = message_event("$old-emote", "m.emote", "waved, a year ago")
+
+        delivery = await self._deliver(alice, emote, nio.TimelineEventProvenance.HISTORY)
+
+        assert not delivery.owed_work
+        assert delivery.handled == ()
+        assert await alice.unsettled_event_ids() == frozenset()
+        assert await self._projected_ids(alice) == ["$old-emote"]
+
+    async def test_a_msgtype_nio_cannot_type_is_context_rather_than_dropped_work(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """`RoomMessageUnknown` has no body, so there is no utterance to answer.
+
+        It still belongs to the conversation, so it is projected -- but it is
+        admitted already settled instead of being committed as work and then
+        thrown away by the binding, which is what used to happen to every
+        msgtype nio has no class for.
+        """
+        location = message_event("$where", "m.location", extra_content={"geo_uri": "geo:51.5,-0.1"})
+        assert isinstance(location, nio.RoomMessageUnknown), "fixture must reach nio's unknown-msgtype class"
+
+        delivery = await self._deliver(alice, location, nio.TimelineEventProvenance.LIVE)
+
+        assert not delivery.owed_work, "an unreadable msgtype was committed as work the binding then discarded"
+        assert delivery.handled == ()
+        assert await alice.unsettled_event_ids() == frozenset()
+        assert await self._projected_ids(alice) == ["$where"]
+
+    @pytest.mark.parametrize(("msgtype", "extra_content"), _ROOM_MESSAGE_MSGTYPES)
+    async def test_anything_admitted_as_work_is_a_payload_dispatch_accepts(
+        self,
+        msgtype: str,
+        extra_content: dict[str, str],
+    ) -> None:
+        """The two rules are compared against each other, not against one assumption.
+
+        Admission's kind rules and `_BINDINGS` are separate statements about
+        the same set, and the emote bug is exactly what their disagreeing looks
+        like. Parametrizing over nio's own parse branches means the next
+        msgtype either side stops agreeing on fails here.
+        """
+        event = message_event(f"$msg-{msgtype}", msgtype, extra_content=extra_content)
+        kind = _event_kind(event)
+        assert kind is not None, f"{msgtype} is projected by hydration, so admission must give it a kind"
+        actionable = _event_class_for(nio.TimelineEventProvenance.LIVE, event) is EventClass.ACTIONABLE
+
+        assert not actionable or isinstance(event, _BINDINGS[kind].event_types), (
+            f"{msgtype} is admitted as {kind.value} work that dispatch would refuse to run"
+        )
+
+    @pytest.mark.parametrize(("msgtype", "extra_content"), _ROOM_MESSAGE_MSGTYPES)
+    async def test_a_server_paginated_read_sees_every_message_the_projection_keeps(
+        self,
+        msgtype: str,
+        extra_content: dict[str, str],
+    ) -> None:
+        """The third rule in this family, compared against what the projection holds.
+
+        `matrix.client_visible_messages` decides which parsed events a
+        server-paginated read treats as visible messages -- which edits it
+        collapses, and which bodies it resolves in full. It has to agree with
+        the projection rather than with the narrower question of what may start
+        a turn, because the projection is what a watched conversation contains.
+
+        Admission splits `m.room.message` into `EventKind.MESSAGE` and
+        `EventKind.MEDIA` because those become different work, but both
+        project, and `project()` applies `m.replace` from the relation alone
+        without ever consulting a msgtype. So a watched conversation holds an
+        image and the caption edit that corrects it. This rule was `MESSAGE`
+        alone twice over -- first as a list of two textual siblings, which lost
+        emotes, and then as `RoomMessageFormatted`, which still lost media --
+        and each time the same conversation read one way live and another way
+        rebuilt from `/messages`.
+
+        The two rules coincide exactly: a visible message is an `m.room.message`
+        that the projection keeps and that carries a `body`, which excludes only
+        the class nio uses for a msgtype it cannot type. Parametrizing over
+        nio's own parse branches means the next msgtype either side stops
+        agreeing on fails here.
+        """
+        event = message_event(f"$read-{msgtype}", msgtype, extra_content=extra_content)
+        projected_as_a_message = _event_kind(event) in {EventKind.MESSAGE, EventKind.MEDIA}
+        has_a_body = not isinstance(event, nio.RoomMessageUnknown)
+
+        assert is_visible_room_message(event) == (projected_as_a_message and has_a_body), (
+            f"{msgtype} is a message to one layer and not the other, so one conversation reads two ways"
+        )
+
+    async def test_a_payload_that_is_not_its_stored_kind_is_reported(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A row whose payload contradicts its kind is corruption, not routine.
+
+        The journal accepted work and is now dropping it, which is the same
+        class of event as an unreplayable payload and deserves the same noise.
+        It was silent, and that silence is why the emote bug survived a release
+        with no line anywhere saying a message had been discarded.
+        """
+        dispatcher = self._dispatcher(alice, cast("Any", _noop_callback))
+        await admit_dispatch_event(
+            dispatcher,
+            room(),
+            reaction_event("$mislabelled"),
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+        )
+
+        with capture_logs() as logs:
+            await dispatcher.drain_once()
+
+        mismatches = [entry for entry in logs if entry["event"] == "journal_event_kind_mismatch"]
+        assert [entry["event_id"] for entry in mismatches] == ["$mislabelled"]
+        assert mismatches[0]["kind"] == EventKind.MESSAGE.value
+        assert mismatches[0]["payload_type"] == "ReactionEvent"
+        assert await alice.unsettled_event_ids() == frozenset()
+
+    async def test_live_call_event_reaches_its_durable_callback(self, alice: PrincipalStore) -> None:
+        """A supported call event stays pending until its callback completes."""
+        handled: list[nio.UnknownEvent] = []
+
+        async def on_call_event(_room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+            handled.append(event)
+
+        dispatcher = self._dispatcher(alice, cast("Any", _noop_callback))
+        dispatcher.callbacks = replace(
+            dispatcher.callbacks,
+            on_rtc=on_call_event,
+        )
+        source = {
+            "event_id": "$call",
+            "sender": ALICE,
+            "origin_server_ts": 1,
+            "type": CALL_MEMBER_EVENT_TYPE,
+            "state_key": "_call",
+            "content": {},
+        }
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+        )
+        assert views is not None
+        await alice.admit(*views)
+
+        await dispatcher.drain_once()
+
+        assert [event.event_id for event in handled] == ["$call"]
+        assert not await alice.is_pending("$call")
+
+    async def test_failed_call_callback_replays_from_durable_work(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A callback failure keeps the RTC event pending for a later pass."""
+        failure = RuntimeError("call reconciliation failed")
+        on_rtc = AsyncMock(side_effect=[failure, None])
+        dispatcher = self._dispatcher(alice, cast("Any", _noop_callback))
+        dispatcher.callbacks = replace(dispatcher.callbacks, on_rtc=on_rtc)
+        source = {
+            "event_id": "$call-retry",
+            "sender": ALICE,
+            "origin_server_ts": 1,
+            "type": CALL_MEMBER_EVENT_TYPE,
+            "state_key": "_call",
+            "content": {},
+        }
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+        )
+        assert views is not None
+        await alice.admit(*views)
+
+        await dispatcher.drain_once()
+        assert await alice.is_pending("$call-retry")
+
+        await dispatcher.drain_once()
+        assert on_rtc.await_count == 1
+        retry_sleeps[0][1].set()
+        await asyncio.sleep(0)
+        await dispatcher.drain_once()
+        assert on_rtc.await_count == 2
+        assert not await alice.is_pending("$call-retry")
+        await dispatcher.stop()
+
+
+class TestScheduleTriggerDispatch:
+    """Silent schedule work uses the ordinary formatted-message turn path."""
+
+    @staticmethod
+    def _dispatcher(
+        store: PrincipalStore,
+        on_message: Callable[[nio.MatrixRoom, nio.Event], Awaitable[TurnDispatchOutcome]],
+    ) -> JournalDispatcher:
+        return TestAdmittedWorkReachesItsCallback._dispatcher(store, on_message)
+
+    @staticmethod
+    async def _admit(
+        store: PrincipalStore,
+        event: nio.Event,
+        *,
+        event_class: EventClass = EventClass.ACTIONABLE,
+        kind: EventKind = EventKind.SCHEDULE_TRIGGER,
+    ) -> None:
+        """Store one already-classified event for dispatcher-focused tests."""
+        await store.admit(
+            _inbound_event(ROOM, event, kind, event_class),
+            _projected_event(ROOM, event, kind, self_sender=BOT),
+        )
+
+    async def test_schedule_trigger_dispatch_preserves_the_admitted_event(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Dropping metadata or crypto state would make live and replayed turns differ."""
+        handled: list[nio.Event] = []
+
+        async def on_message(_room: nio.MatrixRoom, event: nio.Event) -> TurnDispatchOutcome:
+            handled.append(event)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        event = schedule_trigger_event(
+            "$schedule-live",
+            "Inspect the durable queue",
+            extra_content={
+                "msgtype": "m.notice",
+                SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+                "com.example.request": {"history_limit": 4, "requester": ALICE},
+            },
+            ts=7_654,
+        )
+        event.decrypted = True
+        event.verified = False
+        event.sender_key = "sender-key"
+        event.session_id = "session-id"
+        dispatcher = self._dispatcher(alice, on_message)
+
+        await self._admit(alice, event)
+        await dispatcher.drain_once()
+
+        assert len(handled) == 1
+        delivered = handled[0]
+        assert isinstance(delivered, nio.RoomMessageFormatted)
+        assert delivered.event_id == event.event_id
+        assert delivered.sender == event.sender
+        assert delivered.server_timestamp == event.server_timestamp
+        assert delivered.body == "Inspect the durable queue"
+        assert delivered.source["type"] == "m.room.message"
+        assert delivered.source["content"] == {
+            "msgtype": "m.text",
+            "body": "Inspect the durable queue",
+            SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+            "com.example.request": {"history_limit": 4, "requester": ALICE},
+        }
+        assert delivered.decrypted is True
+        assert delivered.verified is False
+        assert delivered.sender_key == "sender-key"
+        assert delivered.session_id == "session-id"
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_replay_uses_the_same_message_callback(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A process restart must not strand a valid trigger as an unknown event."""
+        event = schedule_trigger_event(
+            "$schedule-replay",
+            extra_content={SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND},
+        )
+        await self._admit(alice, event)
+        handled: list[nio.Event] = []
+
+        async def on_message(_room: nio.MatrixRoom, message: nio.Event) -> TurnDispatchOutcome:
+            assert turn_dispatch_recovery_active()
+            handled.append(message)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        dispatcher = self._dispatcher(alice, on_message)
+
+        await dispatcher.drain_once()
+
+        assert [message.event_id for message in handled] == [event.event_id]
+        assert isinstance(handled[0], nio.RoomMessageFormatted)
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_whitespace_schedule_trigger_replay_settles_without_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Recovered whitespace-only trigger bodies are malformed, not actionable prompts."""
+        event = schedule_trigger_event(
+            "$schedule-whitespace-replay",
+            " \n\t",
+            extra_content={SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND},
+        )
+        await self._admit(alice, event)
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_from_ordinary_user_settles_without_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An otherwise authorized human cannot manufacture automation work."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-human", sender=ALICE)
+
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=event.source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+        )
+        assert views is None
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_with_mismatched_marker_settles_without_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The custom event type alone cannot promote a differently marked payload."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event(
+            "$schedule-wrong-marker",
+            extra_content={SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND},
+        )
+
+        await self._admit(alice, event)
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_deferred_callback_keeps_the_source_pending(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Settling on callback return would lose the turn before its response is durable."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-deferred")
+
+        await self._admit(alice, event)
+        await dispatcher.drain_once()
+
+        on_message.assert_awaited_once()
+        delivered = on_message.await_args.args[1]
+        assert isinstance(delivered, nio.RoomMessageFormatted)
+        assert await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_from_cold_history_never_reaches_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Cold history must remain inert even though the custom payload is convertible."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-cold")
+
+        await self._admit(alice, event, event_class=EventClass.CONTEXT_ONLY)
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    @pytest.mark.parametrize("body", ["", None, 7])
+    async def test_malformed_schedule_trigger_settles_without_body_logging(
+        self,
+        alice: PrincipalStore,
+        body: object,
+    ) -> None:
+        """A bad durable row must not poison later recovery or leak its body."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-malformed", body)
+
+        with capture_logs() as logs:
+            await self._admit(alice, event)
+            await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        invalid = [entry for entry in logs if entry["event"] == "schedule_trigger_invalid"]
+        assert [entry["event_id"] for entry in invalid] == [event.event_id]
+        assert "body" not in invalid[0]
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_binding_rejects_the_wrong_custom_type(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A corrupt kind label must not promote an unrelated custom event to a message."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event(
+            "$schedule-wrong-type",
+            "private-body-marker",
+            event_type="com.example.unrelated",
+        )
+
+        with capture_logs() as logs:
+            await self._admit(alice, event)
+            await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        invalid = [entry for entry in logs if entry["event"] == "schedule_trigger_invalid"]
+        assert [entry["event_id"] for entry in invalid] == [event.event_id]
+        assert "private-body-marker" not in str(logs)
+        assert not await alice.is_pending(event.event_id)

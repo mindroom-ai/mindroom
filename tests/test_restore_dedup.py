@@ -11,14 +11,10 @@ import pytest
 from mindroom import scheduling
 from mindroom.constants import resolve_runtime_paths
 from mindroom.scheduling import _MISSED_TASK_MAX_AGE_SECONDS, ScheduledWorkflow, restore_scheduled_tasks
-from tests.conftest import make_event_cache_mock
 
 
-def _conversation_cache() -> AsyncMock:
-    access = AsyncMock()
-    access.get_latest_thread_event_id_if_needed.return_value = None
-    access.notify_outbound_message = Mock()
-    return access
+def _conversation_reader() -> AsyncMock:
+    return AsyncMock()
 
 
 def _make_state_event(state_key: str, workflow: ScheduledWorkflow, status: str = "pending", idx: int = 1) -> dict:
@@ -83,8 +79,7 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(monkey
         "!r:server",
         config,
         resolve_runtime_paths(process_env={}),
-        make_event_cache_mock(),
-        _conversation_cache(),
+        _conversation_reader(),
     )
     # recent past once-task is restored; invalid cron and cancelled cron are skipped
     assert restored == 1
@@ -120,8 +115,7 @@ async def test_restore_marks_ancient_missed_task_as_failed() -> None:
         "!r:server",
         config,
         resolve_runtime_paths(process_env={}),
-        make_event_cache_mock(),
-        _conversation_cache(),
+        _conversation_reader(),
     )
     assert restored == 0
 
@@ -165,8 +159,7 @@ async def test_restore_marks_ancient_missed_task_failed_via_admin_when_active_wr
         "!r:server",
         config,
         resolve_runtime_paths(process_env={}),
-        make_event_cache_mock(),
-        _conversation_cache(),
+        _conversation_reader(),
     )
 
     assert restored == 0
@@ -212,8 +205,7 @@ async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch) 
         "!r:server",
         config,
         resolve_runtime_paths(process_env={}),
-        make_event_cache_mock(),
-        _conversation_cache(),
+        _conversation_reader(),
     )
     assert restored == 1
     start_mock.assert_called_once()
@@ -259,8 +251,7 @@ async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.
         "!r:server",
         config,
         resolve_runtime_paths(process_env={}),
-        make_event_cache_mock(),
-        _conversation_cache(),
+        _conversation_reader(),
     )
 
     assert restored == 0

@@ -14,10 +14,15 @@ That handle reuses the existing encrypted Matrix media instead of saving or uplo
 
 The bridge is accessibility-first on macOS.
 It returns a bounded accessibility tree with roles, names, values, bounds, writable state, and advertised actions, plus a screenshot cropped to the selected app window.
-The agent normally selects an element index from that state instead of guessing a screen coordinate.
-Every element index is bound to one opaque `state_id`, and a new state invalidates the old indexes.
-The local bridge also pins the exact local process and window, rechecks the current app structure and values before acting, and rejects stale state.
-On macOS, a complete tree is sampled until it is briefly stable before its `state_id` is returned, while a capped partial tree is returned immediately with `truncated: true`.
+The agent normally selects an opaque `element_ref` from that state instead of guessing a screen coordinate.
+The bridge retains up to 128 observations for 120 seconds, bound to the requester, agent, command session, and exact app.
+An `element_index` remains supported within its matching `state_id`.
+A new observation does not invalidate an older unchanged target; expiration, process/window changes, and changed target identity still reject it.
+The local bridge pins the exact local process, window, element, and ancestor identity and rechecks them before acting.
+Passive labels such as clocks may change without invalidating an unchanged actionable target.
+Full actionable text and identity stay checked even when returned text is truncated.
+On macOS, complete trees undergo bounded stabilization sampling; a changing tree can still return a `state_id` with `stability: unstable`.
+A capped partial tree returns immediately with `truncated: true` and `stability: truncated`.
 
 Pixel and keyboard operations remain explicit fallbacks for controls that do not expose useful accessibility elements.
 Fallback coordinates run from `0` to `1000` inside the selected app window rather than using raw desktop pixels.
@@ -25,23 +30,53 @@ Every completed action normally returns a new accessibility state and a new app-
 If follow-up state or capture fails after an action completes, the tool tells the agent not to repeat the action automatically.
 On macOS, taking the scoped screenshot foregrounds the selected application, so observation can change which local window is active.
 
+## Observations and recovery
+
+Pass `observation="tree"` to native app actions when semantic state is sufficient.
+Tree mode skips screenshot capture, encrypted media upload, and image input entirely.
+`observation="screenshot"` omits the element list while retaining app/state/coordinate metadata; `both` remains the default.
+The explicit `screenshot` action requires pixels.
+Results include elapsed execution time and structured/image byte counts.
+
+A timeout returns the original `request_id` and an unknown outcome.
+Call `desktop(action="request_status", request_id="...")` with a new query request to read `queued`, `running`, `completed`, `unknown`, or `not_found`.
+The query can recover the same requester's and agent's receipt across command sessions, including after local restart.
+It does not wait behind the action executor or evict the receipt it reads.
+Request IDs must be unique across actions and queries.
+A missing receipt is not evidence that the action never ran.
+Do not repeat an uncertain action automatically; inspect current state first.
+
+The local SQLite journal commits command admission before Matrix acknowledgement and records an execution start before input.
+After a crash, queued work is rechecked against current trust, deadline, policy, and lease.
+Started work with no outcome becomes unknown; it is never executed again automatically.
+Responses retry independently without repeating the original action.
+The private journal contains command arguments and structured outcomes, including encrypted media descriptors; it does not store plaintext screenshot files.
+An existing legacy replay journal is imported without resending historical outcomes.
+
+On macOS, captures return logical bounds, display identity and scale, source pixel dimensions, and output image dimensions.
+Secondary displays and negative logical origins are supported when the window fits one unambiguous display.
+Move a window fully onto one display if it spans displays or its mapping cannot be verified.
+
 ## Security Model
 
-The local bridge starts in observe-only mode unless a person at the computer grants a short control lease on the command line.
+The local bridge starts in observe-only mode unless a person at the computer grants a short control lease in Desktop Control or on the command line.
 The local process independently checks the exact cloud Matrix user, device ID, Ed25519 fingerprint, human requester ID, agent name, app ID, command expiry, request ID, and monotonic session sequence.
-Only applications named with local `--allow-app` options can be listed, launched, inspected, captured, or controlled.
+Only applications selected locally in Desktop Control or named with `--allow-app` can be listed, launched, inspected, captured, or controlled.
 Cloud configuration and model output cannot add an application to that allowlist.
 The allowlist restricts the bridge's direct target, but an allowed app can still cause operating-system side effects such as opening a link or document in another app.
 The bridge cannot then inspect or control that newly opened app unless its exact app ID is also locally allowlisted.
-The local bridge executes only one cloud request at a time, and state binding prevents parallel controls planned from the same state from both succeeding.
+The local bridge executes actions serially and revalidates each target immediately before input.
+Matrix polling, durable admission, and response delivery continue independently during slow actions.
 Cloud configuration cannot enable control, extend a running lease, or change any local allowlist.
 Restarting the local bridge returns it to observe-only mode unless `--allow-control` is supplied again.
-Moving the pointer to the upper-left corner triggers PyAutoGUI's emergency stop and latches control off until the local bridge is restarted.
+Moving the pointer to the upper-left corner of the primary display triggers the emergency stop and latches control off.
+Desktop Control can reset the latch while idle and away from that corner; resetting does not grant control.
 The local process writes an audit log entry for each completed or rejected parsed command without logging action parameters, values, or typed text.
 
 The observation actions are:
 
 - `status` reports coarse screen, cursor, accessibility-backend, and local lease state.
+- `request_status` reads a retained request outcome for the original requester and agent without executing it again.
 - `list_apps` lists only locally allowlisted app IDs and whether each is running.
 - `get_app_state` returns a fresh accessibility state and app-window screenshot.
 - `screenshot` returns a fresh state and requires its app-window screenshot to succeed.
@@ -58,10 +93,13 @@ The control actions are:
 - `set_value` changes an accessibility value only when the selected element reports that it is writable.
 - `scroll_element` scrolls at the selected element's current bounds.
 - `perform_action` invokes an exact action advertised by the selected element.
-- `click` clicks a normalized fallback coordinate inside the app window.
-- `type_text` types up to 2,000 characters into the validated and focused app.
-- `scroll` scrolls a bounded number of pages at the app or an optional normalized app coordinate.
-- `keypress` presses one locally safe navigation key in the validated app.
+- `click` and `double_click` click a normalized fallback coordinate inside the app window.
+- `hover` moves the pointer within the validated app window.
+- `drag` moves with the left button held between two normalized points in the same window, over 100–2,000 milliseconds.
+- `type_text` types up to 2,000 characters into the validated and focused app; an optional `element_ref` or `element_index` requires that exact element to have focus.
+- `scroll` scrolls a bounded number of pages up, down, left, or right at the app or an optional normalized app coordinate.
+- `keypress` supports navigation keys, shift plus navigation, command/ctrl plus a/c/x/v/z/f, and command/ctrl plus shift plus z.
+  Global switching, quit, launch, and address-bar shortcuts are rejected.
 
 The bridge does not expose a shell, filesystem, clipboard, microphone, webcam, unlock operation, privilege elevation, or arbitrary local RPC.
 It operates only the currently logged-in graphical session and cannot bypass operating-system permission prompts.
@@ -69,12 +107,15 @@ It operates only the currently logged-in graphical session and cannot bypass ope
 The optional Playwright MCP extension path is a separate browser capability on the same pinned Matrix transport and local control lease.
 It returns semantic page snapshots and stable element references from the browser, which are usually more precise for forms and interactive websites than desktop coordinates.
 Its observation actions are `status`, `profiles`, `tabs`, `snapshot`, `screenshot`, and `console`.
-Its supported control actions are `start`, `stop`, `open`, current-tab `close`, `navigate`, `pdf`, `upload`, `dialog`, and `act`.
-The browser `act` action supports semantic click, type, key press, hover, drag, select, multi-field fill, resize, wait, evaluate, and close operations.
+Its supported control actions are `start`, `stop`, and `open` a new tab.
+Existing-page mutations, including `act`, `navigate`, `close`, `focus`, `pdf`, `upload`, and `dialog`, fail before MCP dispatch because this pinned backend does not expose stable page identity.
+The provider reports `stable_targeting: false` and `supported_control_actions` explicitly.
 Enabling the extension grants access to the tabs and signed-in state in the connected browser profile, and the desktop application allowlist does not narrow that access to one tab or origin.
-Extension mode is not a network sandbox: MindRoom validates URLs passed directly to `open` and `navigate`, but redirects, page scripts, and evaluated JavaScript retain the connected profile's normal network reach.
-The local MCP process is pinned to the documented package version and can read upload files only from its `<storage>/desktop-browser` workspace.
-The desktop browser target operates the extension's current tab and rejects `targetId` and `focus`, because Playwright MCP exposes mutable numeric tab indices that can point at a different signed-in tab after another tab closes.
+Extension mode is not a network sandbox: MindRoom validates URLs passed to `open`, while redirects and page scripts retain the connected profile's normal network reach.
+The local MCP process uses the pinned package version documented below.
+Browser observations describe the current page.
+A closed or crashed tab can cause upstream MCP to select another page automatically.
+A fresh snapshot, reconnect, URL/title match, or numeric index cannot make subsequent existing-page mutation safe with this backend.
 The browser extension and MCP process communicate over a machine-local loopback connection, while every cloud-to-local command still travels through pinned Matrix Olm encryption.
 
 Matrix protects the local-to-cloud transport, but accessibility state and screenshots become model input after MindRoom decrypts them in the cloud process.
@@ -100,12 +141,37 @@ uv tool install 'mindroom[desktop]'
 ```
 
 macOS supports native semantic state through AXUIElement and requires Accessibility permission for state and control.
-macOS also requires Screen Recording permission for screenshots.
+macOS screenshots require macOS 14 or newer and Screen Recording permission.
+ScreenCaptureKit captures the exact selected window, with its process and bounds checked before capture.
 Windows and Linux currently expose screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
 Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
 A headless or locked graphical session is not a supported target.
 Playwright extension mode requires Node.js 18 or newer, a Chromium-family browser, and the official Playwright MCP Bridge extension installed in the browser profile that MindRoom will use.
 Chrome and Brave are supported by the local command through an explicit browser executable and user-data root.
+
+## Native macOS setup
+
+Open MindRoom and select **Computer access**, or click the **Computer access: …** status row in the menu bar.
+In the requester-agent chat, run `!desktop setup` and paste its JSON setup data into the app.
+Review the displayed controller fingerprint, requester, and agent, then sign in and choose allowed applications.
+Confirm the displayed controller fingerprint, requester, and agent locally, then choose **Save Setup**.
+Confirm the saved identities again before choosing **Claim Pairing**.
+Return the displayed `!desktop confirm ...` command to the same chat.
+For a homeserver behind Cloudflare Access, complete the printed terminal login flow first.
+
+The permission controls show Accessibility and Screen Recording readiness and link to the corresponding System Settings panes.
+Start in observe-only mode, then grant a bounded local lease when control is needed.
+Stop and Revoke remain available while another setup operation is waiting.
+The menu displays the current mode, remaining lease, and active action without exposing its arguments.
+Changing configuration or restarting the app/helper does not renew control.
+Once a command journal exists, saving a different controller identity is rejected before settings change.
+Pending work remains bound to its original controller.
+Saving settings can repair malformed local configuration or restore private file permissions; revision checks still apply.
+
+Release builds package the existing Python provider inside a separately signed helper app with a fixed bundle identity.
+The menu app owns that foreground helper through inherited private standard-I/O pipes.
+There is no listening management socket or separate background daemon.
+The terminal workflow remains available below.
 
 ## 1. Create the Local Desktop Device
 
@@ -235,8 +301,9 @@ The Desktop tool can explain the trusted chat command, but the model cannot regi
 Use `!desktop rotate` to replace a device without dropping the current target before confirmation, or `!desktop disconnect confirm` to remove it.
 
 The `desktop` tool runs in the primary agent process because it needs that live agent's Matrix device and room requester identity.
-The `browser` tool remains worker-routable for host-browser isolation, but its Matrix desktop target requires the primary process's live Matrix context.
-Do not list `browser` in `worker_tools` for an agent that uses `target: desktop`; a worker-routed desktop call fails closed with a live-context error.
+The `browser` tool keeps calls resolving to `target: desktop` in the primary process, including when `default_target: desktop` is configured.
+Host-browser calls still follow the worker routing policy, even with a desktop default or configured desktop device.
+Listing `browser` in `worker_tools` therefore isolates its host calls while preserving desktop control through the live Matrix context.
 It is hidden from OpenAI-compatible API runs when approval policy requires Matrix approval because those runs have no Matrix approval transport.
 
 The separate `browser` tool can still target its Playwright extension transport through its own configuration:
@@ -289,7 +356,8 @@ The process opens outbound HTTPS connections to Matrix and does not listen on a 
 Authenticated, unexpired commands received by the initial Matrix sync are dispatched during startup, including control commands when the new process has a valid local control lease.
 Wait until the terminal says `Desktop bridge online` before sending new work when the caller needs confirmation that startup and device pinning completed.
 The bridge durably journals an accepted command before local execution, so a Matrix redelivery after a crash returns the cached response or an unknown-outcome warning instead of repeating a started control.
-Completed journal records retain bounded desktop or browser response content and screenshot decryption metadata in `<storage>/desktop_bridge/command_journal.json`, which MindRoom requires to be owner-only (`0600`) before reading.
+Completed journal records retain bounded desktop or browser response content and screenshot decryption metadata in `<storage>/desktop_bridge/commands.sqlite3`, which MindRoom requires to be owner-only (`0600`) before reading.
+Existing `command_journal.json` files are imported as legacy receipts; current admission and delivery state lives in SQLite.
 
 To grant semantic and fallback control for fifteen minutes, stop the observe-only process and restart it locally with an explicit lease:
 
@@ -307,7 +375,8 @@ mindroom desktop run \
 
 The maximum lease accepted by the CLI is sixty minutes.
 The running process enforces the lease with a monotonic local deadline, so moving the wall clock backward does not extend control.
-The bridge continues running after the lease expires, but every control action is rejected until a person restarts it with a new lease.
+The bridge continues observing after the lease expires, but every control action is rejected until a person grants another local lease.
+Desktop Control can grant or revoke without restarting; the CLI requires a new invocation.
 
 ### Use the Signed-In Browser Profile
 
@@ -337,17 +406,19 @@ The connection page lets the user choose an initial tab and displays a reconnect
 To reconnect after local bridge restarts without another browser prompt, store that value as `PLAYWRIGHT_MCP_EXTENSION_TOKEN` in the local MindRoom `.env` file with owner-only permissions.
 Treat the reconnect token like a local browser-control credential, never commit it, and regenerate it from the extension page if it is exposed.
 MindRoom passes only the safe MCP subprocess environment, this explicit reconnect token, and the selected browser profile root to the Node child, so unrelated provider API keys are not inherited.
-The local bridge terminal remains the only place that can grant or renew the control lease.
-Files used with `browser(action="upload", target="desktop")` must already exist under `<storage>/desktop-browser` on the local computer.
+Only Desktop Control and the local bridge terminal can grant or renew the control lease.
 
 ## 5. Agent Flow
 
 The agent calls `list_apps` and selects an exact returned app ID.
 If the selected app is not running, the agent calls `launch_app`, which requires the local control lease and returns fresh state when the app becomes accessible.
 It then calls `get_app_state` and inspects the returned roles, names, actions, hierarchy, and screenshot.
-It prefers a semantic action using an element index and the matching `state_id`.
+It prefers a semantic action using an `element_ref` and the matching `state_id`.
 The action response contains a new `state_id`, new element indexes, and a new screenshot for the next decision.
 The agent uses normalized `click`, `type_text`, `scroll`, or `keypress` only when the accessibility state lacks the needed semantic control.
+Coordinate input, unscoped typing, general scrolling, and keypress fallbacks require a fresh, complete, stable observation.
+If state is unstable or truncated, let the UI settle and call `get_app_state` again before a fallback.
+Semantic actions and element-targeted typing use separate exact-element validation.
 If the bridge reports stale state, the agent calls `get_app_state` again instead of reusing the old element index or coordinate.
 If an action outcome is unknown or its follow-up state is incomplete, the agent observes again and does not automatically repeat the action.
 Some applications change their UI successfully and then return an accessibility error, so a fresh observation is the only safe way to resolve an unknown outcome.
@@ -355,9 +426,8 @@ If the user asks to receive the screenshot, the agent calls `desktop(action="scr
 
 For browser work, the agent first uses `browser(action="start", target="desktop")` while the local control lease is active, then calls `browser(action="tabs", target="desktop")` or `browser(action="snapshot", target="desktop")`.
 The snapshot returns semantic roles, names, current values, and element references from the current page.
-Reading and operating the current tab avoids treating Playwright MCP's mutable tab-list indices as durable identities.
-Element references are opaque and may include frame identity, so the agent must pass each returned reference through unchanged.
-The agent passes those references to `browser(action="act", target="desktop", request=...)` for form filling and interactive steps.
+Existing-page control is unavailable through this pinned extension backend until stable page targeting is supported.
+For app-level control, an explicitly allowlisted browser can still use the native desktop state and input path.
 After navigation or a significant page update, the agent requests a new snapshot instead of reusing old references.
 The `screenshot` action is useful for visual context, but semantic actions should use snapshot references rather than guessing image coordinates.
 For a browser screenshot that the user should receive, the agent passes `returnAttachment=true` with `target="desktop"` and sends the returned `attachment_id` through `matrix_message` in the same turn.
@@ -375,6 +445,9 @@ CONTROL_ACTIONS = {
     "scroll_element",
     "perform_action",
     "click",
+    "double_click",
+    "hover",
+    "drag",
     "type_text",
     "scroll",
     "keypress",
@@ -404,7 +477,12 @@ Approval does not override an absent or expired local control lease.
 
 Rotate the local desktop Matrix device with `mindroom desktop login --replace`, revoke the old device in Matrix account management, then run `!desktop rotate` and follow the new pairing command in the direct agent chat.
 The `--replace` option creates a fresh saved session but cannot revoke the old device by itself.
-If the cloud agent receives a new Matrix device, run `!desktop rotate` and follow the new pairing command so the local bridge pins the replacement controller identity.
+Cloud-controller rotation is a separate case: `!desktop rotate` starts pairing but does not migrate the local command journal.
+An existing journal pins the cloud user, device ID, and Ed25519 fingerprint, so pairing alone cannot resume that journal under a replacement controller.
+Keep the original journal and unresolved outcomes intact; do not delete or rewrite its ownership binding.
+The native app has no journal-migration action.
+Terminal commands accept `--storage-path` for a separate local setup; use the same new directory for `mindroom desktop login`, `mindroom desktop setup`, and `mindroom desktop run`.
+A separate setup does not transfer pending commands or their outcomes from the old journal.
 A device ID or Ed25519 mismatch is a hard failure and should be treated as a rotation or possible substitution, not bypassed.
 Use `Ctrl+C` to stop accepting new bridge commands and begin shutdown.
 Desktop input already dispatched through a native worker thread and active Playwright MCP calls are not preemptible, so an in-flight control can still finish before shutdown returns; observe local state before deciding whether to retry it.
@@ -414,10 +492,11 @@ For stronger isolation, run the bridge in a dedicated operating-system account a
 
 Native semantic accessibility is implemented only for macOS in this version.
 Playwright extension mode is limited to Chromium-family browsers, so Safari and other unsupported browsers continue to use the accessibility and scoped-screenshot path.
-Screenshots and pixel fallback currently target the primary display, so an app window must fit fully on that display for a scoped screenshot to succeed.
-The bridge foregrounds and revalidates the allowed app before an on-screen window crop, but an always-on-top overlay inside those bounds can still appear in the screenshot.
+On macOS, window-bound screenshots and coordinate input support secondary displays when the window fits one unambiguous display.
+ScreenCaptureKit captures the selected window, with process and window identity revalidated around capture.
+Windows and Linux pixel operations currently target the primary display.
 Global keyboard shortcut chords are intentionally unavailable because they could switch to or launch an application outside the local allowlist.
 The returned accessibility tree is capped and depth-bounded, and the state reports when it was truncated.
 Table and outline state prefers the rows that macOS reports as visible so off-screen Finder-style content does not crowd current controls out of the bounded tree.
-There is no MatrixRTC live screen stream, tray application, multi-monitor selector, unattended service installer, or remote approval of local lease changes yet.
+There is no MatrixRTC live screen stream, multi-monitor selector, unattended service installer, or remote approval of local lease changes yet.
 Commands and encrypted responses are Matrix to-device messages rather than persistent room events, while normal MindRoom tool traces and optional approval cards remain visible in the Matrix conversation.

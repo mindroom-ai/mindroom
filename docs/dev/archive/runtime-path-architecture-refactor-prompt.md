@@ -1,6 +1,8 @@
 # Runtime Path Architecture Refactor Prompt
 
-Use this prompt when delegating the config-path and storage-path architecture cleanup to an agent.
+> **Archived prompt:** This artifact is retained for historical context and must not be used as current implementation guidance.
+
+This prompt was used when delegating the config-path and storage-path architecture cleanup to an agent.
 
 ```text
 You are doing an architecture refactor, not a bug fix.
@@ -14,8 +16,8 @@ Do not preserve old path behavior when it conflicts with the new contract.
 Do not add compatibility wrappers whose only purpose is to keep old tests passing.
 Do not treat removed tool-constructor env fallback as part of the runtime contract.
 
-Context:
-This repo keeps regressing on:
+Context at the time:
+This repo had recurring regressions in:
 - config file path resolution
 - storage root resolution
 - config-adjacent .env loading and precedence
@@ -114,7 +116,7 @@ Guardrails to add:
 - A regression test or lint-style test that prevents new direct runtime use of import-time runtime globals outside approved bootstrap modules.
 - A regression test or lint-style test that prevents new direct `os.getenv()` / `os.environ` reads of runtime-varying keys outside approved bootstrap or subprocess-entry modules.
 - Define the approved-module allowlist explicitly in the test/lint helper and keep it small.
-- The allowlist should be concrete, for example startup-only modules such as `constants.py`, CLI startup, orchestrator bootstrap, and dedicated subprocess-entry code, rather than an open-ended concept of "bootstrap".
+- The allowlist should name only specific startup or subprocess entry modules and call sites, rather than broadly allowing shared constants or orchestration modules.
 
 Deliverables:
 1. Implement the refactor.

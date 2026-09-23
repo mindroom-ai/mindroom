@@ -32,6 +32,7 @@ MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER=X-MindRoom-User-Id
 MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER=X-MindRoom-User-Email
 MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER=X-MindRoom-Matrix-User-Id
 MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE='@{localpart}:example.org'
+MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN=example.com
 ```
 
 `MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER` is required when trusted upstream auth is enabled.
@@ -43,7 +44,10 @@ When present, the email value is stored in `request.scope["auth_user"]["email"]`
 For private `user` and `user_agent` OAuth flows, the trusted identity must resolve to the requester identity used by Matrix-backed tool execution.
 Prefer `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` when your access layer can supply a real Matrix ID.
 When the access layer only supplies email, set `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` to derive the Matrix ID from the trusted email localpart.
-For example, the template `@{localpart}:example.org` maps `alice@example.com` to `@alice:example.org`.
+Set `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` to the single allowed email domain before upgrading a deployment that derives Matrix identities from email.
+Missing domain configuration fails closed; emails from any other domain, including subdomains, are rejected.
+Domain comparison is case-insensitive.
+For example, with email domain `example.com`, the template `@{localpart}:example.org` maps `alice@example.com` to `@alice:example.org`.
 The template must contain exactly one `{localpart}` placeholder, no other braces, and must render a valid Matrix user ID.
 Derived Matrix IDs must pass MindRoom's Matrix user ID parser.
 
@@ -79,6 +83,105 @@ When no Matrix user ID claim is configured, strict mode only accepts a Matrix id
 That derivation can use the verified JWT email claim even when `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` is not configured.
 When no Matrix user ID claim or email-to-Matrix template is configured, strict mode rejects `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` because that header is not backed by a signed identity.
 
+## Usage Export Service
+
+Strict JWT deployments can expose `GET /api/usage/export` to a service client without granting that client a browser or administrator identity.
+The route prepares the same organization-wide report as the standard dashboard-authenticated `GET /api/usage` route and accepts the same optional `include_daily` and `include_requests` query parameters, both defaulting to `false`.
+With `include_requests=true`, the report adds reconciled provider-request token facts and request coverage as described in [Token Usage](https://docs.mindroom.chat/dashboard/#token-usage); missing request detail remains unavailable.
+Both routes share background preparation and cache state while authenticating every request independently.
+It never accepts an assertion from a query parameter, and methods other than `GET` are unsupported.
+
+Configure trusted-upstream strict JWT mode as above, then add a dedicated service audience and exact client ID:
+
+```bash
+MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true
+MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER=Cf-Access-Authenticated-User-Email
+MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true
+MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER=Cf-Access-Jwt-Assertion
+MINDROOM_TRUSTED_UPSTREAM_JWKS_URL=https://gateway.example.org/.well-known/jwks.json
+MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE=mindroom-dashboard
+MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER=https://gateway.example.org
+MINDROOM_USAGE_SERVICE_JWT_AUDIENCE=mindroom-usage-export
+MINDROOM_USAGE_SERVICE_CLIENT_ID=usage-export-client.example.org
+```
+
+The service assertion must use `RS256` and include valid `exp`, `iat`, `iss`, and `aud` claims.
+It must also contain `type=app`, a `common_name` exactly equal to `MINDROOM_USAGE_SERVICE_CLIENT_ID`, and an empty `sub` claim.
+The issuer, JWKS URL, and assertion header come from the trusted-upstream settings, while `MINDROOM_USAGE_SERVICE_JWT_AUDIENCE` is separate from the browser audience.
+
+The export route returns `503` until trusted-upstream auth, strict JWT mode, every shared strict-JWT setting, and both service settings are configured.
+Missing or invalid assertions return `401`.
+A valid service assertion authorizes only `/api/usage/export`; it does not authorize `/api/usage`, configuration APIs, personal usage APIs, or any administrator route.
+
+Every request, including polls and cache hits, must include the service assertion.
+When a report needs preparation, the route promptly returns `202` with `{"status":"pending"}`, `Retry-After: 5`, and `Cache-Control: no-store`.
+Poll the same URL with the same `include_daily` and `include_requests` values after the requested delay.
+Once preparation succeeds, an authenticated poll returns `200`, `Cache-Control: no-store`, and the existing aggregate report schema.
+The four daily/request option combinations are prepared and cached separately, successful results expire 60 seconds after completion, and only one retained-data scan runs at a time.
+Configuration or runtime changes discard earlier results.
+On either organization route, a failed scan or unavailable committed configuration returns a content-free `503` with `Cache-Control: no-store`; scan failures remain cached for five seconds before another request can start a retry.
+
+## Connections Portal
+
+Set `MINDROOM_CONNECTIONS_AGENT` to the name of a private agent to enable `/connections`.
+The portal lists assigned tools and groups OAuth services by agent: the selected private agent and shared agents the authenticated user can use or manage credentials for.
+Services come from each authorized agent's available tools, including deferred tools and registered plugin or MCP OAuth providers.
+Tools without browser authentication also appear, and room-dependent tools are marked **MindRoom only**.
+Each service status loads independently, so a failed or unconnected service does not block the others.
+The portal does not expose model configuration, generic credential editing, or OAuth client administration.
+
+```bash
+MINDROOM_CONNECTIONS_AGENT=personal
+MINDROOM_PUBLIC_URL=https://assistant.example.org
+```
+
+Configure strict JWT authentication as described above, including a signed Matrix user ID claim or a mapping from verified email.
+The portal rejects header-only, standalone API-key, and owner-identity fallback authentication.
+The selected agent must use `private.per: user` or `private.per: user_agent`:
+
+```yaml
+agents:
+  personal:
+    display_name: Personal Mind
+    role: Personal assistant
+    private:
+      per: user_agent
+    access:
+      users: ["@*:example.org"]
+    tools:
+      - google_drive
+      - name: google_calendar
+        defer: true
+```
+
+Agent use requires a matching `access.users` grant, configured administrator authority, or verified membership in a configured grant room.
+Conversation-only `access.current_room_members` grants do not apply because browser and MCP requests have no current Matrix room.
+Shared agents also appear when the user is listed in `agents.<name>.credential_managers`, even when they cannot use that agent.
+Users with agent access can select its compatible MCP tools and see shared connection availability without the connected account identity.
+Credential managers and administrators can manage shared connections; users can manage their own requester-scoped connections.
+Credential management alone does not grant MCP tool access.
+The server resolves canonical Matrix aliases and rechecks agent and provider authorization for every status, connect, and disconnect request.
+The browser selects an authorized agent; it cannot override the credential owner or execution scope.
+Shared connections keep their configured credential scope: `worker_scope: shared` is per agent, while an unset scope uses the installation-wide store.
+Disconnecting an account affects every agent using that credential scope.
+Existing requester-only provider rules still apply.
+Disconnect confirmations follow the connection's credential scope, including personal connections on shared agents.
+Account linking and disconnect reuse the same OAuth state, callback, token store, and reset lifecycle used by tools.
+Operators still configure OAuth clients; shared service accounts are not displayed as personal connections.
+
+When the portal is enabled, upstream users without administrator authority cannot access administrator APIs or dashboard pages.
+Existing state-bound OAuth callback, success, and reset pages remain available for account linking.
+To share a hostname with another frontend, forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and the existing `/api/oauth/*` routes to the MindRoom API.
+Keep these routes behind the authenticated upstream and exclude `/connections` from any other application's service-worker navigation fallback.
+Portal assets are served under `/connections/assets/`; root `/assets/` can continue serving the other application.
+Use a runtime build containing the portal before enabling the routes.
+
+Connect and disconnect requests require an HTTPS public origin and a same-origin `Origin` header matching `MINDROOM_PUBLIC_URL`, or the request base URL when unset.
+The portal API returns private, non-cacheable account status and never returns token or OAuth client configuration.
+The optional [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/) reuses these accounts to expose selected agents' tools to external MCP clients.
+When enabled, the portal lets each user choose which eligible agents are exposed through every one of their MCP clients.
+Its machine endpoints use separate gateway OAuth bearer authentication; the browser consent page uses this same signed login.
+
 ## Instance Chart
 
 For the hosted instance chart, configure the equivalent values:
@@ -90,6 +193,7 @@ trustedUpstreamAuth:
   emailHeader: X-MindRoom-User-Email
   matrixUserIdHeader: X-MindRoom-Matrix-User-Id
   emailToMatrixUserIdTemplate: "@{localpart}:example.org"
+  emailDomain: example.com
   requireJwt: "true"
   jwtHeader: X-Trusted-Jwt
   jwksUrl: https://gateway.example.com/.well-known/jwks.json
@@ -103,6 +207,7 @@ trustedUpstreamAuth:
 The chart renders these values as the `MINDROOM_TRUSTED_UPSTREAM_*` runtime environment variables.
 The instance chart fails rendering when `trustedUpstreamAuth.emailToMatrixUserIdTemplate` is set without `trustedUpstreamAuth.emailHeader`.
 The instance chart also fails rendering when `trustedUpstreamAuth.requireJwt` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, or `jwtIssuer`.
+Both charts require `emailDomain` when an email template is configured.
 The template value must contain exactly one `{localpart}` placeholder.
 When using the platform provisioner, configure the platform chart with matching provisioner values:
 
@@ -114,6 +219,7 @@ provisioner:
     emailHeader: X-MindRoom-User-Email
     matrixUserIdHeader: X-MindRoom-Matrix-User-Id
     emailToMatrixUserIdTemplate: "@{localpart}:example.org"
+    emailDomain: example.com
     requireJwt: "true"
     jwtHeader: X-Trusted-Jwt
     jwksUrl: https://gateway.example.com/.well-known/jwks.json
@@ -130,6 +236,11 @@ The platform chart also fails rendering when `provisioner.trustedUpstreamAuth.re
 
 ## Security Boundary
 
+Dashboard configuration is an operator capability.
+Without `MINDROOM_CONNECTIONS_AGENT`, every user authenticated by the trusted upstream can read and change dashboard configuration, regardless of the Matrix `administrators` list.
+Restrict gateway admission to trusted operators in that mode.
+With Connections enabled, ordinary dashboard pages and configuration APIs additionally require a Matrix identity authorized by `administrators`; the portal and state-bound OAuth completion routes keep their separate access checks.
+
 Trusted upstream auth is provider-neutral.
 A reverse proxy, ingress controller, OAuth2 proxy, or another gateway can provide the headers as long as MindRoom only receives gateway-verified values.
 Never expose a MindRoom instance with this mode enabled directly to browsers or the public internet.
@@ -139,3 +250,16 @@ If the configured trusted user ID header is missing, MindRoom returns `401`.
 If strict JWT mode is enabled and the configured JWT header is missing or invalid, MindRoom returns `401`.
 If a trusted browser identity does not map to the Matrix requester stored in an OAuth connect token, MindRoom returns `403`.
 Existing Supabase platform auth and standalone API-key auth remain available when trusted upstream auth is not enabled.
+
+## Browser mutation protection
+
+Requests that use trusted upstream browser authentication or dashboard cookies must send an `Origin` matching `MINDROOM_PUBLIC_URL` for POST, PUT, PATCH, and DELETE operations.
+If no public URL is configured, MindRoom uses the request origin.
+Requests marked `Sec-Fetch-Site: cross-site` are rejected even when the Origin matches.
+A successfully validated API bearer token does not require these browser headers.
+Adding a bearer header to a request authenticated by trusted upstream identity does not bypass this protection.
+The dashboard CORS allowlist controls which origins may read credentialed responses; it does not authorize cross-origin cookie or trusted-upstream mutations.
+Host the dashboard under the app's public origin, or use its development proxy, which authenticates API calls with a bearer token.
+
+Conversation-issued OAuth links for requester-scoped credentials require the intended requester to authenticate before starting authorization and again at the callback.
+Shared-agent credential links retain their short-lived, single-use delegation behavior.

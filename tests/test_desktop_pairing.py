@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import sqlite3
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
+from uuid import uuid4
 
+import nio
 import pytest
+from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
+from nio.durable import RecordKind, SyncBatch, SyncRecord
 
 import mindroom.tools  # noqa: F401
 from mindroom.commands.desktop_commands import DesktopCommandScope, handle_desktop_command
@@ -33,7 +38,7 @@ from mindroom.desktop.protocol import (
 )
 from mindroom.matrix.device_identity import PinnedMatrixDevice
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
+from mindroom.matrix.olm_to_device import OlmToDeviceError
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -155,7 +160,7 @@ async def test_pairing_claim_uses_authenticated_device_store_identity(
         requester_id="@alice:example.org",
         agent_name="computer",
     )
-    device = SimpleNamespace(ed25519="signed-fingerprint", blacklisted=False)
+    device = SimpleNamespace(ed25519="signed-fingerprint", curve25519="curve-key", deleted=False, blacklisted=False)
     client = SimpleNamespace(
         olm=SimpleNamespace(device_store={"@desktop:example.org": {"SIGNED": device}}),
     )
@@ -163,7 +168,7 @@ async def test_pairing_claim_uses_authenticated_device_store_identity(
         source={"content": DesktopPairingClaim(pairing.token).to_content()},
         sender="@desktop:example.org",
         type=DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
-        authenticated_device_id="SIGNED",
+        authenticated_sender=AuthenticatedDevice("@desktop:example.org", "SIGNED", "curve-key", "signed-fingerprint"),
     )
     send_ack = AsyncMock()
     monkeypatch.setattr("mindroom.desktop.pairing_receiver.send_encrypted_to_device", send_ack)
@@ -193,57 +198,109 @@ async def test_pairing_claim_uses_authenticated_device_store_identity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ack_failure", [False, True])
 async def test_pairing_client_retries_until_authenticated_controller_ack(
     monkeypatch: pytest.MonkeyPatch,
+    ack_failure: bool,
 ) -> None:
-    """Local CLI reports success only after its pinned controller accepts the claim."""
-    controller = PinnedMatrixDevice(
-        user_id="@computer:example.org",
-        device_id="CLOUD",
-        ed25519="cloud-fingerprint",
-    )
+    """Pairing consumes durable acknowledgements and removes its scoped callback."""
+    controller = PinnedMatrixDevice("@computer:example.org", "CLOUD", "cloud-fingerprint")
     verification = desktop_pairing_verification("pair-code", "desktop-fingerprint")
-    cloud_device = SimpleNamespace(ed25519="cloud-fingerprint", blacklisted=False)
+    ready = asyncio.Event()
+    acknowledged = asyncio.Event()
+    client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
+    client.olm = SimpleNamespace(
+        account=SimpleNamespace(identity_keys={"ed25519": "desktop-fingerprint"}),
+        device_store={
+            controller.user_id: {
+                controller.device_id: SimpleNamespace(
+                    ed25519=controller.ed25519,
+                    curve25519="curve-key",
+                    deleted=False,
+                    blacklisted=False,
+                ),
+            },
+        },
+    )
+    event = AuthenticatedToDeviceEvent(
+        source={"content": DesktopPairingAccepted(verification).to_content()},
+        sender=controller.user_id,
+        type=DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE,
+        authenticated_sender=AuthenticatedDevice(
+            controller.user_id,
+            controller.device_id,
+            "curve-key",
+            controller.ed25519,
+        ),
+    )
+    batch = SyncBatch(uuid4(), 1, (SyncRecord(RecordKind.TO_DEVICE, None, event.source),))
 
-    class PairingClient:
-        def __init__(self) -> None:
-            self.olm = SimpleNamespace(
-                account=SimpleNamespace(identity_keys={"ed25519": "desktop-fingerprint"}),
-                device_store={controller.user_id: {controller.device_id: cloud_device}},
-            )
-            self.callback: object | None = None
-            self.sync_count = 0
+    class Source:
+        async def run(self) -> None:
+            await asyncio.Event().wait()
 
-        def add_to_device_callback(self, callback: object, _event_type: object) -> None:
-            self.callback = callback
+        async def wait_for_work(self) -> None:
+            await ready.wait()
 
-        async def sync(self, **_kwargs: object) -> object:
-            self.sync_count += 1
-            if self.sync_count == 2:
-                event = AuthenticatedToDeviceEvent(
-                    source={"content": DesktopPairingAccepted(verification).to_content()},
-                    sender=controller.user_id,
-                    type=DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE,
-                    authenticated_device_id=controller.device_id,
-                )
-                assert self.callback is not None
-                await self.callback(event)  # type: ignore[operator]
-            return object()
+        async def next_batch(self) -> SyncBatch:
+            ready.clear()
+            return batch
 
-    client = PairingClient()
-    send_claim = AsyncMock()
+        async def dispatch(self, _record: SyncRecord) -> None:
+            await client._on_to_device(event)
+
+        async def ack(self, _batch: SyncBatch) -> None:
+            if ack_failure:
+                await asyncio.sleep(0.01)
+                msg = "durable acknowledgement failed"
+                raise OSError(msg)
+            acknowledged.set()
+
+    sends = []
+
+    async def send_claim(*_args: object, **_kwargs: object) -> None:
+        sends.append("claim")
+        if len(sends) == 2:
+            ready.set()
+
+    owner = SimpleNamespace(client=client, source=Source())
     monkeypatch.setattr("mindroom.desktop.pairing_client.resolve_pinned_device", AsyncMock())
     monkeypatch.setattr("mindroom.desktop.pairing_client.prepare_desktop_client", AsyncMock())
     monkeypatch.setattr("mindroom.desktop.pairing_client.send_encrypted_to_device", send_claim)
+    monkeypatch.setattr("mindroom.desktop.pairing_client._PAIRING_RETRY_SECONDS", 0, raising=False)
+    try:
+        if ack_failure:
+            with pytest.raises(OSError, match="durable acknowledgement failed"):
+                await send_desktop_pairing_claim(owner, controller, code="pair-code")
+            assert not acknowledged.is_set()
+        else:
+            assert await send_desktop_pairing_claim(owner, controller, code="pair-code") == verification
+            assert sends == ["claim", "claim"]
+            assert acknowledged.is_set()
+        assert client.to_device_callbacks == []
+    finally:
+        await client.close()
 
-    result = await send_desktop_pairing_claim(
-        client,  # type: ignore[arg-type]
-        controller,
-        code="pair-code",
+
+@pytest.mark.asyncio
+async def test_pairing_callback_removed_when_pinning_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Early preparation errors cannot leave a stale pairing callback registered."""
+    client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
+    client.olm = SimpleNamespace(account=SimpleNamespace(identity_keys={"ed25519": "desktop-fingerprint"}))
+    monkeypatch.setattr(
+        "mindroom.desktop.pairing_client.resolve_pinned_device",
+        AsyncMock(side_effect=OlmToDeviceError("pin changed")),
     )
-
-    assert result == verification
-    assert send_claim.await_count == 2
+    try:
+        with pytest.raises(OlmToDeviceError, match="pin changed"):
+            await send_desktop_pairing_claim(
+                SimpleNamespace(client=client, source=object()),
+                PinnedMatrixDevice("@c:example.org", "C", "key"),
+                code="code",
+            )
+        assert client.to_device_callbacks == []
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
@@ -258,7 +315,7 @@ async def test_pairing_claim_contains_database_errors(
         raise sqlite3.OperationalError(message)
 
     monkeypatch.setattr("mindroom.desktop.pairing_receiver.claim_desktop_pairing", fail_claim)
-    device = SimpleNamespace(ed25519="signed-fingerprint", blacklisted=False)
+    device = SimpleNamespace(ed25519="signed-fingerprint", curve25519="curve-key", deleted=False, blacklisted=False)
     client = SimpleNamespace(
         olm=SimpleNamespace(device_store={"@desktop:example.org": {"SIGNED": device}}),
     )
@@ -266,7 +323,7 @@ async def test_pairing_claim_contains_database_errors(
         source={"content": DesktopPairingClaim("pairing-token").to_content()},
         sender="@desktop:example.org",
         type=DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
-        authenticated_device_id="SIGNED",
+        authenticated_sender=AuthenticatedDevice("@desktop:example.org", "SIGNED", "curve-key", "signed-fingerprint"),
     )
 
     await DesktopPairingReceiver(
@@ -323,7 +380,6 @@ def test_pairing_receiver_registration_owns_desktop_enablement_check(tmp_path: P
 
 def test_setup_command_uses_public_homeserver_and_access_flag(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hosted runtimes can print one reachable Desktop setup command."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -340,19 +396,17 @@ def test_setup_command_uses_public_homeserver_and_access_flag(
         },
         runtime_paths,
     )
-    monkeypatch.setattr(
-        "mindroom.commands.desktop_commands.controller_identity_for_entity",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            user_id="@computer:example.org",
-            device_id="CLOUD",
-            ed25519="cloud-fingerprint",
-        ),
+    controller_identity = lambda _entity_name: SimpleNamespace(  # noqa: E731
+        user_id="@computer:example.org",
+        device_id="CLOUD",
+        ed25519="cloud-fingerprint",
     )
     scope = DesktopCommandScope(
         config=config,
         runtime_paths=runtime_paths,
         agent_name="computer",
         requester_id="@alice:example.org",
+        controller_identity=controller_identity,
     )
 
     setup_response = handle_desktop_command("setup", scope=scope)
@@ -392,7 +446,6 @@ def test_setup_command_uses_public_homeserver_and_access_flag(
 
 def test_confirmation_keeps_claim_retryable_when_controller_lookup_fails(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Startup-guidance failure must not consume a valid pairing claim."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -409,12 +462,12 @@ def test_confirmation_keeps_claim_retryable_when_controller_lookup_fails(
         ed25519="cloud-fingerprint",
     )
     identity_lookup = Mock(return_value=controller)
-    monkeypatch.setattr("mindroom.commands.desktop_commands.controller_identity_for_entity", identity_lookup)
     scope = DesktopCommandScope(
         config=config,
         runtime_paths=runtime_paths,
         agent_name="computer",
         requester_id="@alice:example.org",
+        controller_identity=identity_lookup,
     )
     setup_response = handle_desktop_command("setup", scope=scope)
     token_match = re.search(r"--code ([A-Za-z0-9_-]+)", setup_response)
@@ -438,7 +491,6 @@ def test_confirmation_keeps_claim_retryable_when_controller_lookup_fails(
 
 def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A normal agent stores each requester's Desktop separately from every other scope."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -461,31 +513,31 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
         },
         runtime_paths,
     )
-    monkeypatch.setattr(
-        "mindroom.commands.desktop_commands.controller_identity_for_entity",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            user_id="@computer:example.org",
-            device_id="CLOUD",
-            ed25519="cloud-fingerprint",
-        ),
+    controller_identity = lambda _entity_name: SimpleNamespace(  # noqa: E731
+        user_id="@computer:example.org",
+        device_id="CLOUD",
+        ed25519="cloud-fingerprint",
     )
     alice_scope = DesktopCommandScope(
         config=config,
         runtime_paths=runtime_paths,
         agent_name="computer",
         requester_id="@alice:example.org",
+        controller_identity=controller_identity,
     )
     bob_scope = DesktopCommandScope(
         config=config,
         runtime_paths=runtime_paths,
         agent_name="computer",
         requester_id="@bob:example.org",
+        controller_identity=controller_identity,
     )
     alice_other_agent_scope = DesktopCommandScope(
         config=config,
         runtime_paths=runtime_paths,
         agent_name="other",
         requester_id="@alice:example.org",
+        controller_identity=controller_identity,
     )
 
     setup_response = handle_desktop_command("setup", scope=alice_scope)

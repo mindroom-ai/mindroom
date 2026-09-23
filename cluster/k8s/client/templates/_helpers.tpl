@@ -115,6 +115,11 @@ runtime-config.js straight from nginx and the Deployment bypasses the entrypoint
 {{- $prefix := include "mindroom-client.pathPrefix" . -}}
 {{- $navigationFallbackExcludePaths := default (list) .Values.serviceWorker.navigationFallbackExcludePaths | toJson -}}
 {{- $runtimeConfig := printf "window.__APP_BASE_PATH__ = \"%s\"; window.__ENABLE_SERVICE_WORKER__ = %t; window.__SERVICE_WORKER_NAVIGATION_FALLBACK_EXCLUDE_PATHS__ = %s;" $base .Values.serviceWorker.enabled $navigationFallbackExcludePaths -}}
+{{- if .Values.authenticationRecovery.enabled -}}
+{{- $authenticationRecoveryConfig := dict "probeUrl" .Values.authenticationRecovery.probeUrl "navigationUrl" .Values.authenticationRecovery.navigationUrl "timeoutMs" (int .Values.authenticationRecovery.timeoutMs) | toJson -}}
+{{- $authenticationRecoveryLoader := "if (!window.__AUTHENTICATION_RECOVERY_READY__) { const script = document.createElement(\"script\"); script.src = new URL(\"authentication-recovery.js\", document.currentScript.src).href; script.async = false; window.__AUTHENTICATION_RECOVERY_READY__ = new Promise((resolve) => { script.onload = resolve; script.onerror = resolve; }); document.head.appendChild(script); }" -}}
+{{- $runtimeConfig = printf "%s window.__AUTHENTICATION_RECOVERY_CONFIG__ = %s; %s" $runtimeConfig $authenticationRecoveryConfig $authenticationRecoveryLoader -}}
+{{- end -}}
 server {
   listen {{ .Values.nginx.port }};
 {{- if .Values.nginx.ipv6 }}
@@ -138,6 +143,21 @@ server {
     add_header Cache-Control "no-store, max-age=0" always;
     return 200 {{ $runtimeConfig | quote }};
   }
+{{- if .Values.authenticationRecovery.enabled }}
+
+  # The client image owns the recovery implementation. This chart only loads
+  # its native bootstrap and provides a same-origin reachability probe.
+  location = /authentication-recovery.js {
+    alias /usr/share/nginx/html/authentication-recovery.js;
+    default_type application/javascript;
+    add_header Cache-Control "no-store, max-age=0" always;
+  }
+
+  location = /authentication-recovery-probe {
+    add_header Cache-Control "no-store, max-age=0" always;
+    return 204;
+  }
+{{- end }}
 {{- if .Values.matrixRTC.enabled }}
 
   # MatrixRTC backend discovery for Matrix voice and video calls.

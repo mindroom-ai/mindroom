@@ -30,7 +30,7 @@ if TYPE_CHECKING:
         ConfigField(
             name="engines",
             label="Engines",
-            type="text",
+            type="string[]",
             required=False,
         ),
         ConfigField(
@@ -39,6 +39,13 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=None,
+        ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
         ),
     ],
     dependencies=[],  # httpx already included in main dependencies

@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from mindroom.config.agent import CultureConfig
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryBackend, MemorySearchConfig
     from mindroom.config.models import CompactionConfig, EffectiveToolConfig
@@ -115,16 +114,6 @@ class ResolvedEntityView:
     def deferred_tool_scope_incompatible_tools(self, authored_tool_name: str) -> list[str]:
         """Return expanded deferred tools invalid for this agent's effective execution scope."""
         return self._config._deferred_tool_scope_incompatible_tools(self._agent_name(), authored_tool_name)
-
-    @property
-    def culture(self) -> tuple[str, CultureConfig] | None:
-        """Configured culture assignment for this agent, if any.
-
-        Unknown or team names resolve to None (culture assignment is a membership scan)
-        instead of raising like the other agent-only fields; the defaults-only scope
-        still raises like every agent-only field.
-        """
-        return self._config._agent_culture(self._agent_name())
 
     @property
     def knowledge_base_ids(self) -> list[str]:

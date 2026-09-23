@@ -23,6 +23,12 @@ also why Agno's ``cache_tools`` flag must stay off: it always emits a 5m tools
 marker ahead of a potentially 1h system marker). The total marker count,
 including markers Agno itself adds, is capped at the API limit of four.
 
+Agent-built system prompts carry an explicit boundary before their session
+context. Split that text into two system blocks and move the existing system
+marker to the shared prefix. Dates, summaries, and learning can then change
+without invalidating the agent's instructions. The message rungs still cache
+the full system and conversation prefix within each thread.
+
 The ladder operates on the wire-format request (after Agno's
 ``format_messages``) because Agno rebuilds assistant and tool_result blocks
 from scratch on every request, so markers placed on Agno ``Message`` objects
@@ -50,15 +56,25 @@ can still replay poisoned history.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.agno_compat_model_hooks import install_client_factories
+from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.hooks.enrichment import is_transient_context
 from mindroom.llm_request_logging import record_llm_request_tools
+from mindroom.logging_config import get_logger
 from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
 from mindroom.model_instance_checks import isinstance_of_loaded
+from mindroom.provider_tool_policy import provider_tools_disabled
+from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agno.models.anthropic import Claude as AnthropicClaude
+
+    from mindroom.bedrock_claude import MindRoomBedrockClaude
 
 _PROMPT_CACHE_HOOK_ATTR = "_mindroom_claude_prompt_cache_hook_installed"
 _DEFERRED_TOOL_NAMES_ATTR = "_mindroom_claude_deferred_tool_names"
@@ -94,6 +110,8 @@ def native_tool_search_supported(provider: str, model_id: str) -> bool:
 
 
 _ANTHROPIC_CLAUDE_CLASS = ("agno.models.anthropic.claude", "Claude")
+_BEDROCK_CLAUDE_CLASS = ("mindroom.bedrock_claude", "MindRoomBedrockClaude")
+logger = get_logger(__name__)
 
 
 def as_anthropic_claude(model: object) -> AnthropicClaude | None:
@@ -106,6 +124,62 @@ def as_anthropic_claude(model: object) -> AnthropicClaude | None:
     if not isinstance_of_loaded(model, _ANTHROPIC_CLAUDE_CLASS):
         return None
     return cast("AnthropicClaude", model)
+
+
+def _is_session_backed_bedrock_claude(model: object) -> bool:
+    """Return whether a Bedrock model refreshes credentials from a session."""
+    if not isinstance_of_loaded(model, _BEDROCK_CLAUDE_CLASS):
+        return False
+    return cast("MindRoomBedrockClaude", model).session is not None
+
+
+def prewarm_anthropic_async_client(model: object) -> None:
+    """Build and cache a Claude async SDK client without making a request."""
+    claude_model = as_anthropic_claude(model)
+    if claude_model is None:
+        return
+    try:
+        claude_model.get_async_client()
+    except Exception:
+        async_client, claude_model.async_client = claude_model.async_client, None
+        if async_client is not None:
+            try:
+                asyncio.run(async_client.close())
+            except Exception:
+                logger.exception("Failed to close partially initialized Claude async client")
+        raise
+
+
+async def aclose_anthropic_async_client(model: object) -> None:
+    """Close and clear a retained Claude async SDK client, if present."""
+    claude_model = as_anthropic_claude(model)
+    if claude_model is None:
+        return
+    async_client, claude_model.async_client = claude_model.async_client, None
+    if async_client is not None:
+        await async_client.close()
+
+
+async def arefresh_session_backed_bedrock_async_client(model: object) -> None:
+    """Refresh one retained session-backed client between serialized turns."""
+    if not _is_session_backed_bedrock_claude(model):
+        return
+    claude_model = cast("MindRoomBedrockClaude", model)
+    previous_client = claude_model.async_client
+
+    def replace_client() -> None:
+        claude_model.async_client = None
+        try:
+            prewarm_anthropic_async_client(claude_model)
+        except BaseException:
+            claude_model.async_client = previous_client
+            raise
+
+    try:
+        await run_blocking_until_complete(replace_client)
+    finally:
+        if previous_client is not None and claude_model.async_client is not previous_client:
+            await run_coroutine_until_complete(previous_client.close())
 
 
 def _prompt_cache_control(*, extended_cache_time: bool = False) -> dict[str, str]:
@@ -446,6 +520,27 @@ def _request_kwargs_with_deferred_tool_search(
     return prepared_kwargs
 
 
+def _request_kwargs_with_shared_system_prefix(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Keep the shared instructions cacheable independently of session context."""
+    system = request_kwargs.get("system")
+    if not isinstance(system, list) or not system:
+        return request_kwargs
+    first_block = system[0]
+    if not isinstance(first_block, dict) or first_block.get("type") != "text":
+        return request_kwargs
+    text = first_block.get("text")
+    if not isinstance(text, str) or "cache_control" not in first_block:
+        return request_kwargs
+    shared_text, boundary, session_text = text.partition(SESSION_CONTEXT_BOUNDARY)
+    if not boundary or not shared_text.strip():
+        return request_kwargs
+
+    shared_block = {**first_block, "text": shared_text}
+    session_block = {key: value for key, value in first_block.items() if key != "cache_control"}
+    session_block["text"] = boundary + session_text
+    return {**request_kwargs, "system": [shared_block, session_block, *system[1:]]}
+
+
 def _request_kwargs_with_prompt_cache_ladder(
     request_kwargs: dict[str, Any],
     cache_control: dict[str, str],
@@ -478,12 +573,65 @@ def _request_kwargs_with_prompt_cache_ladder(
     return prepared_kwargs
 
 
+class _OffloadedAsyncStreamManager:
+    """Construct one synchronous SDK stream manager away from the event loop."""
+
+    def __init__(self, stream_factory: Callable[[], Any]) -> None:
+        self._stream_factory = stream_factory
+        self._stream_manager: Any = None
+
+    async def __aenter__(self) -> object:
+        current_task = asyncio.current_task()
+        assert current_task is not None
+        deferred_cancel_count = 0
+        deferred_cancel: asyncio.CancelledError | None = None
+        setup_task = asyncio.create_task(asyncio.to_thread(self._stream_factory))
+
+        while not setup_task.done():
+            try:
+                await asyncio.shield(setup_task)
+            except asyncio.CancelledError as exc:
+                if setup_task.cancelled():
+                    raise
+                caller_cancel_count = current_task.cancelling()
+                if caller_cancel_count <= 0:
+                    raise
+                for _ in range(caller_cancel_count):
+                    current_task.uncancel()
+                deferred_cancel_count += caller_cancel_count
+                deferred_cancel = deferred_cancel or exc
+
+        try:
+            self._stream_manager = setup_task.result()
+        except BaseException as setup_error:
+            if deferred_cancel is None:
+                raise
+            for _ in range(deferred_cancel_count):
+                current_task.cancel()
+            raise deferred_cancel from setup_error
+
+        for _ in range(deferred_cancel_count):
+            current_task.cancel()
+        return await self._stream_manager.__aenter__()
+
+    async def __aexit__(self, exc_type: object, exc_value: object, traceback: object) -> bool | None:
+        result: bool | None = await self._stream_manager.__aexit__(exc_type, exc_value, traceback)
+        return result
+
+
 class _PromptCacheMessagesProxy:
     """Messages namespace proxy that adds the cache ladder on create/stream."""
 
-    def __init__(self, messages_namespace: object, model: AnthropicClaude) -> None:
+    def __init__(
+        self,
+        messages_namespace: object,
+        model: AnthropicClaude,
+        *,
+        offload_stream_setup: bool,
+    ) -> None:
         self._messages_namespace: Any = messages_namespace
         self._model = model
+        self._offload_stream_setup = offload_stream_setup
 
     def _prepared(self, request_kwargs: dict[str, Any]) -> dict[str, Any]:
         return prepare_claude_request_kwargs(self._model, request_kwargs)
@@ -492,10 +640,28 @@ class _PromptCacheMessagesProxy:
         return self._messages_namespace.create(**self._prepared(request_kwargs))
 
     def stream(self, **request_kwargs: object) -> object:
+        if self._offload_stream_setup:
+            return _OffloadedAsyncStreamManager(
+                lambda: self._messages_namespace.stream(**self._prepared(request_kwargs)),
+            )
         return self._messages_namespace.stream(**self._prepared(request_kwargs))
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._messages_namespace, name)
+
+
+def _request_kwargs_without_provider_execution(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Keep definitions cacheable while preventing tool calls in participation checks."""
+    if not provider_tools_disabled():
+        return request_kwargs
+    extra_body = request_kwargs.get("extra_body")
+    effective = {**request_kwargs, **extra_body} if isinstance(extra_body, dict) else request_kwargs
+    if not effective.get("tools") and not effective.get("mcp_servers"):
+        return request_kwargs
+    prepared = {**request_kwargs, "tool_choice": {"type": "none"}}
+    if isinstance(extra_body, dict) and "tool_choice" in extra_body:
+        prepared["extra_body"] = {**extra_body, "tool_choice": {"type": "none"}}
+    return prepared
 
 
 def prepare_claude_request_kwargs(
@@ -508,8 +674,10 @@ def prepare_claude_request_kwargs(
         prepared_kwargs,
         _model_deferred_tool_names(model),
     )
+    prepared_kwargs = _request_kwargs_without_provider_execution(prepared_kwargs)
     if model.cache_system_prompt:
         cache_control = _prompt_cache_control(extended_cache_time=model.extended_cache_time is True)
+        prepared_kwargs = _request_kwargs_with_shared_system_prefix(prepared_kwargs)
         prepared_kwargs = _request_kwargs_with_prompt_cache_ladder(prepared_kwargs, cache_control)
     record_llm_request_tools(prepared_kwargs.get("tools"))
     return prepared_kwargs
@@ -518,13 +686,24 @@ def prepare_claude_request_kwargs(
 class _PromptCacheBetaProxy:
     """Beta namespace proxy that routes beta.messages through the ladder."""
 
-    def __init__(self, beta_namespace: object, model: AnthropicClaude) -> None:
+    def __init__(
+        self,
+        beta_namespace: object,
+        model: AnthropicClaude,
+        *,
+        offload_stream_setup: bool,
+    ) -> None:
         self._beta_namespace: Any = beta_namespace
         self._model = model
+        self._offload_stream_setup = offload_stream_setup
 
     @property
     def messages(self) -> _PromptCacheMessagesProxy:
-        return _PromptCacheMessagesProxy(self._beta_namespace.messages, self._model)
+        return _PromptCacheMessagesProxy(
+            self._beta_namespace.messages,
+            self._model,
+            offload_stream_setup=self._offload_stream_setup,
+        )
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._beta_namespace, name)
@@ -533,17 +712,32 @@ class _PromptCacheBetaProxy:
 class _PromptCacheClientProxy:
     """Anthropic SDK client proxy that applies the ladder to message requests."""
 
-    def __init__(self, client: object, model: AnthropicClaude) -> None:
+    def __init__(
+        self,
+        client: object,
+        model: AnthropicClaude,
+        *,
+        offload_stream_setup: bool = False,
+    ) -> None:
         self._client: Any = client
         self._model = model
+        self._offload_stream_setup = offload_stream_setup
 
     @property
     def messages(self) -> _PromptCacheMessagesProxy:
-        return _PromptCacheMessagesProxy(self._client.messages, self._model)
+        return _PromptCacheMessagesProxy(
+            self._client.messages,
+            self._model,
+            offload_stream_setup=self._offload_stream_setup,
+        )
 
     @property
     def beta(self) -> _PromptCacheBetaProxy:
-        return _PromptCacheBetaProxy(self._client.beta, self._model)
+        return _PromptCacheBetaProxy(
+            self._client.beta,
+            self._model,
+            offload_stream_setup=self._offload_stream_setup,
+        )
 
     # Python looks dunder methods up on the type, bypassing __getattr__, so
     # context-manager use of the proxied client must be delegated explicitly.
@@ -582,23 +776,12 @@ def install_claude_prompt_cache_hook(model: object) -> None:
     claude_model = as_anthropic_claude(model)
     if claude_model is None:
         return
-    model_dict = vars(claude_model)
-    if model_dict.get(_PROMPT_CACHE_HOOK_ATTR) is True:
-        return
-    original_get_client = claude_model.get_client
-    original_get_async_client = claude_model.get_async_client
-    model_dict[_PROMPT_CACHE_HOOK_ATTR] = True
-
-    def _get_client_with_prompt_cache() -> object:
-        client = original_get_client()
-        return _PromptCacheClientProxy(client, claude_model)
-
-    def _get_async_client_with_prompt_cache() -> object:
-        client = original_get_async_client()
-        return _PromptCacheClientProxy(client, claude_model)
-
-    model_dict["get_client"] = _get_client_with_prompt_cache
-    model_dict["get_async_client"] = _get_async_client_with_prompt_cache
+    install_client_factories(
+        claude_model,
+        marker=_PROMPT_CACHE_HOOK_ATTR,
+        wrap_sync=lambda client: _PromptCacheClientProxy(client, claude_model),
+        wrap_async=lambda client: _PromptCacheClientProxy(client, claude_model, offload_stream_setup=True),
+    )
 
 
 def install_claude_deferred_tool_search(model: object, *, deferred_tool_names: frozenset[str]) -> None:

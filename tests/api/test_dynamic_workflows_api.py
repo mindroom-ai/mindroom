@@ -274,6 +274,7 @@ def test_private_dynamic_workflow_report_accepts_derived_trusted_upstream_matrix
             "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@{localpart}:example.org",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN": "example.com",
         },
     )
     main.initialize_api_app(test_client.app, trusted_runtime_paths)

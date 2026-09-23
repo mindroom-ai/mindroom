@@ -3,45 +3,51 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, Protocol, Self, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 from agno.agent import Agent as AgnoAgent
-from agno.db.base import SessionType
+from agno.db.base import BaseDb, SessionType
 from agno.media import Image
 from agno.models.message import Message
+from agno.models.response import ModelResponse
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
+from structlog.testing import capture_logs
 
-from mindroom import turn_controller
+from mindroom import ai_runtime, model_loading
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
-    cleanup_queued_notice_state,
     install_queued_message_notice_hook,
     queued_message_signal_context,
+    register_queued_notice_storage,
 )
-from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing_batch import (
     CoalescingKey,
-    PendingEvent,
+    RequesterCoalescingOwner,
     active_follow_up_coalescing_key,
-    build_coalesced_batch,
+    build_prepared_turn,
 )
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
+from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
+from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
@@ -53,14 +59,17 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.history.runtime import open_bound_scope_session_context
+from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
-from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.message_target import MessageTarget
+from mindroom.message_target import MessageTarget, ResponseLifecycleKey
+from mindroom.mid_turn import QueuedMessage
 from mindroom.post_response_effects import (
     PostResponseEffectsDeps,
     PostResponseEffectsSupport,
@@ -68,7 +77,7 @@ from mindroom.post_response_effects import (
     apply_post_response_effects,
 )
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_lifecycle import _QueuedMessageState
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import (
     PostLockRequestPreparationError,
@@ -76,34 +85,48 @@ from mindroom.response_runner import (
     ResponseRunner,
     _ResponseGenerationOutcome,
 )
+from mindroom.response_sources import ResponseSources
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
-    make_event_cache_mock,
-    make_event_cache_write_coordinator_mock,
+    install_runtime_journal_support,
+    make_conversation_reader_mock,
+    make_matrix_client_mock,
+    make_membership_stub,
+    make_pending_event,
     make_turn_context,
     message_origin,
     prepared_dispatch_result,
     request_envelope,
     runtime_paths_for,
+    seed_session,
+    serve_conversation_reader,
     test_runtime_paths,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.history_helpers import RecordingModel
+from tests.participation_helpers import ParticipationModel
+from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import FinalDeliveryRequest
     from mindroom.turn_origin import TurnOrigin
 
 
 class _ReservationLike(Protocol):
+    def consume(self) -> None:
+        """Consume the reserved queued-human notice."""
+
     def cancel(self) -> None:
         """Release the reserved queued-human notice."""
 
@@ -131,11 +154,12 @@ class _NoopResponseLifecycle:
 
 def _config(tmp_path: Path) -> Config:
     return bind_runtime_paths(
-        Config(
-            agents={"general": AgentConfig(display_name="General", rooms=["!room:localhost"])},
-            teams={},
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={"general": AgentConfig(display_name="General", rooms=["!room:localhost"])},
+                teams={},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+            ),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -149,10 +173,10 @@ def _bot(tmp_path: Path) -> AgentBot:
         display_name="General",
         user_id="@mindroom_general:localhost",
     )
-    bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
 
@@ -184,8 +208,8 @@ def _envelope(
     )
 
 
-def _prepared_text_event(*, event_id: str = "$event") -> PreparedTextEvent:
-    return PreparedTextEvent(
+def _prepared_text_event(*, event_id: str = "$event") -> PreparedIngress:
+    return PreparedIngress(
         sender="@user:localhost",
         event_id=event_id,
         body="hello",
@@ -247,7 +271,7 @@ def _reserved_follow_up_case(
         source_event_id=event_id,
         target=target,
     )
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id=event_id,
         body=body,
@@ -288,7 +312,6 @@ def _queued_notice_metadata(reservation: _ReservationLike) -> tuple[PendingDispa
             kind="queued_notice_reservation",
             payload=reservation,
             close=reservation.cancel,
-            requires_solo_batch=True,
         ),
     )
 
@@ -302,7 +325,7 @@ def _targeted_queued_notice_metadata(
             kind="queued_notice_reservation",
             payload=reservation,
             close=reservation.cancel,
-            target_key=(target.room_id, target.resolved_thread_id),
+            target_key=target.lifecycle_key,
         ),
     )
 
@@ -338,21 +361,77 @@ async def test_response_lifecycle_rejects_mismatched_locked_response_target(tmp_
         await lifecycle.run_locked_response(
             target=mismatched_target,
             response_envelope=envelope,
-            queued_notice_reservation=None,
             pipeline_timing=None,
             locked_operation=locked_operation,
         )
 
 
-def _notice_count(messages: list[Message]) -> int:
-    return sum(1 for message in messages if message.content == QUEUED_MESSAGE_NOTICE_TEXT)
+_QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
+_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
 
 
-def _queued_notice_message() -> Message:
+def _notice_messages(
+    messages: list[Message],
+    *,
+    marker: bool | str | None = None,
+    response_turn_id: str | None = None,
+) -> list[Message]:
+    matches: list[Message] = []
+    for message in messages:
+        provider_data = message.provider_data
+        if not isinstance(provider_data, dict):
+            continue
+        notice_marker = provider_data.get(_QUEUED_NOTICE_MARKER_KEY)
+        if notice_marker not in (True, "persisted"):
+            continue
+        if marker is not None and notice_marker != marker:
+            continue
+        if response_turn_id is not None and provider_data.get(_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY) != response_turn_id:
+            continue
+        matches.append(message)
+    return matches
+
+
+def _notice_count(
+    messages: list[Message],
+    *,
+    marker: bool | str | None = None,
+    response_turn_id: str | None = None,
+) -> int:
+    return len(
+        _notice_messages(
+            messages,
+            marker=marker,
+            response_turn_id=response_turn_id,
+        ),
+    )
+
+
+def _queued_notice_message(
+    response_turn_id: str,
+    *,
+    marker: bool | str = True,
+    content: str = QUEUED_MESSAGE_NOTICE_TEXT,
+    from_history: bool = False,
+) -> Message:
     return Message(
         role="user",
-        content=QUEUED_MESSAGE_NOTICE_TEXT,
-        provider_data={"mindroom_queued_message_notice": True},
+        content=content,
+        provider_data={
+            _QUEUED_NOTICE_MARKER_KEY: marker,
+            _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id,
+        },
+        from_history=from_history,
+    )
+
+
+def _queued_notice_storage(tmp_path: Path) -> BaseDb:
+    return create_state_storage(
+        "queued_notice",
+        tmp_path,
+        subdir="sessions",
+        session_table="queued_notice_sessions",
+        prompt_roles=prompt_roles_for_history_storage(),
     )
 
 
@@ -360,6 +439,10 @@ class _FakeStorage:
     def __init__(self) -> None:
         self.session: AgentSession | TeamSession | None = None
         self.upserted = False
+        self.upsert_count = 0
+        self.upserted_runs: list[object] = []
+        self.deleted_run_ids: list[str] = []
+        self.closed = False
 
     def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
         if self.session is None or self.session.session_id != session_id:
@@ -369,10 +452,39 @@ class _FakeStorage:
     def upsert_session(self, session: AgentSession | TeamSession) -> AgentSession | TeamSession:
         self.session = session
         self.upserted = True
+        self.upsert_count += 1
         return session
 
+    def upsert_run(
+        self,
+        run: object,
+        session_id: str,
+        user_id: str | None = None,
+        run_index: int | None = None,
+    ) -> None:
+        del session_id, user_id, run_index
+        self.upserted = True
+        self.upsert_count += 1
+        self.upserted_runs.append(run)
 
-class _FakeModel:
+    def delete_runs(self, run_ids: list[str]) -> None:
+        self.deleted_run_ids.extend(run_ids)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeResponseModel:
+    async def aresponse(self, messages: list[Message], **_kwargs: object) -> ModelResponse:
+        del messages
+        return ModelResponse(content="ok")
+
+    async def aresponse_stream(self, messages: list[Message], **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        del messages
+        yield ModelResponse(content="ok")
+
+
+class _FakeModel(_FakeResponseModel):
     def format_function_call_results(
         self,
         messages: list[Message],
@@ -394,7 +506,7 @@ class _FakeModel:
             messages.append(Message(role="user", content="Take note of the following content"))
 
 
-class _FakeModelWithoutFunctionCallMedia:
+class _FakeModelWithoutFunctionCallMedia(_FakeResponseModel):
     def format_function_call_results(
         self,
         messages: list[Message],
@@ -411,6 +523,9 @@ class _StaticQueuedState:
 
     def has_pending_human_messages(self) -> bool:
         return self.pending
+
+    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return (QueuedMessage("$pending", None),) if self.has_pending_human_messages() else ()
 
 
 def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
@@ -437,63 +552,62 @@ def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
 
 def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
     """Target-scoped active follow-up batches should preserve timeline order and senders."""
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!room:localhost"
+    room = nio.MatrixRoom("!room:localhost", "@mindroom_general:localhost")
     pending_events = [
-        PendingEvent(
-            event=PreparedTextEvent(
+        make_pending_event(
+            PreparedIngress(
                 sender="@alice:localhost",
                 event_id="$a1",
                 body="A first",
                 source={"content": {"body": "A first"}},
                 server_timestamp=1,
             ),
-            room=room,
+            room,
             requester_user_id="@alice:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
-        PendingEvent(
-            event=PreparedTextEvent(
+        make_pending_event(
+            PreparedIngress(
                 sender="@bob:localhost",
                 event_id="$b1",
                 body="B <context> & more",
                 source={"content": {"body": "B <context> & more"}},
                 server_timestamp=2,
             ),
-            room=room,
+            room,
             requester_user_id="@bob:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
-        PendingEvent(
-            event=PreparedTextEvent(
+        make_pending_event(
+            PreparedIngress(
                 sender="@alice:localhost",
                 event_id="$a2",
                 body="A follow-up",
                 source={"content": {"body": "A follow-up"}},
                 server_timestamp=3,
             ),
-            room=room,
+            room,
             requester_user_id="@alice:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
     ]
 
-    batch = build_coalesced_batch(
+    batch = build_prepared_turn(
         active_follow_up_coalescing_key(room.room_id, "$thread"),
         pending_events,
     )
 
-    assert batch.source_event_ids == ["$a1", "$b1", "$a2"]
+    assert batch.handled_turn.source_event_ids == ("$a1", "$b1", "$a2")
     assert batch.requester_user_id == "@alice:localhost"
-    assert batch.source_event_prompts == {
+    assert batch.handled_turn.source_event_prompts == {
         "$a1": "A first",
         "$b1": "B <context> & more",
         "$a2": "A follow-up",
     }
-    assert batch.prompt == (
+    assert batch.event.body == (
         "Messages arrived while the previous response was still running. "
         "They are in chat timeline order. Respond once to the combined context:\n\n"
         "<queued_messages>\n"
@@ -504,52 +618,55 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
     )
 
 
-def test_same_target_batch_reservation_consumes_all_pending_messages(tmp_path: Path) -> None:
-    """A coalesced target batch should consume every matching queued-human notice."""
+@pytest.mark.asyncio
+async def test_room_mode_root_batch_consumes_all_same_target_reservations(tmp_path: Path) -> None:
+    """Root events coalesced in room mode should consume every reservation for that room."""
     bot = _bot(tmp_path)
-    target = MessageTarget.resolve("!room:localhost", "$thread", "$a1")
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = coordinator._lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
-    queued_signal.begin_response_turn()
-    try:
-        first_reservation = lifecycle.reserve_waiting_human_message(
-            target=target,
-            response_envelope=_envelope(source_event_id="$a1", target=target),
-        )
-        second_reservation = lifecycle.reserve_waiting_human_message(
-            target=target,
-            response_envelope=_envelope(source_event_id="$b1", target=target),
-        )
-        assert first_reservation is not None
-        assert second_reservation is not None
-
-        turn_controller._consume_queued_notice_reservations_from_metadata(
-            (
-                PendingDispatchMetadata(
-                    kind="queued_notice_reservation",
-                    payload=first_reservation,
-                    close=first_reservation.cancel,
-                    target_key=(target.room_id, target.resolved_thread_id),
-                ),
-                PendingDispatchMetadata(
-                    kind="queued_notice_reservation",
-                    payload=second_reservation,
-                    close=second_reservation.cancel,
-                    target_key=(target.room_id, target.resolved_thread_id),
-                ),
+    bot.config.agents["general"].thread_mode = "room"
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    target = MessageTarget.resolve(room.room_id, None, "$a1", room_mode=True)
+    first_reservation = MagicMock()
+    second_reservation = MagicMock()
+    first_event = _prepared_text_event(event_id="$a1")
+    second_event = _prepared_text_event(event_id="$b1")
+    batch = build_prepared_turn(
+        CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
+        [
+            make_pending_event(
+                first_event,
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                dispatch_metadata=_targeted_queued_notice_metadata(first_reservation, target),
             ),
-            target_key=(target.room_id, target.resolved_thread_id),
-        )
+            make_pending_event(
+                second_event,
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                dispatch_metadata=_targeted_queued_notice_metadata(second_reservation, target),
+            ),
+        ],
+    )
 
-        assert queued_signal.pending_human_message_event_ids == set()
-    finally:
-        queued_signal.finish_response_turn()
+    with patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()):
+        await bot._turn_controller.handle_prepared_turn(batch)
+
+    first_reservation.consume.assert_called_once_with()
+    second_reservation.consume.assert_called_once_with()
+    first_reservation.cancel.assert_not_called()
+    second_reservation.cancel.assert_not_called()
 
 
 @contextmanager
 def _open_scope(storage: _FakeStorage) -> object:
-    yield SimpleNamespace(storage=storage, session=storage.session, scope=HistoryScope("agent", "general"))
+    yield ScopeSessionContext(
+        storage=cast("BaseDb", storage),
+        storage_factory=lambda: cast("BaseDb", storage),
+        session=storage.session,
+        session_id=storage.session.session_id if storage.session is not None else "session-1",
+        session_exists=storage.session is not None,
+        scope=HistoryScope("agent", "general"),
+    )
 
 
 class _PrelockBarrierLock:
@@ -599,7 +716,7 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
             suppressed=True,
         ),
         ResponseOutcome(
-            interactive_target=MessageTarget.resolve(
+            response_target=MessageTarget.resolve(
                 room_id="!room:localhost",
                 thread_id="$thread",
                 reply_to_event_id="$event",
@@ -681,15 +798,15 @@ async def test_post_response_effects_skip_memory_persistence_for_failed_run() ->
 
 
 @pytest.mark.asyncio
-async def test_post_response_effects_register_interactive_follow_up_for_preserved_stream_failure() -> None:
-    """Preserved visible streamed replies should still register interactive follow-up."""
-    register_interactive = AsyncMock()
+async def test_post_response_effects_add_buttons_for_preserved_stream_success() -> None:
+    """Preserved visible streamed replies should still receive reaction buttons."""
+    add_interactive_buttons = AsyncMock()
     target = MessageTarget.resolve(
         room_id="!room:localhost",
         thread_id="$thread",
         reply_to_event_id="$event",
     )
-    interactive_metadata = InteractiveMetadata.from_parts(
+    interactive_metadata = InteractiveMetadata._from_parts(
         {"1": "yes"},
         ({"emoji": "1", "label": "Yes", "value": "yes"},),
     )
@@ -705,31 +822,30 @@ async def test_post_response_effects_register_interactive_follow_up_for_preserve
             interactive_metadata=interactive_metadata,
         ),
         ResponseOutcome(
-            interactive_target=target,
+            response_target=target,
         ),
         PostResponseEffectsDeps(
             logger=MagicMock(),
-            register_interactive=register_interactive,
+            add_interactive_buttons=add_interactive_buttons,
         ),
     )
 
-    register_interactive.assert_awaited_once_with(
+    add_interactive_buttons.assert_awaited_once_with(
         "$stream",
-        target,
         interactive_metadata,
     )
 
 
 @pytest.mark.asyncio
-async def test_post_response_effects_skip_interactive_follow_up_for_preserved_stream_error() -> None:
-    """Failed preserved stream outcomes must not register interactive follow-up on a failed reply."""
-    register_interactive = AsyncMock()
+async def test_post_response_effects_skip_buttons_for_preserved_stream_error() -> None:
+    """Failed preserved stream outcomes must not add buttons to a failed reply."""
+    add_interactive_buttons = AsyncMock()
     target = MessageTarget.resolve(
         room_id="!room:localhost",
         thread_id="$thread",
         reply_to_event_id="$event",
     )
-    interactive_metadata = InteractiveMetadata.from_parts(
+    interactive_metadata = InteractiveMetadata._from_parts(
         {"1": "yes"},
         ({"emoji": "1", "label": "Yes", "value": "yes"},),
     )
@@ -744,15 +860,75 @@ async def test_post_response_effects_skip_interactive_follow_up_for_preserved_st
             interactive_metadata=interactive_metadata,
         ),
         ResponseOutcome(
-            interactive_target=target,
+            response_target=target,
         ),
         PostResponseEffectsDeps(
             logger=MagicMock(),
-            register_interactive=register_interactive,
+            add_interactive_buttons=add_interactive_buttons,
         ),
     )
 
-    register_interactive.assert_not_awaited()
+    add_interactive_buttons.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(tmp_path: Path) -> None:
+    """A response prompt rejected during transport must not expose dead buttons."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    client = make_matrix_client_mock()
+    runtime = BotRuntimeState(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        enable_streaming=False,
+        orchestrator=None,
+    )
+    membership = make_membership_stub()
+    membership.interactive_prompt_is_current.return_value = False
+    support = PostResponseEffectsSupport(
+        runtime=runtime,
+        logger=MagicMock(),
+        runtime_paths=runtime_paths,
+        conversation_reader=make_conversation_reader_mock(),
+        membership=membership,
+        agent_name="agent",
+    )
+    interactive_metadata = InteractiveMetadata._from_parts(
+        {"1": "yes"},
+        ({"emoji": "1", "label": "Yes", "value": "yes"},),
+    )
+    assert interactive_metadata is not None
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="Choose",
+            delivery_kind="sent",
+            interactive_metadata=interactive_metadata,
+        ),
+        ResponseOutcome(),
+        support.build_deps(
+            room_id="!room:localhost",
+            membership_turn_id="$turn",
+        ),
+    )
+
+    membership.interactive_prompt_is_current.assert_awaited_once_with(
+        room_id="!room:localhost",
+        question_event_id="$response",
+        expected=InteractivePrompt(
+            creator_agent="agent",
+            question_text="",
+            options={"1": "yes"},
+            option_labels={},
+            source_event_id="$turn",
+        ),
+    )
+    client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -760,27 +936,43 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     """A stale hint just below threshold should still reach the live summary check."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = make_matrix_client_mock()
+    client.room_messages.return_value = nio.RoomMessagesResponse(
+        room_id="!room:localhost",
+        chunk=[
+            nio.RoomMessageText.from_dict(
+                {
+                    "type": "m.room.message",
+                    "event_id": "$thread",
+                    "sender": "@user0:localhost",
+                    "origin_server_ts": 0,
+                    "content": {"msgtype": "m.text", "body": "Thread root"},
+                },
+            ),
+        ],
+        start="",
+        end=None,
+    )
     runtime = BotRuntimeState(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=False,
         orchestrator=None,
-        event_cache=make_event_cache_mock(),
-        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
-    conversation_cache = MagicMock()
+    conversation_reader = make_conversation_reader_mock()
     support = PostResponseEffectsSupport(
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
-        delivery_gateway=MagicMock(),
-        conversation_cache=conversation_cache,
+        conversation_reader=conversation_reader,
+        membership=make_membership_stub(),
+        agent_name="agent",
     )
     deps = support.build_deps(
         room_id="!room:localhost",
-        interactive_agent_name="general",
+        membership_turn_id="$turn",
     )
     thread_history = [
         ResolvedVisibleMessage.synthetic(
@@ -791,7 +983,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         )
         for i in range(5)
     ]
-    conversation_cache.get_fresh_strict_thread_history = AsyncMock(return_value=thread_history)
+    serve_conversation_reader(conversation_reader, thread_history)
     scheduled_tasks: list[asyncio.Task[None]] = []
 
     def schedule_background_task(
@@ -808,7 +1000,10 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     with (
         patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
         patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as mock_generate,
-        patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as mock_send,
+        patch(
+            "mindroom.thread_summary._send_thread_summary_event",
+            new=AsyncMock(return_value="$summary"),
+        ) as mock_send,
     ):
         await apply_post_response_effects(
             FinalDeliveryOutcome(
@@ -829,28 +1024,34 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    conversation_cache.get_fresh_strict_thread_history.assert_awaited_once_with(
-        "!room:localhost",
-        "$thread",
-        caller_label="thread_summary_background",
+    conversation_reader.read_strict.assert_awaited_once_with(
+        room_id="!room:localhost",
+        thread_id="$thread",
+        limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
     )
-    mock_generate.assert_awaited_once_with(
-        thread_history,
-        config,
-        runtime_paths,
-        model_name="default",
-        tag_vocabulary=None,
-        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
-    )
+    # Nothing has echoed the response back, so the projection this pass reads
+    # stops one message short of the thread. It summarizes the projected
+    # messages plus the answer it was queued for, and counts that answer -- the
+    # same number the pre-queue gate above already used.
+    generated_history = mock_generate.await_args.args[0]
+    assert list(generated_history[:-1]) == thread_history
+    assert (generated_history[-1].sender, generated_history[-1].body) == (client.user_id, "response")
+    assert mock_generate.await_args.args[1:] == (config, runtime_paths)
+    assert mock_generate.await_args.kwargs == {
+        "model_name": "default",
+        "tag_vocabulary": None,
+        "trusted_sender_ids": current_internal_sender_ids(config, runtime_paths),
+    }
     mock_send.assert_awaited_once_with(
         client,
         "!room:localhost",
         "$thread",
         "Summary",
-        5,
+        6,
         "default",
-        conversation_cache,
+        conversation_reader,
         initial_enrichment_complete=None,
+        generated_at=ANY,
     )
 
 
@@ -861,27 +1062,27 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
     config.room_thread_summary_models["general"] = "qwen"
     config.models["qwen"] = ModelConfig(provider="openai", id="qwen-test-model")
     runtime_paths = runtime_paths_for(config)
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = make_matrix_client_mock()
     runtime = BotRuntimeState(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=False,
         orchestrator=None,
-        event_cache=make_event_cache_mock(),
-        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
-    conversation_cache = MagicMock()
+    conversation_reader = make_conversation_reader_mock()
     support = PostResponseEffectsSupport(
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
-        delivery_gateway=MagicMock(),
-        conversation_cache=conversation_cache,
+        conversation_reader=conversation_reader,
+        membership=make_membership_stub(),
+        agent_name="agent",
     )
     deps = support.build_deps(
         room_id="!adhoc:localhost",
-        interactive_agent_name="general",
+        membership_turn_id="$turn",
     )
     thread_history = [
         ResolvedVisibleMessage.synthetic(
@@ -892,7 +1093,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         )
         for i in range(5)
     ]
-    conversation_cache.get_fresh_strict_thread_history = AsyncMock(return_value=thread_history)
+    serve_conversation_reader(conversation_reader, thread_history)
     scheduled_tasks: list[asyncio.Task[None]] = []
 
     def schedule_background_task(
@@ -909,7 +1110,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
     with (
         patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
         patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as mock_generate,
-        patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")),
+        patch("mindroom.thread_summary._send_thread_summary_event", new=AsyncMock(return_value="$summary")),
     ):
         await apply_post_response_effects(
             FinalDeliveryOutcome(
@@ -931,14 +1132,15 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    mock_generate.assert_awaited_once_with(
-        thread_history,
-        config,
-        runtime_paths,
-        model_name="qwen",
-        tag_vocabulary=None,
-        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
-    )
+    generated_history = mock_generate.await_args.args[0]
+    assert list(generated_history[:-1]) == thread_history
+    assert (generated_history[-1].sender, generated_history[-1].body) == (client.user_id, "response")
+    assert mock_generate.await_args.args[1:] == (config, runtime_paths)
+    assert mock_generate.await_args.kwargs == {
+        "model_name": "qwen",
+        "tag_vocabulary": None,
+        "trusted_sender_ids": current_internal_sender_ids(config, runtime_paths),
+    }
 
 
 @pytest.mark.asyncio
@@ -956,12 +1158,16 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
     try:
         with patch.object(
             ResponseRunner,
-            "generate_response_locked",
+            "_generate_response_locked",
             new=AsyncMock(return_value="$response"),
         ) as mock_locked:
             task = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope.source_event_id,),
+                            logical_source_event_ids=(response_envelope.source_event_id,),
+                        ),
                         prompt="hello",
                         thread_history=[],
                         user_id="@user:localhost",
@@ -1019,12 +1225,16 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
     try:
         with patch.object(
             ResponseRunner,
-            "generate_response_locked",
+            "_generate_response_locked",
             new=AsyncMock(return_value="$response"),
         ):
             task = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope.source_event_id,),
+                            logical_source_event_ids=(response_envelope.source_event_id,),
+                        ),
                         prompt="hello",
                         thread_history=[],
                         user_id="@user:localhost",
@@ -1043,7 +1253,8 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
     assert not queued_signal.is_set()
 
 
-def test_forced_compaction_placeholder_check_degrades_on_storage_error(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_forced_compaction_placeholder_check_degrades_on_storage_error(tmp_path: Path) -> None:
     """Storage errors in the placeholder-ordering hint should not abort response generation."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
@@ -1054,13 +1265,56 @@ def test_forced_compaction_placeholder_check_degrades_on_storage_error(tmp_path:
         "create_storage",
         side_effect=RuntimeError("storage unavailable"),
     ):
-        result = coordinator._has_queued_forced_compaction(
+        result = await coordinator._has_queued_forced_compaction(
             session_id="session",
             scope=scope,
             execution_identity=None,
         )
 
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_forced_compaction_placeholder_check_does_not_block_event_loop(tmp_path: Path) -> None:
+    """A blocked compaction-state read must run outside the response event loop."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    scope = HistoryScope(kind="agent", scope_id="home")
+    started = threading.Event()
+    loop_advanced = threading.Event()
+    release = threading.Event()
+    observed_progress = threading.Event()
+
+    def _blocking_read(**_kwargs: object) -> bool:
+        started.set()
+        assert release.wait(timeout=5)
+        return False
+
+    def _release_after_observing_loop() -> None:
+        assert started.wait(timeout=5)
+        if loop_advanced.wait(timeout=0.5):
+            observed_progress.set()
+        release.set()
+
+    observer = threading.Thread(target=_release_after_observing_loop, name="compaction-loop-observer")
+    observer.start()
+    try:
+        with patch.object(coordinator, "_read_queued_forced_compaction", side_effect=_blocking_read):
+            task = asyncio.create_task(
+                coordinator._has_queued_forced_compaction(
+                    session_id="session",
+                    scope=scope,
+                    execution_identity=None,
+                ),
+            )
+            assert await asyncio.to_thread(started.wait, 5)
+            loop_advanced.set()
+            assert await task is False
+    finally:
+        release.set()
+        observer.join(timeout=5)
+
+    assert observed_progress.is_set(), "compaction-state read blocked the event loop"
+    assert not observer.is_alive()
 
 
 @pytest.mark.asyncio
@@ -1091,12 +1345,16 @@ async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp
     try:
         with patch.object(
             ResponseRunner,
-            "generate_response_locked",
+            "_generate_response_locked",
             new=AsyncMock(return_value="$response"),
         ):
             task = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope.source_event_id,),
+                            logical_source_event_ids=(response_envelope.source_event_id,),
+                        ),
                         prompt="hello",
                         thread_history=[],
                         user_id="@user:localhost",
@@ -1135,11 +1393,15 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
 
     with (
         patch.object(coordinator._lifecycle_coordinator, "_response_lifecycle_lock", return_value=lock),
-        patch.object(ResponseRunner, "generate_response_locked", new=fake_generate_response_locked),
+        patch.object(ResponseRunner, "_generate_response_locked", new=fake_generate_response_locked),
     ):
         first_task = asyncio.create_task(
             bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(first_envelope.source_event_id,),
+                        logical_source_event_ids=(first_envelope.source_event_id,),
+                    ),
                     prompt="hello",
                     thread_history=[],
                     user_id="first",
@@ -1152,6 +1414,10 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
         second_task = asyncio.create_task(
             bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(second_envelope.source_event_id,),
+                        logical_source_event_ids=(second_envelope.source_event_id,),
+                    ),
                     prompt="stop",
                     thread_history=[],
                     user_id="second",
@@ -1178,6 +1444,20 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
     lifecycle_lock = coordinator._lifecycle_coordinator._response_lifecycle_lock(response_target)
     await lifecycle_lock.acquire()
     lifecycle_started = asyncio.Event()
+    # Both handoffs this test observes are causal, not timed: the turn is known
+    # to be blocked on the lock because its own acquire said so, and the
+    # lifecycle is known to have started because it said so. A wall-clock bound
+    # on either would only re-add the race, since the work between the release
+    # and the first placeholder is real and its duration is the machine's to
+    # decide.
+    lock_wait_started = asyncio.Event()
+    acquire_lifecycle_lock = lifecycle_lock.acquire
+
+    async def announce_lock_wait() -> bool:
+        lock_wait_started.set()
+        return await acquire_lifecycle_lock()
+
+    lifecycle_lock.acquire = announce_lock_wait  # type: ignore[method-assign]
 
     async def fake_run_cancellable_response(*_args: object, **kwargs: object) -> str:
         lifecycle_started.set()
@@ -1189,7 +1469,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
         with (
             patch.object(
                 ResponseRunner,
-                "process_and_respond",
+                "_process_and_respond",
                 new=AsyncMock(
                     return_value=_ResponseGenerationOutcome(
                         delivery=FinalDeliveryOutcome(
@@ -1205,7 +1485,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
             ),
             patch.object(
                 ResponseRunner,
-                "run_cancellable_response",
+                "_run_cancellable_response",
                 new=AsyncMock(side_effect=fake_run_cancellable_response),
             ) as mock_run_cancellable_response,
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
@@ -1215,6 +1495,10 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
             task = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope.source_event_id,),
+                            logical_source_event_ids=(response_envelope.source_event_id,),
+                        ),
                         prompt="hello",
                         thread_history=[],
                         user_id="@user:localhost",
@@ -1222,11 +1506,11 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
                     ),
                 ),
             )
-            await asyncio.sleep(0.05)
+            await lock_wait_started.wait()
             mock_run_cancellable_response.assert_not_awaited()
 
             lifecycle_lock.release()
-            await asyncio.wait_for(lifecycle_started.wait(), timeout=0.2)
+            await lifecycle_started.wait()
             resolution = await task
             assert resolution == "$response"
     finally:
@@ -1259,6 +1543,10 @@ async def test_refresh_model_history_after_lock_refreshes_empty_thread_history(t
     ) as mock_fetch_thread_history:
         request = await coordinator._refresh_model_history_after_lock(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1275,7 +1563,6 @@ async def test_refresh_model_history_after_lock_refreshes_empty_thread_history(t
     mock_fetch_thread_history.assert_awaited_once_with(
         "!room:localhost",
         "$thread",
-        caller_label="dispatch_post_lock_refresh",
     )
     assert request.thread_history == fresh_history
 
@@ -1298,6 +1585,10 @@ async def test_refresh_model_history_after_lock_does_not_reprove_room_target(
     ):
         request = await coordinator._refresh_model_history_after_lock(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=(envelope.source_event_id,),
+                    logical_source_event_ids=(envelope.source_event_id,),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1351,18 +1642,22 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
         patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=_NoopResponseLifecycle())),
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch.object(
             coordinator,
-            "process_and_respond",
+            "_process_and_respond",
             new=AsyncMock(side_effect=fake_process_and_respond),
         ),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
     ):
         result = await coordinator.generate_response(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1374,8 +1669,8 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id if target is not None else None for target in observed_delivery_targets] == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
-    assert ("!room:localhost", None) in lock_keys
-    assert ("!room:localhost", "$plain_root") not in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$plain_root") not in lock_keys
 
 
 @pytest.mark.asyncio
@@ -1438,18 +1733,22 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
         ),
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch.object(
             coordinator,
-            "process_and_respond",
+            "_process_and_respond",
             new=AsyncMock(side_effect=fake_process_and_respond),
         ),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
     ):
         result = await coordinator.generate_response(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1463,8 +1762,8 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
     assert observed_delivery_targets == [stable_target]
     assert observed_lifecycle_targets == [stable_target]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
-    assert ("!room:localhost", None) in lock_keys
-    assert ("!room:localhost", "$other_thread") not in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$other_thread") not in lock_keys
 
 
 @pytest.mark.asyncio
@@ -1508,7 +1807,7 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
         patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=lifecycle)),
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.delivery_gateway.DeliveryGateway.deliver_final", new=AsyncMock(side_effect=fake_deliver_final)),
@@ -1517,6 +1816,10 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     ):
         result = await coordinator.generate_team_response_helper(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1531,8 +1834,8 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     assert [target.resolved_thread_id for target in observed_delivery_targets] == [None]
     assert lifecycle.session_thread_ids == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
-    assert ("!room:localhost", None) in lock_keys
-    assert ("!room:localhost", "$plain_root") not in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$plain_root") not in lock_keys
 
 
 @pytest.mark.asyncio
@@ -1589,7 +1892,7 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
         ),
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.delivery_gateway.DeliveryGateway.deliver_final", new=AsyncMock(side_effect=fake_deliver_final)),
@@ -1598,6 +1901,10 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
     ):
         result = await coordinator.generate_team_response_helper(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1613,8 +1920,8 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
     assert observed_delivery_targets == [stable_target]
     assert lifecycle.session_thread_ids == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
-    assert ("!room:localhost", None) in lock_keys
-    assert ("!room:localhost", "$other_thread") not in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$other_thread") not in lock_keys
 
 
 @pytest.mark.asyncio
@@ -1634,6 +1941,10 @@ async def test_prepare_request_after_lock_wraps_refresh_failures(tmp_path: Path)
     ):
         await coordinator._prepare_request_after_lock(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1666,12 +1977,16 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
     try:
         with patch.object(
             ResponseRunner,
-            "generate_team_response_helper_locked",
+            "_generate_team_response_helper_locked",
             new=AsyncMock(return_value="$team-response"),
         ) as mock_locked:
             task = asyncio.create_task(
                 bot._response_runner.generate_team_response_helper(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope.source_event_id,),
+                            logical_source_event_ids=(response_envelope.source_event_id,),
+                        ),
                         thread_history=[],
                         prompt="hello",
                         user_id="@user:localhost",
@@ -1716,10 +2031,14 @@ async def test_generate_response_without_reservation_does_not_drain_human_backlo
 
     await lifecycle_lock.acquire()
     try:
-        with patch.object(ResponseRunner, "generate_response_locked", new=fake_locked):
+        with patch.object(ResponseRunner, "_generate_response_locked", new=fake_locked):
             task_b = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope_b.source_event_id,),
+                            logical_source_event_ids=(response_envelope_b.source_event_id,),
+                        ),
                         prompt="hello",
                         thread_history=[],
                         user_id="@user:localhost",
@@ -1731,6 +2050,10 @@ async def test_generate_response_without_reservation_does_not_drain_human_backlo
             task_c = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope_c.source_event_id,),
+                            logical_source_event_ids=(response_envelope_c.source_event_id,),
+                        ),
                         prompt="hello again",
                         thread_history=[],
                         user_id="@user:localhost",
@@ -1783,10 +2106,14 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
 
     await lifecycle_lock.acquire()
     try:
-        with patch.object(ResponseRunner, "generate_team_response_helper_locked", new=fake_locked):
+        with patch.object(ResponseRunner, "_generate_team_response_helper_locked", new=fake_locked):
             task_b = asyncio.create_task(
                 bot._response_runner.generate_team_response_helper(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope_b.source_event_id,),
+                            logical_source_event_ids=(response_envelope_b.source_event_id,),
+                        ),
                         thread_history=[],
                         prompt="hello",
                         user_id="@user:localhost",
@@ -1800,6 +2127,10 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
             task_c = asyncio.create_task(
                 bot._response_runner.generate_team_response_helper(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope_c.source_event_id,),
+                            logical_source_event_ids=(response_envelope_c.source_event_id,),
+                        ),
                         thread_history=[],
                         prompt="hello again",
                         user_id="@user:localhost",
@@ -1861,7 +2192,6 @@ async def test_reserved_human_follow_up_reaches_active_turn_before_dispatch(tmp_
         lifecycle.run_locked_response(
             target=response_target,
             response_envelope=active_envelope,
-            queued_notice_reservation=None,
             pipeline_timing=None,
             locked_operation=active_operation,
         ),
@@ -1875,12 +2205,12 @@ async def test_reserved_human_follow_up_reaches_active_turn_before_dispatch(tmp_
     assert reservation is not None
     await asyncio.wait_for(active_saw_follow_up.wait(), timeout=0.2)
     assert queued_signal.pending_human_messages == 1
+    reservation.consume()
 
     follow_up_task = asyncio.create_task(
         lifecycle.run_locked_response(
             target=response_target,
             response_envelope=follow_up_envelope,
-            queued_notice_reservation=reservation,
             pipeline_timing=None,
             locked_operation=follow_up_operation,
         ),
@@ -1921,7 +2251,6 @@ async def test_response_lifecycle_reservations_clear_individual_notices(tmp_path
         lifecycle.run_locked_response(
             target=target,
             response_envelope=active_envelope,
-            queued_notice_reservation=None,
             pipeline_timing=None,
             locked_operation=active_operation,
         ),
@@ -1944,12 +2273,14 @@ async def test_response_lifecycle_reservations_clear_individual_notices(tmp_path
         assert reservation is not None
         queued_items.append((source_event_id, envelope, reservation))
 
+    for _source_event_id, _envelope_item, reservation in queued_items:
+        reservation.consume()
+
     follow_up_tasks = [
         asyncio.create_task(
             lifecycle.run_locked_response(
                 target=target,
                 response_envelope=envelope,
-                queued_notice_reservation=reservation,
                 pipeline_timing=None,
                 locked_operation=lambda locked_target, source_event_id=source_event_id: follow_up_operation(
                     source_event_id,
@@ -2002,13 +2333,13 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
 
     async def scheduled_operation(_target: MessageTarget) -> str:
         observed_scheduled_pending.append(
-            set(lifecycle._get_or_create_queued_signal(target).pending_human_message_event_ids),
+            {message.event_id for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()},
         )
         return "$scheduled-response"
 
     async def human_operation(_target: MessageTarget) -> str:
         observed_human_pending.append(
-            set(lifecycle._get_or_create_queued_signal(target).pending_human_message_event_ids),
+            {message.event_id for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()},
         )
         return "$human-response"
 
@@ -2016,7 +2347,6 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
         lifecycle.run_locked_response(
             target=target,
             response_envelope=active_envelope,
-            queued_notice_reservation=None,
             pipeline_timing=None,
             locked_operation=active_operation,
         ),
@@ -2029,7 +2359,6 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
         lifecycle.run_locked_response(
             target=target,
             response_envelope=scheduled_envelope,
-            queued_notice_reservation=None,
             pipeline_timing=None,
             locked_operation=scheduled_operation,
         ),
@@ -2040,13 +2369,15 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
     assert await active_task == "$active-response"
     assert await scheduled_task == "$scheduled-response"
     assert observed_scheduled_pending == [{"$human"}]
-    assert lifecycle._get_or_create_queued_signal(target).pending_human_message_event_ids == {"$human"}
+    assert {
+        message.event_id for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()
+    } == {"$human"}
+    human_reservation.consume()
 
     assert (
         await lifecycle.run_locked_response(
             target=target,
             response_envelope=human_envelope,
-            queued_notice_reservation=human_reservation,
             pipeline_timing=None,
             locked_operation=human_operation,
         )
@@ -2067,7 +2398,7 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
         source_event_id="$command",
         target=target,
     )
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$command",
         body="!help",
@@ -2103,7 +2434,8 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
             ),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=reservation,
@@ -2127,7 +2459,7 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
         source_event_id="$older",
         target=target,
     )
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$older",
         body="older follow-up",
@@ -2164,7 +2496,8 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
             patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=True),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=reservation,
@@ -2188,7 +2521,8 @@ async def test_reserved_follow_up_cleanup_when_hook_suppression_returns_before_d
             patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=None)),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=case.reservation,
@@ -2220,7 +2554,8 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
                 new=AsyncMock(return_value=_DispatchPlan(kind="ignore")),
             ),
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=case.reservation,
@@ -2252,7 +2587,8 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
             ),
             patch.object(bot._turn_controller, "_execute_router_relay", new=AsyncMock()) as mock_route,
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=case.reservation,
@@ -2295,7 +2631,8 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
             ),
             pytest.raises(RuntimeError, match="dispatch failed"),
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=case.reservation,
@@ -2336,7 +2673,8 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
                 new=AsyncMock(side_effect=asyncio.CancelledError),
             ),
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
                 queued_notice_reservation=case.reservation,
@@ -2348,48 +2686,8 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
 
 
 @pytest.mark.asyncio
-async def test_reserved_follow_up_cleanup_when_text_normalization_raises(tmp_path: Path) -> None:
-    """Reserved follow-ups should clean up even before PreparedDispatch can exist."""
-    bot = _bot(tmp_path)
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!room:localhost"
-    target = MessageTarget.resolve(room.room_id, "$thread", "$normalize")
-    envelope = _envelope(
-        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-        source_event_id="$normalize",
-        target=target,
-    )
-    event = _prepared_text_event(event_id="$normalize")
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = coordinator._lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
-    queued_signal.begin_response_turn()
-    try:
-        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
-        assert reservation is not None
-        with (
-            patch.object(
-                type(bot._turn_controller.deps.normalizer),
-                "resolve_text_event",
-                new=AsyncMock(side_effect=RuntimeError("normalization failed")),
-            ),
-            pytest.raises(RuntimeError, match="normalization failed"),
-        ):
-            await bot._turn_controller._dispatch_text_message(
-                room,
-                event,
-                "@user:localhost",
-                queued_notice_reservation=reservation,
-            )
-    finally:
-        queued_signal.finish_response_turn()
-
-    assert not queued_signal.is_set()
-
-
-@pytest.mark.asyncio
 async def test_reserved_follow_up_cleanup_when_prepare_dispatch_raises(tmp_path: Path) -> None:
-    """Reserved follow-ups should clean up when dispatch preparation fails."""
+    """Reserved follow-ups should clean up even before PreparedDispatch can exist."""
     bot = _bot(tmp_path)
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
@@ -2415,7 +2713,8 @@ async def test_reserved_follow_up_cleanup_when_prepare_dispatch_raises(tmp_path:
             ),
             pytest.raises(RuntimeError, match="prepare failed"),
         ):
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 event,
                 "@user:localhost",
@@ -2428,7 +2727,7 @@ async def test_reserved_follow_up_cleanup_when_prepare_dispatch_raises(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_before_dispatch(
+async def test_reserved_follow_up_cleanup_when_handle_prepared_turn_fails_before_dispatch(
     tmp_path: Path,
 ) -> None:
     """Reserved follow-ups claimed by the gate should clean up if handoff fails early."""
@@ -2449,12 +2748,12 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
     try:
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
-        batch = build_coalesced_batch(
-            CoalescingKey(room.room_id, "$thread", "@user:localhost"),
+        batch = build_prepared_turn(
+            CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner("@user:localhost")),
             [
-                PendingEvent(
-                    event=event,
-                    room=room,
+                make_pending_event(
+                    event,
+                    room,
                     source_kind=MESSAGE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                     dispatch_metadata=_queued_notice_metadata(reservation),
@@ -2463,12 +2762,12 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
         )
         with (
             patch(
-                "mindroom.turn_controller.build_dispatch_handoff",
-                side_effect=RuntimeError("handoff failed"),
+                "mindroom.turn_controller.dispatch_text_message",
+                new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
             ),
-            pytest.raises(RuntimeError, match="handoff failed"),
+            pytest.raises(RuntimeError, match="dispatch failed"),
         ):
-            await bot._turn_controller.handle_coalesced_batch(batch)
+            await bot._turn_controller.handle_prepared_turn(batch)
     finally:
         queued_signal.finish_response_turn()
 
@@ -2479,8 +2778,7 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
 async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path: Path) -> None:
     """A mixed batch should consume the notices for its single coalescing target before dispatch."""
     bot = _bot(tmp_path)
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!room:localhost"
+    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
     pre_target = MessageTarget.resolve(room.room_id, "$pre_stt_thread", "$typed")
     post_target = MessageTarget.resolve(room.room_id, "$post_stt_thread", "$voice")
     pre_envelope = _envelope(
@@ -2519,19 +2817,19 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
         post_reservation = lifecycle.reserve_waiting_human_message(target=post_target, response_envelope=post_envelope)
         assert pre_reservation is not None
         assert post_reservation is not None
-        batch = build_coalesced_batch(
-            CoalescingKey(room.room_id, "$post_stt_thread", "@user:localhost"),
+        batch = build_prepared_turn(
+            CoalescingKey(room.room_id, "$post_stt_thread", RequesterCoalescingOwner("@user:localhost")),
             [
-                PendingEvent(
-                    event=typed_event,
-                    room=room,
+                make_pending_event(
+                    typed_event,
+                    room,
                     source_kind=MESSAGE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                     dispatch_metadata=_targeted_queued_notice_metadata(pre_reservation, pre_target),
                 ),
-                PendingEvent(
-                    event=voice_event,
-                    room=room,
+                make_pending_event(
+                    voice_event,
+                    room,
                     source_kind=VOICE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                     dispatch_metadata=_targeted_queued_notice_metadata(post_reservation, post_target),
@@ -2539,8 +2837,11 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
             ],
         )
 
-        with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=capture_dispatch)):
-            await bot._turn_controller.handle_coalesced_batch(batch)
+        with patch(
+            "mindroom.turn_controller.dispatch_text_message",
+            new=AsyncMock(side_effect=prepared_turn_recorder(capture_dispatch)),
+        ):
+            await bot._turn_controller.handle_prepared_turn(batch)
     finally:
         pre_signal.finish_response_turn()
         post_signal.finish_response_turn()
@@ -2590,12 +2891,12 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
     try:
         voice_reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert voice_reservation is not None
-        batch = build_coalesced_batch(
-            CoalescingKey(room.room_id, None, "@user:localhost"),
+        batch = build_prepared_turn(
+            CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
             [
-                PendingEvent(
-                    event=voice_event,
-                    room=room,
+                make_pending_event(
+                    voice_event,
+                    room,
                     source_kind=VOICE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                     dispatch_metadata=_targeted_queued_notice_metadata(voice_reservation, target),
@@ -2603,8 +2904,11 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
             ],
         )
 
-        with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=capture_dispatch)):
-            await bot._turn_controller.handle_coalesced_batch(batch)
+        with patch(
+            "mindroom.turn_controller.dispatch_text_message",
+            new=AsyncMock(side_effect=prepared_turn_recorder(capture_dispatch)),
+        ):
+            await bot._turn_controller.handle_prepared_turn(batch)
     finally:
         queued_signal.finish_response_turn()
 
@@ -2630,7 +2934,7 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
         assert queued_signal.pending_human_messages == 1
-        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
         try:
             with (
                 patch.object(
@@ -2643,7 +2947,6 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
                 await bot._turn_controller._enqueue_prepared_text_for_dispatch(
                     room=room,
                     prepared_event=event,
-                    dispatch_event=event,
                     envelope=envelope,
                     coalescing_thread_id="$thread",
                     requester_user_id="@user:localhost",
@@ -2718,8 +3021,8 @@ def test_managed_message_does_not_reserve_queued_human_notice(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_handed_off_reservation_is_cancelled_when_lock_wait_is_cancelled(tmp_path: Path) -> None:
-    """A reservation handed to the lifecycle should not leak if lock acquisition is cancelled."""
+async def test_lifecycle_notice_is_cancelled_when_lock_wait_is_cancelled(tmp_path: Path) -> None:
+    """A lifecycle-owned notice should not leak if lock acquisition is cancelled."""
     bot = _bot(tmp_path)
     target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
     envelope = _envelope(
@@ -2734,6 +3037,7 @@ async def test_handed_off_reservation_is_cancelled_when_lock_wait_is_cancelled(t
     reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
     assert reservation is not None
     assert queued_signal.pending_human_messages == 1
+    reservation.consume()
 
     lock = lifecycle._response_lifecycle_lock(target)
     await lock.acquire()
@@ -2747,7 +3051,6 @@ async def test_handed_off_reservation_is_cancelled_when_lock_wait_is_cancelled(t
             lifecycle.run_locked_response(
                 target=target,
                 response_envelope=envelope,
-                queued_notice_reservation=reservation,
                 pipeline_timing=None,
                 locked_operation=locked_operation,
             ),
@@ -2763,52 +3066,6 @@ async def test_handed_off_reservation_is_cancelled_when_lock_wait_is_cancelled(t
     assert queued_signal.pending_human_messages == 0
     assert not queued_signal.is_set()
     assert not queued_signal.has_active_response_turn()
-
-
-def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> None:
-    """Batch validation should not own cleanup for a reserved active follow-up."""
-    bot = _bot(tmp_path)
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!room:localhost"
-    target = MessageTarget.resolve(room.room_id, "$thread", "$reserved")
-    envelope = _envelope(
-        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-        source_event_id="$reserved",
-        target=target,
-    )
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = coordinator._lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
-    queued_signal.begin_response_turn()
-    reservation = None
-    try:
-        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
-        assert reservation is not None
-        with pytest.raises(ValueError, match="solo batches"):
-            build_coalesced_batch(
-                CoalescingKey(room.room_id, "$thread", "@user:localhost"),
-                [
-                    PendingEvent(
-                        event=_prepared_text_event(event_id="$reserved"),
-                        room=room,
-                        source_kind=MESSAGE_SOURCE_KIND,
-                        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-                        dispatch_metadata=_queued_notice_metadata(reservation),
-                    ),
-                    PendingEvent(
-                        event=_prepared_text_event(event_id="$normal"),
-                        room=room,
-                        source_kind=MESSAGE_SOURCE_KIND,
-                    ),
-                ],
-            )
-        assert queued_signal.is_set()
-    finally:
-        if reservation is not None:
-            reservation.cancel()
-        queued_signal.finish_response_turn()
-
-    assert not queued_signal.is_set()
 
 
 @pytest.mark.asyncio
@@ -2841,12 +3098,13 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
             new=AsyncMock(return_value=_DispatchPlan(kind="ignore")),
         ) as mock_plan,
     ):
-        await bot._turn_controller._dispatch_text_message(
+        await dispatch_test_turn(
+            bot._turn_controller,
             room,
             _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
         )
 
-    assert bot._turn_store.is_handled("$older")
+    assert not bot._turn_store.is_handled("$older")
     mock_plan.assert_not_awaited()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert coordinator._lifecycle_coordinator._thread_queued_signals == {}
@@ -2865,7 +3123,7 @@ def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call()
     )
     assert _notice_count(plain_messages) == 0
 
-    with queued_message_signal_context(_StaticQueuedState(pending=True)):
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
         queued_messages = [Message(role="user", content="hello")]
         model.format_function_call_results(
             messages=queued_messages,
@@ -2884,7 +3142,7 @@ def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call()
             function_call_results=[Message(role="tool", content="done", stop_after_tool_call=True)],
         )
 
-    with queued_message_signal_context(_StaticQueuedState(pending=True)):
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as next_notice_context:
         next_turn_messages = [Message(role="user", content="hello")]
         model.format_function_call_results(
             messages=next_turn_messages,
@@ -2893,9 +3151,26 @@ def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call()
 
     assert _notice_count(queued_messages) == 1
     assert queued_messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
+    assert queued_messages[-1].provider_data == {
+        _QUEUED_NOTICE_MARKER_KEY: True,
+        _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: notice_context.response_turn_id,
+    }
     assert _notice_count(next_turn_messages) == 1
     assert next_turn_messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
+    assert next_notice_context.response_turn_id != notice_context.response_turn_id
     assert _notice_count(stop_after_messages) == 0
+
+
+def test_default_queued_notice_requires_pause_handoff() -> None:
+    """The default notice should require an explicit pause handoff and continuation default."""
+    assert QUEUED_MESSAGE_NOTICE_TEXT == (
+        "[SYSTEM NOTICE — PAUSE FOR A NEWER USER MESSAGE] A newer user message arrived in this thread "
+        "while you were working. This is a PAUSE, not a cancellation of the current task. Do not make "
+        "any new tool calls. End this turn now with a final text response that explicitly says a newer "
+        "message arrived and states: (1) what you completed, (2) what remains unfinished, and (3) the "
+        "next step. You cannot see the newer message's contents yet. If work remains, state that you "
+        "intend to resume it on the next turn, subject to the newer message's instructions."
+    )
 
 
 def test_notice_hook_uses_configured_notice_text() -> None:
@@ -2903,7 +3178,7 @@ def test_notice_hook_uses_configured_notice_text() -> None:
     model = _FakeModel()
     install_queued_message_notice_hook(model, notice_text="Custom queued notice.")
 
-    with queued_message_signal_context(_StaticQueuedState(pending=True)):
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
         messages = [Message(role="user", content="hello")]
         model.format_function_call_results(
             messages=messages,
@@ -2911,7 +3186,64 @@ def test_notice_hook_uses_configured_notice_text() -> None:
         )
 
     assert messages[-1].content == "Custom queued notice."
-    assert messages[-1].provider_data == {"mindroom_queued_message_notice": True}
+    assert messages[-1].provider_data == {
+        _QUEUED_NOTICE_MARKER_KEY: True,
+        _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: notice_context.response_turn_id,
+    }
+
+
+def test_notice_hook_scopes_dedupe_to_response_turn_id() -> None:
+    """Tool-round dedupe should remove only notices owned by the active response."""
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        prior_notice = _queued_notice_message(
+            "prior-response",
+            marker="persisted",
+            content=QUEUED_MESSAGE_NOTICE_TEXT,
+            from_history=True,
+        )
+        current_stale_notice = _queued_notice_message(
+            notice_context.response_turn_id,
+            marker="persisted",
+            content=QUEUED_MESSAGE_NOTICE_TEXT,
+        )
+        messages = [prior_notice, current_stale_notice]
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+
+    assert messages[0] is prior_notice
+    assert _notice_count(messages, marker="persisted", response_turn_id="prior-response") == 1
+    assert _notice_count(messages, marker="persisted", response_turn_id=notice_context.response_turn_id) == 0
+    assert _notice_count(messages, marker=True, response_turn_id=notice_context.response_turn_id) == 1
+
+
+def test_notice_hook_preserves_prior_persisted_replay() -> None:
+    """A prior persisted notice should survive later tool-result formatting byte-for-byte."""
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    prior_notice = _queued_notice_message(
+        "prior-response",
+        marker="persisted",
+        content=QUEUED_MESSAGE_NOTICE_TEXT,
+        from_history=True,
+    )
+    original = prior_notice.model_dump()
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages = [prior_notice]
+        for index in range(2):
+            model.format_function_call_results(
+                messages=messages,
+                function_call_results=[Message(role="tool", content=f"result {index}")],
+            )
+
+    assert prior_notice.model_dump() == original
+    assert _notice_count(messages, marker="persisted", response_turn_id="prior-response") == 1
+    assert _notice_count(messages, marker=True, response_turn_id=notice_context.response_turn_id) == 1
 
 
 def test_notice_reinjects_at_end_across_multiple_tool_rounds() -> None:
@@ -2931,24 +3263,46 @@ def test_notice_reinjects_at_end_across_multiple_tool_rounds() -> None:
             assert messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
 
 
-def test_stop_after_tool_call_strips_stale_notice_without_readding() -> None:
-    """A stop-after-tool-call round should remove any stale queued notice and not append a new one."""
+def test_queued_notice_logs_once_per_response_turn() -> None:
+    """Repeated successful appends should emit one injection event for the response."""
     model = _FakeModel()
     install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
 
-    messages = [Message(role="user", content="hello")]
-    with queued_message_signal_context(_StaticQueuedState(pending=True)):
-        model.format_function_call_results(
-            messages=messages,
-            function_call_results=[Message(role="tool", content="result")],
-        )
-        model.format_function_call_results(
-            messages=messages,
-            function_call_results=[Message(role="tool", content="done", stop_after_tool_call=True)],
-        )
+    with (
+        capture_logs() as logs,
+        queued_message_signal_context(
+            _StaticQueuedState(pending=True),
+        ) as notice_context,
+    ):
+        messages = [Message(role="user", content="hello")]
+        for index in range(5):
+            model.format_function_call_results(
+                messages=messages,
+                function_call_results=[Message(role="tool", content=f"result {index}")],
+            )
 
-    assert _notice_count(messages) == 0
-    assert messages[-1].content == "done"
+    injection_logs = [entry for entry in logs if entry.get("event") == "queued_message_notice_injected"]
+    assert injection_logs == [
+        {
+            "event": "queued_message_notice_injected",
+            "log_level": "info",
+            "response_turn_id": notice_context.response_turn_id,
+        },
+    ]
+
+    with capture_logs() as no_injection_logs:
+        with queued_message_signal_context(_StaticQueuedState(pending=False)):
+            model.format_function_call_results(
+                messages=[],
+                function_call_results=[Message(role="tool", content="result")],
+            )
+        with queued_message_signal_context(_StaticQueuedState(pending=True)):
+            model.format_function_call_results(
+                messages=[],
+                function_call_results=[Message(role="tool", content="done", stop_after_tool_call=True)],
+            )
+
+    assert not any(entry.get("event") == "queued_message_notice_injected" for entry in no_injection_logs)
 
 
 def test_notice_reinjects_after_media_follow_up_message() -> None:
@@ -2997,7 +3351,7 @@ def test_notice_hook_still_installs_when_media_handler_is_missing() -> None:
 
 @pytest.mark.asyncio
 async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path) -> None:
-    """Loaded session history should strip stale queued notices before replay."""
+    """Loaded session history should persist a prior crash-left live notice."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     storage.session = AgentSession(
@@ -3006,7 +3360,8 @@ async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path)
             RunOutput(
                 run_id="run-0",
                 session_id="session-1",
-                messages=[_queued_notice_message()],
+                messages=[_queued_notice_message("prior-response")],
+                status=RunStatus.completed,
             ),
         ],
     )
@@ -3054,15 +3409,20 @@ async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path)
         )
 
     assert response == "final answer"
-    assert observed_notice_counts == [0]
+    assert observed_notice_counts == [1]
     assert storage.upserted is True
     assert storage.session is not None
-    assert _notice_count(storage.session.runs[0].messages or []) == 0
+    recovered = _notice_messages(
+        storage.session.runs[0].messages or [],
+        marker="persisted",
+        response_turn_id="prior-response",
+    )
+    assert [message.content for message in recovered] == [QUEUED_MESSAGE_NOTICE_TEXT]
 
 
 @pytest.mark.asyncio
-async def test_ai_response_preserves_notice_in_run_output_and_session(tmp_path: Path) -> None:
-    """Non-streaming runs should strip the hidden notice from returned and persisted history."""
+async def test_ai_response_preserves_notice_in_session(tmp_path: Path) -> None:
+    """Attempt registration should stay live until outer non-stream finalization."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     model = _FakeModel()
@@ -3082,7 +3442,14 @@ async def test_ai_response_preserves_notice_in_run_output_and_session(tmp_path: 
         stored_messages = [message.model_copy(deep=True) for message in messages]
         storage.session = AgentSession(
             session_id=session_id,
-            runs=[RunOutput(run_id="run-1", session_id=session_id, messages=stored_messages)],
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    session_id=session_id,
+                    messages=stored_messages,
+                    status=RunStatus.completed,
+                ),
+            ],
         )
         run_output = RunOutput(
             run_id="run-1",
@@ -3108,7 +3475,7 @@ async def test_ai_response_preserves_notice_in_run_output_and_session(tmp_path: 
         ),
         patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
         patch("mindroom.ai.close_agent_runtime_state_dbs"),
-        queued_message_signal_context(_StaticQueuedState(pending=True)),
+        queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context,
     ):
         response = await ai_response(
             make_turn_context("general", session_id="session-1"),
@@ -3116,17 +3483,22 @@ async def test_ai_response_preserves_notice_in_run_output_and_session(tmp_path: 
             runtime_paths=runtime_paths_for(config),
             config=config,
         )
+        assert storage.upserted is False
+        assert _notice_count(run_output_holder["run"].messages or [], marker=True) == 1
+        assert storage.session is not None
+        assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 1
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
     assert response == "final answer"
     assert storage.upserted is True
-    assert _notice_count(run_output_holder["run"].messages or []) == 0
     assert storage.session is not None
-    assert _notice_count(storage.session.runs[0].messages or []) == 0
+    assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 0
+    assert _notice_count(storage.session.runs[0].messages or [], marker="persisted") == 1
 
 
 @pytest.mark.asyncio
 async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path: Path) -> None:
-    """Non-streaming failures should still scrub persisted notices."""
+    """An error-only response should remove its live notice at the outer boundary."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     model = _FakeModel()
@@ -3144,7 +3516,14 @@ async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path:
         )
         storage.session = AgentSession(
             session_id=session_id,
-            runs=[RunOutput(run_id="run-1", session_id=session_id, messages=messages)],
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    session_id=session_id,
+                    messages=messages,
+                    status=RunStatus.error,
+                ),
+            ],
         )
         error_message = "boom"
         raise RuntimeError(error_message)
@@ -3160,7 +3539,7 @@ async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path:
         ),
         patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
         patch("mindroom.ai.close_agent_runtime_state_dbs"),
-        queued_message_signal_context(_StaticQueuedState(pending=True)),
+        queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context,
     ):
         response = await ai_response(
             make_turn_context("general", session_id="session-1"),
@@ -3168,6 +3547,9 @@ async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path:
             runtime_paths=runtime_paths_for(config),
             config=config,
         )
+        assert storage.session is not None
+        assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 1
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
     assert isinstance(response, str)
     assert storage.upserted is True
@@ -3177,7 +3559,7 @@ async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path:
 
 @pytest.mark.asyncio
 async def test_stream_agent_response_preserves_notice_in_session(tmp_path: Path) -> None:
-    """Streaming runs should also scrub the hidden notice from persisted history."""
+    """Streaming attempt cleanup should wait for the outer response boundary."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     model = _FakeModel()
@@ -3196,7 +3578,14 @@ async def test_stream_agent_response_preserves_notice_in_session(tmp_path: Path)
         stored_messages = [message.model_copy(deep=True) for message in messages]
         storage.session = AgentSession(
             session_id=session_id,
-            runs=[RunOutput(run_id="run-1", session_id=session_id, messages=stored_messages)],
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    session_id=session_id,
+                    messages=stored_messages,
+                    status=RunStatus.completed,
+                ),
+            ],
         )
         yield RunContentEvent(content="chunk")
         yield RunCompletedEvent(run_id="run-1", session_id=session_id)
@@ -3212,7 +3601,7 @@ async def test_stream_agent_response_preserves_notice_in_session(tmp_path: Path)
         ),
         patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
         patch("mindroom.ai.close_agent_runtime_state_dbs"),
-        queued_message_signal_context(_StaticQueuedState(pending=True)),
+        queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context,
     ):
         chunks = [
             chunk
@@ -3223,11 +3612,16 @@ async def test_stream_agent_response_preserves_notice_in_session(tmp_path: Path)
                 config=config,
             )
         ]
+        assert storage.upserted is False
+        assert storage.session is not None
+        assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 1
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
     assert any(isinstance(chunk, RunContentEvent) and chunk.content == "chunk" for chunk in chunks)
     assert storage.upserted is True
     assert storage.session is not None
-    assert _notice_count(storage.session.runs[0].messages or []) == 0
+    assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 0
+    assert _notice_count(storage.session.runs[0].messages or [], marker="persisted") == 1
 
 
 def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path) -> None:
@@ -3268,60 +3662,1093 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
         assert _notice_count(messages) == 1
 
 
-def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> None:
-    """Team cleanup should recurse into nested member responses."""
-    run_output = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        messages=[_queued_notice_message()],
-        member_responses=[
-            RunOutput(
-                run_id="member-run-1",
+@pytest.mark.asyncio
+async def test_response_finalization_collapses_nested_current_notice_state() -> None:
+    """Outer finalization should leave one exact notice in the top-level completed run."""
+    created_storages: list[_FakeStorage] = []
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+        run_output = TeamRunOutput(
+            run_id="run-1",
+            session_id="session-1",
+            messages=[message.model_copy(deep=True) for message in messages],
+            member_responses=[
+                RunOutput(
+                    run_id="member-run-1",
+                    session_id="session-1",
+                    messages=[message.model_copy(deep=True) for message in messages],
+                    status=RunStatus.completed,
+                ),
+            ],
+            status=RunStatus.completed,
+        )
+
+        def storage_factory() -> _FakeStorage:
+            storage = _FakeStorage()
+            storage.session = TeamSession(
                 session_id="session-1",
-                messages=[_queued_notice_message()],
-            ),
-        ],
-        status=RunStatus.completed,
-    )
-    storage = _FakeStorage()
-    storage.session = TeamSession(
-        session_id="session-1",
-        runs=[
-            TeamRunOutput(
-                run_id="run-1",
-                session_id="session-1",
-                messages=[_queued_notice_message()],
-                member_responses=[
-                    RunOutput(
-                        run_id="member-run-1",
+                runs=[
+                    TeamRunOutput(
+                        run_id="run-1",
                         session_id="session-1",
-                        messages=[_queued_notice_message()],
+                        messages=[message.model_copy(deep=True) for message in messages],
+                        member_responses=[
+                            RunOutput(
+                                run_id="member-run-1",
+                                session_id="session-1",
+                                messages=[message.model_copy(deep=True) for message in messages],
+                                status=RunStatus.completed,
+                            ),
+                        ],
+                        status=RunStatus.completed,
                     ),
                 ],
-                status=RunStatus.completed,
-            ),
-        ],
-    )
+            )
+            created_storages.append(storage)
+            return storage
 
-    cleanup_queued_notice_state(
-        run_output=run_output,
-        storage=storage,
-        session_id="session-1",
-        session_type=SessionType.TEAM,
-        entity_name="queued-notice-team",
-    )
+        register_queued_notice_storage(
+            storage_factory=storage_factory,
+            session_id="session-1",
+            session_type=SessionType.TEAM,
+            entity_name="queued-notice-team",
+        )
+        assert _notice_count(run_output.messages or [], marker=True) == 1
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
-    assert _notice_count(run_output.messages or []) == 0
-    assert run_output.member_responses is not None
-    nested_member_run = run_output.member_responses[0]
-    assert isinstance(nested_member_run, RunOutput)
-    assert _notice_count(nested_member_run.messages or []) == 0
+    storage = created_storages[0]
     assert storage.upserted is True
     assert storage.session is not None
     stored_team_run = storage.session.runs[0]
     assert isinstance(stored_team_run, TeamRunOutput)
-    assert _notice_count(stored_team_run.messages or []) == 0
+    assert _notice_count(stored_team_run.messages or [], marker=True) == 0
+    assert _notice_count(stored_team_run.messages or [], marker="persisted") == 1
     assert stored_team_run.member_responses is not None
     stored_member_run = stored_team_run.member_responses[0]
     assert isinstance(stored_member_run, RunOutput)
     assert _notice_count(stored_member_run.messages or []) == 0
+    assert storage.closed is True
+
+
+@pytest.mark.asyncio
+async def test_response_finalization_does_not_copy_notice_to_untouched_target() -> None:
+    """Finalization should persist a notice only in storage that contains its live marker."""
+    untouched_storage = _FakeStorage()
+    noticed_storage = _FakeStorage()
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        noticed_messages = [Message(role="user", content="Outer request")]
+        model.format_function_call_results(
+            messages=noticed_messages,
+            function_call_results=[Message(role="tool", content="Outer tool result")],
+        )
+        untouched_run = RunOutput(
+            run_id="untouched-run",
+            session_id="shared-session",
+            messages=[
+                Message(role="user", content="Delegated request"),
+                Message(role="assistant", content="Delegated answer"),
+            ],
+            status=RunStatus.completed,
+        )
+        noticed_run = RunOutput(
+            run_id="noticed-run",
+            session_id="shared-session",
+            messages=noticed_messages,
+            status=RunStatus.completed,
+        )
+        untouched_storage.session = AgentSession(
+            session_id="shared-session",
+            runs=[untouched_run],
+        )
+        noticed_storage.session = AgentSession(
+            session_id="shared-session",
+            runs=[noticed_run],
+        )
+        register_queued_notice_storage(
+            storage_factory=lambda: untouched_storage,
+            session_id="shared-session",
+            session_type=SessionType.AGENT,
+            entity_name="delegated-agent",
+        )
+        register_queued_notice_storage(
+            storage_factory=lambda: noticed_storage,
+            session_id="shared-session",
+            session_type=SessionType.AGENT,
+            entity_name="outer-agent",
+        )
+
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+
+    assert untouched_storage.upsert_count == 0
+    assert untouched_storage.session is not None
+    assert [(message.role, message.content) for message in untouched_run.messages or []] == [
+        ("user", "Delegated request"),
+        ("assistant", "Delegated answer"),
+    ]
+    assert noticed_storage.upsert_count == 1
+    # The loaded run is left untouched; the finalized copy is what got written.
+    assert _notice_count(noticed_run.messages or [], marker=True) == 1
+    persisted_run = noticed_storage.upserted_runs[0]
+    assert isinstance(persisted_run, RunOutput)
+    assert _notice_count(persisted_run.messages or [], marker=True) == 0
+    assert _notice_count(persisted_run.messages or [], marker="persisted") == 1
+
+
+@pytest.mark.asyncio
+async def test_response_finalization_uses_newest_completed_same_turn_run_and_original_notice_position() -> None:
+    """Two completed attempts should leave one exact notice at the newest notice position."""
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    storage = _FakeStorage()
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        first_messages = [
+            Message(role="user", content="First request"),
+            Message(role="assistant", content="First tool call"),
+        ]
+        model.format_function_call_results(
+            messages=first_messages,
+            function_call_results=[Message(role="tool", content="First result")],
+        )
+        first_messages.append(Message(role="assistant", content="First final"))
+        second_messages = [
+            Message(role="user", content="Second request"),
+            Message(role="assistant", content="Second tool call"),
+        ]
+        model.format_function_call_results(
+            messages=second_messages,
+            function_call_results=[Message(role="tool", content="Second result")],
+        )
+        second_messages.append(Message(role="assistant", content="Second final"))
+        first_run = RunOutput(
+            run_id="first-completed-run",
+            session_id="session-1",
+            messages=first_messages,
+            status=RunStatus.completed,
+        )
+        second_run = RunOutput(
+            run_id="second-completed-run",
+            session_id="session-1",
+            messages=second_messages,
+            status=RunStatus.completed,
+        )
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id=first_run.run_id,
+                    session_id=first_run.session_id,
+                    messages=[message.model_copy(deep=True) for message in first_messages],
+                    status=first_run.status,
+                ),
+                RunOutput(
+                    run_id=second_run.run_id,
+                    session_id=second_run.session_id,
+                    messages=[message.model_copy(deep=True) for message in second_messages],
+                    status=second_run.status,
+                ),
+            ],
+        )
+        register_queued_notice_storage(
+            storage_factory=lambda: storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
+
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+
+    # Both attempts change: the first loses its notice, the second gets the persisted one.
+    assert storage.upsert_count == 2
+    assert {run.run_id for run in storage.upserted_runs if isinstance(run, RunOutput)} == {
+        "first-completed-run",
+        "second-completed-run",
+    }
+    assert storage.session is not None
+    stored_first, stored_second = storage.session.runs
+    assert _notice_count(stored_first.messages or []) == 0
+    assert [(message.role, message.content) for message in stored_second.messages or []] == [
+        ("user", "Second request"),
+        ("assistant", "Second tool call"),
+        ("tool", "Second result"),
+        ("user", QUEUED_MESSAGE_NOTICE_TEXT),
+        ("assistant", "Second final"),
+    ]
+    assert (
+        _notice_count(
+            stored_second.messages or [],
+            marker="persisted",
+            response_turn_id=notice_context.response_turn_id,
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_cleanup_keeps_session_storage_io_off_event_loop() -> None:
+    """Slow response-boundary storage finalization must stay off the event loop."""
+    request_started = threading.Event()
+    release_request = threading.Event()
+    created_storages: list[_BlockingStorage] = []
+    event_loop_thread_id = threading.get_ident()
+
+    class _BlockingStorage(_FakeStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.created_thread_id = threading.get_ident()
+
+        def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
+            request_started.set()
+            release_request.wait(timeout=1)
+            return super().get_session(session_id, _session_type)
+
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+
+        def storage_factory() -> _BlockingStorage:
+            storage = _BlockingStorage()
+            storage.session = AgentSession(
+                session_id="session-1",
+                runs=[
+                    RunOutput(
+                        run_id="run-1",
+                        session_id="session-1",
+                        messages=[message.model_copy(deep=True) for message in messages],
+                        status=RunStatus.completed,
+                    ),
+                ],
+            )
+            created_storages.append(storage)
+            return storage
+
+        register_queued_notice_storage(
+            storage_factory=storage_factory,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="queued-notice-agent",
+        )
+        cleanup_task = asyncio.create_task(
+            ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
+        )
+        try:
+            assert await asyncio.to_thread(request_started.wait, 1)
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+            assert not cleanup_task.done()
+        finally:
+            release_request.set()
+
+        await asyncio.wait_for(cleanup_task, timeout=1)
+    storage = created_storages[0]
+    assert storage.created_thread_id != event_loop_thread_id
+    assert storage.upserted is True
+    assert storage.closed is True
+
+
+@pytest.mark.asyncio
+async def test_response_turn_finalization_completes_when_cancelled_during_storage_io() -> None:
+    """Cancellation during storage I/O must not leave a durable live imperative behind."""
+    request_started = threading.Event()
+    release_request = threading.Event()
+    request_finished = threading.Event()
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+
+    class _BlockingStorage(_FakeStorage):
+        def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
+            request_started.set()
+            release_request.wait(timeout=1)
+            return super().get_session(session_id, _session_type)
+
+        def close(self) -> None:
+            super().close()
+            request_finished.set()
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+        run_output = RunOutput(
+            run_id="completed-run",
+            session_id="session-1",
+            messages=messages,
+            status=RunStatus.completed,
+        )
+        storage = _BlockingStorage()
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id=run_output.run_id,
+                    session_id=run_output.session_id,
+                    messages=[message.model_copy(deep=True) for message in messages],
+                    status=run_output.status,
+                ),
+            ],
+        )
+        register_queued_notice_storage(
+            storage_factory=lambda: storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
+        finalization_task = asyncio.create_task(
+            ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
+        )
+        assert await asyncio.to_thread(request_started.wait, 1)
+        finalization_task.cancel()
+        release_request.set()
+        with pytest.raises(asyncio.CancelledError):
+            await finalization_task
+        assert await asyncio.to_thread(request_finished.wait, 1)
+
+    assert storage.session is not None
+    assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 0
+    assert (
+        _notice_count(
+            storage.session.runs[0].messages or [],
+            marker="persisted",
+            response_turn_id=notice_context.response_turn_id,
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_response_turn_finalization_defers_repeated_cancellation_during_storage_io() -> None:
+    """Repeated cancellation must not release the caller before durable finalization finishes."""
+    request_started = threading.Event()
+    release_request = threading.Event()
+    request_finished = threading.Event()
+    first_cancel_observed = asyncio.Event()
+    original_shield = asyncio.shield
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+
+    class _BlockingStorage(_FakeStorage):
+        def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
+            request_started.set()
+            release_request.wait(timeout=1)
+            return super().get_session(session_id, _session_type)
+
+        def close(self) -> None:
+            super().close()
+            request_finished.set()
+
+    async def observed_shield(task: asyncio.Task[None]) -> None:
+        try:
+            await original_shield(task)
+        except asyncio.CancelledError:
+            first_cancel_observed.set()
+            raise
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+        run_output = RunOutput(
+            run_id="completed-run",
+            session_id="session-1",
+            messages=messages,
+            status=RunStatus.completed,
+        )
+        storage = _BlockingStorage()
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id=run_output.run_id,
+                    session_id=run_output.session_id,
+                    messages=[message.model_copy(deep=True) for message in messages],
+                    status=run_output.status,
+                ),
+            ],
+        )
+        register_queued_notice_storage(
+            storage_factory=lambda: storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
+        with patch.object(ai_runtime.asyncio, "shield", new=observed_shield):
+            finalization_task = asyncio.create_task(
+                ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
+            )
+            assert await asyncio.to_thread(request_started.wait, 1)
+            finalization_task.cancel()
+            await asyncio.wait_for(first_cancel_observed.wait(), timeout=1)
+            finalization_task.cancel()
+            completed, _ = await asyncio.wait({finalization_task}, timeout=0.05)
+            try:
+                assert finalization_task not in completed
+            finally:
+                release_request.set()
+            with pytest.raises(asyncio.CancelledError):
+                await finalization_task
+
+    assert request_finished.is_set()
+    assert storage.session is not None
+    assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 0
+    assert (
+        _notice_count(
+            storage.session.runs[0].messages or [],
+            marker="persisted",
+            response_turn_id=notice_context.response_turn_id,
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_storage_registration_deduplicates_one_session_across_fresh_factories() -> None:
+    """Fresh storage-factory closures for one session should cause one boundary open."""
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    factory_calls = 0
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+        run_output = RunOutput(
+            run_id="completed-run",
+            session_id="session-1",
+            messages=messages,
+            status=RunStatus.completed,
+        )
+        storage = _FakeStorage()
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id=run_output.run_id,
+                    session_id=run_output.session_id,
+                    messages=[message.model_copy(deep=True) for message in messages],
+                    status=run_output.status,
+                ),
+            ],
+        )
+
+        def fresh_storage_factory() -> Callable[[], _FakeStorage]:
+            def storage_factory() -> _FakeStorage:
+                nonlocal factory_calls
+                factory_calls += 1
+                return storage
+
+            return storage_factory
+
+        for _ in range(2):
+            register_queued_notice_storage(
+                storage_factory=fresh_storage_factory(),
+                session_id="session-1",
+                session_type=SessionType.AGENT,
+                entity_name="general",
+            )
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+
+    assert factory_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_error_responses_never_attach_notices_to_prior_completed_run() -> None:
+    """Failed responses must not accumulate their notice facts on an earlier turn."""
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    storage = _FakeStorage()
+    prior_completed = RunOutput(
+        run_id="prior-completed",
+        session_id="session-1",
+        messages=[
+            Message(role="user", content="Prior request"),
+            Message(role="assistant", content="Prior answer"),
+        ],
+        status=RunStatus.completed,
+    )
+    storage.session = AgentSession(session_id="session-1", runs=[prior_completed])
+
+    for index in range(3):
+        with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+            messages: list[Message] = []
+            model.format_function_call_results(
+                messages=messages,
+                function_call_results=[Message(role="tool", content=f"failed result {index}")],
+            )
+            error_run = RunOutput(
+                run_id=f"error-run-{index}",
+                session_id="session-1",
+                messages=messages,
+                status=RunStatus.error,
+            )
+            assert storage.session.runs is not None
+            storage.session.runs.append(
+                RunOutput(
+                    run_id=error_run.run_id,
+                    session_id=error_run.session_id,
+                    messages=[message.model_copy(deep=True) for message in messages],
+                    status=error_run.status,
+                ),
+            )
+            register_queued_notice_storage(
+                storage_factory=lambda: storage,
+                session_id="session-1",
+                session_type=SessionType.AGENT,
+                entity_name="general",
+            )
+            await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+
+    assert storage.session.runs is not None
+    assert _notice_count(prior_completed.messages or []) == 0
+    assert (
+        sum(
+            _notice_count(run.messages or [])
+            for run in storage.session.runs
+            if isinstance(run, RunOutput | TeamRunOutput)
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_response_lifecycle_finalizes_notice_after_locked_operation() -> None:
+    """The lifecycle boundary should persist the exact notice shown to the model."""
+    lifecycle = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
+    envelope = _envelope(source_event_id="$event", target=target)
+    storage = _FakeStorage()
+    model = _FakeModel()
+    notice_text = "Custom queued notice."
+    install_queued_message_notice_hook(model, notice_text=notice_text)
+    observed_live_counts: list[int] = []
+
+    async def locked_operation(_target: MessageTarget) -> str:
+        lifecycle._get_or_create_queued_signal(target).add_waiting_human_message("$newer")
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+        run = RunOutput(
+            run_id="completed-run",
+            session_id="session-1",
+            messages=messages,
+            status=RunStatus.completed,
+        )
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id=run.run_id,
+                    session_id=run.session_id,
+                    messages=[message.model_copy(deep=True) for message in messages],
+                    status=run.status,
+                ),
+            ],
+        )
+        register_queued_notice_storage(
+            storage_factory=lambda: storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
+        observed_live_counts.append(_notice_count(run.messages or [], marker=True))
+        return "$response"
+
+    result = await lifecycle.run_locked_response(
+        target=target,
+        response_envelope=envelope,
+        pipeline_timing=None,
+        locked_operation=locked_operation,
+    )
+
+    assert result == "$response"
+    assert observed_live_counts == [1]
+    assert storage.session is not None
+    stored_run = storage.session.runs[0]
+    assert _notice_count(stored_run.messages or [], marker=True) == 0
+    persisted_notices = _notice_messages(stored_run.messages or [], marker="persisted")
+    assert [message.content for message in persisted_notices] == [notice_text]
+    assert storage.upsert_count == 1
+
+
+@pytest.mark.asyncio
+async def test_response_lifecycle_finalizes_error_state_when_operation_raises() -> None:
+    """The lifecycle finally block should remove live state when the operation raises."""
+    lifecycle = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
+    envelope = _envelope(source_event_id="$event", target=target)
+    storage = _FakeStorage()
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+
+    async def locked_operation(_target: MessageTarget) -> str:
+        lifecycle._get_or_create_queued_signal(target).add_waiting_human_message("$newer")
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="failed result")],
+        )
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id="error-run",
+                    session_id="session-1",
+                    messages=messages,
+                    status=RunStatus.error,
+                ),
+            ],
+        )
+        register_queued_notice_storage(
+            storage_factory=lambda: storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
+        error_message = "provider failed"
+        raise RuntimeError(error_message)
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        await lifecycle.run_locked_response(
+            target=target,
+            response_envelope=envelope,
+            pipeline_timing=None,
+            locked_operation=locked_operation,
+        )
+
+    assert storage.session is not None
+    assert _notice_count(storage.session.runs[0].messages or []) == 0
+
+
+@pytest.mark.asyncio
+async def test_response_turn_finalization_is_idempotent_for_one_persisted_notice() -> None:
+    """Repeated boundary finalization should not rewrite an already-normalized response."""
+    storage = _FakeStorage()
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        injected_messages: list[Message] = []
+        model.format_function_call_results(
+            messages=injected_messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+        persisted_notice = _queued_notice_message(
+            notice_context.response_turn_id,
+            marker="persisted",
+            content=QUEUED_MESSAGE_NOTICE_TEXT,
+        )
+        run = RunOutput(
+            run_id="completed-run",
+            session_id="session-1",
+            messages=[persisted_notice],
+            status=RunStatus.completed,
+        )
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id=run.run_id,
+                    session_id=run.session_id,
+                    messages=[persisted_notice.model_copy(deep=True)],
+                    status=run.status,
+                ),
+            ],
+        )
+        original_stored = (storage.session.runs[0].messages or [])[0].model_dump()
+        register_queued_notice_storage(
+            storage_factory=lambda: storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+
+    assert storage.upsert_count == 0
+    assert storage.session is not None
+    assert (storage.session.runs[0].messages or [])[0].model_dump() == original_stored
+
+
+def test_pre_replay_crash_recovery_preserves_prior_persisted_and_active_live_notice() -> None:
+    """Recovery should persist prior live state without touching prior records or the active response."""
+    storage = _FakeStorage()
+
+    with queued_message_signal_context(_StaticQueuedState(pending=False)) as notice_context:
+        prior_persisted = _queued_notice_message(
+            "already-persisted",
+            marker="persisted",
+            content=QUEUED_MESSAGE_NOTICE_TEXT,
+        )
+        prior_dump = prior_persisted.model_dump()
+        active_live = _queued_notice_message(notice_context.response_turn_id)
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id="completed-run",
+                    session_id="session-1",
+                    messages=[
+                        _queued_notice_message("crash-left"),
+                        prior_persisted,
+                        active_live,
+                    ],
+                ),
+            ],
+        )
+        ai_runtime.scrub_queued_notice_session_context(
+            scope_context=SimpleNamespace(
+                storage=storage,
+                session=storage.session,
+            ),
+            entity_name="general",
+        )
+
+    assert storage.session is not None
+    stored_messages = storage.session.runs[0].messages or []
+    assert prior_persisted.model_dump() == prior_dump
+    assert _notice_count(stored_messages, marker="persisted", response_turn_id="already-persisted") == 1
+    assert _notice_count(stored_messages, marker="persisted", response_turn_id="crash-left") == 1
+    assert _notice_count(stored_messages, marker=True, response_turn_id="crash-left") == 0
+    assert _notice_count(stored_messages, marker=True, response_turn_id=notice_context.response_turn_id) == 1
+
+
+def test_notice_provider_data_survives_mindroom_sqlite_round_trip(tmp_path: Path) -> None:
+    """MindRoom's prompt-sanitizing SQLite storage should preserve notice ownership metadata."""
+    response_turn_id = "response-1"
+    storage = _queued_notice_storage(tmp_path)
+    seed_session(
+        storage,
+        AgentSession(
+            session_id="session-1",
+            agent_id="general",
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    agent_id="general",
+                    session_id="session-1",
+                    messages=[_queued_notice_message(response_turn_id)],
+                    status=RunStatus.completed,
+                ),
+            ],
+            created_at=1,
+            updated_at=1,
+        ),
+    )
+    storage.close()
+
+    reopened_storage = _queued_notice_storage(tmp_path)
+    try:
+        session = get_agent_session(reopened_storage, "session-1")
+    finally:
+        reopened_storage.close()
+
+    assert session is not None
+    assert session.runs is not None
+    stored_run = session.runs[0]
+    assert isinstance(stored_run, RunOutput)
+    stored_notice = (stored_run.messages or [])[0]
+    assert stored_notice.content == QUEUED_MESSAGE_NOTICE_TEXT
+    assert stored_notice.provider_data == {
+        _QUEUED_NOTICE_MARKER_KEY: True,
+        _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id,
+    }
+    assert stored_notice.from_history is False
+
+
+async def _persist_notice_bearing_response(tmp_path: Path) -> str:
+    lifecycle = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$event-1")
+    envelope = _envelope(source_event_id="$event-1", target=target)
+    response_1_model = RecordingModel(id="response-1-model", provider="fake")
+    install_queued_message_notice_hook(response_1_model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    response_1_ids: list[str] = []
+
+    async def response_1_operation(_target: MessageTarget) -> str:
+        lifecycle._get_or_create_queued_signal(target).add_waiting_human_message("$newer")
+        messages = [Message(role="user", content="First request")]
+        response_1_model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="First tool result")],
+        )
+        notices = _notice_messages(messages, marker=True)
+        assert len(notices) == 1
+        provider_data = notices[0].provider_data
+        assert isinstance(provider_data, dict)
+        response_turn_id = provider_data[_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY]
+        assert isinstance(response_turn_id, str)
+        response_1_ids.append(response_turn_id)
+        messages.append(Message(role="assistant", content="First response handoff"))
+        run_output = RunOutput(
+            run_id="run-1",
+            agent_id="general",
+            session_id="session-1",
+            messages=messages,
+            status=RunStatus.completed,
+        )
+        storage = _queued_notice_storage(tmp_path)
+        try:
+            seed_session(
+                storage,
+                AgentSession(
+                    session_id="session-1",
+                    agent_id="general",
+                    runs=[run_output],
+                    created_at=1,
+                    updated_at=1,
+                ),
+            )
+        finally:
+            storage.close()
+        register_queued_notice_storage(
+            storage_factory=lambda: _queued_notice_storage(tmp_path),
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
+        return "First response handoff"
+
+    response_1 = await lifecycle.run_locked_response(
+        target=target,
+        response_envelope=envelope,
+        pipeline_timing=None,
+        locked_operation=response_1_operation,
+    )
+
+    assert response_1 == "First response handoff"
+    assert len(response_1_ids) == 1
+    return response_1_ids[0]
+
+
+@pytest.mark.asyncio
+async def test_prior_notice_survives_actual_next_provider_request_and_tool_round(
+    tmp_path: Path,
+) -> None:
+    """The exact notice should survive real SQLite replay and next-response formatting."""
+    response_1_id = await _persist_notice_bearing_response(tmp_path)
+
+    response_2_storage = _queued_notice_storage(tmp_path)
+    recording_model = RecordingModel(id="response-2-model", provider="fake")
+    install_queued_message_notice_hook(recording_model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    response_2_agent = AgnoAgent(
+        id="general",
+        name="General",
+        model=recording_model,
+        db=response_2_storage,
+        add_history_to_context=True,
+        num_history_runs=10,
+        store_history_messages=False,
+    )
+    try:
+        with queued_message_signal_context(_StaticQueuedState(pending=False)) as response_2_context:
+            response_2 = await response_2_agent.arun("Second request", session_id="session-1")
+            prior = next(
+                message for message in recording_model.seen_messages if message.content == QUEUED_MESSAGE_NOTICE_TEXT
+            )
+            assert prior.from_history is True
+            assert prior.provider_data == {
+                _QUEUED_NOTICE_MARKER_KEY: "persisted",
+                _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_1_id,
+            }
+            assert [
+                (message.role, message.content)
+                for message in recording_model.seen_messages
+                if message.content
+                in {
+                    QUEUED_MESSAGE_NOTICE_TEXT,
+                    "First response handoff",
+                    "Second request",
+                }
+            ] == [
+                ("user", QUEUED_MESSAGE_NOTICE_TEXT),
+                ("assistant", "First response handoff"),
+                ("user", "Second request"),
+            ]
+            original_prior = prior.model_dump()
+
+            recording_model.format_function_call_results(
+                messages=recording_model.seen_messages,
+                function_call_results=[Message(role="tool", content="Second tool result")],
+            )
+
+            assert prior.model_dump() == original_prior
+            assert (
+                _notice_count(
+                    recording_model.seen_messages,
+                    marker="persisted",
+                    response_turn_id=response_1_id,
+                )
+                == 1
+            )
+            assert (
+                _notice_count(
+                    recording_model.seen_messages,
+                    response_turn_id=response_2_context.response_turn_id,
+                )
+                == 0
+            )
+
+        assert response_2.content == "ok"
+        persisted = get_agent_session(response_2_storage, "session-1")
+    finally:
+        response_2_storage.close()
+
+    assert persisted is not None
+    assert persisted.runs is not None
+    response_2_run = persisted.runs[-1]
+    assert isinstance(response_2_run, RunOutput)
+    assert all(message.content != QUEUED_MESSAGE_NOTICE_TEXT for message in response_2_run.messages or [])
+    response_1_run = persisted.runs[0]
+    assert isinstance(response_1_run, RunOutput)
+    persisted_notices = _notice_messages(
+        response_1_run.messages or [],
+        marker="persisted",
+        response_turn_id=response_1_id,
+    )
+    assert [message.content for message in persisted_notices] == [QUEUED_MESSAGE_NOTICE_TEXT]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_media", [False, True])
+@pytest.mark.parametrize("selection", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("reaction", [None, "👀"])
+async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pending_media: bool,
+    selection: bool,
+    enabled: bool,
+    reaction: str | None,
+) -> None:
+    """Agent opt-in reaches the real tool loop while unprepared media keeps wrap-up."""
+    bot = _bot(tmp_path)
+    bot.client.room_send.return_value = nio.RoomSendResponse.from_dict({"event_id": "$reaction"}, "!room:localhost")
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runner.deps.runtime.config.agents[bot.agent_name].mid_turn = (
+        MidTurnConfig(
+            judgment=LLMJudgmentConfig(provider="llm", model="default"),
+            defer_reaction=reaction,
+        )
+        if enabled
+        else None
+    )
+    judge = ParticipationModel(ModelResponse(content='{"decision": false}'))
+    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
+    envelope = _envelope(target=MessageTarget.resolve("!room:localhost", "$thread", "$event"))
+    prompt = "Question: Install the dependency?\nSelected option: yes (install)" if selection else "hello"
+    if selection:
+        envelope = replace(envelope, body="The user selected: yes")
+    preparation = _payload_preparation(envelope.target)
+    if pending_media:
+        preparation = replace(preparation, payload_inputs=replace(preparation.payload_inputs, raw_audio_fallback=True))
+    request = ResponseRequest(
+        sources=ResponseSources(("$event",), ("$event",)),
+        prompt=prompt,
+        thread_history=[],
+        response_envelope=envelope,
+        payload_preparation=preparation if pending_media else None,
+    )
+    monkeypatch.setattr(
+        runner.deps.resolver,
+        "fetch_thread_history",
+        AsyncMock(
+            return_value=ThreadHistoryResult(
+                [
+                    ResolvedVisibleMessage.synthetic(sender="@user:localhost", body="Do the task", event_id="$thread"),
+                    ResolvedVisibleMessage.synthetic(sender="@user:localhost", body=prompt, event_id="$event"),
+                ],
+                is_full_history=True,
+            ),
+        ),
+    )
+    reservations = []
+
+    def note_progress(text: str) -> None:
+        progress = runner._lifecycle_coordinator.visible_progress_callback(envelope.target)
+        assert (progress is not None) is enabled
+        if progress is not None:
+            progress(text)
+
+    def queue_followup() -> str:
+        reservation = runner.reserve_waiting_human_message(
+            target=envelope.target,
+            response_envelope=replace(envelope, source_event_id="$queued", body="Thanks"),
+        )
+        assert reservation is not None
+        reservations.append(reservation)
+        note_progress("Later text that the user had not seen when sending")
+        return "Completed"
+
+    model = ParticipationModel(
+        ModelResponse(
+            tool_calls=[
+                {"id": "call", "type": "function", "function": {"name": "queue_followup", "arguments": "{}"}},
+            ],
+        ),
+    )
+    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
+    agent = AgnoAgent(model=model, tools=[queue_followup], telemetry=False)
+
+    async def locked_operation(_target: MessageTarget, _placeholder: object) -> str:
+        await runner._prepare_request_after_lock(replace(request, payload_preparation=None))
+        note_progress("I have located the requested file")
+        await agent.arun("Do the task")
+        return "$response"
+
+    try:
+        assert (
+            await runner._run_locked_response_lifecycle(
+                request,
+                response_kind="agent",
+                locked_operation=locked_operation,
+            )
+            == "$response"
+        )
+        assert len(model.requests) == 2
+        reactions = [
+            call.kwargs["content"]
+            for call in bot.client.room_send.await_args_list
+            if call.kwargs["message_type"] == "m.reaction"
+        ]
+        assert reactions == (
+            [{"m.relates_to": {"rel_type": "m.annotation", "event_id": "$queued", "key": "👀"}}]
+            if enabled and not pending_media and reaction
+            else []
+        )
+        assert any(message.content == "WRAP UP NOW" for message in model.requests[-1]["messages"]) is (
+            pending_media or not enabled
+        )
+        assert len(judge.requests) == (1 if enabled and not pending_media else 0)
+        assert runner._lifecycle_coordinator.visible_progress_callback(envelope.target) is None
+        if enabled and not pending_media:
+            evidence = "\n".join(str(message.content) for message in judge.requests[0]["messages"])
+            assert "I have located the requested file" in evidence
+            assert "Later text" not in evidence
+            if selection:
+                assert "Install the dependency?" in evidence
+                assert "yes (install)" in evidence
+    finally:
+        for reservation in reservations:
+            reservation.cancel()

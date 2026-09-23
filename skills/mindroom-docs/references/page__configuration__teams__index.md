@@ -58,11 +58,12 @@ teams:
     rooms:
       - team-room
 
+    # Accept all, none, or matching inviter ID patterns
+    accept_invites: true
+
     # Model for team coordination (default: "default")
     model: sonnet
 
-    # Participate in room-level startup prewarm for rooms already joined at first sync (default: true)
-    startup_thread_prewarm: true
 
     # Team-scoped replay controls (optional; inherit from defaults when omitted)
     num_history_runs: 8
@@ -75,6 +76,7 @@ teams:
       enabled: true
       threshold_percent: 0.8
       reserve_tokens: 16384
+      timeout_seconds: 600
 ```
 
 ## Configuration Fields
@@ -86,19 +88,25 @@ teams:
 | `agents` | Yes | - | List of agent names that compose this team |
 | `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
 | `rooms` | No | `[]` | List of room names the team responds in |
+| `accept_invites` | No | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID after human-only alias resolution; non-human accounts retain their exact transport ID |
+| `access` | No | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this team's own managed `rooms`. See [Authorization](https://docs.mindroom.chat/authorization/) |
 | `model` | No | `default` | Model used for team coordination and synthesis |
-| `startup_thread_prewarm` | No | `true` | When enabled, this bot may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
 | `num_history_messages` | No | `defaults.num_history_messages` | Max messages from team-scoped history replayed into the next run |
 | `max_tool_calls_from_history` | No | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history |
 | `compaction` | No | `defaults.compaction` | Team-scoped required-compaction overrides |
 
 Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.
+Each configured team must contain at least one unique, known agent.
+Private agents, and agents whose delegation closure reaches private agents, are not supported in configured teams.
+
+Invitation acceptance is independent from team conversation access.
+After joining, the team applies its ordinary `access` policy to every interaction.
 
 `num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings.
 When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.
 
-Team-scoped compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, and `fallback_model`.
+Team-scoped compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, `fallback_model`, and `timeout_seconds`.
 When the active team model has a known `context_window`, MindRoom always computes a final replay plan for the shared team scope and reduces or disables persisted replay for the run when needed.
 Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices.
@@ -106,23 +114,22 @@ Crossing that soft trigger while still within the hard budget leaves the stored 
 
 You can tune team-scoped compaction behavior with these settings:
 
-- Use `replay_window_tokens` to cap persisted replay, required-compaction planning, and summary input chunks below the model's real context window without lowering the provider request limit.
+- Use `replay_window_tokens` to cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
 - Use `reserve_tokens` to leave hard-budget headroom.
 - Use `model` to choose the summary model.
-- Use `fallback_model` to name a different model config that resends the unchanged summary prompt and input once (only the target model differs) when the summary model refuses for safeguards; after a successful fallback, that model serves the remaining compaction chunks and is reported as the summary model.
+- Use `fallback_model` to name a different model config retried once when the summary model refuses for safeguards; the same input is reused when it fits, otherwise it is rebuilt under the fallback model's own context budget, and after success that model serves the remaining chunks.
+- Use `timeout_seconds` to bound each primary, retry, or fallback summary request; it defaults to 600 seconds, while an explicitly shorter provider timeout remains the stricter cap.
 - Set `enabled: false` to disable automatic pre-reply compaction for a team.
 
 When the active team model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
-The effective replay window also caps each compaction summary input chunk.
+Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
 Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
 With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
 `compaction.fallback_model` must also name a configured model with its own `context_window`; a fallback naming the summary model's alias, or another alias resolving to the same provider and model ID, is ignored because it would resend the refused request to the same model.
 Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
 Compaction uses an in-room lifecycle notice that is edited in place.
-
-Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
 
 ## When to Use Each Mode
 
@@ -135,7 +142,8 @@ Startup thread prewarm is a background, best-effort cache warmup for rooms alrea
 
 When multiple agents are mentioned in a message (e.g., `@code @research analyze this`), MindRoom automatically forms an ad-hoc team. Dynamic teams form in these scenarios:
 In threads with multiple human participants, stale thread context does not auto-form a team.
-A fresh explicit `@mention` in the current message is required before agents respond.
+A fresh explicit `@mention` in the current message is required for team responses in those threads.
+An eligible individual agent that already replied can separately opt into [Adaptive Participation](https://docs.mindroom.chat/configuration/agents/#adaptive-participation) and answer an untagged turn after approval; this does not automatically form a team.
 
 1. **Multiple agents explicitly tagged** - e.g., `@code @research analyze this`
 2. **Thread with previously mentioned agents** - Follow-up messages in a thread where multiple agents were mentioned earlier, as long as the thread has not become a multi-human conversation that now requires a fresh explicit mention
@@ -149,8 +157,7 @@ For dynamic teams, the collaboration mode is selected by AI based on the task:
 - Tasks with different subtasks for each agent use **coordinate** mode
 - Tasks asking for opinions or brainstorming use **collaborate** mode
 
-When AI mode selection is unavailable or fails, MindRoom falls back to:
-- **coordinate** when multiple agents are explicitly tagged in the message (they likely have different roles to fulfill)
-- **collaborate** for all other cases, such as agents from thread history or DM rooms (likely discussing the same topic)
+Before model selection completes, explicit mentions carry a provisional **coordinate** heuristic and thread-derived groups carry a provisional **collaborate** heuristic.
+The execution layer asks the model to refine that choice; when model selection fails or returns an unexpected result, MindRoom falls back to **collaborate**.
 
 Dynamic teams do not have a named `teams:` entry, so their history replay and compaction policy comes from `defaults`, not from any participating agent's overrides.

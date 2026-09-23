@@ -10,28 +10,32 @@ router:
   # Model for routing decisions (defaults to "default")
   model: haiku
 
-  # Accept authorized room invites and preserve them across restarts (default: true)
+  # Accept all, none, or matching inviter ID patterns (default: true)
   accept_invites: true
 
-  # Participate in room-level startup prewarm for rooms already joined at first sync (default: true)
-  startup_thread_prewarm: true
 ```
 
-The router has three configuration options:
+The router supports these configuration options:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `model` | string | `"default"` | Model to use for routing decisions |
-| `accept_invites` | bool | `true` | When enabled, the router accepts authorized room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
-| `startup_thread_prewarm` | bool | `true` | When enabled, the router may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
+| `model` | string | `"default"` | Model to use for ordinary routing and judgment fallback |
+| `judgment` | object or null | `null` | Optional JEV (TypeSafe) responder selection before the LLM router |
+| `access` | object or null | `null` | Membership-based responder access policy |
+| `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted room IDs are persisted, rejoined after restart, and preserved during room cleanup |
 
-Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
+Invitation patterns are matched after identity alias resolution and use the same case-sensitive wildcard semantics as responder `access.users`.
+Invitation acceptance grants room membership only and remains independent from responder access.
+The router applies its `access` policy to every interaction after joining.
+Omitted router access resolves to `current_room_members: true` with empty room and user grants.
+Setting only `access.users` preserves that current-room-member grant; set `current_room_members: false` explicitly to remove it.
+See [Authorization](https://docs.mindroom.chat/authorization/) for the policy fields.
 
 ## How Routing Works
 
 When a message arrives in a room without a specific agent or team mention, MindRoom first builds the eligible responder candidate set for that sender and room.
 
-1. If the thread already requires explicit targeting, MindRoom stays silent until someone mentions an agent or team
+1. If the thread requires explicit targeting, the router stays silent; eligible existing individual agents may still use the opt-in adaptive participation described below
 2. If exactly one eligible responder remains, that agent or team handles the message directly
 3. If multiple eligible responders remain, the router analyzes the message content and any recent thread context (up to 3 previous messages)
 4. Based on the candidate entities' roles, tools, and instructions, it selects the best match
@@ -43,13 +47,60 @@ For ad-hoc rooms accepted through invites, routing candidates come from the send
 
 When multiple responders are eligible, the router uses a structured output schema to ensure consistent routing decisions, including the selected agent or team name and reasoning for the selection.
 
+## Responder selection judgments
+
+Set `router.judgment` to make one bounded choice among the already eligible agents and teams before ordinary routing.
+This is optional; omitting it or setting it to `null` preserves existing behavior, even when a TypeSafe API key is present.
+Explicit mentions, existing thread participation rules, authorization, and deterministic single-candidate routing are unchanged.
+
+LLM routing uses the existing `router.model` setting. To use a cheap LLM, point it at a configured model alias.
+
+```yaml
+router:
+  model: cheap_router  # Must exist under models
+```
+
+To try JEV (System One), set `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env` and enable the judgment.
+There is one LLM routing implementation: it handles ordinary routing and fallback when JEV cannot decide.
+
+```yaml
+router:
+  model: default
+  judgment:
+    provider: typesafe
+    threshold: 0.8
+    timeout_seconds: 1.5
+```
+
+JEV receives candidate descriptions: roles, available tools, delegation capabilities, and the brief instructions used by ordinary routing.
+It sees the current request text and the last three complete visible message bodies, with sender fields replaced by speaker aliases.
+This is a text-only view: no system prompt, private tool results, attachment contents, or full conversation history is added.
+Messages are not cut off to fit: sensitive or oversized input uses ordinary routing instead.
+The complete judgment request is limited to 16,000 UTF-8 bytes and at most 253 candidate responders (plus two special choices).
+
+A selected candidate routes through the existing delivery path.
+A confident `no_fit` produces the existing Matrix message asking the user to mention a responder or rephrase.
+For OpenAI-compatible `model: auto` requests, it returns HTTP 400 with error code `no_suitable_responder` instead of selecting the first agent.
+The `multiple` choice means no single candidate can cover the request; it falls back to ordinary single-responder routing and does not launch several agents.
+Low confidence, abstention, invalid output, missing credentials, capacity exhaustion, or a timeout also falls back to ordinary routing using the existing runtime model resolution.
+The LLM router retains its configured prompts, `router.model`, and room/thread model overrides.
+Its existing context window includes up to three previous messages truncated to 100 characters each.
+
+System One returns a distribution and confidence; both the selected option's probability and confidence must meet `threshold`, and tied winners abstain.
+The dedicated rubric does not use the ordinary router prompt overrides; those still apply to fallback routing.
+
+Judgments share the same process-wide capacity limits as participation and mid-turn checks: eight concurrent calls and one per instance/router owner, without a waiting queue.
+There are no application-level retries; the configured deadline bounds the JEV request.
+Logs record the backend, decision, probability when available, latency, token usage, and failure category without logging the request text.
+
 ## Router Responsibilities
 
 The router is a special system agent that handles several important tasks beyond message routing:
 
 ### Command Handling
 
-The router exclusively handles all commands:
+The router owns commands by default.
+A requester-scoped `!desktop` command may instead be owned by an eligible private agent when the room contains exactly that requester and agent.
 
 - `!help [topic]` - Get help on commands or specific topics
 - `!hi` - Show the welcome message again
@@ -57,13 +108,20 @@ The router exclusively handles all commands:
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
+- `!reload-plugins` - Reload configured plugins (admin only)
 - `!config <operation>` - Manage configuration when explicitly enabled for global admins
+- `!desktop [setup|status|confirm|rotate|disconnect]` - Manage the requester's Desktop target
+- `!model [name|list|reset]` - Show or switch the current thread model
+- `!room_model [name|list|reset]` - Show the current room model default or switch it (set/reset require a room admin)
+- `!thread_mode [room|thread|reset|show]` - Manage room thread mode (room admin only)
+- `!encrypt [confirm]` - Enable room encryption (irreversible, room admin only)
+- `!e2ee` - Show room encryption diagnostics
 
-Even in single-responder rooms, commands are always processed by the router.
+Except for the requester-scoped `!desktop` case above, commands are processed by the router even in single-responder rooms.
 
 ### Welcome Messages
 
-When the router joins a room after an invite, it sends a requester-scoped welcome message.
+After accepting an invite, the router sends a requester-scoped welcome message only when the room has no existing message history.
 
 That welcome message lists:
 
@@ -72,7 +130,8 @@ That welcome message lists:
 - Quick command reference
 
 Startup welcomes with no requester list configured room responders when the room is statically configured.
-Startup welcomes for ad-hoc rooms send the general interaction guidance and quick command reference without an available-responder list.
+Startup does not send requester-less welcomes in persisted ad-hoc invite rooms because the original inviter cannot be re-authorized safely from persisted state.
+The live invite callback sends the requester-scoped welcome when the inviter currently has router reply access.
 
 Use `!hi` in any room to see the welcome message again.
 
@@ -84,14 +143,22 @@ The router creates and manages rooms:
 
 - Creates configured rooms that don't exist yet
 - Invites configured agents, teams, and users to their rooms
-- Applies `matrix_room_access` policy for managed rooms (when enabled)
+- Applies effective `room_defaults` and per-room policy for managed rooms
 - Reconciles managed room power levels so the custom thread-tags state event can be written at PL0
 - Generates AI-powered room topics based on configured agents and teams
 - Has admin privileges to manage room membership
 - Cleans up orphaned bots on startup
 
-By default (`matrix_room_access.mode: single_user_private`), rooms remain invite-only and private in the room directory.
-In `multi_user` mode, the router can set join rules (`public`/`knock`) and optionally publish rooms to the server directory.
+Every concrete Matrix agent operating in a room also receives a built-in zero-argument `invite_router` recovery tool.
+The tool can invite only the persisted router identity and only into the agent's current room.
+The router accepts the invite and persists the room only when `router.accept_invites` allows the current Matrix transport account's user ID.
+A team member therefore authorizes recovery through the team's Matrix account, not the member agent's account.
+The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
+This lets an agent recover router-backed approvals without adding persistent prompt instructions or exposing arbitrary invite targets.
+
+By default, `room_defaults.join_policy: invite` and `room_defaults.listed: false` keep managed rooms private.
+Set `room_defaults.join_policy` to `public` or `knock`, and use `room_defaults.listed` to control room-directory visibility.
+Per-room values replace these defaults when configured under `rooms.<key>`.
 That same reconciliation path also updates `m.room.power_levels` for managed rooms, so the router must be joined and able to edit room power levels when thread tags are enabled.
 
 ### Voice Message Processing
@@ -99,7 +166,8 @@ That same reconciliation path also updates `m.room.power_levels` for managed roo
 Audio events are handled through the shared media pipeline on all bots.
 The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a room.
 When the responder is already clear, normalized audio follows the normal direct agent or team dispatch rules without an extra router message.
-By default, `voice.visible_router_echo: true` also lets the router post the normalized voice text as a display-only message when it is allowed to reply.
+By default, `voice.visible_router_echo: true` also lets the router post an immediate display-only transcription placeholder and replace it with the normalized transcript or fallback text when voice STT is enabled and it is allowed to reply.
+With STT disabled, the router posts the display-only fallback directly.
 Set `voice.visible_router_echo: false` to suppress that display-only echo.
 
 See [Voice Messages](https://docs.mindroom.chat/voice/) for the detailed dispatch behavior.
@@ -122,16 +190,23 @@ The single responder handles messages directly, which is faster and more efficie
 
 ### Multi-Human Thread Protection
 
-When multiple human users have posted in a thread, the router, agents, and teams require an explicit `@mention` before responding.
-This prevents MindRoom entities from injecting themselves into human-to-human conversations.
+When multiple human users have posted in a thread, explicit `@mention` targeting is the default.
+An authorized, materializable individual agent that already replied in the thread can opt into judging an untagged turn with `agents.<name>.participation`.
+It can answer after participation approval; a decline produces no text reply, and failed checks stay quiet after any configured judgment fallback.
+A configured `decline_reaction` can acknowledge a deliberate decline.
+See [Adaptive Participation](https://docs.mindroom.chat/configuration/agents/#adaptive-participation) for eligibility and configuration.
+The router stays silent and multi-human threads do not automatically form ad-hoc teams.
 
 The rules are:
 
 1. **Mentioned eligible agents or teams respond** — an explicit `@agent` or `@team` bypasses AI routing, but room configuration and reply permissions still apply.
 2. **Non-thread messages** — a single eligible agent or team can auto-respond, regardless of how many humans are present.
 3. **Threads with one human** — normal auto-response behavior applies, so the agent or team continues the conversation.
-4. **Threads with two or more humans** — agents and teams stay silent unless explicitly mentioned.
-5. **Mentioning a non-MindRoom user** — if a message tags only humans or unmanaged users, agents and teams stay silent.
+4. **Threads with two or more humans** — explicit targeting is required by default; eligible individual agents can use the opt-in participation exception above.
+5. **Mentioning another joined room participant** — if a message tags only joined users who are neither managed entities nor configured bot accounts, agents and teams stay silent.
+
+Mentions of unmanaged user IDs that are absent from the room or merely invited do not suppress normal routing or automatic responses.
+Mentioning a configured agent that is not joined to the room still counts as an explicit mention for the other agents.
 
 #### Bot accounts
 
@@ -166,5 +241,7 @@ If a message mentions only the router and no other users, agents, or teams, the 
 Mention a specific agent or team when you want that entity to answer.
 Mention multiple agents when you want an ad-hoc collaboration, or mention a configured team directly for its team workflow.
 When one human and one agent or team are already talking in a thread, continuing without an explicit tag is fine.
-Once a thread has multiple human users or multiple agent/team participants, tag the agents or teams you want next.
+Explicit tags select the agents or teams you want next.
+An untagged single-human thread can also continue an eligible ad-hoc team of previously mentioned or participating individual agents; named team IDs do not become ad-hoc members.
+Multi-human threads use the explicit-targeting default and opt-in individual participation described above.
 In a new untagged message, automatic routing can still choose an agent or team when that is appropriate.

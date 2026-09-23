@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import io
+import math
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from mindroom.desktop import macos_capture, macos_input
 from mindroom.desktop.accessibility import (
     AccessibilityBackend,
     AccessibilityState,
@@ -14,7 +16,8 @@ from mindroom.desktop.accessibility import (
     DesktopRect,
     create_accessibility_backend,
 )
-from mindroom.desktop.protocol import DESKTOP_SAFE_KEYS
+from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError, display_for_region, macos_displays
+from mindroom.desktop.input import DESKTOP_SCROLL_DIRECTIONS, normalize_key_chord
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -75,6 +78,7 @@ class ScreenCapture:
     capture_y: int
     capture_width: int
     capture_height: int
+    coordinates: dict[str, object] | None = None
 
 
 class DesktopProvider(Protocol):
@@ -139,7 +143,29 @@ class DesktopProvider(Protocol):
         """Click normalized app coordinates after revalidating state."""
         ...
 
-    def type_text(self, *, app_id: str, state_id: str, text: str) -> None:
+    def hover(self, *, app_id: str, state_id: str, x: int, y: int) -> None:
+        """Move inside the revalidated allowed window without pressing a button."""
+        ...
+
+    def double_click(self, *, app_id: str, state_id: str, x: int, y: int, button: str) -> None:
+        """Perform a bounded double click at one validated app coordinate."""
+        ...
+
+    def drag(
+        self,
+        *,
+        app_id: str,
+        state_id: str,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        duration_ms: int = 500,
+    ) -> None:
+        """Drag within one observed window and release even if movement fails."""
+        ...
+
+    def type_text(self, *, app_id: str, state_id: str, text: str, element_index: int | None = None) -> None:
         """Type bounded text after revalidating and focusing the app."""
         ...
 
@@ -196,6 +222,7 @@ class PyAutoGuiDesktopProvider:
         self._capture_app_window: Callable[[int, DesktopRect], PillowImage] | None = (
             _capture_macos_window if sys.platform == "darwin" else None
         )
+        self._display_geometry = macos_displays if sys.platform == "darwin" else self._primary_display_geometry
         self._max_screenshot_width = max_screenshot_width
         self._jpeg_quality = jpeg_quality
         self._accessibility = accessibility_backend or create_accessibility_backend(
@@ -207,10 +234,15 @@ class PyAutoGuiDesktopProvider:
         """Return coarse geometry without reading clipboard or disallowed applications."""
         screen = self._pyautogui.size()
         cursor = self._pyautogui.position()
+        try:
+            displays = [display.to_result() for display in self._display_geometry()]
+        except DisplayMappingError as exc:
+            raise DesktopProviderError(str(exc)) from exc
         return {
             "screen": {"width": int(screen.width), "height": int(screen.height)},
             "cursor": {"x": int(cursor.x), "y": int(cursor.y)},
             "accessibility": self._accessibility.availability(),
+            "displays": displays,
         }
 
     def check_emergency_stop(self) -> None:
@@ -236,7 +268,9 @@ class PyAutoGuiDesktopProvider:
         state = target.state
         region = state.window
         screen_width, screen_height = self._screen_size()
-        _validate_region(region, screen_width=screen_width, screen_height=screen_height)
+        display = self._mapped_display(region)
+        if target.process_id is None:
+            _validate_region(region, screen_width=screen_width, screen_height=screen_height)
         if target.process_id is None:
             image = self._capture_screen()
             source_width, source_height = image.size
@@ -250,6 +284,14 @@ class PyAutoGuiDesktopProvider:
                 msg = "Window-bound capture is unavailable for this accessibility backend."
                 raise DesktopProviderError(msg)
             image = self._capture_app_window(target.process_id, region)
+        if self._mapped_display(region) != display:
+            msg = "The display changed during capture; request fresh app state."
+            raise DesktopProviderError(msg)
+        source_width, source_height = image.size
+        capture_scale = source_width / region.width
+        if not math.isclose(capture_scale, source_height / region.height, rel_tol=0.01):
+            msg = "Capture pixels do not match the logical window; request fresh app state."
+            raise DesktopProviderError(msg)
         image_width, image_height = image.size
         if image_width > self._max_screenshot_width:
             scaled_height = max(1, round(image_height * self._max_screenshot_width / image_width))
@@ -268,6 +310,12 @@ class PyAutoGuiDesktopProvider:
             capture_y=region.y,
             capture_width=region.width,
             capture_height=region.height,
+            coordinates={
+                "display": display.to_result(),
+                "logical_bounds": region.to_result(),
+                "source_pixels": {"width": source_width, "height": source_height},
+                "capture_scale": capture_scale,
+            },
         )
 
     def click_element(self, *, app_id: str, state_id: str, element_index: int) -> None:
@@ -300,8 +348,8 @@ class PyAutoGuiDesktopProvider:
             raise DesktopProviderError(msg)
         clicks = _scroll_clicks(direction, pages)
         x, y = _rect_center(element.bounds)
-        _validate_screen_point(x, y, screen_size=self._screen_size())
-        self._run_input(lambda: self._pyautogui.scroll(clicks, x=x, y=y))
+        self._mapped_display(DesktopRect(x, y, 1, 1))
+        self._scroll_input(direction, clicks, x, y)
 
     def perform_action(
         self,
@@ -323,19 +371,31 @@ class PyAutoGuiDesktopProvider:
         self._check_emergency_stop()
         state = self._accessibility.prepare_fallback(app_id, state_id)
         screen_x, screen_y = _normalized_point(state.window, x=x, y=y)
-        _validate_screen_point(screen_x, screen_y, screen_size=self._screen_size())
-        self._run_input(lambda: self._pyautogui.click(x=screen_x, y=screen_y, button=button))
+        self._mapped_display(state.window)
+        self._click_input(screen_x, screen_y, button=button, count=1)
 
-    def type_text(self, *, app_id: str, state_id: str, text: str) -> None:
-        """Type bounded text into a freshly validated and focused app."""
+    def type_text(self, *, app_id: str, state_id: str, text: str, element_index: int | None = None) -> None:
+        """Type bounded text into a validated app or an exact focused text element."""
         if not text or len(text) > 2000:
             msg = "text must contain between 1 and 2000 characters."
             raise DesktopProviderError(msg)
         self._check_emergency_stop()
-        self._accessibility.prepare_fallback(app_id, state_id)
-        if sys.platform == "darwin":
-            self._run_input(lambda: _type_macos_unicode(text))
+        guard = None
+        if element_index is None:
+            self._accessibility.prepare_fallback(app_id, state_id)
         else:
+            if type(element_index) is not int or element_index < 0:
+                msg = "element_index must be a nonnegative integer."
+                raise DesktopProviderError(msg)
+            guard = self._accessibility.prepare_typing(app_id, state_id, element_index)
+        if sys.platform == "darwin":
+            if guard is None:
+                self._run_input(lambda: _type_macos_unicode(text))
+            else:
+                self._run_input(lambda: _type_macos_unicode(text, before_chunk=guard))
+        else:
+            if guard is not None:
+                guard()
             self._run_input(lambda: self._pyautogui.write(text, interval=0.01))
 
     def scroll(
@@ -357,22 +417,119 @@ class PyAutoGuiDesktopProvider:
         point = (
             _normalized_point(state.window, x=x, y=y) if x is not None and y is not None else _rect_center(state.window)
         )
-        _validate_screen_point(point[0], point[1], screen_size=self._screen_size())
+        self._mapped_display(state.window)
         clicks = _scroll_clicks(direction, pages)
-        self._run_input(lambda: self._pyautogui.scroll(clicks, x=point[0], y=point[1]))
+        self._scroll_input(direction, clicks, *point)
 
     def keypress(self, *, app_id: str, state_id: str, keys: list[str]) -> None:
-        """Press one locally safe navigation key in a validated and focused app."""
-        if len(keys) != 1:
-            msg = "keys must contain exactly one locally safe navigation key."
-            raise DesktopProviderError(msg)
-        normalized = [key.strip().lower() for key in keys]
-        if normalized[0] not in DESKTOP_SAFE_KEYS:
-            msg = "keys contains a shortcut or key that may escape the allowed app."
-            raise DesktopProviderError(msg)
+        """Press only an explicitly allowed application editing/navigation chord."""
+        try:
+            normalized = normalize_key_chord(keys)
+        except ValueError as exc:
+            raise DesktopProviderError(str(exc)) from exc
         self._check_emergency_stop()
         self._accessibility.prepare_fallback(app_id, state_id)
-        self._run_input(lambda: self._pyautogui.press(normalized[0]))
+        if len(normalized) == 1:
+            self._run_input(lambda: self._pyautogui.press(normalized[0]))
+        else:
+            self._run_input(lambda: self._pyautogui.hotkey(*normalized))
+
+    def hover(self, *, app_id: str, state_id: str, x: int, y: int) -> None:
+        """Move inside the revalidated allowed window without pressing a button."""
+        point = self._fallback_point(app_id, state_id, x, y)
+        self._run_input(
+            lambda: macos_input.move(*point) if sys.platform == "darwin" else self._pyautogui.moveTo(*point),
+        )
+
+    def double_click(self, *, app_id: str, state_id: str, x: int, y: int, button: str = "left") -> None:
+        """Perform a bounded double click at one validated app coordinate."""
+        if button not in {"left", "middle", "right"}:
+            msg = "button must be left, middle, or right."
+            raise DesktopProviderError(msg)
+        point = self._fallback_point(app_id, state_id, x, y)
+        self._click_input(*point, button=button, count=2)
+
+    def drag(
+        self,
+        *,
+        app_id: str,
+        state_id: str,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        duration_ms: int = 500,
+    ) -> None:
+        """Drag within one observed window and release even if movement fails."""
+        if type(duration_ms) is not int or not 100 <= duration_ms <= 2000:
+            msg = "duration_ms must be an integer between 100 and 2000."
+            raise DesktopProviderError(msg)
+        self._check_emergency_stop()
+        state = self._accessibility.prepare_fallback(app_id, state_id)
+        start = _normalized_point(state.window, x=start_x, y=start_y)
+        end = _normalized_point(state.window, x=end_x, y=end_y)
+        self._mapped_display(state.window)
+        if sys.platform == "darwin":
+            self._accessibility.prepare_fallback(app_id, state_id)
+            macos_input.drag(
+                start,
+                end,
+                duration=duration_ms / 1000,
+                check=self._check_emergency_stop,
+                before_press=lambda: self._accessibility.prepare_fallback(app_id, state_id),
+            )
+            return
+        self._run_input(lambda: self._pyautogui.moveTo(*start))
+        self._accessibility.prepare_fallback(app_id, state_id)
+        try:
+            self._run_input(lambda: self._pyautogui.mouseDown(button="left"))
+            self._run_input(lambda: self._pyautogui.moveTo(*end, duration=duration_ms / 1000))
+        finally:
+            # Release must work even when the pointer has reached the fail-safe corner.
+            enabled = self._pyautogui.FAILSAFE
+            try:
+                self._pyautogui.FAILSAFE = False
+                self._pyautogui.mouseUp(button="left")
+            finally:
+                self._pyautogui.FAILSAFE = enabled
+
+    def _fallback_point(self, app_id: str, state_id: str, x: int, y: int) -> tuple[int, int]:
+        self._check_emergency_stop()
+        state = self._accessibility.prepare_fallback(app_id, state_id)
+        point = _normalized_point(state.window, x=x, y=y)
+        self._mapped_display(state.window)
+        return point
+
+    def _click_input(self, x: int, y: int, *, button: str, count: int) -> None:
+        if sys.platform == "darwin":
+            macos_input.click(x, y, button=button, count=count, check=self._check_emergency_stop)
+        elif count == 1:
+            self._run_input(lambda: self._pyautogui.click(x=x, y=y, button=button))
+        else:
+            self._run_input(lambda: self._pyautogui.doubleClick(x=x, y=y, button=button, interval=0.1))
+
+    def _scroll_input(self, direction: str, clicks: int, x: int, y: int) -> None:
+        if sys.platform == "darwin":
+            macos_input.scroll(
+                x,
+                y,
+                clicks=clicks,
+                horizontal=direction in {"left", "right"},
+                check=self._check_emergency_stop,
+            )
+            return
+        operation = self._pyautogui.hscroll if direction in {"left", "right"} else self._pyautogui.scroll
+        self._run_input(lambda: operation(clicks, x=x, y=y))
+
+    def _primary_display_geometry(self) -> tuple[DisplayGeometry, ...]:
+        width, height = self._screen_size()
+        return (DisplayGeometry("primary", DesktopRect(0, 0, width, height), width, height),)
+
+    def _mapped_display(self, region: DesktopRect) -> DisplayGeometry:
+        try:
+            return display_for_region(self._display_geometry(), region)
+        except DisplayMappingError as exc:
+            raise DesktopProviderError(str(exc)) from exc
 
     def _run_input(self, operation: Callable[[], None]) -> None:
         try:
@@ -411,11 +568,10 @@ def _capture_macos_primary_screen() -> PillowImage:
     if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[unresolved-attribute]
         msg = "macOS Screen Recording permission is required for desktop screenshots."
         raise DesktopProviderError(msg)
-    display_id = Quartz.CGMainDisplayID()  # ty: ignore[unresolved-attribute]
-    cg_image = Quartz.CGDisplayCreateImage(display_id)  # ty: ignore[unresolved-attribute]
-    if cg_image is None:
-        msg = "macOS did not return a primary-display screenshot; check Screen Recording permission."
-        raise DesktopProviderError(msg)
+    try:
+        cg_image = macos_capture.capture_display(int(Quartz.CGMainDisplayID()))  # ty: ignore[unresolved-attribute]
+    except macos_capture.MacOSCaptureError as exc:
+        raise DesktopProviderError(str(exc)) from exc
     return _pillow_image_from_macos_capture(cg_image)
 
 
@@ -426,6 +582,21 @@ def _capture_macos_window(process_id: int, region: DesktopRect) -> PillowImage:
     if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[unresolved-attribute]
         msg = "macOS Screen Recording permission is required for desktop screenshots."
         raise DesktopProviderError(msg)
+    window_id = _macos_window_id(process_id, region)
+    try:
+        cg_image = macos_capture.capture_window(window_id, process_id, region)
+    except macos_capture.MacOSCaptureError as exc:
+        raise DesktopProviderError(str(exc)) from exc
+    if _macos_window_id(process_id, region) != window_id:
+        msg = "The application window changed during capture; request fresh app state."
+        raise DesktopProviderError(msg)
+    return _pillow_image_from_macos_capture(cg_image)
+
+
+def _macos_window_id(process_id: int, region: DesktopRect) -> int:
+    """Resolve the exact on-screen window without capturing unrelated pixels."""
+    import Quartz  # noqa: PLC0415
+
     on_screen_only = Quartz.kCGWindowListOptionOnScreenOnly  # ty: ignore[unresolved-attribute]
     exclude_desktop = Quartz.kCGWindowListExcludeDesktopElements  # ty: ignore[unresolved-attribute]
     options = on_screen_only | exclude_desktop
@@ -453,55 +624,33 @@ def _capture_macos_window(process_id: int, region: DesktopRect) -> PillowImage:
     if len(matching_window_ids) != 1:
         msg = "macOS could not bind the accessibility target to one exact on-screen application window."
         raise DesktopProviderError(msg)
-    null_rect = Quartz.CGRectNull  # ty: ignore[unresolved-attribute]
-    including_window = Quartz.kCGWindowListOptionIncludingWindow  # ty: ignore[unresolved-attribute]
-    ignore_framing = Quartz.kCGWindowImageBoundsIgnoreFraming  # ty: ignore[unresolved-attribute]
-    nominal_resolution = Quartz.kCGWindowImageNominalResolution  # ty: ignore[unresolved-attribute]
-    cg_image = Quartz.CGWindowListCreateImage(  # ty: ignore[unresolved-attribute]
-        null_rect,
-        including_window,
-        matching_window_ids[0],
-        ignore_framing | nominal_resolution,
-    )
-    if cg_image is None:
-        msg = "macOS did not return the bound application-window screenshot."
-        raise DesktopProviderError(msg)
-    return _pillow_image_from_macos_capture(cg_image)
+    return matching_window_ids[0]
 
 
 def _pillow_image_from_macos_capture(cg_image: object) -> PillowImage:
-    """Convert one 32-bit Core Graphics capture into a Pillow image."""
-    import Quartz  # noqa: PLC0415
+    """Decode an in-memory PNG without assuming CGImage byte order or padding."""
+    import AppKit  # noqa: PLC0415
     from PIL import Image  # noqa: PLC0415
 
-    width = int(Quartz.CGImageGetWidth(cg_image))  # ty: ignore[unresolved-attribute]
-    height = int(Quartz.CGImageGetHeight(cg_image))  # ty: ignore[unresolved-attribute]
-    bytes_per_row = int(Quartz.CGImageGetBytesPerRow(cg_image))  # ty: ignore[unresolved-attribute]
-    bits_per_pixel = int(Quartz.CGImageGetBitsPerPixel(cg_image))  # ty: ignore[unresolved-attribute]
-    if width <= 0 or height <= 0 or bits_per_pixel != 32 or bytes_per_row < width * 4:
-        msg = "macOS returned an unsupported primary-display pixel format."
+    bitmap = AppKit.NSBitmapImageRep.alloc().initWithCGImage_(cg_image)  # ty: ignore[unresolved-attribute]
+    if bitmap is None:
+        msg = "macOS could not decode the screenshot."
         raise DesktopProviderError(msg)
-    provider = Quartz.CGImageGetDataProvider(cg_image)  # ty: ignore[unresolved-attribute]
-    content = bytes(Quartz.CGDataProviderCopyData(provider))  # ty: ignore[unresolved-attribute]
-    if len(content) < bytes_per_row * height:
-        msg = "macOS returned an incomplete primary-display screenshot."
+    content = bitmap.representationUsingType_properties_(AppKit.NSBitmapImageFileTypePNG, {})  # ty: ignore[unresolved-attribute]
+    if content is None:
+        msg = "macOS could not encode the screenshot."
         raise DesktopProviderError(msg)
-    return Image.frombuffer(
-        "RGBA",
-        (width, height),
-        content,
-        "raw",
-        "BGRA",
-        bytes_per_row,
-        1,
-    )
+    with Image.open(io.BytesIO(bytes(content))) as image:
+        return image.copy()
 
 
-def _type_macos_unicode(text: str) -> None:
+def _type_macos_unicode(text: str, *, before_chunk: Callable[[], None] | None = None) -> None:
     """Post layout-independent Unicode keyboard events to the active macOS app."""
     import Quartz  # noqa: PLC0415
 
     for offset in range(0, len(text), _MACOS_UNICODE_CHUNK_LENGTH):
+        if before_chunk is not None:
+            before_chunk()
         chunk = text[offset : offset + _MACOS_UNICODE_CHUNK_LENGTH]
         utf16_length = len(chunk.encode("utf-16-le")) // 2
         key_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)  # ty: ignore[unresolved-attribute]
@@ -516,7 +665,7 @@ def _type_macos_unicode(text: str) -> None:
 
 
 def _normalized_point(rect: DesktopRect, *, x: int, y: int) -> tuple[int, int]:
-    if not 0 <= x <= 1000 or not 0 <= y <= 1000:
+    if type(x) is not int or type(y) is not int or not 0 <= x <= 1000 or not 0 <= y <= 1000:
         msg = "Fallback coordinates must be normalized integers between 0 and 1000."
         raise DesktopProviderError(msg)
     screen_x = rect.x + min(rect.width - 1, round(x * (rect.width - 1) / 1000))
@@ -524,22 +673,15 @@ def _normalized_point(rect: DesktopRect, *, x: int, y: int) -> tuple[int, int]:
     return screen_x, screen_y
 
 
-def _validate_screen_point(x: int, y: int, *, screen_size: tuple[int, int]) -> None:
-    width, height = screen_size
-    if not 0 <= x < width or not 0 <= y < height:
-        msg = f"Fallback coordinate ({x}, {y}) is outside the {width}x{height} primary screen."
-        raise DesktopProviderError(msg)
-
-
 def _scroll_clicks(direction: str, pages: int) -> int:
-    if direction not in {"up", "down"}:
-        msg = "direction must be up or down."
+    if direction not in DESKTOP_SCROLL_DIRECTIONS:
+        msg = "direction must be up, down, left, or right."
         raise DesktopProviderError(msg)
-    if isinstance(pages, bool) or not 1 <= pages <= 10:
+    if type(pages) is not int or not 1 <= pages <= 10:
         msg = "pages must be between 1 and 10."
         raise DesktopProviderError(msg)
     clicks = pages * 3
-    return clicks if direction == "up" else -clicks
+    return clicks if direction in {"up", "right"} else -clicks
 
 
 def _rect_center(rect: DesktopRect) -> tuple[int, int]:

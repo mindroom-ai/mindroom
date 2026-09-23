@@ -2,16 +2,16 @@
 
 Two guards keep import-time regressions from creeping back:
 
-1. A provider-SDK ban: importing the tool registry, config layer, sandbox
-   runner, or the primary runtime must not import any provider SDK; those load
-   on first model or tool construction. Slim entry points additionally must
-   not import the nio matrix client or the mcp SDK, which the primary runtime
-   genuinely needs at boot.
+1. A heavy-optional-dependency ban: importing the primary runtime must not
+   import provider SDKs, storage engines, or ML/data stacks; those load on
+   first use.
+   Slim entry points additionally must not import the nio matrix client or the
+   mcp SDK, which the primary runtime genuinely needs at boot.
 2. A third-party allowlist: each slim entry point may only load the
    third-party packages it loads today. Any new package in the graph fails
    loudly — either defer the import (see the CLAUDE.md import rule) or extend
-   the allowlist as a conscious, reviewed decision. The orchestrator is
-   exempt: its dependency set is large and legitimately grows.
+   the allowlist as a conscious, reviewed decision. The orchestrator uses the
+   narrower heavy-optional-dependency ban because its core boot graph is large.
 
 Each probe runs in a subprocess so the assertion sees exactly what the import
 graph pulls in.
@@ -33,6 +33,25 @@ _PROVIDER_SDK_ROOTS = (
     "groq",
     "ollama",
     "openai",
+)
+_HEAVY_OPTIONAL_RUNTIME_ROOTS = (
+    # Provider-specific clients and authentication.
+    *_PROVIDER_SDK_ROOTS,
+    "agno.models.vertexai.claude",
+    "google.auth",
+    "google.oauth2",
+    # Storage engines.
+    "agno.vectordb.chroma",
+    "chromadb",
+    "mem0",
+    # ML and data stacks.
+    "numpy",
+    "pandas",
+    "scipy",
+    "sentence_transformers",
+    "sklearn",
+    "torch",
+    "transformers",
 )
 _SLIM_ONLY_ROOTS = ("mcp", "nio")
 
@@ -88,7 +107,28 @@ _TOOLS_ROOTS = _REGISTRY_ROOTS | frozenset(
         "zipp",
     },
 )
+# Top-level CLI help only needs command metadata and presentation libraries.
+# Command implementations must defer networking, crypto, config validation,
+# and provider imports until the selected command runs.
+_CLI_ROOTS = frozenset(
+    {
+        "annotated_doc",
+        "attr",
+        "click",
+        "dotenv",
+        "pygments",
+        "rich",
+        "shellingham",
+        "typer",
+    },
+)
 _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
+    "mindroom.desktop.protocol": frozenset({"dotenv"}),
+    "mindroom.matrix.runtime_media": frozenset({"dotenv"}),
+    "mindroom.cli.main": _CLI_ROOTS,
+    # Doctor may use the CLI, config, and HTTP stacks at import time, but no
+    # provider, storage, or other feature-specific dependency.
+    "mindroom.cli.doctor": _CLI_ROOTS | _REGISTRY_ROOTS,
     "mindroom.config.main": _CONFIG_LAYER_ROOTS,
     "mindroom.model_loading": _CONFIG_LAYER_ROOTS | frozenset({"agno"}),
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
@@ -110,6 +150,7 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
             "fastapi",
             "joserfc",
             "orjson",
+            "pydantic_extra_types",
             "python_multipart",
             "requests",
             "socks",
@@ -204,9 +245,101 @@ def test_slim_entry_point_import_contract(module: str) -> None:
     )
 
 
-def test_primary_runtime_does_not_import_provider_sdks() -> None:
-    """The orchestrator import (mindroom run) loads no provider SDK; only configured ones load later."""
-    _assert_probe_clean("mindroom.orchestrator", _PROVIDER_SDK_ROOTS)
+def test_participation_state_has_no_framework_dependencies() -> None:
+    """Using turn participation state must not load execution or provider integration."""
+    _assert_probe_clean(
+        "mindroom.participation",
+        ("agno", "mindroom.provider_tool_policy", "mindroom.hooks"),
+    )
+
+
+def test_primary_runtime_defers_heavy_optional_dependencies() -> None:
+    """The orchestrator import must leave provider, storage, and ML/data engines unloaded."""
+    _assert_probe_clean("mindroom.orchestrator", _HEAVY_OPTIONAL_RUNTIME_ROOTS)
+
+
+def test_worker_retirement_is_a_standard_library_leaf() -> None:
+    """The retirement boundary exposes two operations without loading another MindRoom module."""
+    probe = """
+import importlib
+import json
+import sys
+
+import mindroom.workers
+
+baseline = set(sys.modules)
+module = importlib.import_module("mindroom.workers.worker_retirement")
+loaded = sorted(name for name in set(sys.modules) - baseline if name.startswith("mindroom"))
+print(json.dumps({"exports": module.__all__, "loaded": loaded}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "exports": ["open_worker_state_root", "remove_directory_tree_at"],
+        "loaded": ["mindroom.workers.worker_retirement"],
+    }
+
+
+def test_background_approval_transactions_have_a_focused_module_boundary() -> None:
+    """Background rows depend on shared card state without owning its lifecycle."""
+    probe = """
+import importlib
+import json
+
+card_state = importlib.import_module("mindroom.event_journal.approval_card_state")
+background = importlib.import_module("mindroom.event_journal.background_approvals")
+dispatcher = importlib.import_module("mindroom.event_journal.approvals")
+print(json.dumps({
+    "background_exports": background.__all__,
+    "background_resolve_owner": background.resolve.__module__,
+    "card_state_exports": card_state.__all__,
+    "card_reserve_owner": card_state.reserve_delivery.__module__,
+    "dispatcher_owner": dispatcher.resolve_card.__module__,
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "background_exports": [
+            "BackgroundApprovalDecision",
+            "background_identity",
+            "decision",
+            "prune_calls",
+            "reserve_delivery",
+            "resolve",
+            "resolve_call",
+            "resolve_pending_calls",
+        ],
+        "background_resolve_owner": "mindroom.event_journal.background_approvals",
+        "card_state_exports": [
+            "TIMEOUT_REASON",
+            "ApprovalCardReservation",
+            "ApprovalDecisionMetadata",
+            "RecordedApprovalDecision",
+            "decode_object_payload",
+            "decode_resolution",
+            "enqueue_resolution",
+            "reserve_delivery",
+            "stored_resolution",
+            "terminal_content",
+        ],
+        "card_reserve_owner": "mindroom.event_journal.approval_card_state",
+        "dispatcher_owner": "mindroom.event_journal.approvals",
+    }
 
 
 def test_openai_wire_models_import_only_the_openai_sdk() -> None:
@@ -223,6 +356,20 @@ def test_builtin_tool_manifest_does_not_import_runtime_catalog() -> None:
     )
 
 
+def test_knowledge_read_worker_does_not_boot_application_services() -> None:
+    """A short-lived read must not pay for refresh scheduling or agent configuration."""
+    _assert_probe_clean(
+        "mindroom.knowledge.read_worker",
+        (
+            "mindroom.knowledge.registry",
+            "mindroom.knowledge.refresh_scheduler",
+            "mindroom.knowledge.utils",
+            "mindroom.config.main",
+            "mindroom.runtime_resolution",
+        ),
+    )
+
+
 def test_tool_auto_install_smoke_entrypoint_imports() -> None:
     """The repository smoke entry point must use the post-split tool-system surfaces."""
     subprocess.run(
@@ -230,3 +377,33 @@ def test_tool_auto_install_smoke_entrypoint_imports() -> None:
         check=True,
         timeout=120,
     )
+
+
+@pytest.mark.parametrize(
+    ("module", "forbidden"),
+    [
+        (
+            "mindroom.delegation.sessions",
+            (
+                "mindroom.delegation.recovery",
+                "mindroom.delegation.execution",
+                "mindroom.delegation.lifecycle",
+                "mindroom.custom_tools.delegate",
+            ),
+        ),
+        (
+            "mindroom.delegation.audit",
+            (
+                "mindroom.delegation.sessions",
+                "mindroom.delegation.lifecycle",
+                "mindroom.delegation.recovery",
+                "mindroom.delegation.execution",
+            ),
+        ),
+        ("mindroom.delegation.execution", ("mindroom.ai", "mindroom.custom_tools.delegate")),
+        ("mindroom.delegation.state", ("agno", "mindroom.config", "mindroom.knowledge")),
+    ],
+)
+def test_delegation_dependencies_point_toward_state_and_storage(module: str, forbidden: tuple[str, ...]) -> None:
+    """Storage/audit cannot boot execution; the driver cannot construct its response adapter."""
+    _assert_probe_clean(module, forbidden)

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -150,6 +153,95 @@ def test_mark_dirty_and_reprioritize(tmp_path: Path, config: Config) -> None:
     assert '"thread_id"' not in payload
 
 
+def test_reprioritize_rewrites_legacy_location_fields_only(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A public state mutation drops retired locations while preserving current flush history."""
+    state_file = tmp_path / "memory_flush_state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sessions": {
+                    "general:s1": {
+                        "agent_name": "general",
+                        "session_id": "s1",
+                        "worker_key": None,
+                        "execution_identity": None,
+                        "room_id": "!legacy:example.org",
+                        "thread_id": "$legacy-thread",
+                        "dirty": True,
+                        "in_flight": False,
+                        "first_dirty_at": 100,
+                        "last_seen_at": 200,
+                        "last_session_updated_at": 190,
+                        "last_flushed_session_updated_at": 180,
+                        "next_attempt_at": 300,
+                        "consecutive_failures": 2,
+                        "priority_boost_at": None,
+                        "dirty_revision": 4,
+                        "flush_started_dirty_revision": 3,
+                    },
+                    "general:s2": {
+                        "agent_name": "general",
+                        "session_id": "s2",
+                        "worker_key": None,
+                        "execution_identity": None,
+                        "dirty": False,
+                        "in_flight": False,
+                        "first_dirty_at": 110,
+                        "last_seen_at": 210,
+                        "consecutive_failures": 0,
+                        "dirty_revision": 1,
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("mindroom.memory.auto_flush._now_ts", lambda: 500)
+
+    reprioritize_auto_flush_sessions(tmp_path, config, agent_name="general", active_session_id="s2")
+
+    persisted = json.loads(state_file.read_text(encoding="utf-8"))
+    assert persisted == {
+        "version": 1,
+        "sessions": {
+            "general:s1": {
+                "agent_name": "general",
+                "session_id": "s1",
+                "worker_key": None,
+                "execution_identity": None,
+                "dirty": True,
+                "in_flight": False,
+                "first_dirty_at": 100,
+                "last_seen_at": 200,
+                "last_session_updated_at": 190,
+                "last_flushed_session_updated_at": 180,
+                "next_attempt_at": 300,
+                "consecutive_failures": 2,
+                "priority_boost_at": 500,
+                "dirty_revision": 4,
+                "flush_started_dirty_revision": 3,
+            },
+            "general:s2": {
+                "agent_name": "general",
+                "session_id": "s2",
+                "worker_key": None,
+                "execution_identity": None,
+                "dirty": False,
+                "in_flight": False,
+                "first_dirty_at": 110,
+                "last_seen_at": 210,
+                "consecutive_failures": 0,
+                "dirty_revision": 1,
+            },
+        },
+    }
+
+
 def test_mark_dirty_uses_per_agent_file_override(tmp_path: Path, config: Config) -> None:
     """Auto-flush should track agents explicitly configured for file memory."""
     storage_path = tmp_path
@@ -237,6 +329,57 @@ async def test_worker_respects_batch_limits(
     await worker._run_cycle(config)
 
     assert len(writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_session_load_does_not_block_the_event_loop(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked session read must run outside the worker's event loop."""
+    mark_auto_flush_dirty_session(
+        tmp_path,
+        config,
+        agent_name="general",
+        session_id="s1",
+    )
+    started = threading.Event()
+    loop_advanced = threading.Event()
+    release = threading.Event()
+    observed_progress = threading.Event()
+
+    def _blocking_load(*_args: object, **_kwargs: object) -> _FakeSession:
+        started.set()
+        assert release.wait(timeout=5)
+        return _FakeSession(updated_at=100, messages=[])
+
+    def _release_after_observing_loop() -> None:
+        assert started.wait(timeout=5)
+        if loop_advanced.wait(timeout=0.5):
+            observed_progress.set()
+        release.set()
+
+    monkeypatch.setattr("mindroom.memory.auto_flush._load_agent_session", _blocking_load)
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+    monkeypatch.setattr(worker, "_process_session_key", AsyncMock())
+    observer = threading.Thread(target=_release_after_observing_loop, name="auto-flush-loop-observer")
+    observer.start()
+    try:
+        task = asyncio.create_task(worker._run_cycle(config))
+        assert await asyncio.to_thread(started.wait, 5)
+        loop_advanced.set()
+        await task
+    finally:
+        release.set()
+        observer.join(timeout=5)
+
+    assert observed_progress.is_set(), "session read blocked the event loop"
+    assert not observer.is_alive()
 
 
 @pytest.mark.asyncio
@@ -782,8 +925,13 @@ def test_load_agent_session_passes_execution_identity_for_private_agents(
     captured: dict[str, object] = {}
 
     class _DummyStorage:
+        closed = False
+
         def get_session(self, session_id: str, _session_type: object) -> None:
             captured["session_id"] = session_id
+
+        def close(self) -> None:
+            self.closed = True
 
     def _fake_create_session_storage(
         agent_name: str,
@@ -796,7 +944,9 @@ def test_load_agent_session_passes_execution_identity_for_private_agents(
         captured["config"] = config
         captured["runtime_paths"] = runtime_paths
         captured["execution_identity"] = execution_identity
-        return _DummyStorage()
+        storage = _DummyStorage()
+        captured["storage"] = storage
+        return storage
 
     monkeypatch.setattr("mindroom.memory.auto_flush.create_session_storage", _fake_create_session_storage)
 
@@ -813,6 +963,8 @@ def test_load_agent_session_passes_execution_identity_for_private_agents(
     assert captured["execution_identity"] == alice_identity
     assert captured["agent_name"] == "mind"
     assert captured["session_id"] == "session-alice"
+    assert isinstance(captured["storage"], _DummyStorage)
+    assert captured["storage"].closed is True
 
 
 def test_load_agent_session_uses_canonical_session_helper(
@@ -820,7 +972,7 @@ def test_load_agent_session_uses_canonical_session_helper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Auto-flush should not locally coerce raw Agno session payloads."""
-    storage = object()
+    storage = MagicMock()
     sentinel = object()
 
     def _fake_create_session_storage(*_args: object, **_kwargs: object) -> object:
@@ -836,6 +988,7 @@ def test_load_agent_session_uses_canonical_session_helper(
     )
 
     assert _load_agent_session(config, runtime_paths_for(config), "general", "session-1") is sentinel
+    storage.close.assert_called_once_with()
 
 
 def test_reprioritize_private_sessions_stays_within_private_scope(tmp_path: Path) -> None:

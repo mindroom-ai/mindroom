@@ -1,6 +1,7 @@
 """Matrix avatar management helpers."""
 
 import mimetypes
+from collections.abc import Callable
 from pathlib import Path
 
 import nio
@@ -140,6 +141,8 @@ async def set_room_avatar_from_file(
     client: nio.AsyncClient,
     room_id: str,
     avatar_path: Path,
+    *,
+    write_allowed: Callable[[], bool] | None = None,
 ) -> bool:
     """Set or replace the avatar for a Matrix room from a file.
 
@@ -147,6 +150,7 @@ async def set_room_avatar_from_file(
         client: Authenticated Matrix client
         room_id: The room ID to set the avatar for
         avatar_path: Path to the avatar image file
+        write_allowed: Live authorization check before updating room state
 
     Returns:
         True if avatar was successfully set, False otherwise
@@ -154,6 +158,8 @@ async def set_room_avatar_from_file(
     """
     avatar_url = await _upload_avatar_file(client, avatar_path)
     if not avatar_url:
+        return False
+    if write_allowed is not None and not write_allowed():
         return False
 
     # Set room avatar using room state

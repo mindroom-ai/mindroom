@@ -13,7 +13,9 @@ import pytest
 from agno.models.message import Message
 
 import mindroom.ai as ai_module
+import mindroom.knowledge.utils as knowledge_utils
 import mindroom.memory._file_backend as file_backend_module
+import mindroom.pre_model_preparation as pre_model_preparation_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -21,6 +23,7 @@ from mindroom.history.types import PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory._file_backend import FileMemoryBackend
+from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import bind_runtime_paths, make_turn_context, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -34,6 +37,156 @@ async def _assert_loop_heartbeats_while_pending(task: asyncio.Task) -> None:
         await asyncio.sleep(0)
         heartbeats += 1
     assert not task.done()
+
+
+@pytest.mark.asyncio
+async def test_agent_knowledge_lookup_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow published-index lookup must not stall other event-loop work."""
+    gate = threading.Event()
+    lookup_started = threading.Event()
+    loop_thread_id = threading.get_ident()
+    schedule_thread_ids: list[int] = []
+
+    def gated_lookup(*_args: object, **_kwargs: object) -> knowledge_utils.PublishedIndexResolution:
+        lookup_started.set()
+        assert threading.get_ident() != loop_thread_id
+        if not gate.wait(5.0):
+            msg = "timed out waiting to release published-index lookup"
+            raise TimeoutError(msg)
+        return knowledge_utils.get_published_index("docs", config=config, runtime_paths=test_runtime_paths(tmp_path))
+
+    def record_refresh_schedule(
+        *_args: object,
+        availability: knowledge_utils.KnowledgeAvailability,
+        **_kwargs: object,
+    ) -> knowledge_utils.KnowledgeAvailability:
+        schedule_thread_ids.append(threading.get_ident())
+        return availability
+
+    monkeypatch.setattr(knowledge_utils, "_lookup_knowledge_for_base", gated_lookup)
+    monkeypatch.setattr(knowledge_utils, "_schedule_refresh_for_availability", record_refresh_schedule)
+    config = Config.model_validate(
+        {
+            "agents": {
+                "general": {
+                    "display_name": "General",
+                    "role": "test",
+                    "knowledge_bases": ["docs"],
+                },
+            },
+            "knowledge_bases": {"docs": {"path": str(tmp_path / "docs")}},
+        },
+    )
+    resolve_task = asyncio.create_task(
+        knowledge_utils.resolve_agent_knowledge_access_async(
+            "general",
+            config,
+            test_runtime_paths(tmp_path),
+            refresh_scheduler=MagicMock(),
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(lookup_started.wait, 5.0)
+        await _assert_loop_heartbeats_while_pending(resolve_task)
+    finally:
+        gate.set()
+
+    resolution = await resolve_task
+    assert resolution.knowledge is None
+    assert resolution.unavailable["docs"].availability is knowledge_utils.KnowledgeAvailability.INITIALIZING
+    assert resolution.unavailable["docs"].search_available is False
+    assert schedule_thread_ids == [loop_thread_id]
+
+
+@pytest.mark.asyncio
+async def test_agent_file_memory_resolution_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """File-memory workspace resolution must not stall other event-loop work."""
+    gate = threading.Event()
+    resolution_started = threading.Event()
+    loop_thread_id = threading.get_ident()
+
+    def gated_file_memory_resolution(*_args: object, **_kwargs: object) -> None:
+        resolution_started.set()
+        assert threading.get_ident() != loop_thread_id
+        if not gate.wait(5.0):
+            msg = "timed out waiting to release file-memory resolution"
+            raise TimeoutError(msg)
+
+    monkeypatch.setattr(
+        knowledge_utils,
+        "resolve_agent_file_memory_knowledge",
+        gated_file_memory_resolution,
+    )
+    config = Config.model_validate(
+        {
+            "agents": {"general": {"display_name": "General", "role": "test", "memory_backend": "file"}},
+            "memory": {"search": {"mode": "semantic"}},
+        },
+    )
+    resolve_task = asyncio.create_task(
+        knowledge_utils.resolve_agent_knowledge_access_async(
+            "general",
+            config,
+            test_runtime_paths(tmp_path),
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(resolution_started.wait, 5.0)
+        await _assert_loop_heartbeats_while_pending(resolve_task)
+    finally:
+        gate.set()
+
+    resolution = await resolve_task
+    assert resolution.knowledge is None
+    assert resolution.unavailable == {}
+
+
+@pytest.mark.asyncio
+async def test_knowledge_base_lookup_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct published-index lookup must not stall other event-loop work."""
+    gate = threading.Event()
+    lookup_started = threading.Event()
+    loop_thread_id = threading.get_ident()
+
+    def gated_lookup(*_args: object, **_kwargs: object) -> knowledge_utils.PublishedIndexResolution:
+        lookup_started.set()
+        assert threading.get_ident() != loop_thread_id
+        if not gate.wait(5.0):
+            msg = "timed out waiting to release direct published-index lookup"
+            raise TimeoutError(msg)
+        return knowledge_utils.get_published_index("docs", config=config, runtime_paths=test_runtime_paths(tmp_path))
+
+    monkeypatch.setattr(knowledge_utils, "_lookup_knowledge_for_base", gated_lookup)
+    config = Config.model_validate(
+        {
+            "knowledge_bases": {"docs": {"path": str(tmp_path / "docs")}},
+        },
+    )
+    resolve_task = asyncio.create_task(
+        knowledge_utils.resolve_knowledge_base_access_async(
+            "docs",
+            config,
+            test_runtime_paths(tmp_path),
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(lookup_started.wait, 5.0)
+        await _assert_loop_heartbeats_while_pending(resolve_task)
+    finally:
+        gate.set()
+
+    resolution = await resolve_task
+    assert resolution.knowledge is None
+    assert resolution.availability is knowledge_utils.KnowledgeAvailability.INITIALIZING
 
 
 def _prompt_preparation_config(memory_backend: str = "mem0") -> Config:
@@ -97,12 +250,14 @@ async def test_prepare_agent_and_prompt_builds_agent_off_event_loop(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("first_finished", ["memory", "agent"])
-async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_history(  # noqa: PLR0915
+@pytest.mark.parametrize("memory_backend", ["mem0", "file"])
+async def test_prepare_agent_and_prompt_joins_overlapping_branches_before_history(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     first_finished: str,
+    memory_backend: str,
 ) -> None:
-    """Mem0 preparation and agent construction overlap, then both join before history."""
+    """Memory preparation and agent construction overlap, then both join before history."""
     memory_started = asyncio.Event()
     memory_release = asyncio.Event()
     memory_finished = asyncio.Event()
@@ -165,7 +320,8 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
     monkeypatch.setattr(ai_module, "_compose_current_turn_prompt", compose_prompt)
     monkeypatch.setattr(ai_module, "prepare_agent_execution_context", prepare_history)
 
-    config = _prompt_preparation_config()
+    config = _prompt_preparation_config(memory_backend)
+    pipeline_timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
     prepare_task = asyncio.create_task(
         ai_module._prepare_agent_and_prompt(
             make_turn_context("general"),
@@ -173,6 +329,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
             runtime_paths=test_runtime_paths(tmp_path),
             config=config,
             model_prompt="model metadata",
+            pipeline_timing=pipeline_timing,
         ),
     )
     try:
@@ -200,14 +357,18 @@ async def test_prepare_agent_and_prompt_joins_overlapping_mem0_branches_before_h
     assert prepared_run.agent is built_agent
     assert prepared_run.prompt_text == "raw prompt\n\nmodel metadata"
     assert built_agent.additional_context == "existing context\n\nsession memory"
+    assert pipeline_timing.metadata["prompt_branches_parallel"] is True
+    assert pipeline_timing.metadata["prompt_branches_memory_backend"] == memory_backend
+    assert "prompt_branches_start" in pipeline_timing.marks
+    assert "prompt_branches_ready" in pipeline_timing.marks
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_keeps_file_memory_before_agent_build(
+async def test_prepare_agent_and_prompt_keeps_cold_default_workspace_serial(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """File-memory preparation stays serial so workspace scaffolding cannot change its read."""
+    """Cold default workspace stays serial so construction cannot change memory reads."""
     memory_finished = False
     built_agent = MagicMock()
     built_agent.additional_context = ""
@@ -238,16 +399,302 @@ async def test_prepare_agent_and_prompt_keeps_file_memory_before_agent_build(
         prepare_history,
     )
 
-    config = _prompt_preparation_config("file")
+    config = Config.model_validate(
+        {
+            "agents": {
+                "mind": {
+                    "display_name": "Mind",
+                    "role": "test",
+                    "memory_backend": "file",
+                    "context_files": [
+                        "SOUL.md",
+                        "AGENTS.md",
+                        "USER.md",
+                        "IDENTITY.md",
+                        "TOOLS.md",
+                        "HEARTBEAT.md",
+                    ],
+                },
+            },
+        },
+    )
+    pipeline_timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
+    prepared = await ai_module._prepare_agent_and_prompt(
+        make_turn_context("mind"),
+        prompt="hello",
+        runtime_paths=test_runtime_paths(tmp_path),
+        config=config,
+        pipeline_timing=pipeline_timing,
+    )
+
+    assert prepared.agent is built_agent
+    assert prepare_history.await_args.kwargs["resolved_runtime_model"].model_name == "default"
+    assert pipeline_timing.metadata["prompt_branches_parallel"] is False
+    assert pipeline_timing.metadata["prompt_branches_serial_reason"] == "default_workspace_scaffold_pending"
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_closes_built_agent_when_history_preparation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A built per-turn agent must be closed when later preparation fails."""
+    built_agent = MagicMock()
+    built_agent.additional_context = ""
+    close_runtime = MagicMock()
+    close_client = AsyncMock()
+    preparation_error = RuntimeError("history preparation failed")
+
+    monkeypatch.setattr(ai_module, "build_memory_prompt_parts", AsyncMock(return_value=MemoryPromptParts()))
+    monkeypatch.setattr(ai_module, "create_agent", MagicMock(return_value=built_agent))
+    monkeypatch.setattr(
+        ai_module,
+        "prepare_agent_execution_context",
+        AsyncMock(side_effect=preparation_error),
+    )
+    monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_runtime)
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "aclose_anthropic_async_client",
+        close_client,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        await ai_module._prepare_agent_and_prompt(
+            make_turn_context("general"),
+            prompt="hello",
+            runtime_paths=test_runtime_paths(tmp_path),
+            config=_prompt_preparation_config(),
+        )
+
+    assert raised.value is preparation_error
+    close_runtime.assert_called_once_with(built_agent, shared_scope_storage=None)
+    close_client.assert_awaited_once_with(built_agent.model)
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_closes_built_agent_when_prewarm_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed client prewarm must reclaim the agent built in the worker."""
+    built_agent = MagicMock()
+    close_runtime = MagicMock()
+
+    monkeypatch.setattr(ai_module, "build_memory_prompt_parts", AsyncMock(return_value=MemoryPromptParts()))
+    monkeypatch.setattr(ai_module, "create_agent", MagicMock(return_value=built_agent))
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "prewarm_anthropic_async_client",
+        MagicMock(side_effect=RuntimeError("prewarm failed")),
+    )
+    monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_runtime)
+
+    with pytest.raises(RuntimeError, match="prewarm failed"):
+        await ai_module._prepare_agent_and_prompt(
+            make_turn_context("general"),
+            prompt="hello",
+            runtime_paths=test_runtime_paths(tmp_path),
+            config=_prompt_preparation_config(),
+        )
+
+    close_runtime.assert_called_once_with(built_agent, shared_scope_storage=None)
+
+
+@pytest.mark.asyncio
+async def test_serial_agent_build_cancellation_drains_and_closes_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation must wait for a serial build and close its unreturned agent."""
+    build_started = threading.Event()
+    release_build = threading.Event()
+    built_agent = MagicMock()
+    built_agent.additional_context = ""
+    close_runtime = MagicMock()
+    close_client = AsyncMock()
+
+    def blocked_create_agent(*_args: object, **_kwargs: object) -> MagicMock:
+        build_started.set()
+        assert release_build.wait(timeout=5)
+        return built_agent
+
+    monkeypatch.setattr(ai_module, "build_memory_prompt_parts", AsyncMock(return_value=MemoryPromptParts()))
+    monkeypatch.setattr(ai_module, "create_agent", blocked_create_agent)
+    monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_runtime)
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "aclose_anthropic_async_client",
+        close_client,
+        raising=False,
+    )
+
+    task = asyncio.create_task(
+        ai_module._prepare_agent_and_prompt(
+            make_turn_context("general"),
+            prompt="hello",
+            runtime_paths=test_runtime_paths(tmp_path),
+            config=_prompt_preparation_config("file"),
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(build_started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release_build.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release_build.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    close_runtime.assert_called_once_with(built_agent, shared_scope_storage=None)
+    close_client.assert_awaited_once_with(built_agent.model)
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_file_memory_preserves_reusable_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """File-memory overlap reuses caller-owned agent without rebuilding it."""
+    reusable_agent = MagicMock()
+    reusable_agent.additional_context = "caller context"
+    create_agent_mock = MagicMock(side_effect=AssertionError("caller-owned agent must not be rebuilt"))
+
+    async def prepare_history(*_args: object, **kwargs: object) -> SimpleNamespace:
+        assert kwargs["agent"] is reusable_agent
+        assert kwargs["resolved_runtime_model"].model_name == "default"
+        transient_messages = kwargs["transient_context_messages"]
+        assert [message.content for message in transient_messages] == [render_transient_context(("turn memory",))]
+        return SimpleNamespace(
+            prepared_history=PreparedHistoryState(prepared_context_tokens=42),
+            replay_plan=None,
+            unseen_event_ids=["$memory"],
+            messages=(
+                *transient_messages,
+                Message(role="user", content=kwargs["prompt"]),
+            ),
+        )
+
+    monkeypatch.setattr(
+        ai_module,
+        "build_memory_prompt_parts",
+        AsyncMock(
+            return_value=MemoryPromptParts(
+                session_preamble="session memory",
+                transient_turn_context="turn memory",
+            ),
+        ),
+    )
+    monkeypatch.setattr(ai_module, "create_agent", create_agent_mock)
+    monkeypatch.setattr(ai_module, "prepare_agent_execution_context", prepare_history)
+
     prepared = await ai_module._prepare_agent_and_prompt(
         make_turn_context("general"),
         prompt="hello",
         runtime_paths=test_runtime_paths(tmp_path),
-        config=config,
+        config=_prompt_preparation_config("file"),
+        reusable_agent=reusable_agent,
     )
 
-    assert prepared.agent is built_agent
-    assert prepare_history.await_args.kwargs["resolved_runtime_model"] is None
+    assert prepared.agent is reusable_agent
+    assert reusable_agent.additional_context == "caller context\n\nsession memory"
+    assert prepared.unseen_event_ids == ["$memory"]
+    assert prepared.prepared_history.prepared_context_tokens == 42
+    create_agent_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_parallel_file_prompt_matches_sequential_output_and_bookkeeping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parallel file preparation preserves sequential prompt and history results."""
+    built_agents: list[MagicMock] = []
+    history_inputs: list[tuple[str, tuple[str, ...], str]] = []
+
+    async def prepare_memory(*_args: object, **_kwargs: object) -> MemoryPromptParts:
+        return MemoryPromptParts(
+            session_preamble="session memory",
+            transient_turn_context="retrieved memory",
+        )
+
+    def build_agent(*_args: object, **_kwargs: object) -> MagicMock:
+        agent = MagicMock()
+        agent.additional_context = "base context"
+        built_agents.append(agent)
+        return agent
+
+    async def prepare_history(*_args: object, **kwargs: object) -> SimpleNamespace:
+        transient_messages = tuple(kwargs["transient_context_messages"])
+        history_inputs.append(
+            (
+                kwargs["prompt"],
+                tuple(message.content for message in transient_messages),
+                kwargs["resolved_runtime_model"].model_name,
+            ),
+        )
+        return SimpleNamespace(
+            prepared_history=PreparedHistoryState(prepared_context_tokens=73),
+            replay_plan=None,
+            unseen_event_ids=["$one", "$two"],
+            messages=(
+                Message(role="system", content="stable system context"),
+                *transient_messages,
+                Message(role="user", content=kwargs["prompt"]),
+            ),
+        )
+
+    monkeypatch.setattr(ai_module, "build_memory_prompt_parts", prepare_memory)
+    monkeypatch.setattr(ai_module, "create_agent", build_agent)
+    monkeypatch.setattr(ai_module, "prepare_agent_execution_context", prepare_history)
+
+    config = _prompt_preparation_config("file")
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setattr(ai_module, "agent_build_can_overlap_file_memory", lambda *_args: False)
+    sequential = await ai_module._prepare_agent_and_prompt(
+        make_turn_context("general"),
+        prompt="raw prompt",
+        runtime_paths=runtime_paths,
+        config=config,
+        model_prompt="model metadata",
+    )
+    monkeypatch.setattr(ai_module, "agent_build_can_overlap_file_memory", lambda *_args: True)
+    parallel = await ai_module._prepare_agent_and_prompt(
+        make_turn_context("general"),
+        prompt="raw prompt",
+        runtime_paths=runtime_paths,
+        config=config,
+        model_prompt="model metadata",
+    )
+
+    assert [(message.role, message.content, message.add_to_agent_memory) for message in parallel.messages] == [
+        (message.role, message.content, message.add_to_agent_memory) for message in sequential.messages
+    ]
+    assert parallel.prompt_text == sequential.prompt_text
+    assert parallel.unseen_event_ids == sequential.unseen_event_ids == ["$one", "$two"]
+    assert parallel.prepared_history == sequential.prepared_history
+    assert parallel.runtime_model_name == sequential.runtime_model_name
+    assert [agent.additional_context for agent in built_agents] == [
+        "base context\n\nsession memory",
+        "base context\n\nsession memory",
+    ]
+    assert history_inputs == [
+        (
+            "raw prompt\n\nmodel metadata",
+            (render_transient_context(("retrieved memory",)),),
+            "default",
+        ),
+        (
+            "raw prompt\n\nmodel metadata",
+            (render_transient_context(("retrieved memory",)),),
+            "default",
+        ),
+    ]
 
 
 @pytest.mark.asyncio

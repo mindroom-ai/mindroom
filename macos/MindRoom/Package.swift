@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "MindRoom",
     platforms: [
-        .macOS(.v13),
+        .macOS(.v14),
     ],
     products: [
         .executable(name: "MindRoom", targets: ["MindRoom"]),
@@ -19,7 +19,8 @@ let package = Package(
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
-            path: "Sources/MindRoom"
+            path: "Sources/MindRoom",
+            resources: [.process("Resources")]
         ),
         .testTarget(
             name: "MindRoomTests",

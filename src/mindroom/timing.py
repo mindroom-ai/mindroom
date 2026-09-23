@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import logging
 import os
 import time
 from contextlib import contextmanager
@@ -33,9 +34,20 @@ def _is_enabled() -> bool:
     return os.environ.get("MINDROOM_TIMING", "") == "1"
 
 
-def timing_enabled() -> bool:
-    """Return whether structured timing diagnostics should be emitted."""
-    return _is_enabled()
+def _debug_enabled(bound_logger: object) -> bool:
+    """Return whether one logger would keep a debug event.
+
+    Only used to skip work that would be discarded, so anything that cannot
+    answer the question counts as enabled: test doubles and non-stdlib structlog
+    loggers must never lose a diagnostic to this check.
+    """
+    is_enabled_for = getattr(bound_logger, "isEnabledFor", None)
+    if not callable(is_enabled_for):
+        return True
+    try:
+        return bool(is_enabled_for(logging.DEBUG))
+    except Exception:
+        return True
 
 
 def elapsed_ms_between(start: float, end: float, *, ndigits: int = 1) -> float:
@@ -65,12 +77,13 @@ _PRIMARY_SEGMENTS: tuple[tuple[str, str, str], ...] = (
 )
 
 _PRIMARY_TOTALS: tuple[tuple[str, str, str], ...] = (
+    ("time_to_model_request_ms", "message_received", "first_model_request_sent"),
     ("time_to_first_visible_reply_ms", "message_received", "first_visible_reply"),
+    ("time_to_first_substantive_reply_ms", "message_received", "first_substantive_reply"),
     ("total_pipeline_ms", "message_received", "response_complete"),
 )
 
 _DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
-    ("diag_ingress_cache_append_ms", "ingress_cache_append_start", "ingress_cache_append_ready"),
     ("diag_ingress_normalize_ms", "ingress_normalize_start", "ingress_normalize_ready"),
     ("diag_dispatch_prepare_ms", "dispatch_prepare_start", "dispatch_prepare_ready"),
     ("diag_dispatch_plan_ms", "dispatch_plan_start", "dispatch_plan_ready"),
@@ -78,6 +91,7 @@ _DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
     ("diag_thread_refresh_ms", "thread_refresh_start", "thread_refresh_ready"),
     ("diag_lock_wait_ms", "lock_wait_start", "lock_acquired"),
     ("diag_runtime_prepare_ms", "response_runtime_start", "response_runtime_ready"),
+    ("diag_knowledge_access_ms", "knowledge_access_start", "knowledge_access_ready"),
     ("diag_llm_prepare_ms", "ai_prepare_start", "history_ready"),
     ("diag_prompt_branch_join_ms", "prompt_branches_start", "prompt_branches_ready"),
     ("diag_memory_prepare_ms", "memory_prepare_start", "memory_prepare_ready"),
@@ -88,6 +102,16 @@ _DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
     ("diag_prompt_assembly_ms", "prompt_assembly_start", "prompt_assembly_ready"),
     ("diag_history_ready_to_model_request_ms", "history_ready", "model_request_sent"),
     ("diag_provider_ttft_ms", "model_request_sent", "model_first_token"),
+    (
+        "diag_first_visible_to_first_substantive_reply_ms",
+        "first_visible_reply",
+        "first_substantive_reply",
+    ),
+    (
+        "diag_model_first_token_to_first_substantive_reply_ms",
+        "model_first_token",
+        "first_substantive_reply",
+    ),
     ("diag_first_visible_to_stream_complete_ms", "first_visible_reply", "streaming_complete"),
     ("diag_model_request_to_completion_ms", "model_request_sent", "response_complete"),
 )
@@ -114,14 +138,27 @@ class DispatchPipelineTiming:
             if value is not None:
                 self.metadata[key] = value
 
-    def mark_first_visible_reply(self, kind: str) -> None:
-        """Record the first user-visible response milestone once."""
-        if "first_visible_reply" in self.marks:
-            return
-        self.marks["first_visible_reply"] = time.perf_counter()
-        self.metadata["first_visible_kind"] = kind
+    def mark_model_request(self) -> None:
+        """Keep initial startup separate from the latest model attempt's timings."""
+        now = time.perf_counter()
+        self.marks.setdefault("first_model_request_sent", now)
+        self.marks["model_request_sent"] = now
 
-    def elapsed_ms(self, start_label: str, end_label: str) -> float | None:
+    def mark_first_visible_reply(self, kind: str, *, substantive: bool = False) -> None:
+        """Record the first visible reply and, when confirmed, the first substantive reply."""
+        needs_visible = "first_visible_reply" not in self.marks
+        needs_substantive = substantive and "first_substantive_reply" not in self.marks
+        if not needs_visible and not needs_substantive:
+            return
+        now = time.perf_counter()
+        if needs_visible:
+            self.marks["first_visible_reply"] = now
+            self.metadata["first_visible_kind"] = kind
+        if needs_substantive:
+            self.marks["first_substantive_reply"] = now
+            self.metadata["first_substantive_kind"] = kind
+
+    def _elapsed_ms(self, start_label: str, end_label: str) -> float | None:
         """Return elapsed time between two recorded phase boundaries."""
         start = self.marks.get(start_label)
         end = self.marks.get(end_label)
@@ -130,7 +167,7 @@ class DispatchPipelineTiming:
         return elapsed_ms_between(start, end)
 
     def emit_summary(self, logger: BoundLogger, *, outcome: str) -> None:
-        """Log one structured end-to-end timing summary."""
+        """Log one opt-in summary at INFO; high-frequency spans remain DEBUG."""
         if self.summary_emitted:
             return
         self.summary_emitted = True
@@ -142,10 +179,10 @@ class DispatchPipelineTiming:
         }
         duration_pairs = (*_PRIMARY_SEGMENTS, *_PRIMARY_TOTALS, *_DIAGNOSTIC_SPANS)
         for key, start_label, end_label in duration_pairs:
-            elapsed = self.elapsed_ms(start_label, end_label)
+            elapsed = self._elapsed_ms(start_label, end_label)
             if elapsed is not None:
                 summary[key] = elapsed
-        logger.debug("Dispatch pipeline timing", **summary)
+        logger.info("Dispatch pipeline timing", **summary)
 
 
 def create_dispatch_pipeline_timing(*, event_id: str, room_id: str) -> DispatchPipelineTiming | None:
@@ -190,11 +227,10 @@ def emit_timing_event(event_name: str, **event_data: object) -> None:
 
     Emitted at ``debug`` level so callers can keep ``MINDROOM_TIMING=1`` enabled
     in long-running processes and still flip emission off cheaply via the global
-    log level. With ``MINDROOM_TIMING=1`` and log level at INFO or above, the
-    stdlib ``isEnabledFor(DEBUG)`` check short-circuits before formatting and
-    handler dispatch.
+    log level. The ``isEnabledFor`` check runs before the payload is assembled,
+    so a dropped event costs one level lookup rather than a discarded dict.
     """
-    if not _is_enabled():
+    if not _is_enabled() or not _debug_enabled(logger):
         return
     scope = event_data.pop("timing_scope", None)
     if not isinstance(scope, str) or not scope:

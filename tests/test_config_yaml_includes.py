@@ -6,12 +6,16 @@ import asyncio
 import os
 import time
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
 from pydantic import ValidationError
 from typer.testing import CliRunner
+from yaml.constructor import ConstructorError
+from yaml.scanner import Scanner
 
 from mindroom import file_watcher
 from mindroom.cli.main import app
@@ -19,6 +23,11 @@ from mindroom.config.main import Config, load_config
 from mindroom.config.yaml_includes import ConfigIncludeError, load_yaml_config_source, partial_source_files
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
+from mindroom.orchestrator import _watch_config_task
+from mindroom.response_admission import ResponseAdmissionGate
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 runner = CliRunner()
 
@@ -84,6 +93,25 @@ def _write_split_config(config_dir: Path) -> Path:
 
 class TestIncludeTags:
     """Happy-path semantics of each include tag."""
+
+    def test_config_load_avoids_python_scanner_when_libyaml_is_available(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Repeated config loads must not pay for the Python scanner when libyaml is installed."""
+        if not yaml.__with_libyaml__:
+            pytest.skip("PyYAML built without libyaml")
+        config_path = _write_split_config(tmp_path)
+
+        def reject_python_scanner(_self: object) -> None:
+            pytest.fail("Config parsing used the slow Python YAML scanner")
+
+        monkeypatch.setattr(Scanner, "fetch_more_tokens", reject_python_scanner)
+
+        data, _files = load_yaml_config_source(config_path)
+
+        assert data == MONOLITH_CONFIG
 
     def test_include_resolves_nested_files_relative_to_including_file(self, tmp_path: Path) -> None:
         """!include nests recursively and resolves relative to the including file."""
@@ -188,15 +216,17 @@ class TestIncludeTags:
         assert data == {}
         assert files == frozenset({(tmp_path / "config.yaml").resolve()})
 
+    @pytest.mark.parametrize("tools", ["!include shared/tools.yaml", "[!expand shared/tools.yaml]"])
     def test_diamond_include_reads_the_shared_file_once(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        tools: str,
     ) -> None:
         """A file reachable via two include paths is read once so digest and content stay coherent."""
         _write(tmp_path / "config.yaml", "a: !include a.yaml\nb: !include b.yaml\n")
-        _write(tmp_path / "a.yaml", "tools: !include shared/tools.yaml\n")
-        _write(tmp_path / "b.yaml", "tools: !include shared/tools.yaml\n")
+        _write(tmp_path / "a.yaml", f"tools: {tools}\n")
+        _write(tmp_path / "b.yaml", f"tools: {tools}\n")
         _write(tmp_path / "shared" / "tools.yaml", "- calculator\n")
 
         read_names: list[str] = []
@@ -213,6 +243,145 @@ class TestIncludeTags:
         assert data == {"a": {"tools": ["calculator"]}, "b": {"tools": ["calculator"]}}
         assert (tmp_path / "shared" / "tools.yaml").resolve() in files
         assert read_names.count("tools.yaml") == 1
+
+
+class TestListExpansion:
+    """Explicit expansion splices shared YAML lists into the surrounding sequence."""
+
+    @pytest.mark.parametrize(
+        "tools",
+        ["\n  - calculator\n  - !expand tools.yaml\n  - shell", "[calculator, !expand tools.yaml, shell]"],
+    )
+    def test_expand_preserves_order_duplicates_and_nested_values(self, tmp_path: Path, tools: str) -> None:
+        """Expand one level while retaining ordinary includes and nested list values."""
+        config_path = _write(tmp_path / "config.yaml", f"tools: {tools}\nordinary: [!include tools.yaml]\n")
+        shared = _write(tmp_path / "tools.yaml", "- file\n- calculator\n- [nested, list]\n- {key: value}\n")
+
+        data, files = load_yaml_config_source(config_path)
+
+        shared_values = ["file", "calculator", ["nested", "list"], {"key": "value"}]
+        assert data["tools"] == ["calculator", *shared_values, "shell"]
+        assert data["ordinary"] == [shared_values]
+        assert files == frozenset({config_path.resolve(), shared.resolve()})
+
+    def test_expand_composes_recursively_with_includes(self, tmp_path: Path) -> None:
+        """Nested expansions resolve from their own file and track all dependencies."""
+        config_path = _write(tmp_path / "config.yaml", "agent: !include agents/code.yaml\n")
+        agent = _write(tmp_path / "agents/code.yaml", "tools: [!expand _shared/tools.yaml, shell]\n")
+        shared = _write(tmp_path / "agents/_shared/tools.yaml", "- !expand base.yaml\n- file\n- !expand base.yaml\n")
+        base = _write(tmp_path / "agents/_shared/base.yaml", "!include calculator.yaml\n")
+        calculator = _write(tmp_path / "agents/_shared/calculator.yaml", "- calculator\n")
+
+        data, files = load_yaml_config_source(config_path)
+
+        assert data == {"agent": {"tools": ["calculator", "file", "calculator", "shell"]}}
+        assert files == frozenset(path.resolve() for path in (config_path, agent, shared, base, calculator))
+
+    def test_empty_list_expands_to_no_items(self, tmp_path: Path) -> None:
+        """An explicit empty list is a valid expansion and still tracks its file."""
+        config_path = _write(tmp_path / "config.yaml", "tools: [!expand empty.yaml, calculator]\n")
+        empty = _write(tmp_path / "empty.yaml", "[]\n")
+
+        data, files = load_yaml_config_source(config_path)
+
+        assert data == {"tools": ["calculator"]}
+        assert empty.resolve() in files
+
+    def test_expand_preserves_yaml_aliases_and_mapping_merges(self, tmp_path: Path) -> None:
+        """Ordinary aliases and merges keep working around expanded list items."""
+        config_path = _write(
+            tmp_path / "config.yaml",
+            "base: &base\n  tools: &tools [!expand tools.yaml, file]\n"
+            "agent: {<<: *base}\ncopy: *tools\nnested: [*tools]\n",
+        )
+        _write(tmp_path / "tools.yaml", "- calculator\n")
+
+        data, _files = load_yaml_config_source(config_path)
+
+        assert data["base"] == data["agent"] == {"tools": ["calculator", "file"]}
+        assert data["copy"] is data["base"]["tools"]
+        assert data["nested"] == [["calculator", "file"]]
+
+    @pytest.mark.parametrize("content", ["", "null\n", "calculator\n", "42\n", "tools: [calculator]\n"])
+    def test_expand_rejects_non_lists_with_source_location(self, tmp_path: Path, content: str) -> None:
+        """Bad shared values report the expansion site and retain failure dependencies."""
+        config_path = _write(tmp_path / "config.yaml", "tools:\n  - !expand tools.yaml\n")
+        shared = _write(tmp_path / "tools.yaml", content)
+
+        with pytest.raises(
+            ConfigIncludeError,
+            match=r"!expand.*tools\.yaml.*must contain a YAML list.*config\.yaml, line 2",
+        ) as exc_info:
+            load_yaml_config_source(config_path)
+
+        assert partial_source_files(exc_info.value) == frozenset({config_path.resolve(), shared.resolve()})
+
+    @pytest.mark.parametrize(
+        "source",
+        ["!expand tools.yaml\n", "tools: !expand tools.yaml\n", "!expand tools.yaml: value\n"],
+    )
+    def test_expand_requires_a_list_item(self, tmp_path: Path, source: str) -> None:
+        """Expansion outside a sequence reports a clear usage error."""
+        config_path = _write(tmp_path / "config.yaml", source)
+        _write(tmp_path / "tools.yaml", "- calculator\n")
+
+        with pytest.raises(ConfigIncludeError, match=r"!expand.*only.*list item.*config\.yaml, line 1"):
+            load_yaml_config_source(config_path)
+
+    @pytest.mark.parametrize("value", ["[]", "{}", "''"])
+    def test_expand_requires_a_file_path(self, tmp_path: Path, value: str) -> None:
+        """Only a nonempty scalar relative file path can follow !expand."""
+        config_path = _write(tmp_path / "config.yaml", f"tools:\n  - !expand {value}\n")
+
+        with pytest.raises(ConfigIncludeError, match=r"!expand expects a relative file path.*config\.yaml, line 2"):
+            load_yaml_config_source(config_path)
+
+    @pytest.mark.parametrize(
+        ("target", "error"),
+        [
+            ("missing.yaml", "does not exist"),
+            ("/tools.yaml", "does not allow absolute paths"),
+            ("../tools.yaml", "outside the configuration directory"),
+            (".hidden.yaml", "does not allow hidden path components"),
+        ],
+    )
+    def test_expand_obeys_include_path_rules(self, tmp_path: Path, target: str, error: str) -> None:
+        """Expansion reuses the same file access rules as ordinary includes."""
+        config_path = _write(tmp_path / "config.yaml", f"tools:\n  - !expand {target}\n")
+
+        with pytest.raises(ConfigIncludeError, match=error):
+            load_yaml_config_source(config_path)
+
+    def test_expand_rejects_include_cycles(self, tmp_path: Path) -> None:
+        """Mixed include and expansion cycles report the full file chain."""
+        config_path = _write(tmp_path / "config.yaml", "tools: [!expand tools.yaml]\n")
+        _write(tmp_path / "tools.yaml", "- !include config.yaml\n")
+
+        with pytest.raises(
+            ConfigIncludeError,
+            match=r"include cycle detected: config.yaml -> tools.yaml -> config.yaml",
+        ):
+            load_yaml_config_source(config_path)
+
+    def test_expanded_agent_tools_validate_and_resolve(self, tmp_path: Path) -> None:
+        """Agent configs and CLI resolution expose the final flat tools list."""
+        config_path = _write_split_config(tmp_path)
+        agent = tmp_path / "agents/code.yaml"
+        agent.write_text(
+            agent.read_text().replace(
+                "tools: !include _shared/tools.yaml",
+                "tools: [!expand _shared/tools.yaml, file]",
+            ),
+        )
+
+        config = load_config(resolve_runtime_paths(config_path=config_path))
+        result = runner.invoke(app, ["config", "resolve", "--path", str(config_path)])
+
+        assert [tool.name for tool in config.agents["code"].tools] == ["calculator", "file"]
+        assert [tool.name for tool in config.agents["research"].tools] == ["calculator"]
+        assert (tmp_path / "agents/_shared/tools.yaml").resolve() in config.source_files
+        assert result.exit_code == 0, result.output
+        assert yaml.safe_load(result.stdout)["agents"]["code"]["tools"] == ["calculator", "file"]
 
 
 class TestIncludeErrors:
@@ -318,6 +487,17 @@ class TestIncludeErrors:
 
         with pytest.raises(yaml.YAMLError, match=r"bad\.yaml"):
             load_yaml_config_source(tmp_path / "config.yaml")
+
+    def test_unsafe_tag_inside_included_file_reports_file_and_line(self, tmp_path: Path) -> None:
+        """The fast loader must reject Python tags and retain the included file's error mark."""
+        _write(tmp_path / "config.yaml", "nested: !include sub/unsafe.yaml\n")
+        included = _write(tmp_path / "sub" / "unsafe.yaml", "safe: true\nunsafe: !!python/tuple [1, 2]\n")
+
+        with pytest.raises(ConstructorError) as exc_info:
+            load_yaml_config_source(tmp_path / "config.yaml")
+
+        assert exc_info.value.problem_mark.name == str(included)
+        assert exc_info.value.problem_mark.line == 1
 
     def test_hidden_file_component_is_rejected(self, tmp_path: Path) -> None:
         """!include_text of a dotfile is rejected with the including file and line."""
@@ -456,6 +636,34 @@ class TestRoundTripEquivalence:
 
 class TestWatchPaths:
     """The dynamic multi-file watcher backing include-aware hot reload."""
+
+    @pytest.mark.asyncio
+    async def test_scans_run_off_the_event_loop(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stat scans must cross the thread offload boundary, not block the loop."""
+        monkeypatch.setattr(file_watcher, "_WATCH_SCAN_INTERVAL_SECONDS", 0.001)
+        path = _write(tmp_path / "config.yaml", "a: 1\n")
+        offloaded: list[str] = []
+        stop_event = asyncio.Event()
+
+        async def fake_to_thread(function: Callable[..., object], *args: object, **kwargs: object) -> object:
+            offloaded.append(getattr(function, "__name__", repr(function)))
+            return function(*args, **kwargs)
+
+        async def on_change() -> None:
+            return
+
+        monkeypatch.setattr(file_watcher.asyncio, "to_thread", fake_to_thread)
+        watch_task = asyncio.create_task(file_watcher.watch_paths(lambda: (path,), on_change, stop_event))
+        await asyncio.sleep(0.05)
+        stop_event.set()
+        await asyncio.wait_for(watch_task, timeout=2)
+
+        assert offloaded
+        assert set(offloaded) == {"paths_mtime_snapshot"}
 
     @pytest.mark.asyncio
     async def test_change_to_any_watched_file_triggers_callback(
@@ -653,9 +861,10 @@ def _reload_lifecycle(config_path: Path) -> ConfigReloadLifecycle:
         is_running=lambda: True,
         current_config=lambda: None,
         agent_bots=dict,
-        in_flight_response_count=lambda: 0,
         load_initial_config=_load_initial,
         apply_update_plan=_apply_plan,
+        response_admission_gate=ResponseAdmissionGate(),
+        before_runtime_replacement=AsyncMock(),
     )
 
 
@@ -682,6 +891,34 @@ class TestFailedReloadWatchSet:
         await lifecycle._apply_queued_config_reload()
 
         assert lifecycle.failed_reload_source_files is None
+
+    @pytest.mark.asyncio
+    async def test_config_watcher_uses_sources_from_a_successful_noop_reload(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The dynamic watcher should replace stale include topology after an equal reload."""
+        config_path = (tmp_path / "config.yaml").resolve()
+        old_include = (tmp_path / "old.yaml").resolve()
+        new_include = (tmp_path / "new.yaml").resolve()
+        orchestrator = SimpleNamespace(
+            config=SimpleNamespace(source_files=frozenset({config_path, old_include})),
+            config_reload=SimpleNamespace(
+                loaded_source_files=frozenset({config_path, new_include}),
+                failed_reload_source_files=None,
+            ),
+        )
+        watched: set[Path] = set()
+
+        async def capture_paths(paths_provider: Callable[[], set[Path]], _callback: object) -> None:
+            watched.update(paths_provider())
+
+        monkeypatch.setattr(file_watcher, "watch_paths", capture_paths)
+
+        await _watch_config_task(config_path, orchestrator)  # type: ignore[arg-type]
+
+        assert watched == {config_path, new_include}
 
     @pytest.mark.asyncio
     async def test_broken_new_include_file_stays_watched_until_fixed(self, tmp_path: Path) -> None:

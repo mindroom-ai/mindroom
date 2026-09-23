@@ -47,7 +47,6 @@ describe("configStore", () => {
       draftVersion: 0,
       agents: [],
       teams: [],
-      cultures: [],
       rooms: [],
       agentPoliciesByAgent: {},
       agentPoliciesStale: false,
@@ -56,7 +55,6 @@ describe("configStore", () => {
       saveConfigRequestId: 0,
       selectedAgentId: null,
       selectedTeamId: null,
-      selectedCultureId: null,
       selectedRoomId: null,
       isDirty: false,
       dirtyRoots: [],
@@ -64,11 +62,261 @@ describe("configStore", () => {
       diagnostics: [],
       syncStatus: "disconnected",
       configUsesIncludes: false,
+      configJournalPendingRestart: false,
       privateWorkerScopeBackups: {},
     });
 
     // Clear all mocks
     vi.clearAllMocks();
+  });
+
+  describe.each(["structured", "raw"] as const)(
+    "%s configuration conflicts",
+    (mode) => {
+      const conflictMessage =
+        "Configuration changed elsewhere. Your draft has not been saved. Copy any changes you want to keep, then refresh this page and reapply them.";
+      const save = () =>
+        mode === "structured"
+          ? useConfigStore.getState().saveConfig()
+          : useConfigStore.getState().saveRecoveryConfigSource();
+      const edit = () =>
+        mode === "structured"
+          ? useConfigStore
+              .getState()
+              .updateModel("default", { provider: "test", id: "newer-edit" })
+          : useConfigStore
+              .getState()
+              .updateRecoveryConfigSource("agents: {}\n# newer edit\n");
+
+      beforeEach(() => {
+        const config: Config = {
+          agents: {},
+          models: { default: { provider: "test", id: "local-edit" } },
+          memory: {
+            embedder: { provider: "test", config: { model: "test-embedder" } },
+          },
+          defaults: { markdown: true },
+          router: { model: "default" },
+        };
+        useConfigStore.setState({
+          committedGeneration: 7,
+          config: mode === "structured" ? config : null,
+          loadedConfig: mode === "structured" ? config : null,
+          recoveryConfigSource:
+            mode === "raw" ? "agents: {}\n# local edit\n" : null,
+          recoveryConfigSourceOriginal: mode === "raw" ? "agents: {}\n" : null,
+          isDirty: true,
+          syncStatus: "error",
+        });
+      });
+
+      it.each([false, true])(
+        "reports a server conflict and preserves the draft (newer edits: %s)",
+        async (newerEdits) => {
+          const response = deferred<Response>();
+          vi.mocked(fetch).mockReturnValueOnce(response.promise);
+          const savePromise = save();
+          if (newerEdits) edit();
+          const draft = useConfigStore.getState();
+          response.resolve(
+            new Response(
+              JSON.stringify({
+                detail:
+                  "Configuration changed while request was in progress. Retry the operation.",
+              }),
+              { status: 409 },
+            ),
+          );
+
+          const result = await savePromise;
+          expect(result).toEqual({
+            status: "error",
+            message: conflictMessage,
+            diagnostics: [
+              {
+                kind: "global",
+                code: "config_conflict",
+                message: conflictMessage,
+                blocking: mode === "raw",
+              },
+            ],
+          });
+          expect(useConfigStore.getState()).toMatchObject({
+            config: draft.config,
+            recoveryConfigSource: draft.recoveryConfigSource,
+            recoveryConfigSourceOriginal: draft.recoveryConfigSourceOriginal,
+            committedGeneration: 7,
+            draftVersion: draft.draftVersion,
+            isDirty: true,
+            isLoading: false,
+            syncStatus: "error",
+            diagnostics: result.status === "error" ? result.diagnostics : [],
+          });
+          // A rejected full replacement must not refresh the generation and retry implicitly.
+          expect(fetch).toHaveBeenCalledTimes(1);
+          expect(fetch).toHaveBeenCalledWith(
+            mode === "structured" ? "/api/config/save" : "/api/config/raw",
+            expect.objectContaining({
+              method: "PUT",
+              headers: expect.objectContaining({
+                "x-mindroom-config-generation": "7",
+              }),
+            }),
+          );
+        },
+      );
+
+      it("rejects retries locally while retaining conflict and validation diagnostics", async () => {
+        const validationDiagnostic = {
+          kind: "validation" as const,
+          issue: {
+            loc: ["agents", "helper", "role"],
+            msg: "role is required",
+            type: "value_error",
+          },
+        };
+        useConfigStore.setState({ diagnostics: [validationDiagnostic] });
+        vi.mocked(fetch).mockImplementation(
+          async () =>
+            new Response(JSON.stringify({ detail: "Configuration changed" }), {
+              status: 409,
+            }),
+        );
+
+        await save();
+        edit();
+        expect((await save()).status).toBe("error");
+
+        expect(useConfigStore.getState().diagnostics).toEqual([
+          {
+            kind: "global",
+            code: "config_conflict",
+            message: conflictMessage,
+            blocking: mode === "raw",
+          },
+          validationDiagnostic,
+        ]);
+        expect(useConfigStore.getState().committedGeneration).toBe(7);
+        expect(fetch).toHaveBeenCalledTimes(1);
+      });
+
+      it("keeps conflict guidance after editing without validation errors", async () => {
+        vi.mocked(fetch).mockResolvedValueOnce(
+          new Response("{}", { status: 409 }),
+        );
+        await save();
+        edit();
+
+        expect(useConfigStore.getState().diagnostics).toEqual([
+          {
+            kind: "global",
+            code: "config_conflict",
+            message: conflictMessage,
+            blocking: mode === "raw",
+          },
+        ]);
+        expect(useConfigStore.getState().committedGeneration).toBe(7);
+      });
+
+      it("keeps conflict guidance when a reload fails", async () => {
+        vi.mocked(fetch).mockResolvedValueOnce(
+          new Response("{}", { status: 409 }),
+        );
+        await save();
+        vi.mocked(fetch).mockRejectedValueOnce(
+          new Error("Network unavailable"),
+        );
+        await useConfigStore.getState().loadConfig();
+
+        expect(useConfigStore.getState().diagnostics).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              code: "config_conflict",
+              message: conflictMessage,
+            }),
+          ]),
+        );
+        expect(useConfigStore.getState().committedGeneration).toBe(7);
+      });
+
+      it("ignores a conflict from a save superseded by a newer request", async () => {
+        const response = deferred<Response>();
+        vi.mocked(fetch).mockReturnValueOnce(response.promise);
+        const savePromise = save();
+        useConfigStore.setState({
+          saveConfigRequestId: 2,
+          syncStatus: "syncing",
+        });
+        response.resolve(
+          new Response(JSON.stringify({ detail: "Configuration changed" }), {
+            status: 409,
+          }),
+        );
+
+        expect(await savePromise).toEqual({ status: "stale" });
+        expect(useConfigStore.getState()).toMatchObject({
+          diagnostics: [],
+          syncStatus: "syncing",
+        });
+      });
+    },
+  );
+
+  it("keeps a raw conflict after undoing edits and failing to reload", async () => {
+    useConfigStore.setState({
+      recoveryConfigSource: "agents: {}\n# draft\n",
+      recoveryConfigSourceOriginal: "agents: {}\n",
+      committedGeneration: 7,
+      isDirty: true,
+    });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("{}", { status: 409 }));
+    await useConfigStore.getState().saveRecoveryConfigSource();
+    useConfigStore.getState().updateRecoveryConfigSource("agents: {}\n");
+    expect(useConfigStore.getState().isDirty).toBe(false);
+    vi.mocked(fetch).mockRejectedValueOnce(new Error("Network unavailable"));
+    await useConfigStore.getState().loadConfig();
+    expect(useConfigStore.getState().diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "config_conflict" }),
+      ]),
+    );
+    useConfigStore
+      .getState()
+      .updateRecoveryConfigSource("agents: {}\n# retry\n");
+    expect(
+      (await useConfigStore.getState().saveRecoveryConfigSource()).status,
+    ).toBe("error");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains conflict guidance when an outstanding policy refresh finishes", async () => {
+    const config: Config = {
+      agents: {},
+      models: { default: { provider: "test", id: "draft" } },
+      memory: {
+        embedder: { provider: "test", config: { model: "test-embedder" } },
+      },
+      defaults: { markdown: true },
+      router: { model: "default" },
+    };
+    useConfigStore.setState({
+      config,
+      loadedConfig: config,
+      committedGeneration: 7,
+      isDirty: true,
+    });
+    const policies = deferred<Response>();
+    vi.mocked(fetch).mockReturnValueOnce(policies.promise);
+    const refresh = useConfigStore.getState().refreshAgentPolicies([]);
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("{}", { status: 409 }));
+    await useConfigStore.getState().saveConfig();
+    policies.resolve(new Response(JSON.stringify({ agent_policies: {} })));
+    await refresh;
+
+    expect(useConfigStore.getState().diagnostics).toEqual([
+      expect.objectContaining({ code: "config_conflict" }),
+    ]);
+    expect(useConfigStore.getState().committedGeneration).toBe(7);
   });
 
   describe("loadConfig", () => {
@@ -110,7 +358,6 @@ describe("configStore", () => {
       expect(state.config).toEqual({
         ...mockConfig,
         knowledge_bases: {},
-        cultures: {},
       });
       expect(state.agents).toHaveLength(1);
       expect(state.agents[0].id).toBe("test");
@@ -145,6 +392,33 @@ describe("configStore", () => {
       await useConfigStore.getState().loadConfig();
 
       expect(useConfigStore.getState().configUsesIncludes).toBe(true);
+    });
+
+    it("records when the saved event journal only takes effect after a restart", async () => {
+      // The backend accepts the edit and keeps using the store it opened at
+      // startup, so the editor showing the saved value without saying so would
+      // be reporting a database nothing is writing to.
+      const mockConfig = {
+        agents: {},
+        models: { default: { provider: "ollama", id: "test-model" } },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+        headers: {
+          get: (name: string) =>
+            name === "x-mindroom-config-pending-restart" ? "true" : null,
+        },
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: {} }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+
+      expect(useConfigStore.getState().configJournalPendingRestart).toBe(true);
     });
 
     it("uses the room id fallback for blank authored room display names", async () => {
@@ -204,7 +478,7 @@ describe("configStore", () => {
           },
           claude: {
             provider: "anthropic",
-            id: "claude-sonnet-4-6",
+            id: "claude-sonnet-5",
           },
         },
       };
@@ -355,7 +629,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -963,7 +1237,6 @@ describe("configStore", () => {
           },
         },
         knowledge_bases: {},
-        cultures: {},
         agents: {
           assistant: {
             display_name: "Assistant",
@@ -1379,7 +1652,6 @@ describe("configStore", () => {
           },
         },
         knowledge_bases: {},
-        cultures: {},
         agents: {
           existing: {
             display_name: "Existing Agent",
@@ -1460,7 +1732,6 @@ describe("configStore", () => {
       expect(state.config).toEqual({
         ...replacementConfig,
         knowledge_bases: {},
-        cultures: {},
       });
       expect(state.agents).toEqual([
         {
@@ -1689,7 +1960,7 @@ describe("configStore", () => {
           memory: {
             embedder: {
               provider: "openai",
-              config: { model: "text-embedding-ada-002" },
+              config: { model: "text-embedding-3-small" },
             },
           },
           defaults: { markdown: true },
@@ -1741,7 +2012,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -1955,7 +2226,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2035,7 +2306,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2154,7 +2425,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2247,7 +2518,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2347,7 +2618,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2428,7 +2699,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2532,7 +2803,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2620,7 +2891,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2716,7 +2987,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2905,7 +3176,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2969,7 +3240,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -3638,14 +3909,6 @@ describe("configStore", () => {
 
     it("should delete agent", () => {
       useConfigStore.setState({
-        cultures: [
-          {
-            id: "engineering",
-            description: "Engineering standards",
-            agents: ["agent1", "agent2"],
-            mode: "automatic",
-          },
-        ],
         teams: [
           {
             id: "team1",
@@ -3663,15 +3926,14 @@ describe("configStore", () => {
       const state = useConfigStore.getState();
       expect(state.agents).toHaveLength(1);
       expect(state.agents[0].id).toBe("agent2");
-      expect(state.cultures[0].agents).toEqual(["agent2"]);
       expect(state.teams[0].agents).toEqual(["agent2"]);
       expect(state.isDirty).toBe(true);
       expect(state.dirtyRoots).toEqual(
-        expect.arrayContaining(["agents", "teams", "cultures"]),
+        expect.arrayContaining(["agents", "teams"]),
       );
     });
 
-    it("serializes dependent team and culture removals after deleteAgent", async () => {
+    it("serializes dependent team removals after deleteAgent", async () => {
       const mockConfig = {
         agents: {
           agent1: {
@@ -3698,13 +3960,6 @@ describe("configStore", () => {
             agents: ["agent1", "agent2"],
             rooms: [],
             mode: "coordinate",
-          },
-        },
-        cultures: {
-          engineering: {
-            description: "Engineering standards",
-            agents: ["agent1", "agent2"],
-            mode: "automatic",
           },
         },
         models: {
@@ -3762,14 +4017,6 @@ describe("configStore", () => {
             mode: "coordinate",
           },
         ],
-        cultures: [
-          {
-            id: "engineering",
-            description: "Engineering standards",
-            agents: ["agent1", "agent2"],
-            mode: "automatic",
-          },
-        ],
       });
 
       (global.fetch as any).mockResolvedValueOnce({
@@ -3801,12 +4048,6 @@ describe("configStore", () => {
         teams: {
           team1: {
             ...mockConfig.teams.team1,
-            agents: ["agent2"],
-          },
-        },
-        cultures: {
-          engineering: {
-            ...mockConfig.cultures.engineering,
             agents: ["agent2"],
           },
         },
@@ -4042,85 +4283,6 @@ describe("configStore", () => {
     });
   });
 
-  describe("cultures", () => {
-    beforeEach(() => {
-      useConfigStore.setState({
-        cultures: [
-          {
-            id: "engineering",
-            description: "Engineering standards",
-            agents: ["agent1"],
-            mode: "automatic",
-          },
-          {
-            id: "support",
-            description: "Support playbooks",
-            agents: ["agent2"],
-            mode: "manual",
-          },
-        ],
-        selectedCultureId: "engineering",
-      });
-    });
-
-    it("should select culture", () => {
-      const { selectCulture } = useConfigStore.getState();
-      selectCulture("support");
-
-      const state = useConfigStore.getState();
-      expect(state.selectedCultureId).toBe("support");
-    });
-
-    it("should update culture and enforce unique agent assignment", () => {
-      const { updateCulture } = useConfigStore.getState();
-      updateCulture("support", {
-        agents: ["agent1", "agent2"],
-        mode: "agentic",
-      });
-
-      const state = useConfigStore.getState();
-      expect(
-        state.cultures.find((culture) => culture.id === "support")?.mode,
-      ).toBe("agentic");
-      expect(
-        state.cultures.find((culture) => culture.id === "support")?.agents,
-      ).toEqual(["agent1", "agent2"]);
-      expect(
-        state.cultures.find((culture) => culture.id === "engineering")?.agents,
-      ).toEqual([]);
-      expect(state.isDirty).toBe(true);
-    });
-
-    it("should create new culture", () => {
-      const { createCulture } = useConfigStore.getState();
-      createCulture({
-        description: "Product knowledge",
-        agents: ["agent3"],
-        mode: "automatic",
-      });
-
-      const state = useConfigStore.getState();
-      expect(state.cultures).toHaveLength(3);
-      const newCulture = state.cultures.find(
-        (culture) => culture.id === "product_knowledge",
-      );
-      expect(newCulture?.description).toBe("Product knowledge");
-      expect(state.selectedCultureId).toBe("product_knowledge");
-      expect(state.isDirty).toBe(true);
-    });
-
-    it("should delete culture", () => {
-      const { deleteCulture } = useConfigStore.getState();
-      deleteCulture("engineering");
-
-      const state = useConfigStore.getState();
-      expect(state.cultures).toHaveLength(1);
-      expect(state.cultures[0].id).toBe("support");
-      expect(state.selectedCultureId).toBe(null);
-      expect(state.isDirty).toBe(true);
-    });
-  });
-
   describe("room models", () => {
     it("should update room models", () => {
       useConfigStore.setState({
@@ -4159,7 +4321,7 @@ describe("configStore", () => {
             embedder: {
               provider: "openai",
               config: {
-                model: "text-embedding-ada-002",
+                model: "text-embedding-3-small",
               },
             },
           },
@@ -4199,7 +4361,7 @@ describe("configStore", () => {
             embedder: {
               provider: "openai",
               config: {
-                model: "text-embedding-ada-002",
+                model: "text-embedding-3-small",
               },
             },
           },
@@ -4974,7 +5136,7 @@ describe("configStore", () => {
           },
           claude: {
             provider: "anthropic",
-            id: "claude-sonnet-4-6",
+            id: "claude-sonnet-5",
           },
         },
         defaults: {
@@ -5125,7 +5287,7 @@ describe("configStore", () => {
           },
           claude: {
             provider: "anthropic",
-            id: "claude-sonnet-4-6",
+            id: "claude-sonnet-5",
           },
         },
         defaults: {
@@ -6092,7 +6254,7 @@ describe("configStore", () => {
           },
           claude: {
             provider: "anthropic",
-            id: "claude-sonnet-4-6",
+            id: "claude-sonnet-5",
           },
         },
         defaults: {

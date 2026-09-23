@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryConfig, MemorySearchConfig
@@ -28,7 +28,10 @@ def _representative_config() -> Config:
                 model="summary-model",
                 num_history_runs=7,
                 max_tool_calls_from_history=3,
-                compaction=CompactionOverrideConfig(threshold_percent=0.6),
+                compaction=CompactionOverrideConfig(
+                    threshold_percent=0.6,
+                    timeout_seconds=75.0,
+                ),
                 memory_backend="file",
                 memory_search=AgentMemorySearchConfig(mode="semantic"),
                 tools=[
@@ -69,6 +72,7 @@ def _representative_config() -> Config:
                 replay_window_tokens=24_000,
                 reserve_tokens=2_048,
                 model="summary-model",
+                timeout_seconds=420.0,
             ),
         ),
         models={
@@ -77,12 +81,6 @@ def _representative_config() -> Config:
         },
         # Non-default global memory settings so inheritance assertions are non-degenerate.
         memory=MemoryConfig(backend="none", search=MemorySearchConfig(include=["notes/**/*.md"])),
-        cultures={
-            "engineering": CultureConfig(
-                description="Write tests first",
-                agents=["overriding_agent"],
-            ),
-        },
         knowledge_bases={"engineering_docs": KnowledgeBaseConfig(path="./knowledge_docs")},
     )
 
@@ -111,10 +109,12 @@ def test_compaction_resolution() -> None:
     assert merged.replay_window_tokens == 24_000
     assert merged.reserve_tokens == 2_048
     assert merged.model == "summary-model"
+    assert merged.timeout_seconds == 75.0
 
     disabled = config.resolve_entity("overriding_team").compaction_config
     assert disabled.enabled is False
     assert disabled.threshold_tokens == 12_000
+    assert disabled.timeout_seconds == 420.0
 
     for inheriting_scope in ("inheriting_agent", "inheriting_team", None):
         inherited = config.resolve_entity(inheriting_scope).compaction_config
@@ -124,6 +124,7 @@ def test_compaction_resolution() -> None:
             replay_window_tokens=24_000,
             reserve_tokens=2_048,
             model="summary-model",
+            timeout_seconds=420.0,
         )
         assert config.resolve_entity(inheriting_scope).has_authored_compaction_config is True
 
@@ -188,19 +189,8 @@ def test_scope_resolution() -> None:
     assert config.resolve_entity("inheriting_agent").scope_label == "unscoped"
 
 
-def test_culture_and_knowledge_resolution() -> None:
+def test_knowledge_resolution() -> None:
     config = _representative_config()
-
-    culture = config.resolve_entity("overriding_agent").culture
-    assert culture is not None
-    culture_name, culture_config = culture
-    assert culture_name == "engineering"
-    assert culture_config.description == "Write tests first"
-    assert config.resolve_entity("inheriting_agent").culture is None
-    # Culture assignment is a membership scan, so non-agent names resolve to None instead of raising.
-    assert config.resolve_entity("overriding_team").culture is None
-    with pytest.raises(ValueError, match="defaults-only scope has no per-agent config"):
-        _ = config.resolve_entity(None).culture
 
     assert config.resolve_entity("overriding_agent").knowledge_base_ids == ["engineering_docs"]
     assert config.resolve_entity("inheriting_agent").knowledge_base_ids == []

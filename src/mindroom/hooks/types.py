@@ -22,6 +22,7 @@ EVENT_COMPACTION_AFTER = "compaction:after"
 EVENT_SCHEDULE_FIRED = "schedule:fired"
 EVENT_REACTION_RECEIVED = "reaction:received"
 EVENT_ROOM_MEMBER_JOINED = "room:member_joined"
+EVENT_ROOM_MEMBER_LEFT = "room:member_left"
 EVENT_CONFIG_RELOADED = "config:reloaded"
 EVENT_SESSION_STARTED = "session:started"
 EVENT_TOOL_BEFORE_CALL = "tool:before_call"
@@ -44,6 +45,7 @@ BUILTIN_EVENT_NAMES = frozenset(
         EVENT_SCHEDULE_FIRED,
         EVENT_REACTION_RECEIVED,
         EVENT_ROOM_MEMBER_JOINED,
+        EVENT_ROOM_MEMBER_LEFT,
         EVENT_CONFIG_RELOADED,
         EVENT_SESSION_STARTED,
         EVENT_TOOL_BEFORE_CALL,
@@ -64,6 +66,7 @@ _DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
     EVENT_MESSAGE_CANCELLED: 3000,
     EVENT_REACTION_RECEIVED: 500,
     EVENT_ROOM_MEMBER_JOINED: 3000,
+    EVENT_ROOM_MEMBER_LEFT: 3000,
     EVENT_SCHEDULE_FIRED: 1000,
     EVENT_AGENT_STARTED: 5000,
     EVENT_AGENT_STOPPED: 5000,
@@ -112,10 +115,20 @@ class HookMessageSender(Protocol):
 
 
 class HookMatrixAdmin(Protocol):
-    """Async Matrix admin protocol exposed to hook contexts."""
+    """Matrix administration and local room retention exposed to hook contexts."""
+
+    def retain_room(self, room_id: str) -> None:
+        """Persist a plugin-owned room for the bound invite-accepting entity.
+
+        This synchronous local operation changes no Matrix membership and raises
+        ``OSError`` if retention cannot be persisted.
+        """
 
     async def resolve_alias(self, alias: str) -> str | None:
         """Resolve one room alias into a room ID when it exists."""
+
+    async def get_joined_rooms(self) -> list[str] | None:
+        """Return the bound account's joined rooms, or ``None`` when unavailable."""
 
     async def create_room(
         self,
@@ -130,11 +143,30 @@ class HookMatrixAdmin(Protocol):
     async def invite_user(self, room_id: str, user_id: str) -> bool:
         """Invite one user into one room."""
 
+    async def force_join_user(self, room_id: str, user_id: str) -> bool:
+        """Join one local user to one room through the homeserver admin API."""
+
     async def kick_user(self, room_id: str, user_id: str, *, reason: str | None = None) -> bool:
         """Kick one joined user from one room."""
 
     async def get_room_members(self, room_id: str) -> set[str] | None:
         """Return joined members for one room, or ``None`` when the fetch fails."""
+
+    async def get_profile_avatar(self, user_id: str) -> str | None:
+        """Return one user's Matrix avatar content URI, or ``None`` when unavailable."""
+
+    async def get_room_state_event(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Return ``(readable, content)`` for one state event.
+
+        ``(True, None)`` means the homeserver confirmed that the event is
+        missing. ``(False, None)`` means the read failed and callers must not
+        infer that the event is absent.
+        """
 
     async def add_room_to_space(self, space_room_id: str, room_id: str) -> bool:
         """Link one room into one Space."""
@@ -191,6 +223,7 @@ class RegisteredHook:
     source_lineno: int
     agents: tuple[str, ...] | None
     rooms: tuple[str, ...] | None
+    required: bool = False
 
 
 def default_timeout_ms_for_event(event_name: str) -> int:

@@ -17,8 +17,6 @@ from mindroom.desktop.login_method import DesktopLoginMethod
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    import nio
-
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.session import DesktopMatrixSession
 
@@ -36,6 +34,27 @@ desktop_app = typer.Typer(
     help="Connect allowlisted local applications to cloud MindRoom over Matrix E2EE.",
     no_args_is_help=True,
 )
+
+
+@desktop_app.command("app")
+def desktop_native_app(
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        help="Path to local MindRoom configuration.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        help="Path to local MindRoom storage.",
+    ),
+) -> None:
+    """Run the native app's private structured helper over inherited standard I/O."""
+    from mindroom import __version__  # noqa: PLC0415
+    from mindroom.desktop.native_host import run_native_stdio  # noqa: PLC0415
+
+    runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
+    asyncio.run(run_native_stdio(runtime_paths, helper_version=__version__))
 
 
 def _activate_desktop_runtime(config_path: Path | None, *, storage_path: Path | None) -> RuntimePaths:
@@ -251,7 +270,7 @@ async def _login_and_save(
         save_desktop_session,
     )
 
-    client, session = await login_desktop_client(
+    owner, session = await login_desktop_client(
         homeserver=homeserver,
         user_id=user_id,
         password=password,
@@ -262,10 +281,10 @@ async def _login_and_save(
     )
     try:
         save_desktop_session(session_path, session)
-        fingerprint = client_ed25519_fingerprint(client)
+        fingerprint = client_ed25519_fingerprint(owner.client)
         _print_device_identity(session, fingerprint=fingerprint, session_path=session_path)
     finally:
-        await client.close()
+        await owner.close()
 
 
 def _print_device_identity(
@@ -439,15 +458,15 @@ async def _pair_desktop(
         device_id=controller_device_id,
         ed25519=controller_ed25519,
     )
-    client = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
+    owner = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
     try:
         return await send_desktop_pairing_claim(
-            client,
+            owner,
             controller,
             code=code,
         )
     finally:
-        await client.close()
+        await owner.close()
 
 
 @desktop_app.command("run")
@@ -609,7 +628,7 @@ def _validate_browser_options(
         raise typer.Exit(2)
 
 
-async def _run_bridge(
+async def _run_bridge(  # noqa: PLR0915
     *,
     runtime_paths: RuntimePaths,
     session: DesktopMatrixSession,
@@ -629,6 +648,8 @@ async def _run_bridge(
     browser_timeout_seconds: int = 90,
     http_headers: Mapping[str, str] | None = None,
 ) -> None:
+    from nio import AuthenticatedToDeviceEvent  # noqa: PLC0415
+
     from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy  # noqa: PLC0415
     from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider  # noqa: PLC0415
     from mindroom.desktop.provider import PyAutoGuiDesktopProvider  # noqa: PLC0415
@@ -636,8 +657,8 @@ async def _run_bridge(
         open_desktop_client,
         prepare_desktop_client,
     )
+    from mindroom.desktop.transport import DesktopTransport  # noqa: PLC0415
     from mindroom.matrix.olm_to_device import PinnedMatrixDevice, resolve_pinned_device  # noqa: PLC0415
-    from mindroom.matrix.to_device import AuthenticatedToDeviceEvent  # noqa: PLC0415
 
     _request_required_desktop_permissions()
     controller = PinnedMatrixDevice(
@@ -645,20 +666,22 @@ async def _run_bridge(
         device_id=controller_device_id,
         ed25519=controller_ed25519,
     )
-    browser_provider = (
-        PlaywrightMCPBrowserProvider(
-            output_dir=runtime_paths.storage_root / "desktop-browser",
-            executable_path=browser_executable,
-            user_data_dir=browser_user_data_dir,
-            call_timeout_seconds=browser_timeout_seconds,
-            extension_token=runtime_paths.env_value("PLAYWRIGHT_MCP_EXTENSION_TOKEN"),
-        )
-        if browser_extension
-        else None
-    )
-    client = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
+    browser_provider = None
+    owner = None
+    bridge = None
+    registration = None
     tasks: set[asyncio.Task[None]] = set()
     try:
+        if browser_extension:
+            browser_provider = PlaywrightMCPBrowserProvider(
+                output_dir=runtime_paths.storage_root / "desktop-browser",
+                executable_path=browser_executable,
+                user_data_dir=browser_user_data_dir,
+                call_timeout_seconds=browser_timeout_seconds,
+                extension_token=runtime_paths.env_value("PLAYWRIGHT_MCP_EXTENSION_TOKEN"),
+            )
+        owner = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
+        client = owner.client
         provider = PyAutoGuiDesktopProvider(
             allowed_app_ids=allow_app,
             max_screenshot_width=max_screenshot_width,
@@ -678,70 +701,72 @@ async def _run_bridge(
                 browser_enabled=browser_extension,
             ),
             browser_provider=browser_provider,
-            journal_path=runtime_paths.storage_root / "desktop_bridge" / "command_journal.json",
+            journal_path=runtime_paths.storage_root / "desktop_bridge" / "commands.sqlite3",
+            legacy_journal_path=runtime_paths.storage_root / "desktop_bridge" / "command_journal.json",
         )
-
-        def schedule_event(event: nio.ToDeviceEvent) -> None:
-            if not isinstance(event, AuthenticatedToDeviceEvent):
-                return
-            task = asyncio.create_task(bridge.on_to_device_event(event), name="desktop_command")
-            tasks.add(task)
-            task.add_done_callback(command_done)
-
-        def command_done(task: asyncio.Task[None]) -> None:
-            tasks.discard(task)
-            if task.cancelled():
-                return
-            error = task.exception()
-            if error is not None:
-                _error_console.print(f"[red]Desktop command task failed:[/red] {error}")
-
-        client.add_to_device_callback(schedule_event, AuthenticatedToDeviceEvent)
+        client.add_to_device_callback(bridge.on_to_device_event, AuthenticatedToDeviceEvent)
+        registration = client.to_device_callbacks[-1]
         await resolve_pinned_device(client, controller)
         await prepare_desktop_client(client)
 
-        mode = f"control enabled for {lease_minutes} minute(s)" if allow_control else "observe-only"
-        _console.print(f"[green]Desktop bridge online:[/green] {mode}")
-        _console.print(f"Allowed requesters: {', '.join(sorted(allow_requester))}")
-        _console.print(f"Allowed agents: {', '.join(sorted(allow_agent))}")
-        _console.print(f"Allowed applications: {', '.join(sorted(allow_app))}")
-        if browser_extension:
-            _console.print("Playwright browser extension: enabled for the active installed browser profile")
-        _console.print("Move the pointer to the upper-left corner to trigger PyAutoGUI's emergency stop.")
-        await _sync_desktop_client(client)
+        _announce_bridge(
+            allow_control=allow_control,
+            lease_minutes=lease_minutes,
+            allow_requester=allow_requester,
+            allow_agent=allow_agent,
+            allow_app=allow_app,
+            browser_extension=browser_extension,
+        )
+        transport = DesktopTransport(owner.source, wait_for_capacity=bridge.wait_for_capacity)
+        tasks.update(
+            (
+                asyncio.create_task(bridge.run(), name="desktop_workers"),
+                asyncio.create_task(transport.run(), name="desktop_transport"),
+            ),
+        )
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            await task
     finally:
-        client.stop_sync_forever()
+        # Native input runs in threads; cancelling its worker cannot stop the input.
+        # Keep the journal and device lease until the active action has drained.
+        if bridge is not None:
+            await bridge.stop()
         for task in tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if registration is not None and owner is not None:
+            owner.client.to_device_callbacks.remove(registration)
         try:
-            if browser_provider is not None:
-                await browser_provider.close()
+            if bridge is not None:
+                bridge.close()
         finally:
-            await client.close()
+            try:
+                if browser_provider is not None:
+                    await browser_provider.close()
+            finally:
+                if owner is not None:
+                    await owner.close()
 
 
-async def _sync_desktop_client(client: nio.AsyncClient) -> None:
-    """Run desktop sync and surface permanent Matrix authentication failures."""
-    import nio  # noqa: PLC0415
-
-    from mindroom.desktop.session import DesktopSessionError  # noqa: PLC0415
-
-    permanent_sync_error: nio.SyncError | None = None
-
-    async def stop_on_permanent_sync_error(response: nio.SyncError) -> None:
-        nonlocal permanent_sync_error
-        if response.status_code not in {"M_FORBIDDEN", "M_UNKNOWN_TOKEN", "M_USER_DEACTIVATED"}:
-            return
-        permanent_sync_error = response
-        client.stop_sync_forever()
-
-    client.add_response_callback(stop_on_permanent_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
-    await client.sync_forever(timeout=30_000, full_state=False, set_presence="online")
-    if permanent_sync_error is not None:
-        msg = f"Desktop Matrix sync stopped after permanent authentication failure: {permanent_sync_error}"
-        raise DesktopSessionError(msg)
+def _announce_bridge(
+    *,
+    allow_control: bool,
+    lease_minutes: int,
+    allow_requester: frozenset[str],
+    allow_agent: frozenset[str],
+    allow_app: frozenset[str],
+    browser_extension: bool,
+) -> None:
+    """Show the locally granted authority after the owned session is ready."""
+    mode = f"control enabled for {lease_minutes} minute(s)" if allow_control else "observe-only"
+    _console.print(f"[green]Desktop bridge online:[/green] {mode}")
+    _console.print(f"Allowed requesters: {', '.join(sorted(allow_requester))}")
+    _console.print(f"Allowed agents: {', '.join(sorted(allow_agent))}")
+    _console.print(f"Allowed applications: {', '.join(sorted(allow_app))}")
+    if browser_extension:
+        _console.print("Playwright browser extension: enabled for the active installed browser profile")
+    _console.print("Move the pointer to the upper-left corner to trigger PyAutoGUI's emergency stop.")
 
 
-__all__ = ["desktop_app", "desktop_login", "desktop_pair", "desktop_run", "desktop_setup"]
+__all__ = ["desktop_app", "desktop_login", "desktop_native_app", "desktop_pair", "desktop_run", "desktop_setup"]

@@ -66,9 +66,9 @@ def test_generic_api_word_not_false_positive() -> None:
 def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
     """Explicit safeguard stops should not look like empty model responses."""
     error = ModelSafeguardRefusalError(
-        message="Vertex Claude returned stop_reason=refusal",
+        message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
         model_name="Claude",
-        model_id="claude-fable-5",
+        model_id="claude-fable-5-1",
     )
 
     message = get_user_friendly_error_message(error, "mind")

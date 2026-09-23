@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -218,6 +219,61 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persisted_replay", [True, False], ids=["persisted", "fallback"])
+@pytest.mark.parametrize("numeric_selection", [True, False], ids=["numeric", "reaction"])
+async def test_interactive_selection_keeps_context_after_question(
+    persisted_replay: bool,
+    numeric_selection: bool,
+) -> None:
+    """Selection history ends at the answer, preserving intervening clarification."""
+    provisional_prompts: list[str] = []
+
+    async def prepare_scope_history(prepared_prompt: str) -> PreparedScopeHistory:
+        provisional_prompts.append(prepared_prompt)
+        scope = _prepared_scope_with_persisted_replay()
+        return scope if persisted_replay else replace(scope, session=None)
+
+    history = [
+        make_visible_message(sender="@alice:localhost", body="Choose a deployment", event_id="$root"),
+        make_visible_message(sender="@mindroom_code:localhost", body="Deploy or cancel?", event_id="$question"),
+        make_visible_message(
+            sender="@bob:localhost",
+            body="Use staging; production is frozen.",
+            event_id="$clarification",
+        ),
+    ]
+    if numeric_selection:
+        history.extend(
+            [
+                make_visible_message(sender="@alice:localhost", body="1", event_id="$selection"),
+                make_visible_message(sender="@bob:localhost", body="Later message", event_id="$later"),
+            ],
+        )
+    prepared = await _prepare_execution_context_common(
+        replace(make_turn_context(reply_to_event_id="$question"), history_boundary_event_id="$selection"),
+        scope_context=None,
+        prompt="The user selected: Deploy",
+        thread_history=history,
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        current_event_id="$question",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert prepared.prepared_history.replays_persisted_history is persisted_replay
+    assert prepared.unseen_event_ids == ["$root", "$question", "$clarification"]
+    for prompt in [*provisional_prompts, prepared.final_prompt]:
+        assert "Use staging; production is frozen." in prompt
+        assert "The user selected: Deploy" in prompt
+        assert "Later message" not in prompt
+        assert "$selection" not in prompt
+
+
 def test_scheduled_limit_zero_disables_replay_plan() -> None:
     """A zero limit disables persisted replay entirely for the scheduled turn."""
     prepared = PreparedHistoryState(
@@ -375,6 +431,42 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
     replay_plan = prepared.prepared_history.replay_plan
     assert replay_plan is not None
     assert replay_plan.add_history_to_context is False
+
+
+@pytest.mark.asyncio
+async def test_scheduled_history_limit_ignores_events_after_current() -> None:
+    """Newer thread events cannot displace prior context from a scheduled turn's budget."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    prepared = await _prepare_execution_context_common(
+        make_turn_context(
+            reply_to_event_id="$current",
+            scheduled_history_budget=ScheduledHistoryBudget(limit=2, source_event_id="$current"),
+        ),
+        scope_context=None,
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="older one", event_id="$older-1"),
+            make_visible_message(sender="@alice:localhost", body="older two", event_id="$older-2"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+            make_visible_message(sender="@alice:localhost", body="newer one", event_id="$newer-1"),
+            make_visible_message(sender="@alice:localhost", body="newer two", event_id="$newer-2"),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert [message.content for message in prepared.context_messages] == [
+        render_msg_tag(sender="@alice:localhost", body="older one", event_id="$older-1"),
+        render_msg_tag(sender="@alice:localhost", body="older two", event_id="$older-2"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -668,6 +760,31 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
     assert messages[1].content == "Current request"
 
 
+def test_thread_history_and_current_message_carry_member_display_names() -> None:
+    """History and the current turn label senders with their current display name, keyed by Matrix ID."""
+    messages = _build_thread_history_messages(
+        "Current request",
+        [make_visible_message(sender="@alice:localhost", body="Earlier", event_id="$earlier")],
+        response_sender_id="@mindroom_team:localhost",
+        current_sender_id="@alice:localhost",
+        current_event_id="$current",
+        member_display_names={"@alice:localhost": "Banana Man"},
+        config=_config(),
+    )
+
+    assert len(messages) == 2
+    assert messages[0].content == render_msg_tag(
+        sender="@alice:localhost",
+        body="Earlier",
+        event_id="$earlier",
+        display_name="Banana Man",
+    )
+    assert messages[1].content == (
+        'Current message:\n<msg event_id="$current" from="@alice:localhost" display_name="Banana Man">'
+        "<![CDATA[Current request]]></msg>"
+    )
+
+
 def test_current_matrix_message_renders_timestamp_as_msg_attribute() -> None:
     """Current Matrix messages should carry time as metadata, not body text."""
     config = _config()
@@ -761,8 +878,8 @@ def test_user_text_matching_structured_prompt_shape_is_still_wrapped() -> None:
     )
 
 
-def test_fallback_thread_history_pins_attachments_to_their_messages(tmp_path: Path) -> None:
-    """History attachments annotate and attach media on the message that carried them."""
+def test_fallback_thread_history_keeps_attachment_ids_without_inline_media(tmp_path: Path) -> None:
+    """History attachments remain addressable without replaying their payloads."""
     image_path = tmp_path / "car.jpg"
     image_path.write_bytes(b"\xff\xd8\xffjpeg")
     record = register_local_attachment(
@@ -804,7 +921,7 @@ def test_fallback_thread_history_pins_attachments_to_their_messages(tmp_path: Pa
         body='look at this\n[attachments: att_car (image, "car.jpg")]',
         event_id="$img",
     )
-    assert [image.id for image in (history_with_media.images or [])] == ["att_car"]
+    assert not history_with_media.images
     assert messages[1].content == render_msg_tag(
         sender="@alice:localhost",
         body="no attachments here",
@@ -814,8 +931,8 @@ def test_fallback_thread_history_pins_attachments_to_their_messages(tmp_path: Pa
     assert not messages[2].images
 
 
-def test_fallback_thread_history_maps_raw_media_events_to_attachments(tmp_path: Path) -> None:
-    """Raw media events without MindRoom metadata resolve via the deterministic event ID."""
+def test_fallback_thread_history_maps_raw_media_events_to_attachment_ids(tmp_path: Path) -> None:
+    """Raw media events remain addressable through their deterministic attachment ID."""
     attachment_id = _attachment_id_for_event("$raw-img")
     image_path = tmp_path / "photo.png"
     image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -850,11 +967,85 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachments(tmp_path: 
         body=f'photo.png\n[attachments: {attachment_id} (image, "photo.png")]',
         event_id="$raw-img",
     )
-    assert [image.id for image in (messages[0].images or [])] == [attachment_id]
+    assert not messages[0].images
 
 
-def test_fallback_thread_history_agent_attachments_annotate_without_media(tmp_path: Path) -> None:
-    """Assistant-authored attachments surface as text only; providers reject assistant media."""
+def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) -> None:
+    """An agent audio caption must not merge into its preceding assistant reply."""
+    voice_path = tmp_path / "voice.ogg"
+    voice_path.write_bytes(b"OggS")
+    record = register_local_attachment(
+        tmp_path,
+        voice_path,
+        kind="audio",
+        attachment_id="att_voice",
+        filename="voice.ogg",
+        mime_type="audio/ogg",
+        room_id="!room:localhost",
+    )
+    assert record is not None
+
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@mindroom_team:localhost",
+                body="The lab closes at 7:41 PM",
+                event_id="$reply",
+            ),
+            make_visible_message(
+                sender="@mindroom_team:localhost",
+                body='Lab results "timing"',
+                event_id="$voice",
+                content={
+                    "msgtype": "m.audio",
+                    "body": 'Lab results "timing"',
+                    ATTACHMENT_IDS_KEY: ["att_voice"],
+                },
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+        attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+    )
+
+    assert [message.role for message in messages] == ["assistant", "assistant", "user"]
+    assert messages[0].content == "\n\nThe lab closes at 7:41 PM"
+    assert messages[1].content == (
+        '\n\n[audio message: Lab results "timing"]\n[attachments: att_voice (audio, "voice.ogg")]'
+    )
+
+
+def test_fallback_thread_history_delimits_agent_audio_caption_without_attachment() -> None:
+    """An agent audio caption remains labeled when no local attachment record exists."""
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@mindroom_team:localhost",
+                body="The lab closes at 7:41 PM",
+                event_id="$reply",
+            ),
+            make_visible_message(
+                sender="@mindroom_team:localhost",
+                body="Lab turnaround",
+                event_id="$voice",
+                content={"msgtype": "m.audio", "body": "Lab turnaround"},
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+    )
+
+    assert [message.role for message in messages] == ["assistant", "assistant", "user"]
+    assert [message.content for message in messages[:2]] == [
+        "\n\nThe lab closes at 7:41 PM",
+        "\n\n[audio message: Lab turnaround]",
+    ]
+
+
+def test_fallback_thread_history_unmapped_agent_media_uses_bare_separator(tmp_path: Path) -> None:
+    """Unmapped assistant media keeps its caption bare while remaining self-delimiting."""
     file_path = tmp_path / "report.pdf"
     file_path.write_bytes(b"%PDF-1.4")
     record = register_local_attachment(
@@ -874,7 +1065,7 @@ def test_fallback_thread_history_agent_attachments_annotate_without_media(tmp_pa
                 sender="@mindroom_team:localhost",
                 body="here is the report",
                 event_id="$agent-file",
-                content={ATTACHMENT_IDS_KEY: ["att_report"]},
+                content={"msgtype": "m.file", ATTACHMENT_IDS_KEY: ["att_report"]},
             ),
         ],
         response_sender_id="@mindroom_team:localhost",
@@ -883,7 +1074,7 @@ def test_fallback_thread_history_agent_attachments_annotate_without_media(tmp_pa
     )
 
     assert messages[0].role == "assistant"
-    assert messages[0].content == 'here is the report\n[attachments: att_report (file, "report.pdf")]'
+    assert messages[0].content == '\n\nhere is the report\n[attachments: att_report (file, "report.pdf")]'
     assert not messages[0].files
 
 
@@ -970,7 +1161,7 @@ def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) 
         body='see files\n[attachments: att_in_thread (file, "in-thread.txt")]',
         event_id="$in-thread",
     )
-    assert [file.id for file in (messages[0].files or [])] == ["att_in_thread"]
+    assert not messages[0].files
 
 
 def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path) -> None:
@@ -1008,7 +1199,7 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
         body='root image\n[attachments: att_root (image, "root.png")]',
         event_id="$root",
     )
-    assert [image.id for image in (messages[0].images or [])] == ["att_root"]
+    assert not messages[0].images
 
 
 def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_context() -> None:
@@ -1034,7 +1225,7 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
     )
 
     assert messages[0].role == "assistant"
-    assert messages[0].content == "Checking status.\n\n\nStill checking.\n\n\nDone."
+    assert messages[0].content == "\n\nChecking status.\n\n\nStill checking.\n\n\nDone."
     assert "🔧" not in str(messages[0].content)
 
 
@@ -1146,6 +1337,51 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
     )
 
 
+def test_unseen_context_stops_at_current_thread_event() -> None:
+    """A backlog turn must not include newer events from its hydrated thread."""
+    thread_history = [
+        make_visible_message(
+            sender="@alice:localhost",
+            body="Older message",
+            event_id="$older",
+            thread_id="$root",
+        ),
+        make_visible_message(
+            sender="@alice:localhost",
+            body="Current message",
+            event_id="$current",
+            thread_id="$root",
+        ),
+        make_visible_message(
+            sender="@bob:localhost",
+            body="Newer message",
+            event_id="$newer",
+            thread_id="$root",
+        ),
+    ]
+
+    messages, unseen_event_ids = _build_unseen_context_messages(
+        "Current message",
+        thread_history,
+        seen_event_ids=set(),
+        current_event_id="$current",
+        active_event_ids=(),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+    )
+
+    assert unseen_event_ids == ["$older"]
+    assert len(messages) == 2
+    assert messages[0].content == render_msg_tag(
+        sender="@alice:localhost",
+        body="Older message",
+        event_id="$older",
+    )
+    assert messages[1].content == 'Current message:\n<msg from="@alice:localhost"><![CDATA[Current message]]></msg>'
+    assert all("$newer" not in str(message.content) for message in messages)
+
+
 def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
     """A self-sent Matrix event not known to persisted history should remain visible context."""
     thread_history = [
@@ -1174,7 +1410,7 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
 
     assert unseen_event_ids == ["$spawn-root"]
     assert messages[0].role == "assistant"
-    assert messages[0].content == "@mindroom_missing_agent Please investigate this"
+    assert messages[0].content == "\n\n@mindroom_missing_agent Please investigate this"
 
 
 def test_unseen_context_keeps_other_agent_message_tagged() -> None:

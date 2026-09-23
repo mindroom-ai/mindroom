@@ -34,7 +34,6 @@ def test_build_matrix_edit_content_wraps_replacement_content() -> None:
         "m.new_content": {
             "msgtype": "io.mindroom.tool_approval",
             "body": "Expired: shell.run",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
         },
         "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
     }

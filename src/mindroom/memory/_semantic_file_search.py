@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import time
 from typing import TYPE_CHECKING
 
-from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.embedding_errors import extract_classified_embedder_detail
-from mindroom.knowledge import (
-    KnowledgeAvailability,
-    KnowledgeRefreshScheduler,
-    list_knowledge_files,
-    resolve_knowledge_base_access,
-)
+from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
+from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.file_listing import list_knowledge_files
+from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+from mindroom.knowledge.utils import resolve_knowledge_base_access_async
 from mindroom.logging_config import get_logger
 from mindroom.memory._shared import MemoryResult
 from mindroom.timing import emit_elapsed_timing
@@ -32,9 +29,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _SOURCE_PATH_KEY = "source_path"
-_CHUNK_SIZE = 5000
-_CHUNK_OVERLAP = 0
-_MEMORY_KNOWLEDGE_PREFIX = "file_memory"
 _SEMANTIC_TIMING_PREFIX = "system_prompt_assembly.memory_search.semantic"
 _memory_refresh_scheduler = KnowledgeRefreshScheduler()
 
@@ -52,46 +46,6 @@ class SemanticFileMemoryIndexUnavailableError(RuntimeError):
         self.degraded_reason = degraded_reason
 
 
-def _safe_identifier(value: str) -> str:
-    sanitized = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in value)
-    return sanitized or "default"
-
-
-def _scope_digest(root: Path, scope_user_id: str) -> str:
-    return hashlib.sha256(f"{scope_user_id}:{root.resolve()}".encode()).hexdigest()[:16]
-
-
-def _memory_knowledge_base_id(root: Path, scope_user_id: str) -> str:
-    return f"{_MEMORY_KNOWLEDGE_PREFIX}_{_safe_identifier(scope_user_id)}_{_scope_digest(root, scope_user_id)}"
-
-
-def _memory_include_patterns(search_config: MemorySearchConfig) -> list[str]:
-    patterns = list(search_config.include)
-    if search_config.include_entrypoint:
-        patterns.append("MEMORY.md")
-    return patterns
-
-
-def _memory_knowledge_config(
-    config: Config,
-    *,
-    base_id: str,
-    root: Path,
-    search_config: MemorySearchConfig,
-) -> Config:
-    base_config = KnowledgeBaseConfig(
-        mode="semantic",
-        description="File-backed memory search index",
-        path=str(root.resolve()),
-        watch=False,
-        chunk_size=_CHUNK_SIZE,
-        chunk_overlap=_CHUNK_OVERLAP,
-        include_extensions=[".md"],
-        include_patterns=_memory_include_patterns(search_config),
-    )
-    return config.with_runtime_knowledge_base_overlay(base_id, base_config)
-
-
 def schedule_semantic_file_memory_refresh(
     *,
     scope_user_id: str,
@@ -102,17 +56,16 @@ def schedule_semantic_file_memory_refresh(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> bool:
     """Schedule a best-effort semantic refresh for one file-memory scope."""
-    base_id = _memory_knowledge_base_id(root, scope_user_id)
-    knowledge_config = _memory_knowledge_config(
-        config,
-        base_id=base_id,
+    resolution = resolve_file_memory_knowledge(
+        scope_user_id=scope_user_id,
         root=root,
+        config=config,
         search_config=search_config,
     )
     try:
         _memory_refresh_scheduler.schedule_refresh(
-            base_id,
-            config=knowledge_config,
+            resolution.base_id,
+            config=resolution.config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
         )
@@ -153,14 +106,14 @@ def _memory_results_from_documents(
     return results
 
 
-def _search_knowledge_with_timing(
+async def _search_knowledge_with_timing(
     knowledge: Knowledge,
     *,
     query: str,
     limit: int,
 ) -> list[Document]:
     search_start = time.monotonic()
-    documents = knowledge.search(query=query, max_results=limit)
+    documents = await knowledge.asearch(query=query, max_results=limit)
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.knowledge_search",
         search_start,
@@ -181,16 +134,15 @@ async def search_semantic_file_memories(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> list[MemoryResult]:
     """Search one file-memory scope through the published knowledge index pipeline."""
-    base_id = _memory_knowledge_base_id(root, scope_user_id)
-    knowledge_config = _memory_knowledge_config(
-        config,
-        base_id=base_id,
+    file_memory = resolve_file_memory_knowledge(
+        scope_user_id=scope_user_id,
         root=root,
+        config=config,
         search_config=search_config,
     )
 
     list_start = time.monotonic()
-    files = await _list_memory_knowledge_files(knowledge_config, base_id, root)
+    files = await _list_memory_knowledge_files(file_memory.config, file_memory.base_id, file_memory.root)
     emit_elapsed_timing(
         "system_prompt_assembly.memory_search.semantic.file_listing",
         list_start,
@@ -203,9 +155,9 @@ async def search_semantic_file_memories(
 
     access_start = time.monotonic()
     resolve_start = time.monotonic()
-    resolution = resolve_knowledge_base_access(
-        base_id,
-        knowledge_config,
+    resolution = await resolve_knowledge_base_access_async(
+        file_memory.base_id,
+        file_memory.config,
         runtime_paths,
         execution_identity=execution_identity,
     )
@@ -244,8 +196,7 @@ async def search_semantic_file_memories(
         )
 
     query_start = time.monotonic()
-    documents = await asyncio.to_thread(
-        _search_knowledge_with_timing,
+    documents = await _search_knowledge_with_timing(
         resolution.knowledge,
         query=query,
         limit=limit,

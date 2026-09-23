@@ -17,6 +17,7 @@ from mindroom.config.main import (
     format_invalid_config_message,
     load_config_or_user_error,
 )
+from mindroom.event_journal_open import describe_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_data
 
@@ -352,7 +353,7 @@ async def apply_config_change(
         _set_nested_value(config_dict, config_path_str, new_value)
 
         try:
-            await asyncio.to_thread(
+            saved = await asyncio.to_thread(
                 config_lifecycle.validate_and_persist_config_payload,
                 config_dict,
                 runtime_paths,
@@ -360,6 +361,17 @@ async def apply_config_change(
         except (ValidationError, ConfigRuntimeValidationError) as ve:
             return format_invalid_config_message(ve, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
 
+        # The event journal is opened once, at startup, and every bot shares
+        # that one store; saying the change affects new interactions would be
+        # untrue for this one field.
+        if pending_event_journal_restart(saved, runtime_paths):
+            return (
+                f"✅ **Configuration updated successfully!**\n\n"
+                f"Changes saved to {path}.\n\n"
+                f"⚠️ The event journal in force is still "
+                f"{describe_event_journal(config.event_journal, runtime_paths)}; the new value applies "
+                f"after MindRoom restarts."
+            )
         return (  # noqa: TRY300
             f"✅ **Configuration updated successfully!**\n\n"
             f"Changes saved to {path} and will affect new agent interactions."

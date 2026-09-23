@@ -19,7 +19,6 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Agents | `configuration/agents.md` | `configuration/agents/index.md` | `page__configuration__agents__index.md` |
 | Models | `configuration/models.md` | `configuration/models/index.md` | `page__configuration__models__index.md` |
 | Teams | `configuration/teams.md` | `configuration/teams/index.md` | `page__configuration__teams__index.md` |
-| Cultures | `configuration/cultures.md` | `configuration/cultures/index.md` | `page__configuration__cultures__index.md` |
 | Router | `configuration/router.md` | `configuration/router/index.md` | `page__configuration__router__index.md` |
 | Overview | `tools/index.md` | `tools/index.md` | `page__tools__index.md` |
 | Dynamic Tools | `tools/dynamic-tools.md` | `tools/dynamic-tools/index.md` | `page__tools__dynamic-tools__index.md` |
@@ -27,17 +26,20 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Data & Databases | `tools/data-and-databases.md` | `tools/data-and-databases/index.md` | `page__tools__data-and-databases__index.md` |
 | Web Search | `tools/web-search.md` | `tools/web-search/index.md` | `page__tools__web-search__index.md` |
 | Web Scraping & Browser | `tools/web-scraping-and-browser.md` | `tools/web-scraping-and-browser/index.md` | `page__tools__web-scraping-and-browser__index.md` |
+| Worker Computer | `tools/worker-computer.md` | `tools/worker-computer/index.md` | `page__tools__worker-computer__index.md` |
 | Research Sources | `tools/research-sources.md` | `tools/research-sources/index.md` | `page__tools__research-sources__index.md` |
 | AI & Generation | `tools/ai-and-generation.md` | `tools/ai-and-generation/index.md` | `page__tools__ai-and-generation__index.md` |
 | Media & Content | `tools/media-and-content.md` | `tools/media-and-content/index.md` | `page__tools__media-and-content__index.md` |
 | Matrix & Attachments | `tools/matrix-and-attachments.md` | `tools/matrix-and-attachments/index.md` | `page__tools__matrix-and-attachments__index.md` |
 | Matrix Message Full Semantics | `tools/matrix-message.md` | `tools/matrix-message/index.md` | `page__tools__matrix-message__index.md` |
+| Agent Chat UI Actions | `tools/chat-ui.md` | `tools/chat-ui/index.md` | `page__tools__chat-ui__index.md` |
 | Matrix Desktop Bridge | `tools/desktop.md` | `tools/desktop/index.md` | `page__tools__desktop__index.md` |
 | Messaging & Social | `tools/messaging-and-social.md` | `tools/messaging-and-social/index.md` | `page__tools__messaging-and-social__index.md` |
 | Project Management | `tools/project-management.md` | `tools/project-management/index.md` | `page__tools__project-management__index.md` |
 | Calendar & Scheduling | `tools/calendar-and-scheduling.md` | `tools/calendar-and-scheduling/index.md` | `page__tools__calendar-and-scheduling__index.md` |
 | Memory & Storage | `tools/memory-and-storage.md` | `tools/memory-and-storage/index.md` | `page__tools__memory-and-storage__index.md` |
 | Agent Orchestration | `tools/agent-orchestration.md` | `tools/agent-orchestration/index.md` | `page__tools__agent-orchestration__index.md` |
+| Background Python Scripts | `tools/background-scripts.md` | `tools/background-scripts/index.md` | `page__tools__background-scripts__index.md` |
 | Automation & Platforms | `tools/automation-and-platforms.md` | `tools/automation-and-platforms/index.md` | `page__tools__automation-and-platforms__index.md` |
 | Location, Commerce & Home | `tools/location-commerce-and-home.md` | `tools/location-commerce-and-home/index.md` | `page__tools__location-commerce-and-home__index.md` |
 | All Tools (Redirect) | `tools/builtin.md` | `tools/builtin/index.md` | `page__tools__builtin__index.md` |
@@ -65,13 +67,19 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Overview | `architecture/index.md` | `architecture/index.md` | `page__architecture__index.md` |
 | Matrix Integration | `architecture/matrix.md` | `architecture/matrix/index.md` | `page__architecture__matrix__index.md` |
 | Agent Orchestration | `architecture/orchestration.md` | `architecture/orchestration/index.md` | `page__architecture__orchestration__index.md` |
+| Migration Boundaries | `architecture/migrations.md` | `architecture/migrations/index.md` | `page__architecture__migrations__index.md` |
+| Agno Compatibility | `architecture/agno-compatibility.md` | `architecture/agno-compatibility/index.md` | `page__architecture__agno-compatibility__index.md` |
+| History Compaction | `architecture/compaction.md` | `architecture/compaction/index.md` | `page__architecture__compaction__index.md` |
 | Overview | `deployment/index.md` | `deployment/index.md` | `page__deployment__index.md` |
+| Nio 1.0 Upgrade | `deployment/nio-upgrade.md` | `deployment/nio-upgrade/index.md` | `page__deployment__nio-upgrade__index.md` |
+| Private Storage Migration | `deployment/private-storage-upgrade.md` | `deployment/private-storage-upgrade/index.md` | `page__deployment__private-storage-upgrade__index.md` |
 | Hosted Matrix + Local Backend | `deployment/hosted-matrix.md` | `deployment/hosted-matrix/index.md` | `page__deployment__hosted-matrix__index.md` |
 | Overview | `deployment/bridges/index.md` | `deployment/bridges/index.md` | `page__deployment__bridges__index.md` |
 | Telegram | `deployment/bridges/telegram.md` | `deployment/bridges/telegram/index.md` | `page__deployment__bridges__telegram__index.md` |
 | Google Services OAuth (Admin) | `deployment/google-services-oauth.md` | `deployment/google-services-oauth/index.md` | `page__deployment__google-services-oauth__index.md` |
 | Google Services OAuth (Individual) | `deployment/google-services-user-oauth.md` | `deployment/google-services-user-oauth/index.md` | `page__deployment__google-services-user-oauth__index.md` |
 | Trusted Upstream Browser Auth | `deployment/trusted-upstream-auth.md` | `deployment/trusted-upstream-auth/index.md` | `page__deployment__trusted-upstream-auth__index.md` |
+| MCP Gateway | `deployment/mcp-gateway.md` | `deployment/mcp-gateway/index.md` | `page__deployment__mcp-gateway__index.md` |
 | Docker | `deployment/docker.md` | `deployment/docker/index.md` | `page__deployment__docker__index.md` |
 | Sandbox Proxy | `deployment/sandbox-proxy.md` | `deployment/sandbox-proxy/index.md` | `page__deployment__sandbox-proxy__index.md` |
 | Approved Egress | `deployment/approved-egress.md` | `deployment/approved-egress/index.md` | `page__deployment__approved-egress__index.md` |

@@ -6,7 +6,7 @@ icon: lucide/shield-check
 
 # Privacy Policy
 
-Last updated: 2026-07-14
+Last updated: 2026-08-14
 
 This Privacy Policy explains how MindRoom and related MindRoom clients/services handle information.
 
@@ -47,6 +47,10 @@ To provide messaging features, MindRoom and your selected homeserver process dat
 - room metadata (room names, avatars, membership)
 - app configuration and local preferences stored on your device
 - diagnostic information you choose to share with support
+
+If you use MindRoom's hosted control plane, it also processes account profile and status data, subscription and payment records, hosted instance records, usage metrics, audit events, and marketing or analytics consent choices.
+These records support service operation, billing, security, fraud prevention, compliance, and the preferences you select.
+Hosted account and instance data is stored with Supabase, and payment processing is handled by Stripe.
 
 ## Matrix and Homeservers
 
@@ -107,12 +111,13 @@ Depending on the integrations you connect, this data can include your Google ide
 
 The MindRoom software uses this data only to provide the user-facing agent features that you request or configure, such as searching email, reading a Drive file, managing a calendar event, or reading and updating a spreadsheet.
 
-Google connections follow the selected agent's credential scope:
+Google connections follow the selected agent's saved effective execution scope.
+MindRoom uses `private.per` first, then `agents.<name>.worker_scope`, then `defaults.worker_scope`, otherwise no scope:
 
-- With `worker_scope: user`, the connection is isolated to the authenticated Matrix requester and can be used by that requester's user-scoped agents.
-- With `worker_scope: user_agent`, the connection is isolated to the authenticated Matrix requester and the selected agent.
-- With `worker_scope: shared`, the connection belongs to the selected shared agent, so any user authorized to invoke that agent can cause it to access the connected Google Account and may receive Google data in the agent's response.
-- With no worker scope configured, the connection is stored at the installation level and is not isolated by requester.
+- With effective scope `user`, the connection is isolated to the authenticated Matrix requester and can be used by that requester's user-scoped agents.
+- With effective scope `user_agent`, the connection is isolated to the authenticated Matrix requester and the selected agent.
+- With effective scope `shared`, the connection belongs to the selected agent, so any user authorized to invoke that agent can cause it to access the connected Google Account and may receive Google data in the agent's response.
+- With no private, per-agent, or inherited scope, the connection is stored at the installation level and is not isolated by requester.
 
 Relevant Google data is sent to the AI model provider that you configure for inference so the agent can complete your request.
 
@@ -134,7 +139,15 @@ Retention depends on the system component:
 
 - data stored on Matrix homeservers is retained according to the homeserver operator's policies
 - local app data remains on your device until you remove it or delete the app
+- runtime sessions, credentials, workspaces, files, and persistent volumes are retained until the installation operator removes them or applies its own retention policy, except where component-specific cleanup applies
+- attachment metadata and eligible managed `incoming_media/` files older than 30 days are pruned opportunistically during new attachment registration
+- the hosted control plane schedules hard deletion of soft-deleted application accounts after a 7-day grace period
+- hosted non-critical audit logs are scheduled for deletion after 90 days and usage metrics after 365 days; selected security and deletion audit events are excluded from that ordinary cleanup
 - support emails and diagnostics may be retained for support and security purposes
+
+Attachment cleanup does not delete unmanaged source or workspace files or copies retained by Matrix homeservers.
+Active attachment references and filesystem failures can preserve local media beyond 30 days.
+Scheduled cleanup describes the repository's configured policy, not proof that a particular deployment has completed every cleanup run.
 
 ## Account Deactivation / Deletion
 
@@ -143,6 +156,11 @@ The MindRoom iOS app provides an in-app account deactivation path:
 - `Settings` -> `Account` -> `Delete / Deactivate Account`
 
 Actual deletion/deactivation behavior depends on the capabilities and policies of your Matrix homeserver.
+
+Hosted MindRoom service account deletion is a separate control-plane flow with a 7-day grace period and is not triggered by Matrix account deactivation.
+The current hard-delete procedure targets application-database account, subscription, instance, audit-log, and subscription-linked usage records.
+Payment and webhook-event rows are not removed by that procedure and can prevent deletion while they still reference the account.
+It does not itself delete the upstream authentication user, Stripe customer or subscription data, Matrix account data, or installation persistent volumes; those processors and operators have separate deletion boundaries.
 
 ## Security
 
@@ -160,4 +178,5 @@ We may update this policy from time to time. The "Last updated" date will change
 
 For privacy questions, contact:
 
-- `support@mindroom.chat`
+- [support@mindroom.chat](mailto:support@mindroom.chat) for private account, privacy, or data requests
+- [MindRoom GitHub issues](https://github.com/mindroom-ai/mindroom/issues) for general policy questions; do not post personal data or private account details publicly

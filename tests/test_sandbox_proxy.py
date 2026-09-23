@@ -11,6 +11,8 @@ import os
 import stat
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,12 +48,12 @@ from mindroom.credentials import get_runtime_credentials_manager, save_scoped_cr
 from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
+from mindroom.tool_system.declarations import ToolExecutionTarget
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     TOOL_REGISTRY,
     ConfigField,
     ToolCategory,
-    ToolExecutionTarget,
     ToolInitOverrideError,
     ToolMetadata,
     ToolValidationInfo,
@@ -61,7 +63,7 @@ from mindroom.tool_system.metadata import (
 )
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context, worker_progress_pump_scope
+from mindroom.tool_system.runtime_context import tool_runtime_context, worker_progress_pump_scope
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
 from mindroom.tool_system.worker_routing import (
@@ -76,7 +78,15 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
-from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock, requires_linux
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
+from tests.conftest import (
+    FakeCredentialsManager,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    requires_linux,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -90,7 +100,58 @@ _TEST_KUBERNETES_VALIDATION_SNAPSHOT = {
         "runtime_loadable": True,
     },
 }
+_TEST_KUBERNETES_CONFIG_SNAPSHOT: dict[str, object] = {
+    "defaults": {"worker_scope": None},
+    "agents": {},
+    "knowledge_bases": {},
+}
 _TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
+
+
+@pytest.fixture(autouse=True)
+def _isolate_primary_worker_manager_runtime() -> Iterator[None]:
+    """Reopen the process-global worker runtime around final-shutdown tests."""
+    workers_runtime_module._reset_primary_worker_manager()
+    try:
+        yield
+    finally:
+        workers_runtime_module._reset_primary_worker_manager()
+
+
+@pytest.mark.asyncio
+async def test_worker_proxy_executor_isolated_from_default_pool_and_preserves_context() -> None:
+    """Worker proxy calls must not queue behind unrelated default-pool work."""
+    loop = asyncio.get_running_loop()
+    default_executor = ThreadPoolExecutor(max_workers=1)
+    replacement_executor = ThreadPoolExecutor()
+    loop.set_default_executor(default_executor)
+    default_started = threading.Event()
+    release_default = threading.Event()
+    request_scope = ContextVar[str]("test_worker_proxy_request_scope")
+
+    def block_default_executor() -> None:
+        default_started.set()
+        release_default.wait(timeout=5)
+
+    default_blocker = loop.run_in_executor(None, block_default_executor)
+    assert default_started.wait(timeout=1)
+    token = request_scope.set("request-scope")
+
+    try:
+        result = await asyncio.wait_for(
+            sandbox_proxy_module._run_in_worker_proxy_executor(request_scope.get),
+            timeout=1,
+        )
+
+        assert result == "request-scope"
+        assert not default_blocker.done()
+    finally:
+        request_scope.reset(token)
+        release_default.set()
+        await default_blocker
+        loop.set_default_executor(replacement_executor)
+        default_executor.shutdown(wait=True)
+        replacement_executor.shutdown(wait=True)
 
 
 def test_approved_egress_tool_stays_primary_even_when_sandbox_mode_all(tmp_path: Path) -> None:
@@ -104,9 +165,23 @@ def test_approved_egress_tool_stays_primary_even_when_sandbox_mode_all(tmp_path:
         },
     )
 
-    assert not sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+    assert not sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
         "approved_egress",
         runtime_paths=runtime_paths,
+    )
+
+
+def test_github_oauth_tool_stays_primary_when_worker_routing_is_requested(tmp_path: Path) -> None:
+    """Requester OAuth credentials must remain in the primary runtime credential boundary."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={},
+    )
+
+    assert not sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
+        "github",
+        runtime_paths=runtime_paths,
+        worker_tools_override=["github"],
     )
 
 
@@ -375,7 +450,7 @@ def _recording_client_class(
     *,
     captured: dict[str, Any] | None = None,
     captured_calls: list[tuple[str, dict[str, Any]]] | None = None,
-    responder: Callable[[str, dict[str, Any]], dict[str, object]] | None = None,
+    responder: Callable[[str, dict[str, Any]], object] | None = None,
 ) -> type:
     class _FakeClient:
         def __init__(self, *, timeout: float) -> None:
@@ -1252,6 +1327,123 @@ def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
         )
 
 
+def test_view_file_from_worker_posts_and_decodes_bounded_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Primary file viewing should route to the selected worker and restore image bytes."""
+    from agno.media import Image  # noqa: PLC0415
+    from agno.tools.function import ToolResult  # noqa: PLC0415
+
+    from mindroom.tool_system.media_transport import encode_media_result  # noqa: PLC0415
+
+    captured: dict[str, Any] = {}
+    manager = _TrackingWorkerManager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"file"},
+    )
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+    envelope = encode_media_result(
+        ToolResult(content='{"view_status":"ready"}', images=[Image(content=b"png", mime_type="image/png")]),
+    )
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "lease_primary_worker_manager",
+        lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(
+            captured=captured,
+            responder=lambda _url, _json: {"ok": True, "result": envelope},
+        ),
+    )
+
+    result = sandbox_proxy_module.view_file_from_worker(
+        runtime_paths=runtime_paths,
+        worker_target=worker_target,
+        path="plots/result.png",
+    )
+
+    assert result is not None
+    assert result.images is not None
+    assert result.images[0].content == b"png"
+    assert captured["url"] == "http://worker/api/sandbox-runner/view-file"
+    assert captured["json"]["path"] == "plots/result.png"
+    assert captured["json"]["worker_key"] == worker_target.worker_key
+    assert manager.touched == [worker_target.worker_key]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("non_object", [True, False])
+async def test_view_file_reports_malformed_worker_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    non_object: bool,
+) -> None:
+    """Malformed worker replies remain structured file-view errors at the public tool boundary."""
+    from mindroom.custom_tools.attachments import AttachmentTools  # noqa: PLC0415
+    from mindroom.tool_system.media_transport import encode_media_result  # noqa: PLC0415
+    from tests.test_attachments_tool import _tool_context  # noqa: PLC0415
+
+    manager = _TrackingWorkerManager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"file"},
+    )
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+    reply = ["unexpected"] if non_object else {"ok": True, "result": encode_media_result({"value": "not media"})}
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "lease_primary_worker_manager",
+        lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured={}, responder=lambda _url, _json: reply),
+    )
+    toolkit = AttachmentTools(runtime_paths=runtime_paths, worker_target=worker_target)
+
+    with tool_runtime_context(_tool_context(tmp_path)):
+        result = await toolkit.view_file(path="plots/result.png")
+
+    assert not result.images
+    receipt = json.loads(result.content)
+    assert receipt["view_status"] == "error"
+    assert receipt["path"] == "plots/result.png"
+    assert receipt["message"] == (
+        "Sandbox view-file returned a non-object response."
+        if non_object
+        else "Sandbox view-file returned a non-media result."
+    )
+
+
 @pytest.mark.parametrize(
     ("response_payload", "expected_error"),
     [
@@ -1384,6 +1576,7 @@ def _sandbox_proxy_test_metadata(
     *,
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY,
     consumes_workspace_paths: bool = False,
+    requires_primary_runtime: bool = False,
 ) -> ToolMetadata:
     return ToolMetadata(
         name=name,
@@ -1392,6 +1585,7 @@ def _sandbox_proxy_test_metadata(
         category=ToolCategory.DEVELOPMENT,
         default_execution_target=default_execution_target,
         consumes_workspace_paths=consumes_workspace_paths,
+        requires_primary_runtime=requires_primary_runtime,
     )
 
 
@@ -1414,7 +1608,55 @@ def test_default_proxy_routing_uses_worker_execution_metadata(monkeypatch: pytes
         execution_mode=None,
     )
 
-    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths) is True
+    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths) is True
+
+
+def test_declared_primary_runtime_requirement_cannot_be_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A catalog declaration must win over global and per-agent worker routing requests."""
+    tool_name = "declared_primary_runtime_test"
+    monkeypatch.setitem(
+        TOOL_METADATA,
+        tool_name,
+        _sandbox_proxy_test_metadata(tool_name, requires_primary_runtime=True),
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox:8765",
+        execution_mode="all",
+    )
+
+    assert TOOL_METADATA[tool_name].requires_primary_runtime is True
+    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths) is False
+    assert (
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
+            tool_name,
+            runtime_paths=runtime_paths,
+            worker_tools_override=[tool_name],
+        )
+        is False
+    )
+
+
+def test_primary_default_tool_remains_explicitly_worker_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A primary default alone must not become a non-overridable primary-runtime restriction."""
+    tool_name = "primary_default_override_test"
+    monkeypatch.setitem(TOOL_METADATA, tool_name, _sandbox_proxy_test_metadata(tool_name))
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox:8765",
+        execution_mode="off",
+    )
+
+    assert TOOL_METADATA[tool_name].default_execution_target is ToolExecutionTarget.PRIMARY
+    assert TOOL_METADATA[tool_name].requires_primary_runtime is False
+    assert (
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
+            tool_name,
+            runtime_paths=runtime_paths,
+            worker_tools_override=[tool_name],
+        )
+        is True
+    )
 
 
 def test_attachment_save_uses_workspace_consumer_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1463,7 +1705,10 @@ def test_attachment_save_uses_workspace_consumer_metadata(monkeypatch: pytest.Mo
     )
 
 
-@pytest.mark.parametrize("worker_tools_override", [["coding"], ["docker"], ["python"], ["shell", "coding"]])
+@pytest.mark.parametrize(
+    "worker_tools_override",
+    [["coding"], ["docker"], ["python"], ["shell", "coding"], ["browser_mcp"]],
+)
 def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
     monkeypatch: pytest.MonkeyPatch,
     worker_tools_override: list[str],
@@ -1672,7 +1917,7 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_direct_python_execution
     """Direct in-process Python execution should not emulate committed runtime env."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -1705,7 +1950,7 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
     """Direct file-backed Python execution should also avoid runtime env emulation."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -1782,7 +2027,7 @@ def test_shell_subprocess_env_path_passthrough_without_prepend(
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -1902,7 +2147,7 @@ def test_execution_env_payload_denies_provider_env_by_default_in_isolated_runtim
     monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text(
@@ -1943,7 +2188,7 @@ def test_execution_env_payload_keeps_provider_env_denied_even_with_worker_creden
     monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -2024,7 +2269,7 @@ async def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path:
     """Direct shell execution should inherit committed runtime env values from the runtime `.env`."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
@@ -2060,7 +2305,7 @@ async def test_local_shell_exposes_configured_extra_parent_env_without_leaking_c
     monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
@@ -2106,7 +2351,7 @@ async def test_local_shell_does_not_expose_extra_parent_env_without_configuratio
     monkeypatch.setenv("WHISPER_URL", "https://whisper.example")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
@@ -2134,7 +2379,7 @@ async def test_local_shell_prepends_configured_path_entries(
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -2186,7 +2431,7 @@ async def test_proxy_forwards_configured_shell_execution_env_only_for_execution_
     monkeypatch.setenv("GITEA_TOKEN", "visible-gitea-token")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     config_path.with_name(".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
@@ -2244,7 +2489,7 @@ async def test_proxy_shell_extra_env_passthrough_survives_sandbox_runner_rebuild
     monkeypatch.setenv("GITEA_TOKEN", "visible-gitea-token")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     config_path.with_name(".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
@@ -2306,7 +2551,7 @@ async def test_proxy_shell_path_prepend_survives_sandbox_runner_rebuild(
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -2357,7 +2602,7 @@ def test_dedicated_worker_runtime_config_resolves_include_tags(
 ) -> None:
     """Dedicated workers must load configs split across !include files."""
     (tmp_path / "models.yaml").write_text(
-        "default:\n  provider: openai\n  id: gpt-5.4\n",
+        "default:\n  provider: openai\n  id: gpt-6-astra\n",
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"
@@ -2378,7 +2623,7 @@ def test_dedicated_worker_runtime_config_resolves_include_tags(
 
     config = sandbox_runner_module._dedicated_worker_runtime_config_or_empty(runtime_paths)
 
-    assert config.models["default"].id == "gpt-5.4"
+    assert config.models["default"].id == "gpt-6-astra"
 
 
 @pytest.mark.asyncio
@@ -2390,7 +2635,7 @@ async def test_inprocess_runner_shell_uses_request_scoped_extra_env_snapshot(
     monkeypatch.setenv("GITEA_TOKEN", "ambient-gitea-token")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     config_path.with_name(".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
@@ -2442,14 +2687,16 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
         proxy_url: str | None,
         proxy_token: str | None,
         storage_root: Path | None = None,
-        kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+        dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
+        kubernetes_config_snapshot: dict[str, object] | None = None,
         worker_grantable_credentials: frozenset[str] | None = None,
     ) -> str:
         captured["runtime_paths"] = runtime_paths_arg
         captured["proxy_url"] = proxy_url
         captured["proxy_token"] = proxy_token
         captured["storage_root"] = storage_root
-        captured["kubernetes_tool_validation_snapshot"] = kubernetes_tool_validation_snapshot
+        captured["dedicated_worker_validation_snapshot"] = dedicated_worker_validation_snapshot
+        captured["kubernetes_config_snapshot"] = kubernetes_config_snapshot
         captured["worker_grantable_credentials"] = worker_grantable_credentials
         return "manager"
 
@@ -2473,6 +2720,8 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
     assert manager == "manager"
     assert captured["runtime_paths"] == runtime_paths
     assert captured["storage_root"] == (tmp_path / "storage").resolve()
+    assert captured["dedicated_worker_validation_snapshot"] is None
+    assert captured["kubernetes_config_snapshot"] is None
     assert captured["worker_grantable_credentials"] is None
 
 
@@ -2813,7 +3062,7 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -2832,8 +3081,8 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
             models={},
         ),
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with tool_runtime_context(runtime_context):
@@ -2910,7 +3159,7 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
     expected_worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="code")
     assert expected_worker_key is not None
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -2929,8 +3178,8 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
             models={},
         ),
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with tool_runtime_context(runtime_context):
@@ -3020,7 +3269,7 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
     expected_worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="code")
     assert expected_worker_key is not None
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -3039,8 +3288,8 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
             models={},
         ),
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with tool_runtime_context(runtime_context):
@@ -3340,9 +3589,10 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             built_storage_paths.append(storage_path)
@@ -3423,11 +3673,57 @@ def test_shutdown_primary_worker_manager_resets_cached_runtime_manager() -> None
     assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES == []
 
 
-def test_docker_worker_manager_retires_obsolete_cached_manager_until_lease_release(
+def test_explicit_primary_worker_reset_reopens_construction_after_shutdown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A leased manager should survive replacement until the request-scoped lease is released."""
+    """Final shutdown rejects new builds until an explicit process reset establishes a new epoch."""
+    workers_runtime_module._reset_primary_worker_manager()
+
+    class _FakeWorkerManager:
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "_primary_worker_backend_config_signature",
+        lambda *_args, **_kwargs: ("reset-generation",),
+    )
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "_build_primary_worker_manager",
+        lambda *_args, **_kwargs: _FakeWorkerManager(),
+    )
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+    try:
+        workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
+        with pytest.raises(WorkerBackendError, match="shut down"):
+            workers_runtime_module.get_primary_worker_manager(
+                runtime_paths,
+                proxy_url=None,
+                proxy_token=None,
+                storage_root=tmp_path,
+            )
+
+        workers_runtime_module._reset_primary_worker_manager()
+        manager = workers_runtime_module.get_primary_worker_manager(
+            runtime_paths,
+            proxy_url=None,
+            proxy_token=None,
+            storage_root=tmp_path,
+        )
+
+        assert isinstance(manager, _FakeWorkerManager)
+    finally:
+        workers_runtime_module._reset_primary_worker_manager()
+
+
+def test_superseded_worker_manager_disposes_when_its_last_lease_releases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A superseded manager shuts down exactly once when its final borrower releases it."""
     workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -3445,9 +3741,10 @@ def test_docker_worker_manager_retires_obsolete_cached_manager_until_lease_relea
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3507,6 +3804,7 @@ def test_docker_worker_manager_retires_obsolete_cached_manager_until_lease_relea
     assert first_manager.shutdown_calls == 1
     assert build_order == [str(first_storage_path), str(second_storage_path)]
     workers_runtime_module._reset_primary_worker_manager()
+    assert first_manager.shutdown_calls == 1
     assert second_manager.shutdown_calls == 1
 
 
@@ -3530,9 +3828,10 @@ def test_shutdown_primary_worker_manager_keeps_leased_retired_manager_tracked_un
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3602,9 +3901,10 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3667,11 +3967,11 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
     assert first_manager.shutdown_calls == 1
 
 
-def test_docker_worker_manager_replacement_succeeds_even_if_previous_shutdown_would_raise(
+def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdown_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Retired-manager shutdown failures should not poison the replacement manager or later requests."""
+    """The final lease release disposes a superseded manager exactly once even on failure."""
     workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -3687,9 +3987,10 @@ def test_docker_worker_manager_replacement_succeeds_even_if_previous_shutdown_wo
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3790,9 +4091,10 @@ def test_docker_worker_manager_build_does_not_hold_cache_lock(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = runtime_paths, storage_path, worker_grantable_credentials
+            _ = runtime_paths, storage_path, tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             build_started.set()
             assert allow_build.wait(timeout=5.0)
@@ -3844,11 +4146,11 @@ def test_docker_worker_manager_build_does_not_hold_cache_lock(
     workers_runtime_module._reset_primary_worker_manager()
 
 
-def test_docker_worker_manager_replacement_does_not_hold_cache_lock_during_retired_shutdown(
+def test_docker_worker_manager_replacement_disposes_unleased_generation_before_return(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A slow retired-manager shutdown must not block cache reads of the new active manager."""
+    """An unleased superseded manager is disposed before replacement acquisition returns."""
     workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -3867,9 +4169,10 @@ def test_docker_worker_manager_replacement_does_not_hold_cache_lock_during_retir
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3924,7 +4227,11 @@ def test_docker_worker_manager_replacement_does_not_hold_cache_lock_during_retir
 
     replacement_thread = threading.Thread(target=_replace_manager)
     replacement_thread.start()
-    assert shutdown_started.wait(timeout=5.0)
+    assert shutdown_started.wait(timeout=1.0)
+    assert replacement_thread.is_alive()
+    allow_shutdown.set()
+    replacement_thread.join(timeout=5.0)
+    assert not replacement_thread.is_alive()
 
     second_manager = workers_runtime_module.get_primary_worker_manager(
         second_runtime_paths,
@@ -3932,9 +4239,6 @@ def test_docker_worker_manager_replacement_does_not_hold_cache_lock_during_retir
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=second_storage_path,
     )
-
-    allow_shutdown.set()
-    replacement_thread.join(timeout=5.0)
 
     assert thread_result["manager"] is second_manager
     workers_runtime_module._reset_primary_worker_manager()
@@ -3962,9 +4266,10 @@ def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_cha
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path == tmp_path.resolve()
             built_shared_paths.append(runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH"))
@@ -4035,9 +4340,10 @@ def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path == tmp_path.resolve()
             built_browser_paths.append(runtime_paths.env_value("BROWSER_EXECUTABLE_PATH"))
@@ -4086,11 +4392,11 @@ def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
     workers_runtime_module._reset_primary_worker_manager()
 
 
-def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot_changes(
+def test_get_worker_manager_rebuilds_kubernetes_backend_when_committed_snapshot_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Kubernetes worker-manager caching should track the authoritative validation snapshot."""
+    """Kubernetes worker-manager caching should track authoritative committed snapshots."""
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
@@ -4110,7 +4416,13 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
             "runtime_loadable": False,
         },
     }
+    second_config_snapshot = {
+        **_TEST_KUBERNETES_CONFIG_SNAPSHOT,
+        "agents": {"code": {"knowledge_bases": ["shared_docs"]}},
+        "knowledge_bases": {"shared_docs": {"path": "./knowledge/shared-docs"}},
+    }
     captured_snapshots: list[dict[str, dict[str, object]]] = []
+    captured_config_snapshots: list[dict[str, object]] = []
 
     class FakeKubernetesBackend:
         backend_name = "kubernetes"
@@ -4124,10 +4436,12 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
             auth_token: str | None,
             storage_root: Path,
             tool_validation_snapshot: dict[str, dict[str, object]],
+            config_snapshot: dict[str, object],
             worker_grantable_credentials: frozenset[str],
         ) -> Self:
             del runtime_paths, auth_token, storage_root, worker_grantable_credentials
             captured_snapshots.append(tool_validation_snapshot)
+            captured_config_snapshots.append(config_snapshot)
             return cls()
 
         def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
@@ -4156,18 +4470,34 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=first_snapshot,
+        dedicated_worker_validation_snapshot=first_snapshot,
+        kubernetes_config_snapshot=_TEST_KUBERNETES_CONFIG_SNAPSHOT,
     )
     second_manager = workers_runtime_module.get_primary_worker_manager(
         runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=second_snapshot,
+        dedicated_worker_validation_snapshot=second_snapshot,
+        kubernetes_config_snapshot=_TEST_KUBERNETES_CONFIG_SNAPSHOT,
+    )
+    third_manager = workers_runtime_module.get_primary_worker_manager(
+        runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+        dedicated_worker_validation_snapshot=second_snapshot,
+        kubernetes_config_snapshot=second_config_snapshot,
     )
 
     assert first_manager is not second_manager
-    assert captured_snapshots == [first_snapshot, second_snapshot]
+    assert second_manager is not third_manager
+    assert captured_snapshots == [first_snapshot, second_snapshot, second_snapshot]
+    assert captured_config_snapshots == [
+        _TEST_KUBERNETES_CONFIG_SNAPSHOT,
+        _TEST_KUBERNETES_CONFIG_SNAPSHOT,
+        second_config_snapshot,
+    ]
 
 
 def test_get_primary_worker_manager_requires_explicit_snapshot_for_kubernetes(
@@ -4196,6 +4526,18 @@ def test_get_primary_worker_manager_requires_explicit_snapshot_for_kubernetes(
             storage_root=tmp_path,
         )
 
+    with pytest.raises(
+        WorkerBackendError,
+        match="requires an explicit committed config snapshot",
+    ):
+        workers_runtime_module.get_primary_worker_manager(
+            runtime_paths,
+            proxy_url=None,
+            proxy_token=_TEST_AUTH_TOKEN,
+            storage_root=tmp_path,
+            dedicated_worker_validation_snapshot=_TEST_KUBERNETES_VALIDATION_SNAPSHOT,
+        )
+
 
 def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk_when_snapshot_is_explicit(
     monkeypatch: pytest.MonkeyPatch,
@@ -4207,7 +4549,7 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nrouter:\n  model: default\nagents: {}\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nrouter:\n  model: default\nagents: {}\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -4219,6 +4561,7 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
     tool_validation_snapshot = serialize_tool_validation_snapshot(
         resolved_tool_validation_snapshot_for_runtime(runtime_paths, runtime_config),
     )
+    config_snapshot = workers_runtime_module.serialized_kubernetes_worker_config_snapshot(runtime_config)
 
     class FakeKubernetesBackend:
         backend_name = "kubernetes"
@@ -4232,9 +4575,17 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
             auth_token: str | None,
             storage_root: Path,
             tool_validation_snapshot: dict[str, dict[str, object]],
+            config_snapshot: dict[str, object],
             worker_grantable_credentials: frozenset[str],
         ) -> Self:
-            del runtime_paths, auth_token, storage_root, tool_validation_snapshot, worker_grantable_credentials
+            del (
+                runtime_paths,
+                auth_token,
+                storage_root,
+                tool_validation_snapshot,
+                config_snapshot,
+                worker_grantable_credentials,
+            )
             return cls()
 
         def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
@@ -4263,7 +4614,8 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=tool_validation_snapshot,
+        kubernetes_config_snapshot=config_snapshot,
     )
     config_path.write_text("models: [\n", encoding="utf-8")
     second_manager = workers_runtime_module.get_primary_worker_manager(
@@ -4271,7 +4623,8 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=tool_validation_snapshot,
+        kubernetes_config_snapshot=config_snapshot,
     )
 
     assert first_manager is second_manager
@@ -4297,7 +4650,7 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
         captured_kwargs.update(kwargs)
         return object()
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -4308,8 +4661,8 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
     proxy_config = sandbox_proxy_module.sandbox_proxy_config(runtime_paths)
     monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", _fake_get_primary_worker_manager)
@@ -4317,7 +4670,53 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
     with tool_runtime_context(runtime_context):
         sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
 
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["dedicated_worker_validation_snapshot"] is not None
+    assert captured_kwargs["kubernetes_config_snapshot"] == (
+        workers_runtime_module.serialized_kubernetes_worker_config_snapshot(runtime_config)
+    )
+
+
+def test_get_docker_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker worker routing should receive the committed tool-validation snapshot."""
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    runtime_config = load_config(runtime_paths)
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> object:
+        captured_kwargs.update(kwargs)
+        return object()
+
+    runtime_context = make_test_tool_runtime_context(
+        agent_name="code",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
+        requester_id="@user:example.org",
+        client=object(),
+        config=runtime_config,
+        runtime_paths=runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+    )
+    proxy_config = sandbox_proxy_module.sandbox_proxy_config(runtime_paths)
+    monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", _fake_get_primary_worker_manager)
+
+    with tool_runtime_context(runtime_context):
+        sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
+
+    assert captured_kwargs["dedicated_worker_validation_snapshot"] is not None
+    assert captured_kwargs["kubernetes_config_snapshot"] is None
 
 
 def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
@@ -4344,10 +4743,10 @@ def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
         return {"fake": ToolValidationInfo(name="fake")}
 
     def fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> object:
-        captured_snapshots.append(kwargs["kubernetes_tool_validation_snapshot"])
+        captured_snapshots.append(kwargs["dedicated_worker_validation_snapshot"])
         return object()
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -4358,8 +4757,8 @@ def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
     proxy_config = sandbox_proxy_module.sandbox_proxy_config(runtime_paths)
     monkeypatch.setattr(
@@ -4394,7 +4793,7 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "agents: {}\n"
@@ -4439,7 +4838,7 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
         assert worker_manager is fake_worker_manager
         return {}, None
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -4450,8 +4849,8 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
         storage_path=request_storage_path,
     )
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
@@ -4475,7 +4874,7 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
 
     assert result == "proxied"
     assert captured_kwargs["storage_root"] == request_storage_path
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["dedicated_worker_validation_snapshot"] is not None
     assert captured_kwargs["worker_grantable_credentials"] == frozenset({"gmail"})
 
 
@@ -4492,7 +4891,7 @@ def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monk
     )
 
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
@@ -4500,7 +4899,7 @@ def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monk
         is True
     )
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=None,
@@ -4524,9 +4923,9 @@ def test_kubernetes_backend_keeps_unscoped_env_routing_enabled_without_proxy_url
         proxy_tools={"shell"},
     )
 
-    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
+    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "calculator",
             runtime_paths=runtime_paths,
         )
@@ -4549,9 +4948,9 @@ def test_kubernetes_backend_uses_env_routing_for_worker_scoped_agents_without_pr
         proxy_tools={"shell"},
     )
 
-    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
+    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "calculator",
             runtime_paths=runtime_paths,
         )
@@ -4574,7 +4973,7 @@ def test_kubernetes_backend_keeps_wrapping_when_required_config_is_missing(
     )
 
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
@@ -4596,7 +4995,7 @@ def test_kubernetes_backend_keeps_wrapping_when_proxy_token_is_missing(monkeypat
     )
 
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
@@ -4630,7 +5029,7 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -4641,8 +5040,8 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with (
@@ -5256,7 +5655,7 @@ def test_worker_tools_override_can_use_docker_backend_without_proxy_url(monkeypa
     )
 
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
@@ -5264,7 +5663,7 @@ def test_worker_tools_override_can_use_docker_backend_without_proxy_url(monkeypa
         is True
     )
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=None,
@@ -5288,14 +5687,14 @@ def test_docker_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
     )
 
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
         )
         is True
     )
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "calculator",
             runtime_paths=runtime_paths,
         )
@@ -5317,7 +5716,7 @@ def test_docker_backend_keeps_wrapping_when_required_config_is_missing(
     )
 
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
@@ -5350,7 +5749,7 @@ async def test_docker_backend_misconfiguration_raises_instead_of_running_locally
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -5361,8 +5760,8 @@ async def test_docker_backend_misconfiguration_raises_instead_of_running_locally
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with (
@@ -5389,7 +5788,7 @@ class TestWorkerToolsOverride:
 
         # None override -> falls through to sandbox-proxy env controls
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5397,7 +5796,7 @@ class TestWorkerToolsOverride:
             is True
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "calculator",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5414,7 +5813,7 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=[],
@@ -5422,7 +5821,7 @@ class TestWorkerToolsOverride:
             is False
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "file",
                 runtime_paths=runtime_paths,
                 worker_tools_override=[],
@@ -5439,7 +5838,7 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell", "file"],
@@ -5447,7 +5846,7 @@ class TestWorkerToolsOverride:
             is True
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "file",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell", "file"],
@@ -5455,7 +5854,7 @@ class TestWorkerToolsOverride:
             is True
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "calculator",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell", "file"],
@@ -5473,7 +5872,7 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell"],
@@ -5491,7 +5890,7 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell"],
@@ -5512,7 +5911,7 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5520,7 +5919,7 @@ class TestWorkerToolsOverride:
             is False
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "calculator",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5542,7 +5941,7 @@ class TestWorkerToolsOverride:
 
         assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5550,7 +5949,7 @@ class TestWorkerToolsOverride:
             is True
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "calculator",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5574,7 +5973,7 @@ class TestWorkerToolsOverride:
 
         assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5582,7 +5981,7 @@ class TestWorkerToolsOverride:
             is True
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "calculator",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5605,7 +6004,7 @@ class TestWorkerToolsOverride:
         runtime_paths = _runtime_paths_from_env()
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell"],
@@ -5635,15 +6034,36 @@ class TestWorkerToolsOverride:
     @pytest.mark.parametrize(
         "tool_name",
         [
+            "approved_egress",
+            "attachments",
+            "browserbase",
             "callback_manager",
+            "chat_ui",
+            "claude_agent",
+            "composio",
+            "daytona",
             "desktop",
+            "duckdb",
+            "e2b",
+            "external_trigger_manager",
+            "github",
             "gmail",
             "google_calendar",
             "google_docs",
             "google_drive",
             "google_sheets",
             "homeassistant",
+            "invite_router",
+            "mem0",
+            "oauth_connections",
+            "pandas",
+            "reasoning",
+            "script",
+            "slack",
+            "sql",
             "todo",
+            "usage_stats",
+            "zep",
         ],
     )
     def test_local_only_tools_never_proxy(
@@ -5659,21 +6079,74 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 tool_name,
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
             )
             is False
         )
+        assert TOOL_METADATA[tool_name].requires_primary_runtime is True
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 tool_name,
                 runtime_paths=runtime_paths,
                 worker_tools_override=[tool_name],
             )
             is False
         )
+
+    @pytest.mark.parametrize(
+        ("method_name", "arguments"),
+        [("show_computer", {}), ("open_panel", {"panel": "computer"}), ("open_panel", {"panel": "members"})],
+    )
+    def test_get_tool_by_name_keeps_chat_ui_local_when_explicitly_worker_routed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        method_name: str,
+        arguments: dict[str, str],
+    ) -> None:
+        """A configured worker_tools entry must retain the live primary-runtime context boundary."""
+
+        class _ForbiddenClient:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                msg = "Sandbox proxy should not be used for local-only tools."
+                raise AssertionError(msg)
+
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url="http://sandbox:8765",
+            proxy_token=_TEST_AUTH_TOKEN,
+            execution_mode="all",
+            credential_policy={},
+        )
+        monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _ForbiddenClient)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+
+        tool = get_tool_by_name(
+            "chat_ui",
+            runtime_paths,
+            worker_tools_override=["chat_ui"],
+            worker_target=_worker_target(runtime_paths, "user_agent", "general", execution_identity),
+        )
+        entrypoint = tool.async_functions[method_name].entrypoint
+        assert entrypoint is not None
+
+        result = json.loads(asyncio.run(entrypoint(**arguments)))
+        assert result["status"] == "error"
+        assert "runtime context" in result["message"]
+
+    def test_usage_stats_stays_local(self) -> None:
+        """Usage scans must not leave the primary runtime."""
+        assert TOOL_METADATA["usage_stats"].requires_primary_runtime is True
 
     def test_browser_can_still_use_explicit_worker_routing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Host-browser isolation must not be disabled by the optional Matrix desktop target."""
@@ -5684,7 +6157,7 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "browser",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["browser"],
@@ -5927,7 +6400,7 @@ async def test_inprocess_runner_blocks_cross_runtime_secret_leakage(
     """Runner-only env vars must not leak via glob passthrough patterns."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     config_path.with_name(".env").write_text("", encoding="utf-8")
@@ -6014,3 +6487,86 @@ def test_shell_extra_env_requires_explicit_patterns_for_service_urls() -> None:
 
     assert result == {"GITEA_TOKEN": "gitea-token"}
     assert "WHISPER_URL" not in result
+
+
+@pytest.mark.parametrize("tool_name", ["browser_mcp", "shell"])
+def test_worker_client_returns_raw_browser_envelopes(tool_name: str) -> None:
+    """The HTTP client leaves feature envelopes untouched for every tool."""
+    from agno.media import Image  # noqa: PLC0415
+    from agno.tools.function import ToolResult  # noqa: PLC0415
+
+    from mindroom.tool_system.media_transport import encode_media_result  # noqa: PLC0415
+
+    envelope = encode_media_result(
+        ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")]),
+    )
+    result = execute_worker_proxy_request(
+        config=WorkerProxyClientConfig(
+            proxy_url="http://worker/execute",
+            proxy_token=_TEST_AUTH_TOKEN,
+            proxy_timeout_seconds=7.0,
+            credential_lease_ttl_seconds=60,
+            credential_policy={},
+        ),
+        payload={"tool_name": tool_name, "function_name": "browser_take_screenshot"},
+        credentials_manager=None,
+        tool_name=tool_name,
+        function_name="browser_take_screenshot",
+        worker_target=None,
+        worker_handle=None,
+        worker_manager=_TrackingWorkerManager(),
+        client_factory=_recording_client_class(responder=lambda _url, _payload: {"ok": True, "result": envelope}),
+    )
+    assert result == envelope
+
+
+@pytest.mark.parametrize("tool_name", ["browser_mcp", "browser", "shell"])
+@pytest.mark.parametrize("valid", [True, False])
+def test_proxy_composition_decodes_typed_media_for_every_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    valid: bool,
+) -> None:
+    """Composition restores native images and rejects malformed native envelopes."""
+    from agno.tools.function import ToolResult  # noqa: PLC0415
+
+    envelope = {
+        "mindroom_tool_result": {
+            "version": 1 if valid else 999,
+            "kind": "tool_result",
+            "audios": [],
+            "videos": [],
+            "files": [],
+            "content": "screen",
+            "images": [{"mime_type": "image/png", "data_base64": "cG5n"}],
+        },
+    }
+    paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={tool_name},
+        credential_policy={},
+    )
+    monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", lambda **_kwargs: envelope)
+
+    def call() -> object:
+        return sandbox_proxy_module._call_proxy_sync(
+            runtime_paths=paths,
+            tool_name=tool_name,
+            function_name="browser_take_screenshot",
+            args=(),
+            kwargs={},
+            credentials_manager=None,
+        )
+
+    if not valid:
+        with pytest.raises(ValueError, match="worker tool result"):
+            call()
+    else:
+        result = call()
+        assert isinstance(result, ToolResult)
+        assert result.content == "screen"
+        assert result.images is not None
+        assert result.images[0].content == b"png"

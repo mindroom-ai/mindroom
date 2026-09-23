@@ -8,14 +8,14 @@ from mindroom.dispatch_thread_context import (
     context_with_dispatch_thread_context,
     planning_history_for,
 )
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_DEGRADED,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_STALE_CACHE,
     is_thread_history_degraded,
 )
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 
 
@@ -37,7 +37,7 @@ def test_planning_history_for_hides_degraded_history() -> None:
         [_message("$event:localhost")],
         is_full_history=False,
         diagnostics={
-            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE,
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
         },
     )

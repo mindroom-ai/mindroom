@@ -207,7 +207,7 @@ def deploy_instance_directly(
             "--set",
             f"synapse_image_pull_policy={synapse_image_pull_policy}",
             "--set-json",
-            "authorizationGlobalUsers=[]",
+            "administrators=[]",
             "--set",
             "openai_key=test-openai",
             "--set",

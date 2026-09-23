@@ -112,6 +112,7 @@ class TestGDPREndpoints:
         assert "activity_history" in data
         assert "data_processing_purposes" in data
         assert "data_retention_periods" in data
+        assert "account UUID" in data["data_retention_periods"]["audit_logs"]
 
         # Verify personal data
         assert data["personal_data"]["email"] == "test@example.com"
@@ -146,6 +147,8 @@ class TestGDPREndpoints:
         assert data["status"] == "deletion_scheduled"
         assert data["grace_period_days"] == 7  # Reduced from 30 for GDPR compliance
         assert "deletion_date" in data
+        assert "still pending deletion" in data["cancellation"]
+        assert "account UUID" in data["data_retained"]
 
         # Verify soft delete was called with correct reason
         mock_supabase.rpc.assert_called_with(
@@ -182,8 +185,10 @@ class TestGDPREndpoints:
         assert data["status"] == "success"
         assert "cancelled" in data["message"]
 
-        # Verify restore was called
-        mock_supabase.rpc.assert_called_with("restore_account", {"target_account_id": mock_user["account_id"]})
+        # The RPC restores the account and records the cancellation atomically.
+        mock_supabase.rpc.assert_called_once_with("restore_account", {"target_account_id": mock_user["account_id"]})
+        mock_rpc.execute.assert_called_once_with()
+        mock_supabase.table.assert_called_once_with("accounts")
 
     def test_update_consent(self, client, mock_verify_user, mock_user, mock_supabase):
         """Test updating consent preferences."""

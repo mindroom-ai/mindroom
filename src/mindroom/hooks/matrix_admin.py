@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.matrix.client_room_admin import add_room_to_space, create_room, get_room_members, invite_to_room
+from mindroom.matrix.client_room_admin import (
+    add_room_to_space,
+    admin_join_room_user,
+    create_room,
+    get_joined_rooms,
+    get_room_members,
+    invite_to_room,
+)
 from mindroom.matrix.identity import managed_account_key, managed_account_user_id
 from mindroom.matrix.invited_rooms_store import (
     invited_room_entity_names,
@@ -56,12 +63,22 @@ class _BoundHookMatrixAdmin:
             power_users=power_user_ids,
         )
         if room_id is not None:
-            self._persist_created_room_for_creator(room_id)
+            self.retain_room(room_id)
         return room_id
 
     async def invite_user(self, room_id: str, user_id: str) -> bool:
         """Invite one user into one room."""
         return await invite_to_room(self.client, room_id, user_id)
+
+    async def force_join_user(self, room_id: str, user_id: str) -> bool:
+        """Join one local user through the Synapse-compatible admin API."""
+        if not self.client.access_token:
+            return False
+        # Tuwunel's Synapse-compatible endpoint performs the join on the
+        # user's behalf, but still enforces the room's join rules.  Restore an
+        # invite first so a user who left an invite-only room can rejoin.
+        await invite_to_room(self.client, room_id, user_id)
+        return await admin_join_room_user(self.client, room_id, user_id)
 
     async def kick_user(self, room_id: str, user_id: str, *, reason: str | None = None) -> bool:
         """Kick one joined user from one room."""
@@ -71,6 +88,31 @@ class _BoundHookMatrixAdmin:
     async def get_room_members(self, room_id: str) -> set[str] | None:
         """Return the current joined members for one room, or ``None`` when the fetch fails."""
         return await get_room_members(self.client, room_id)
+
+    async def get_joined_rooms(self) -> list[str] | None:
+        """Return the bound account's joined rooms, or ``None`` when unavailable."""
+        return await get_joined_rooms(self.client)
+
+    async def get_profile_avatar(self, user_id: str) -> str | None:
+        """Return one user's Matrix avatar content URI, or ``None`` when unavailable."""
+        response = await self.client.get_profile(user_id)
+        if isinstance(response, nio.ProfileGetResponse):
+            return response.avatar_url or None
+        return None
+
+    async def get_room_state_event(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Return one state event while distinguishing missing from unreadable."""
+        response = await self.client.room_get_state_event(room_id, event_type, state_key)
+        if isinstance(response, nio.RoomGetStateEventResponse) and isinstance(response.content, dict):
+            return True, response.content
+        if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+            return True, None
+        return False, None
 
     async def add_room_to_space(self, space_room_id: str, room_id: str) -> bool:
         """Link one room under an existing Matrix Space."""
@@ -96,12 +138,11 @@ class _BoundHookMatrixAdmin:
         )
         return isinstance(response, nio.RoomPutStateResponse)
 
-    def _persist_created_room_for_creator(self, room_id: str) -> None:
-        """Record a room the bound managed entity created so cleanup preserves it.
+    def retain_room(self, room_id: str) -> None:
+        """Retain a plugin-owned room for the bound managed entity across cleanup.
 
-        The creator is never invited into its own room, so the invite-accept
-        lifecycle that records invited rooms never fires for it. Persist here so
-        ``leave_unconfigured_rooms`` keeps plugin-created rooms across restarts.
+        Plugins reconciling existing rooms can restore this local ownership
+        record without creating a room or changing Matrix membership.
         """
         if self.config is None:
             return

@@ -1,6 +1,6 @@
 # Standalone Tuwunel homeserver chart.
 # It deploys the MindRoom Tuwunel fork as a single-replica homeserver that the mindroom-runtime chart can pair with.
-# Ingress, TLS, and apex well-known delegation come from your own cluster.
+# Configure ingress and TLS in your cluster; serve apex well-known documents separately only if those requests do not route to Tuwunel.
 
 nameOverride: ""
 fullnameOverride: ""
@@ -54,12 +54,14 @@ tuwunel:
   registrationToken:
     # Existing Secret holding the shared registration token.
     # When set, the chart enables token-gated registration and points Tuwunel at the mounted token file.
-    # Reference the same Secret from the mindroom-runtime chart's matrix.registrationToken.
+    # In the same namespace, the runtime's matrix.registrationToken can reference this Secret and key.
+    # Across namespaces, copy the token value into a Secret in the runtime namespace and reference its local name and key.
     existingSecret: ""
     key: MATRIX_REGISTRATION_TOKEN
   appserviceRegistration:
     # Existing Secret containing a complete Matrix application-service registration YAML file.
     existingSecret: ""
+    # Also the mounted filename; must end in lowercase .yaml or .yml for Tuwunel to load it.
     key: registration.yaml
   wellKnown:
     # Homeserver base URL served in /.well-known/matrix/client.

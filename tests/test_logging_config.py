@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sys
 import warnings
 from typing import TYPE_CHECKING, NoReturn
 
+import aiohttp
+import nio
 import pytest
 
 from mindroom.constants import RuntimePaths
@@ -291,6 +294,66 @@ def test_setup_logging_json_mode_foreign_logger_inherits_bound_log_context(
     assert payload["thread_id"] == "$thread:example.org"
 
 
+@pytest.mark.parametrize("log_format", ["json", "text"])
+@pytest.mark.parametrize("foreign_logger", [False, True])
+@pytest.mark.asyncio
+async def test_logging_preserves_nio_errors_with_real_transport_and_redacts_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    log_format: str,
+    foreign_logger: bool,
+) -> None:
+    """Live transport objects must not erase diagnostics or leak their credentials."""
+
+    async def respond(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        body = json.dumps(
+            {"errcode": "M_FORBIDDEN", "error": "synthetic denial; api_key=synthetic-message-secret"},
+        ).encode()
+        writer.write(
+            b"HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n"
+            b"Set-Cookie: session=synthetic-transport-secret\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body,
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", log_format)
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+    server = await asyncio.start_server(respond, "127.0.0.1", 0)
+    async with server, aiohttp.ClientSession() as session:
+        url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/synthetic"
+        async with session.get(url, headers={"Authorization": "Bearer synthetic-request-secret"}) as transport:
+            response = nio.RoomSendError.from_dict(await transport.json(), room_id="!room:example.test")
+            response.transport_response = transport
+            logger_name = "tests.logging.transport"
+            if foreign_logger:
+                logging.getLogger(logger_name).warning("matrix_operation_failed", extra={"response": response})
+            else:
+                get_logger(logger_name).warning("matrix_operation_failed", response=response)
+
+    output = capsys.readouterr().err
+    assert "matrix_operation_failed" in output
+    assert logger_name in output
+    assert "warning" in output
+    assert "M_FORBIDDEN" in output
+    assert "synthetic denial" in output
+    assert "[redaction failed]" not in output
+    for secret in ("synthetic-message-secret", "synthetic-transport-secret", "synthetic-request-secret"):
+        assert secret not in output
+    if log_format == "json":
+        payload = json.loads(output.strip().splitlines()[-1])
+        assert payload["event"] == "matrix_operation_failed"
+        assert payload["level"] == "warning"
+        assert payload["logger"] == logger_name
+        assert payload["response"]["status_code"] == "M_FORBIDDEN"
+        assert payload["response"]["message"] == "synthetic denial; api_key=***redacted***"
+    assert response.transport_response is transport
+
+
 def test_setup_logging_text_mode_does_not_emit_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -310,13 +373,58 @@ def test_setup_logging_text_mode_does_not_emit_json(
         json.loads(line)
 
 
+@pytest.mark.parametrize(
+    ("is_terminal", "no_color", "console_colors"),
+    [(False, None, False), (True, None, True), (True, "", True), (True, "1", False)],
+)
+def test_log_colors_follow_output_and_no_color_without_coloring_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    is_terminal: bool,
+    no_color: str | None,
+    console_colors: bool,
+) -> None:
+    """Only interactive output without NO_COLOR may contain terminal styling."""
+    monkeypatch.delenv("MINDROOM_LOG_FORMAT", raising=False)
+    if no_color is None:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+    else:
+        monkeypatch.setenv("NO_COLOR", no_color)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: is_terminal)
+    runtime_paths = _runtime_paths(tmp_path)
+    setup_logging(runtime_paths=runtime_paths)
+    capsys.readouterr()
+
+    get_logger("tests.logging").info("structured_event", sample_count=12)
+    logging.getLogger("nio.client.async_client").warning("Timed out, sleeping for 60s")
+    try:
+        _raise_value_error()
+    except ValueError:
+        get_logger("tests.logging").exception("exception_event")
+
+    console = capsys.readouterr().err
+    saved = next((runtime_paths.storage_root / "logs").glob("mindroom_*.log")).read_text()
+    for output in (console, saved):
+        assert "structured_event" in output
+        assert "Timed out, sleeping for 60s" in output
+        assert "ValueError" in output
+        assert "boom" in output
+    assert ("\x1b[" in console) is console_colors
+    assert "\x1b" not in saved
+
+
+@pytest.mark.parametrize("is_terminal", [False, True])
 def test_setup_logging_text_mode_redacts_exception_tracebacks_without_pretty_exception_warning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    is_terminal: bool,
 ) -> None:
-    """Text mode should keep pretty exception formatting without leaking exception secrets."""
+    """Text tracebacks suit their output stream without leaking exception secrets."""
     monkeypatch.delenv("MINDROOM_LOG_FORMAT", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: is_terminal)
     setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
     capsys.readouterr()
 
@@ -337,6 +445,9 @@ def test_setup_logging_text_mode_redacts_exception_tracebacks_without_pretty_exc
     assert "api-secret" not in output
     assert "auth-secret" not in output
     assert "***redacted***" in output
+    assert ("\x1b[" in output) is is_terminal
+    if not is_terminal:
+        assert "Traceback (most recent call last):" in output
 
 
 def test_setup_logging_json_mode_renders_exception_field_for_exc_info_true(

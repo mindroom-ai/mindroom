@@ -3,6 +3,7 @@
 import gc
 import json
 import sys
+import weakref
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -23,6 +24,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
+from mindroom.tool_system.declarations import SetupType, ToolValidationInfo
 from mindroom.tool_system.metadata import (
     _AUTHORED_OVERRIDE_INHERIT,
     ConfigField,
@@ -66,6 +68,12 @@ def _restore_builtin_tool_metadata_state() -> None:
     TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
     TOOL_METADATA.clear()
     TOOL_METADATA.update(_BASE_TOOL_METADATA)
+
+
+def _clear_module_origin_caches() -> None:
+    """Clear module-origin caches between tests."""
+    metadata_module._MODULE_ORIGIN_CACHE.clear()
+    metadata_module._module_directory_within_root.cache_clear()
 
 
 def test_reconcile_dynamic_tool_state_replaces_only_owned_entries() -> None:
@@ -153,6 +161,31 @@ def test_export_tools_metadata_json() -> None:
         for field in required_fields:
             assert field in first_tool, f"Missing required field: {field}"
         assert "managed_init_args" not in first_tool
+
+
+def test_oauth_connections_requires_live_room_context() -> None:
+    """OAuth reset must not be advertised without a requester-bound live context."""
+    assert TOOL_METADATA["oauth_connections"].requires_room_context is True
+
+
+def test_registration_preserves_primary_runtime_requirement() -> None:
+    """The registration surface must carry the non-overridable routing declaration into the catalog."""
+    snapshot = capture_tool_registry_snapshot()
+    try:
+
+        @register_tool_with_metadata(
+            name="test_primary_runtime_registration",
+            display_name="Primary Runtime Registration",
+            description="Test-only primary-runtime declaration.",
+            category=ToolCategory.DEVELOPMENT,
+            requires_primary_runtime=True,
+        )
+        def _primary_runtime_registration() -> type[Toolkit]:
+            return Toolkit
+
+        assert TOOL_METADATA["test_primary_runtime_registration"].requires_primary_runtime is True
+    finally:
+        restore_tool_registry_snapshot(snapshot)
 
 
 def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
@@ -401,15 +434,104 @@ def test_module_origin_within_root_caches_path_resolution(
             resolve_calls += 1
         return original_resolve(self, *args, **kwargs)
 
-    metadata_module._resolved_module_file.cache_clear()
+    _clear_module_origin_caches()
     monkeypatch.setattr(metadata_module.Path, "resolve", counted_resolve)
     try:
         assert metadata_module._module_origin_within_root(module, plugin_root)
         assert metadata_module._module_origin_within_root(module, plugin_root)
     finally:
-        metadata_module._resolved_module_file.cache_clear()
+        _clear_module_origin_caches()
 
     assert resolve_calls == 1
+
+
+def test_module_origin_within_root_caches_containment_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sibling modules share one directory check, reused across validation scans."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    module_path = plugin_root / "helper.py"
+    module_path.write_text("VALUE = 1\n", encoding="utf-8")
+    module = ModuleType("demo.helper")
+    module.__file__ = str(module_path)
+    sibling_module = ModuleType("demo.sibling")
+    sibling_module.__file__ = str(plugin_root / "sibling.py")
+    outside_module = ModuleType("outside.helper")
+    outside_module.__file__ = str(tmp_path / "outside.py")
+    containment_calls = 0
+    original_is_relative_to = Path.is_relative_to
+
+    def counted_is_relative_to(self: Path, *args: object, **kwargs: object) -> bool:
+        nonlocal containment_calls
+        containment_calls += 1
+        return original_is_relative_to(self, *args, **kwargs)
+
+    _clear_module_origin_caches()
+    monkeypatch.setattr(metadata_module.Path, "is_relative_to", counted_is_relative_to)
+    try:
+        for _ in range(5):
+            assert metadata_module._module_origin_within_root(module, plugin_root)
+            assert metadata_module._module_origin_within_root(sibling_module, plugin_root)
+            assert not metadata_module._module_origin_within_root(outside_module, plugin_root)
+    finally:
+        _clear_module_origin_caches()
+
+    assert containment_calls == 2
+
+
+def test_module_origin_cache_survives_large_module_scans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warm plugin scans must reuse paths even beyond the old 8,192-entry limit."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    other_root = tmp_path / "plugins" / "other"
+    modules = [ModuleType(f"demo.helper_{index}") for index in range(8_193)]
+    for index, module in enumerate(modules):
+        module.__file__ = str(plugin_root / f"helper_{index}.py")
+    resolve_calls = 0
+    original_resolve = Path.resolve
+
+    def counted_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return original_resolve(self, *args, **kwargs)
+
+    _clear_module_origin_caches()
+    monkeypatch.setattr(metadata_module.Path, "resolve", counted_resolve)
+    try:
+        for root, expected in ((plugin_root, True), (plugin_root, True), (other_root, False), (plugin_root, True)):
+            assert all(metadata_module._module_origin_within_root(module, root) is expected for module in modules)
+    finally:
+        _clear_module_origin_caches()
+
+    assert resolve_calls == len(modules)
+
+
+def test_module_origin_cache_tracks_file_changes(tmp_path: Path) -> None:
+    """Changing a live module's origin must invalidate its cached containment."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    module = ModuleType("demo.helper")
+    module.__file__ = str(plugin_root / "helper.py")
+
+    assert metadata_module._module_origin_within_root(module, plugin_root)
+    module.__file__ = str(tmp_path / "outside.py")
+    assert not metadata_module._module_origin_within_root(module, plugin_root)
+
+
+def test_module_origin_cache_does_not_retain_unloaded_modules(tmp_path: Path) -> None:
+    """Origin caching must not keep transient validation modules alive."""
+    module = ModuleType("demo.helper")
+    module.__file__ = str(tmp_path / "helper.py")
+    reference = weakref.ref(module)
+    assert metadata_module._module_origin_within_root(module, tmp_path)
+
+    del module
+    gc.collect(0)
+
+    assert reference() is None
 
 
 def test_restore_tool_registry_snapshot_uses_sys_modules_snapshot(
@@ -457,6 +579,43 @@ def test_tool_metadata_consistency() -> None:
                 f"{tool_name} is metadata-only and should not declare managed init args: "
                 f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
             )
+
+
+def test_github_metadata_declares_oauth_and_manual_token_fallback() -> None:
+    """GitHub metadata should describe both managed OAuth and manual-token construction."""
+    metadata = TOOL_METADATA["github"]
+
+    assert metadata.setup_type == SetupType.OAUTH
+    assert metadata.auth_provider == "github"
+    assert metadata.oauth_fallback_fields == ("access_token",)
+    assert metadata.managed_init_args == (
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.RUNTIME_CONFIG,
+    )
+    assert {field.name for field in metadata.config_fields or []} == {"access_token", "base_url"}
+
+    exported = next(tool for tool in export_tools_metadata() if tool["name"] == "github")
+    assert exported["oauth_fallback_fields"] == ["access_token"]
+    assert "managed_init_args" not in exported
+
+
+def test_registration_rejects_missing_oauth_fallback_config_field() -> None:
+    """Fallback metadata should never reference a field the dashboard cannot configure."""
+    with pytest.raises(ValueError, match="missing_field"):
+
+        @register_tool_with_metadata(
+            name="invalid_oauth_fallback",
+            display_name="Invalid OAuth Fallback",
+            description="Invalid test metadata.",
+            category=ToolCategory.DEVELOPMENT,
+            setup_type=SetupType.OAUTH,
+            config_fields=[],
+            oauth_fallback_fields=("missing_field",),
+        )
+        def _invalid_oauth_fallback() -> type[Toolkit]:
+            return Toolkit
 
 
 def test_dynamic_tools_is_durable_metadata_only_builtin(tmp_path: Path) -> None:
@@ -824,6 +983,28 @@ def test_file_empty_exclude_patterns_override_reaches_constructor(tmp_path: Path
     assert tool.exclude_patterns == []
 
 
+def test_script_integral_number_overrides_reach_integer_limits(tmp_path: Path) -> None:
+    """JSON number fields such as 3.0 must satisfy integer-valued script limits."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "script",
+        runtime_paths,
+        tool_config_overrides={
+            "max_concurrent_runs": 3.0,
+            "max_tool_calls_per_minute": 30.0,
+        },
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert tool.limits.max_concurrent_runs == 3
+    assert tool.limits.max_tool_calls_per_minute == 30
+
+
 def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path: Path) -> None:
     """Universal filters should work when a Toolkit subclass omits filter constructor kwargs."""
     runtime_paths = resolve_runtime_paths(
@@ -870,7 +1051,7 @@ def test_config_load_rejects_unknown_tool_override_key(tmp_path: Path) -> None:
                 "models": {
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-5.6",
+                        "id": "gpt-6-astra",
                     },
                 },
                 "router": {"model": "default"},
@@ -907,7 +1088,7 @@ def test_tool_validation_snapshot_round_trips_mcp_override_validation(tmp_path: 
             "models": {
                 "default": {
                     "provider": "openai",
-                    "id": "gpt-5.4",
+                    "id": "gpt-6-astra",
                 },
             },
             "agents": {},
@@ -931,6 +1112,22 @@ def test_tool_validation_snapshot_round_trips_mcp_override_validation(tmp_path: 
     assert restored_snapshot["mcp_demo"].agent_override_fields is not None
 
 
+def test_tool_validation_snapshot_round_trips_primary_runtime_requirement() -> None:
+    """Worker validation caches must retain the catalog's non-overridable runtime boundary."""
+    snapshot = {
+        "host_only": ToolValidationInfo(
+            name="host_only",
+            requires_primary_runtime=True,
+        ),
+    }
+
+    payload = serialize_tool_validation_snapshot(snapshot)
+    restored_snapshot = deserialize_tool_validation_snapshot(payload)
+
+    assert payload["host_only"]["requires_primary_runtime"] is True
+    assert restored_snapshot["host_only"].requires_primary_runtime is True
+
+
 def test_deserialize_tool_validation_snapshot_rejects_non_boolean_runtime_loadable() -> None:
     """Validation snapshot payloads should type-check runtime_loadable strictly."""
     with pytest.raises(TypeError, match="runtime_loadable to a boolean"):
@@ -941,6 +1138,22 @@ def test_deserialize_tool_validation_snapshot_rejects_non_boolean_runtime_loadab
                     "agent_override_fields": [],
                     "authored_override_validator": "default",
                     "runtime_loadable": "yes",
+                },
+            },
+        )
+
+
+def test_deserialize_tool_validation_snapshot_rejects_non_boolean_primary_runtime() -> None:
+    """Validation snapshot payloads should type-check primary-runtime requirements strictly."""
+    with pytest.raises(TypeError, match="requires_primary_runtime to a boolean"):
+        deserialize_tool_validation_snapshot(
+            {
+                "host_only": {
+                    "config_fields": [],
+                    "agent_override_fields": [],
+                    "authored_override_validator": "default",
+                    "requires_primary_runtime": "yes",
+                    "runtime_loadable": True,
                 },
             },
         )
@@ -985,7 +1198,7 @@ def test_get_tool_by_name_rejects_invalid_mcp_assignment_overrides(tmp_path: Pat
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "mcp_servers:\n"

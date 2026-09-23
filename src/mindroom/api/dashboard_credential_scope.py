@@ -8,8 +8,15 @@ from typing import TYPE_CHECKING, Any, cast
 from fastapi import HTTPException, Request
 
 from mindroom.agent_policy import ResolvedAgentPolicy, resolve_agent_policy_from_data
-from mindroom.authorization import is_sender_allowed_for_agent_credential_management
+from mindroom.api import config_lifecycle
+from mindroom.authorization import (
+    is_platform_administrator,
+    is_sender_allowed_for_agent_credential_management,
+    is_sender_allowed_for_agent_oauth_connection_management,
+    is_sender_allowed_for_responder,
+)
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 if TYPE_CHECKING:
@@ -80,6 +87,7 @@ def build_dashboard_execution_identity(
     request: Request,
     agent_name: str,
     *,
+    config: Config | None,
     runtime_paths: RuntimePaths,
 ) -> ToolExecutionIdentity:
     """Build one dashboard-scoped execution identity for API credential and tool lookups.
@@ -91,10 +99,13 @@ def build_dashboard_execution_identity(
     """
     tenant_id = runtime_paths.env_value("CUSTOMER_ID")
     account_id = runtime_paths.env_value("ACCOUNT_ID")
+    requester_id = _dashboard_requester_id_for_request(request, runtime_paths)
+    if requester_id is not None and config is not None:
+        requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
     return ToolExecutionIdentity(
         channel="matrix",
         agent_name=agent_name,
-        requester_id=_dashboard_requester_id_for_request(request, runtime_paths),
+        requester_id=requester_id,
         room_id=None,
         thread_id=None,
         resolved_thread_id=None,
@@ -226,6 +237,7 @@ def require_agent_credential_management_authorized(
     execution_identity = build_dashboard_execution_identity(
         request,
         agent_name,
+        config=config,
         runtime_paths=runtime_paths,
     )
     requester_id = execution_identity.requester_id
@@ -233,6 +245,70 @@ def require_agent_credential_management_authorized(
         requester_id,
         agent_name=agent_name,
         config=config,
+        runtime_paths=runtime_paths,
     ):
         raise HTTPException(status_code=403, detail=f"Not authorized to manage credentials for agent '{agent_name}'")
+    return execution_identity
+
+
+def require_agent_oauth_connection_authorized(
+    request: Request,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    requester_owned: bool = False,
+) -> ToolExecutionIdentity:
+    """Require requester-private or managed-agent authority for OAuth connections."""
+    execution_identity = build_dashboard_execution_identity(
+        request,
+        agent_name,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    requester_id = execution_identity.requester_id
+    if requester_id is None or not (
+        is_sender_allowed_for_agent_oauth_connection_management(
+            requester_id,
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        or (
+            requester_owned
+            and try_parse_historical_matrix_user_id(requester_id) is not None
+            and agent_name in config.agents
+            and is_sender_allowed_for_responder(
+                requester_id,
+                agent_name,
+                None,
+                config,
+                runtime_paths,
+                config_lifecycle.app_state(request.app).agent_reply_memberships,
+            )
+        )
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Not authorized to manage OAuth connections for agent '{agent_name}'",
+        )
+    return execution_identity
+
+
+def require_platform_administrator_authorized(
+    request: Request,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> ToolExecutionIdentity:
+    """Require platform-administrator authority for a global credential target."""
+    execution_identity = build_dashboard_execution_identity(
+        request,
+        "global_credentials",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    requester_id = execution_identity.requester_id
+    if requester_id is None or not is_platform_administrator(requester_id, config, runtime_paths):
+        raise HTTPException(status_code=403, detail="Not authorized to manage global credential configuration")
     return execution_identity

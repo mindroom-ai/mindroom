@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
@@ -15,6 +17,7 @@ MSC4186_UNSTABLE_FEATURE = "org.matrix.simplified_msc3575"
 _MATRIX_SYNC_HEALTH_STALE_SECONDS = 180.0
 MATRIX_SYNC_STARTUP_GRACE_SECONDS = 600.0
 MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS = 120.0
+MATRIX_INGESTION_GRACE_SECONDS = 600.0
 
 
 @dataclass(slots=True)
@@ -24,6 +27,24 @@ class _MatrixSyncState:
     running: bool = False
     loop_started_time: datetime | None = None
     last_sync_time: datetime | None = None
+    ingestion_progress_started_monotonic: float | None = None
+    ingestion_progress_advanced_monotonic: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SyncIngestionProgress:
+    """Immutable view of one active durable ingestion catch-up phase."""
+
+    started_monotonic: float
+    advanced_monotonic: float
+
+    def seconds_in_flight(self, now_monotonic: float) -> float:
+        """Return total phase time without allowing a negative clock delta."""
+        return max(0.0, now_monotonic - self.started_monotonic)
+
+    def seconds_since_advance(self, now_monotonic: float) -> float:
+        """Return time since the latest commit-gated advance."""
+        return max(0.0, now_monotonic - self.advanced_monotonic)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +89,7 @@ def response_has_matrix_versions(response: httpx.Response) -> bool:
 
 
 def response_advertises_sliding_sync(response: httpx.Response) -> bool:
-    """Return whether a valid `/versions` response advertises MSC4186 Simplified Sliding Sync."""
+    """Return whether a valid versions response advertises Simplified Sliding Sync."""
     unstable_features = response.json().get("unstable_features")
     return isinstance(unstable_features, dict) and unstable_features.get(MSC4186_UNSTABLE_FEATURE) is True
 
@@ -93,7 +114,38 @@ def mark_matrix_sync_success(entity_name: str, sync_time: datetime | None = None
         state = _matrix_sync_state.setdefault(entity_name, _MatrixSyncState())
         state.running = True
         state.last_sync_time = resolved_sync_time
+        state.ingestion_progress_started_monotonic = None
+        state.ingestion_progress_advanced_monotonic = None
     return resolved_sync_time
+
+
+def mark_matrix_ingestion_progress(
+    entity_name: str,
+    *,
+    now_monotonic: float | None = None,
+) -> None:
+    """Publish one commit-gated advance within an incomplete source Frame."""
+    observed = time.monotonic() if now_monotonic is None else now_monotonic
+    if not math.isfinite(observed):
+        message = "now_monotonic must be finite"
+        raise ValueError(message)
+    with _matrix_sync_lock:
+        state = _matrix_sync_state.setdefault(entity_name, _MatrixSyncState())
+        state.running = True
+        if state.ingestion_progress_started_monotonic is None:
+            state.ingestion_progress_started_monotonic = observed
+        state.ingestion_progress_advanced_monotonic = observed
+
+
+def get_matrix_ingestion_progress(entity_name: str) -> _SyncIngestionProgress | None:
+    """Return the active commit-gated ingestion catch-up phase, if any."""
+    with _matrix_sync_lock:
+        state = _matrix_sync_state.get(entity_name)
+        started = state.ingestion_progress_started_monotonic if state is not None else None
+        advanced = state.ingestion_progress_advanced_monotonic if state is not None else None
+    if started is None or advanced is None:
+        return None
+    return _SyncIngestionProgress(started, advanced)
 
 
 def clear_matrix_sync_state(entity_name: str) -> None:
@@ -106,19 +158,38 @@ def get_matrix_sync_health_snapshot(
     *,
     stale_after_seconds: float = _MATRIX_SYNC_HEALTH_STALE_SECONDS,
     startup_grace_seconds: float = MATRIX_SYNC_STARTUP_GRACE_SECONDS,
+    ingestion_grace_seconds: float = MATRIX_INGESTION_GRACE_SECONDS,
     now: datetime | None = None,
+    now_monotonic: float | None = None,
 ) -> _MatrixSyncHealthSnapshot:
     """Return the current Matrix sync-health snapshot.
 
     The reported `last_sync_time` is the oldest successful sync among active
     entities, because any stale entity should surface as unhealthy.
     """
+    if not math.isfinite(ingestion_grace_seconds) or ingestion_grace_seconds <= 0:
+        msg = "ingestion_grace_seconds must be a finite positive number"
+        raise ValueError(msg)
     current_time = _normalize_sync_time(now or datetime.now(UTC))
+    current_monotonic = time.monotonic() if now_monotonic is None else now_monotonic
     with _matrix_sync_lock:
         active_states = tuple(
             sorted(
                 (
-                    (entity_name, state.last_sync_time, state.loop_started_time)
+                    (
+                        entity_name,
+                        state.last_sync_time,
+                        state.loop_started_time,
+                        (
+                            _SyncIngestionProgress(
+                                state.ingestion_progress_started_monotonic,
+                                state.ingestion_progress_advanced_monotonic,
+                            )
+                            if state.ingestion_progress_started_monotonic is not None
+                            and state.ingestion_progress_advanced_monotonic is not None
+                            else None
+                        ),
+                    )
                     for entity_name, state in _matrix_sync_state.items()
                     if state.running
                 ),
@@ -133,24 +204,39 @@ def get_matrix_sync_health_snapshot(
             last_sync_time=None,
         )
 
-    active_entities = tuple(entity_name for entity_name, _, _ in active_states)
+    active_entities = tuple(entity_name for entity_name, _, _, _ in active_states)
     stale_entities = tuple(
         entity_name
-        for entity_name, last_sync_time, loop_started_time in active_states
+        for entity_name, last_sync_time, loop_started_time, ingestion_progress in active_states
         if (
-            (last_sync_time is not None and (current_time - last_sync_time).total_seconds() > stale_after_seconds)
+            (
+                ingestion_progress is not None
+                and (
+                    ingestion_progress.seconds_in_flight(current_monotonic) > ingestion_grace_seconds
+                    or ingestion_progress.seconds_since_advance(current_monotonic) > stale_after_seconds
+                )
+            )
             or (
-                last_sync_time is None
-                and loop_started_time is not None
-                and (current_time - loop_started_time).total_seconds() > startup_grace_seconds
+                ingestion_progress is None
+                and (
+                    (
+                        last_sync_time is not None
+                        and (current_time - last_sync_time).total_seconds() > stale_after_seconds
+                    )
+                    or (
+                        last_sync_time is None
+                        and loop_started_time is not None
+                        and (current_time - loop_started_time).total_seconds() > startup_grace_seconds
+                    )
+                )
             )
         )
     )
-    if any(last_sync_time is None for _, last_sync_time, _ in active_states):
+    if any(last_sync_time is None for _, last_sync_time, _, _ in active_states):
         oldest_last_sync_time = None
     else:
         oldest_last_sync_time = min(
-            last_sync_time for _, last_sync_time, _ in active_states if last_sync_time is not None
+            last_sync_time for _, last_sync_time, _, _ in active_states if last_sync_time is not None
         )
     return _MatrixSyncHealthSnapshot(
         active_entities=active_entities,

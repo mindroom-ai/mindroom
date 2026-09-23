@@ -147,7 +147,7 @@ def test_room_agent_participant_requires_agent_name() -> None:
 
 def test_room_agent_participant_cannot_override_model() -> None:
     """room_agent participants cannot override the agent model."""
-    participants = [{"id": "writer", "kind": "room_agent", "agent": "code", "model": "gpt-5.6"}]
+    participants = [{"id": "writer", "kind": "room_agent", "agent": "code", "model": "gpt-6-astra"}]
     with pytest.raises(DynamicWorkflowError, match="cannot override model"):
         validate_workflow_spec(_spec(participants=participants))
 
@@ -344,7 +344,7 @@ def test_rejects_max_concurrent_agents_above_cap() -> None:
 def test_rejects_non_string_permission_models() -> None:
     """permissions.models must be non-empty strings."""
     with pytest.raises(DynamicWorkflowError, match="'models' must be a list of non-empty strings"):
-        validate_workflow_spec(_spec(permissions={"models": ["claude-sonnet-4-6", 7]}))
+        validate_workflow_spec(_spec(permissions={"models": ["claude-sonnet-5", 7]}))
 
 
 def test_rejects_unknown_data_permission() -> None:

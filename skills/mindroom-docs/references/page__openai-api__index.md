@@ -119,6 +119,7 @@ Point the base URL at `http://localhost:8765/v1` and set the API key. MindRoom i
 Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`.
 Only shared agents that are either unscoped or explicitly configured with `worker_scope=shared` appear in `/v1/models`.
 Agents that use `agents.<name>.private` are not listed there, because `private.per` creates requester-private instances and therefore an isolating execution scope.
+Agents whose `delegate_to` closure reaches an isolating agent are also excluded, because an OpenAI-compatible request cannot safely materialize that delegated target.
 An OpenAI-compatible run can expose fewer tool functions than the same agent in Matrix when `tool_approval` hides approval-gated functions from `/v1` or tool metadata hides functions that require live room context.
 
 ### Auto-routing
@@ -197,9 +198,33 @@ Client `system` / `developer` messages are prepended to the prompt. They augment
 
 The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY`; the browser dashboard uses a same-origin auth cookie, while CLI and curl clients can still send `Authorization: Bearer ...`. These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
 
+### Requester identities and delegation
+
+Bind selected API keys to Matrix user IDs with a JSON object in `.env`:
+
+```dotenv
+OPENAI_COMPAT_API_KEYS=sk-astrbot,sk-legacy
+OPENAI_COMPAT_API_KEY_REQUESTERS='{"sk-astrbot":"@alice:example.org"}'
+```
+
+The key must still appear in `OPENAI_COMPAT_API_KEYS`; a mapping alone never authenticates a caller.
+Restart MindRoom after changing these environment settings.
+Mapped identities must be concrete human Matrix user IDs, and `authorization.aliases` resolves bridge identities to their canonical requester.
+The request body's `user` field and requester headers cannot override this identity.
+
+Mapped callers only see and invoke models allowed by the existing responder access policy, including every member of a selected team.
+Auto-routing uses the same permitted agents.
+`run_subagent` checks both the caller agent's `delegate_to` list and the requester's access to each target, and propagates the requester into nested runs and their metadata.
+Grant access with `agents.<name>.access.users`, administrator membership, or a ready managed `members_of_rooms` membership snapshot.
+There is no current Matrix room for `/v1`, so `current_room_members` cannot grant access, and missing or stale room membership fails closed.
+
+Unmapped keys retain their existing model access but cannot delegate.
+Mapped sessions also include the canonical requester in their namespace, preventing a reassigned key from inheriting the previous requester's session.
+Room-context tools and approval-gated tools remain unavailable in delegated API runs.
+
 ## Limitations
 
-- **Token usage is always zeros** — Agno doesn't expose token counts
+- **Non-streaming token usage is zero** — the compatibility adapter does not populate usage fields from run metrics
 - **No native `tool_calls` format** — tool results appear inline in content text
 - **`show_tool_calls` config is Matrix-only today** — OpenAI-compatible `/v1/chat/completions` currently includes tool-call text/events regardless of `show_tool_calls: false`
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)

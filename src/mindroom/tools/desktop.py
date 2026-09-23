@@ -14,10 +14,11 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="desktop",
     display_name="Matrix Desktop",
-    description="Operate exact locally allowlisted applications through accessibility state over Matrix encryption",
+    description="Let the agent interact with desktop apps you explicitly allow",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
+    requires_primary_runtime=True,
     requires_room_context=True,
     icon="MonitorUp",
     icon_color="text-cyan-500",

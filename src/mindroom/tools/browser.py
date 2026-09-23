@@ -21,8 +21,10 @@ if TYPE_CHECKING:
     name="browser",
     display_name="Browser",
     description=(
-        "OpenClaw-style browser control (status/start/stop/profiles/tabs/open/focus/close/"
-        "snapshot/screenshot/navigate/console/pdf/upload/dialog/act/help/actions)"
+        "Control MindRoom's browser: browse websites, fill in forms, and capture screenshots. "
+        "With worker routing, this controls the agent's worker browser. "
+        "To let the user watch this worker browser, use chat_ui.open_panel(panel='computer'). "
+        "The user's local browser requires the separately configured desktop target."
     ),
     category=ToolCategory.RESEARCH,
     status=ToolStatus.AVAILABLE,
@@ -100,7 +102,7 @@ if TYPE_CHECKING:
             description="Matrix and local Playwright MCP timeout from 1 to 120 seconds.",
         ),
     ],
-    function_names=("browser",),
+    function_names=("browser_control",),
 )
 def browser_tools() -> type[BrowserTools]:
     """Return Browser tools with OpenClaw-style action routing."""

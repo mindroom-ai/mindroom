@@ -1,10 +1,13 @@
 """Tests for canonical inbound turn-origin policy."""
 
+import pytest
+
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
 )
 from mindroom.turn_origin import (
@@ -53,14 +56,15 @@ def test_managed_message_with_human_requester_cannot_answer_interactive_prompt()
     assert not origin.may_answer_interactive_prompt
 
 
-def test_scheduled_managed_sender_bypasses_agent_chatter_gate() -> None:
+@pytest.mark.parametrize("source_kind", [SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND])
+def test_scheduled_managed_sender_bypasses_agent_chatter_gate(source_kind: str) -> None:
     """Scheduled fires bypass the managed-requester chatter gate."""
     origin = classify_turn_origin(
         transport_sender_id="@mindroom_general:localhost",
         requester_id="@mindroom_router:localhost",
         sender_entity_name="general",
         requester_entity_name="router",
-        source_kind=SCHEDULED_SOURCE_KIND,
+        source_kind=source_kind,
         original_sender="@mindroom_router:localhost",
         trusted_user_relay=False,
     )
@@ -140,6 +144,7 @@ def test_requester_id_from_trusted_original_sender_accepts_human_metadata() -> N
         requester_id_from_trusted_original_sender(
             original_sender="@human:localhost",
             original_sender_entity_name=None,
+            original_sender_is_human=True,
             source_kind=HOOK_DISPATCH_SOURCE_KIND,
             sender_trusts_original_sender=True,
         )
@@ -147,13 +152,29 @@ def test_requester_id_from_trusted_original_sender_accepts_human_metadata() -> N
     )
 
 
-def test_requester_id_from_trusted_original_sender_accepts_managed_scheduled_fires() -> None:
+def test_requester_id_from_trusted_original_sender_rejects_non_human_unmanaged_metadata() -> None:
+    """Unmanaged bot and internal-user metadata must not become a human requester."""
+    assert (
+        requester_id_from_trusted_original_sender(
+            original_sender="@bridge_bot:localhost",
+            original_sender_entity_name=None,
+            original_sender_is_human=False,
+            source_kind=HOOK_DISPATCH_SOURCE_KIND,
+            sender_trusts_original_sender=True,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("source_kind", [SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND])
+def test_requester_id_from_trusted_original_sender_accepts_managed_scheduled_fires(source_kind: str) -> None:
     """Scheduled fires may preserve a managed requester such as the router."""
     assert (
         requester_id_from_trusted_original_sender(
             original_sender="@mindroom_router:localhost",
             original_sender_entity_name="router",
-            source_kind=SCHEDULED_SOURCE_KIND,
+            original_sender_is_human=False,
+            source_kind=source_kind,
             sender_trusts_original_sender=True,
         )
         == "@mindroom_router:localhost"
@@ -166,6 +187,7 @@ def test_requester_id_from_trusted_original_sender_rejects_managed_plain_hooks()
         requester_id_from_trusted_original_sender(
             original_sender="@mindroom_router:localhost",
             original_sender_entity_name="router",
+            original_sender_is_human=False,
             source_kind=HOOK_SOURCE_KIND,
             sender_trusts_original_sender=True,
         )
@@ -179,6 +201,7 @@ def test_requester_id_from_trusted_original_sender_requires_original_sender() ->
         requester_id_from_trusted_original_sender(
             original_sender=None,
             original_sender_entity_name=None,
+            original_sender_is_human=False,
             source_kind=HOOK_DISPATCH_SOURCE_KIND,
             sender_trusts_original_sender=True,
         )

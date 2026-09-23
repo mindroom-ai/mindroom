@@ -22,6 +22,15 @@ from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
+from mindroom.cli.config import validate_config_source_quiet
+from mindroom.commands.config_commands import apply_config_change
+from mindroom.config.legacy_access import AccessMigrationError
+from mindroom.config.main import load_config
+from mindroom.custom_tools.config_manager import ConfigManagerTools
+from mindroom.message_target import MessageTarget
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, make_relation_lookup
 
 SPLIT_TOP_SOURCE = (
     "agents: !include_dir_merge_named agents/\nmodels: !include models.yaml\ndefaults:\n  markdown: true\n"
@@ -100,8 +109,901 @@ def split_app(split_runtime_paths: constants.RuntimePaths) -> FastAPI:
     return api_app
 
 
+@pytest.fixture(params=[False, True], ids=["empty", "ignored-only"])
+def empty_include_runtime_paths(tmp_path: Path, request: pytest.FixtureRequest) -> constants.RuntimePaths:
+    """Create an authored directory include that reads no child files."""
+    entries = tmp_path / "entries"
+    entries.mkdir()
+    if request.param:
+        for name in (".hidden.yaml", "_draft.yaml", "notes.txt", ".hidden/item.yaml", "_shared/item.yaml"):
+            ignored = entries / name
+            ignored.parent.mkdir(parents=True, exist_ok=True)
+            ignored.write_text("ignored: true\n", encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default: {provider: ollama, id: test-model}\nagents: !include_dir_merge_named entries/\n",
+        encoding="utf-8",
+    )
+    return constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+
+@pytest.fixture
+def stale_monolith_app(empty_include_runtime_paths: constants.RuntimePaths) -> FastAPI:
+    """Publish a monolith, then add an include without publishing a reload."""
+    runtime_paths = empty_include_runtime_paths
+    source = (
+        "models:\n  default: {provider: ollama, id: test-model}\n"
+        "agents:\n  operator: {display_name: Operator, role: Original role}\n"
+        "teams: {}\n"
+        "administrators: ['@admin:example.org']\n"
+    )
+    runtime_paths.config_path.write_text(source, encoding="utf-8")
+    api_app = _make_api_app(runtime_paths)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+    before = _snapshot(api_app)
+    assert before.uses_includes is False
+    runtime_paths.config_path.write_text(
+        source.replace("teams: {}", "teams: !include_dir_merge_named entries/"),
+        encoding="utf-8",
+    )
+    config = load_config(runtime_paths)
+    assert config.uses_includes is True
+    assert config.source_files == frozenset({runtime_paths.config_path.resolve()})
+    assert _snapshot(api_app) is before
+    return api_app
+
+
+class TestEmptyDirectoryIncludes:
+    """Include topology survives even when a directory contributes no files."""
+
+    @pytest.mark.parametrize("operation", ["inspect", "dry-run", "save"])
+    def test_self_config_preserves_empty_include_with_stale_api_snapshot(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+        monkeypatch: pytest.MonkeyPatch,
+        operation: str,
+    ) -> None:
+        """Self-config reads must honor include tags even before the API reloads."""
+        runtime_paths = empty_include_runtime_paths
+        path = runtime_paths.config_path
+        include_source = path.read_text(encoding="utf-8")
+        path.write_text(
+            include_source.replace("agents: !include_dir_merge_named entries/", "agents: {}"),
+            encoding="utf-8",
+        )
+        api_app = _make_api_app(runtime_paths)
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        before = _snapshot(api_app)
+        assert before.uses_includes is False
+        path.write_text(include_source, encoding="utf-8")
+        monkeypatch.setattr(
+            ConfigManagerTools,
+            "_configuration_mutation_authorization_error",
+            staticmethod(lambda _config: None),
+        )
+        manager = ConfigManagerTools(runtime_paths)
+
+        if operation == "inspect":
+            result = manager.manage_config(operation="inspect")
+            assert "structured patching is unavailable" in result
+        else:
+            result = manager.manage_config(
+                operation="patch",
+                changes=[{"op": "add", "path": "/timezone", "value": "Europe/Amsterdam"}],
+                dry_run=operation == "dry-run",
+            )
+            assert result.startswith("Error:")
+            assert "!include" in result
+
+        assert path.read_text(encoding="utf-8") == include_source
+        assert _snapshot(api_app) is before
+
+    @pytest.mark.parametrize("adds_include", [True, False], ids=["add-include", "remove-include"])
+    @pytest.mark.parametrize("includes_file", [False, True], ids=["directory", "file"])
+    def test_same_config_publication_retains_newer_raw_source_metadata(  # noqa: PLR0915 - exercise one complete publication/write interleaving.
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+        monkeypatch: pytest.MonkeyPatch,
+        adds_include: bool,
+        includes_file: bool,
+    ) -> None:
+        """A same-payload publisher may advance runtime state without reverting source metadata."""
+        runtime_paths = empty_include_runtime_paths
+        path = runtime_paths.config_path
+        include_source = path.read_text(encoding="utf-8")
+        monolith_source = include_source.replace("agents: !include_dir_merge_named entries/", "agents: {}")
+        models_path = path.with_name("models.yaml")
+        if includes_file:
+            models_path.write_text(MODELS_SOURCE, encoding="utf-8")
+            include_source = "models: !include models.yaml\nagents: {}\n"
+        initial_source = monolith_source if adds_include else include_source
+        replacement_source = include_source if adds_include else monolith_source
+        path.write_text(initial_source, encoding="utf-8")
+        api_app = _make_api_app(runtime_paths)
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        previous = _snapshot(api_app)
+        assert previous.runtime_config is not None
+        fingerprint_for_publish = config_lifecycle._source_fingerprint_for_published_runtime_config
+        raw_commits: list[config_lifecycle.ApiSnapshot] = []
+
+        def commit_raw_after_source_observation(
+            paths: constants.RuntimePaths,
+            payload: dict[str, Any],
+        ) -> tuple[str, frozenset[Path] | None, bool | None]:
+            observed = fingerprint_for_publish(paths, payload)
+            config_lifecycle.replace_raw_config_source(
+                _request_for(api_app),
+                replacement_source,
+                error_prefix="Failed to save raw configuration",
+            )
+            raw_commits.append(_snapshot(api_app))
+            assert raw_commits[-1].config_data == previous.config_data
+            return observed
+
+        monkeypatch.setattr(
+            config_lifecycle,
+            "_source_fingerprint_for_published_runtime_config",
+            commit_raw_after_source_observation,
+        )
+
+        assert config_lifecycle._publish_runtime_config_into_app(previous.runtime_config, runtime_paths, api_app)
+
+        committed = raw_commits[0]
+        published = _snapshot(api_app)
+        assert published.runtime_config is previous.runtime_config
+        assert published.revision == committed.revision + 1
+        assert published.generation == committed.generation
+        assert published.source_fingerprint == committed.source_fingerprint
+        assert published.source_files == committed.source_files
+        expected_source_files = {path.resolve()}
+        if includes_file:
+            assert committed.source_files != previous.source_files
+            if adds_include:
+                expected_source_files.add(models_path.resolve())
+        assert published.source_files == frozenset(expected_source_files)
+        assert published.uses_includes is adds_include
+        assert published.config_load_result is not None
+        assert published.config_load_result.uses_includes is adds_include
+        assert path.read_text(encoding="utf-8") == replacement_source
+
+        payload = copy.deepcopy(published.config_data)
+        payload["timezone"] = "Europe/Amsterdam"
+        if adds_include:
+            with pytest.raises(HTTPException) as exc_info:
+                config_lifecycle.replace_committed_config(
+                    _request_for(api_app),
+                    payload,
+                    error_prefix="Failed to save configuration",
+                )
+            assert exc_info.value.status_code == 409
+            assert exc_info.value.detail["code"] == "config_composed_from_includes"
+            assert path.read_text(encoding="utf-8") == replacement_source
+            assert _snapshot(api_app) is published
+        else:
+            config_lifecycle.replace_committed_config(
+                _request_for(api_app),
+                payload,
+                error_prefix="Failed to save configuration",
+            )
+            assert yaml.safe_load(path.read_text(encoding="utf-8"))["timezone"] == "Europe/Amsterdam"
+
+    @pytest.mark.parametrize(
+        "include_source",
+        [
+            "agents: !include_dir_named entries/\n",
+            "agents: !include_dir_merge_named entries/\n",
+            "defaults:\n  tools: !include_dir_list entries/\n",
+            "defaults:\n  tools: !include_dir_merge_list entries/\n",
+        ],
+    )
+    def test_load_config_records_include_use_without_child_files(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+        include_source: str,
+    ) -> None:
+        """The runtime loader retains tag usage independently of the file count."""
+        path = empty_include_runtime_paths.config_path
+        path.write_text(
+            "models:\n  default: {provider: ollama, id: test-model}\n" + include_source,
+            encoding="utf-8",
+        )
+
+        config = load_config(empty_include_runtime_paths)
+
+        assert config.source_files == frozenset({path.resolve()})
+        assert config.uses_includes is True
+        assert config.source_fingerprint == hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def test_load_endpoint_reports_empty_include(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+    ) -> None:
+        """The dashboard receives the include warning when only the root was read."""
+        main.initialize_api_app(main.app, empty_include_runtime_paths)
+        assert config_lifecycle.load_config_into_app(empty_include_runtime_paths, main.app) is True
+        client = TestClient(main.app)
+
+        response = client.post("/api/config/load")
+
+        assert response.status_code == 200
+        assert response.headers[config_lifecycle.CONFIG_USES_INCLUDES_HEADER] == "true"
+        assert _snapshot(main.app).source_files == frozenset({empty_include_runtime_paths.config_path.resolve()})
+        assert config_lifecycle.config_uses_includes(_request_for(main.app)) is True
+
+    def test_runtime_publication_retains_empty_include(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+    ) -> None:
+        """Publishing a validated runtime config retains its authored topology."""
+        api_app = _make_api_app(empty_include_runtime_paths)
+        config = load_config(empty_include_runtime_paths)
+
+        assert config_lifecycle._publish_runtime_config_into_app(config, empty_include_runtime_paths, api_app) is True
+
+        assert config_lifecycle.config_uses_includes(_request_for(api_app)) is True
+        assert _snapshot(api_app).source_files == frozenset({empty_include_runtime_paths.config_path.resolve()})
+
+    @pytest.mark.parametrize("replace", [False, True], ids=["mutation", "replacement"])
+    def test_structured_save_preserves_empty_include(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+        replace: bool,
+    ) -> None:
+        """Both API structured save paths refuse to erase an empty directory tag."""
+        api_app = _make_api_app(empty_include_runtime_paths)
+        assert config_lifecycle.load_config_into_app(empty_include_runtime_paths, api_app) is True
+        before = _snapshot(api_app)
+        source = empty_include_runtime_paths.config_path.read_bytes()
+
+        if replace:
+            with pytest.raises(HTTPException) as exc_info:
+                config_lifecycle.replace_committed_config(
+                    _request_for(api_app),
+                    copy.deepcopy(before.config_data),
+                    error_prefix="Failed to save configuration",
+                )
+        else:
+            with pytest.raises(HTTPException) as exc_info:
+                config_lifecycle.write_committed_config(
+                    _request_for(api_app),
+                    lambda config: config.setdefault("defaults", {}).update({"markdown": False}),
+                    error_prefix="Failed to save configuration",
+                )
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail["code"] == "config_composed_from_includes"
+        assert empty_include_runtime_paths.config_path.read_bytes() == source
+        assert _snapshot(api_app) is before
+
+    @pytest.mark.parametrize("committed", [False, True], ids=["disk-only", "committed"])
+    def test_external_writer_preserves_empty_include(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+        committed: bool,
+    ) -> None:
+        """External structured writes protect both parsed and committed include metadata."""
+        api_app = _make_api_app(empty_include_runtime_paths)
+        if committed:
+            assert config_lifecycle.load_config_into_app(empty_include_runtime_paths, api_app) is True
+        source = empty_include_runtime_paths.config_path.read_bytes()
+        config = load_config(empty_include_runtime_paths)
+
+        with pytest.raises(config_lifecycle._ConfigComposedFromIncludesError, match="!include"):
+            config_lifecycle.validate_and_persist_config_payload(
+                config.authored_model_dump(),
+                empty_include_runtime_paths,
+            )
+
+        assert empty_include_runtime_paths.config_path.read_bytes() == source
+
+    def test_raw_save_updates_empty_include_metadata(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+    ) -> None:
+        """Raw saves add and remove the guard, with matching follow-up reload metadata."""
+        path = empty_include_runtime_paths.config_path
+        include_source = path.read_text(encoding="utf-8")
+        monolith_source = "models:\n  default: {provider: ollama, id: test-model}\n"
+        path.write_text(monolith_source, encoding="utf-8")
+        api_app = _make_api_app(empty_include_runtime_paths)
+        assert config_lifecycle.load_config_into_app(empty_include_runtime_paths, api_app) is True
+
+        config_lifecycle.replace_raw_config_source(
+            _request_for(api_app),
+            include_source,
+            error_prefix="Failed to save raw configuration",
+        )
+
+        assert path.read_text(encoding="utf-8") == include_source
+        assert config_lifecycle.config_uses_includes(_request_for(api_app)) is True
+        generation = _snapshot(api_app).generation
+        assert config_lifecycle.load_config_into_app(empty_include_runtime_paths, api_app) is True
+        assert _snapshot(api_app).generation == generation
+        assert config_lifecycle.config_uses_includes(_request_for(api_app)) is True
+
+        config_lifecycle.replace_raw_config_source(
+            _request_for(api_app),
+            monolith_source,
+            error_prefix="Failed to save raw configuration",
+        )
+
+        assert config_lifecycle.config_uses_includes(_request_for(api_app)) is False
+        config_lifecycle.replace_committed_config(
+            _request_for(api_app),
+            copy.deepcopy(_snapshot(api_app).config_data),
+            error_prefix="Failed to save configuration",
+        )
+
+    @pytest.mark.parametrize("broken_source", ["agents: [broken\n", "agents: [invalid]\n"])
+    def test_failed_reload_retains_empty_include_guard(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+        broken_source: str,
+    ) -> None:
+        """A failed replacement load cannot clear the last committed include guard."""
+        api_app = _make_api_app(empty_include_runtime_paths)
+        assert config_lifecycle.load_config_into_app(empty_include_runtime_paths, api_app) is True
+        payload = copy.deepcopy(_snapshot(api_app).config_data)
+        empty_include_runtime_paths.config_path.write_text(broken_source, encoding="utf-8")
+
+        assert config_lifecycle.load_config_into_app(empty_include_runtime_paths, api_app) is False
+        assert config_lifecycle.config_uses_includes(_request_for(api_app)) is True
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.replace_committed_config(
+                _request_for(api_app),
+                payload,
+                error_prefix="Failed to save configuration",
+            )
+
+        assert exc_info.value.status_code == 409
+        assert empty_include_runtime_paths.config_path.read_text(encoding="utf-8") == broken_source
+
+    @pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+    @pytest.mark.parametrize("invalid_disk", [False, True], ids=["valid-new-source", "invalid-new-source"])
+    def test_runtime_publication_cannot_erase_new_disk_include_guard(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+        write_kind: str,
+        invalid_disk: bool,
+    ) -> None:
+        """Publishing an older monolith must preserve includes observed in newer disk bytes."""
+        runtime_paths = empty_include_runtime_paths
+        path = runtime_paths.config_path
+        included_source = path.read_text(encoding="utf-8") + "defaults:\n  markdown: false\n"
+        if invalid_disk:
+            included_source = included_source.replace("markdown: false", "markdown: [invalid]")
+        path.write_text(
+            "models:\n  default: {provider: ollama, id: test-model}\nagents: {}\ndefaults:\n  markdown: true\n",
+            encoding="utf-8",
+        )
+        api_app = _make_api_app(runtime_paths)
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        previous = _snapshot(api_app)
+        assert previous.runtime_config is not None
+        assert previous.uses_includes is False
+        path.write_text(included_source, encoding="utf-8")
+
+        assert config_lifecycle._publish_runtime_config_into_app(previous.runtime_config, runtime_paths, api_app)
+        assert _snapshot(api_app).config_data == previous.config_data
+
+        payload = copy.deepcopy(previous.config_data)
+        if write_kind == "external":
+            with pytest.raises(config_lifecycle._ConfigComposedFromIncludesError, match="!include"):
+                config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+        else:
+            if write_kind == "replacement":
+                with pytest.raises(HTTPException) as exc_info:
+                    config_lifecycle.replace_committed_config(
+                        _request_for(api_app),
+                        payload,
+                        error_prefix="Failed to save configuration",
+                    )
+            else:
+                with pytest.raises(HTTPException) as exc_info:
+                    config_lifecycle.write_committed_config(
+                        _request_for(api_app),
+                        lambda config: config["defaults"].update({"markdown": False}),
+                        error_prefix="Failed to save configuration",
+                    )
+            assert exc_info.value.status_code == 409
+            assert exc_info.value.detail["code"] == "config_composed_from_includes"
+
+        published = _snapshot(api_app)
+        assert published.uses_includes is True
+        assert published.config_load_result is not None
+        assert published.config_load_result.uses_includes is True
+        assert path.read_text(encoding="utf-8") == included_source
+
+    def test_reinitialization_retains_only_matching_runtime_include_metadata(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+        tmp_path: Path,
+    ) -> None:
+        """Rebinding the same runtime keeps the guard; a different runtime starts fresh."""
+        api_app = _make_api_app(empty_include_runtime_paths)
+        assert config_lifecycle.load_config_into_app(empty_include_runtime_paths, api_app) is True
+
+        main.initialize_api_app(api_app, empty_include_runtime_paths)
+        assert config_lifecycle.config_uses_includes(_request_for(api_app)) is True
+
+        other_runtime = constants.resolve_primary_runtime_paths(
+            config_path=tmp_path / "other.yaml",
+            storage_path=tmp_path / "other-storage",
+            process_env={},
+        )
+        main.initialize_api_app(api_app, other_runtime)
+        assert config_lifecycle.config_uses_includes(_request_for(api_app)) is False
+
+    @pytest.mark.parametrize("loader", ["runtime", "cli", "api"])
+    def test_access_migration_preserves_empty_include(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+        loader: str,
+    ) -> None:
+        """Every source-loading migration entry point rejects without writing a backup."""
+        path = empty_include_runtime_paths.config_path
+        source = path.read_bytes() + b"authorization:\n  global_users: ['@owner:example.com']\n"
+        path.write_bytes(source)
+        if loader == "api":
+            api_app = _make_api_app(empty_include_runtime_paths)
+            assert config_lifecycle.load_config_into_app(empty_include_runtime_paths, api_app) is False
+            result = _snapshot(api_app).config_load_result
+            assert result is not None
+            assert result.error_status_code == 422
+            assert "does not support !include" in str(result.error_detail)
+            assert config_lifecycle.config_uses_includes(_request_for(api_app)) is True
+        elif loader == "runtime":
+            with pytest.raises(AccessMigrationError, match="does not support !include"):
+                load_config(empty_include_runtime_paths)
+        else:
+            with pytest.raises(AccessMigrationError, match="does not support !include"):
+                validate_config_source_quiet(empty_include_runtime_paths, source=source, original=source)
+
+        assert path.read_bytes() == source
+        assert not path.with_name(f"{path.name}.pre-membership-access").exists()
+
+    def test_raw_access_migration_preserves_empty_include(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+    ) -> None:
+        """Raw source validation rejects legacy access before replacing the authored root."""
+        path = empty_include_runtime_paths.config_path
+        source = path.read_text(encoding="utf-8")
+        api_app = _make_api_app(empty_include_runtime_paths)
+        assert config_lifecycle.load_config_into_app(empty_include_runtime_paths, api_app) is True
+
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.replace_raw_config_source(
+                _request_for(api_app),
+                source + "authorization:\n  global_users: ['@owner:example.com']\n",
+                error_prefix="Failed to save raw configuration",
+            )
+
+        assert exc_info.value.status_code == 422
+        assert "does not support !include" in str(exc_info.value.detail)
+        assert path.read_text(encoding="utf-8") == source
+        assert not path.with_name(f"{path.name}.pre-membership-access").exists()
+
+
+@pytest.mark.parametrize(
+    "failing_source",
+    [
+        pytest.param(None, id="valid"),
+        pytest.param("agents: !include missing.yaml\n", id="missing-file"),
+        pytest.param("agents: !include broken.yaml\n", id="malformed-child"),
+        pytest.param("agents: !include_dir_merge_named missing/\n", id="missing-directory"),
+        pytest.param(
+            "teams: !include_dir_merge_named entries/\ndefaults: [broken\n",
+            id="malformed-root",
+        ),
+        pytest.param("agents: !include /outside.yaml\n", id="absolute-path"),
+        pytest.param("agents: !include ../outside.yaml\n", id="escaping-path"),
+        pytest.param("agents: !include .hidden.yaml\n", id="hidden-path"),
+        pytest.param("agents: !include [unexpected]\n", id="non-scalar-path"),
+        pytest.param("agents: !expand missing.yaml\n", id="misplaced-expand"),
+        pytest.param("agents: !<!include> missing.yaml\ndefaults: [broken\n", id="verbatim-tag"),
+        pytest.param(
+            "%TAG !cfg! !\n---\nagents: !cfg!include missing.yaml\ndefaults: [broken\n",
+            id="tag-directive",
+        ),
+    ],
+)
+@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+def test_structured_writes_recheck_includes_before_watcher_reload(
+    stale_monolith_app: FastAPI,
+    write_kind: str,
+    failing_source: str | None,
+) -> None:
+    """Unpublished include topology must protect every structured writer."""
+    before = _snapshot(stale_monolith_app)
+    runtime_paths = before.runtime_paths
+    payload = load_config(runtime_paths).authored_model_dump()
+    payload["timezone"] = "Europe/Amsterdam"
+    if failing_source is not None:
+        runtime_paths.config_path.with_name("broken.yaml").write_text("operator: [broken\n", encoding="utf-8")
+        runtime_paths.config_path.write_text(failing_source, encoding="utf-8")
+        with pytest.raises(yaml.YAMLError):
+            load_config(runtime_paths)
+    source = runtime_paths.config_path.read_bytes()
+
+    if write_kind == "external":
+        with pytest.raises(config_lifecycle._ConfigComposedFromIncludesError, match="!include"):
+            config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+    else:
+        writer = (
+            config_lifecycle.write_committed_config
+            if write_kind == "mutation"
+            else config_lifecycle.replace_committed_config
+        )
+        update = (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
+        with pytest.raises(HTTPException) as exc_info:
+            writer(_request_for(stale_monolith_app), update, error_prefix="Failed to save configuration")
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail["code"] == "config_composed_from_includes"
+
+    assert runtime_paths.config_path.read_bytes() == source
+    assert _snapshot(stale_monolith_app) is before
+    assert not runtime_paths.config_path.with_suffix(".yaml.tmp").exists()
+
+
+@pytest.mark.parametrize(
+    "broken_source",
+    [
+        pytest.param("agents: [broken\n", id="plain"),
+        pytest.param("# agents: !include missing.yaml\nagents: [broken\n", id="comment"),
+        pytest.param("timezone: '!include missing.yaml'\nagents: [broken\n", id="single-quoted"),
+        pytest.param('timezone: "!expand missing.yaml"\nagents: [broken\n', id="double-quoted"),
+        pytest.param("role: |\n  !include missing.yaml\nagents: [broken\n", id="block-scalar"),
+    ],
+)
+@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+def test_structured_writes_recover_broken_monolith_before_watcher_reload(
+    stale_monolith_app: FastAPI,
+    write_kind: str,
+    broken_source: str,
+) -> None:
+    """A parse failure without include evidence must remain recoverable."""
+    before = _snapshot(stale_monolith_app)
+    runtime_paths = before.runtime_paths
+    runtime_paths.config_path.write_text(broken_source, encoding="utf-8")
+    payload = copy.deepcopy(before.config_data)
+    payload["timezone"] = "Europe/Amsterdam"
+
+    if write_kind == "external":
+        config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+    else:
+        writer = (
+            config_lifecycle.write_committed_config
+            if write_kind == "mutation"
+            else config_lifecycle.replace_committed_config
+        )
+        update = (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
+        writer(_request_for(stale_monolith_app), update, error_prefix="Failed to save configuration")
+
+    after = _snapshot(stale_monolith_app)
+    assert after.revision == before.revision + 1
+    assert after.uses_includes is False
+    assert after.config_data["timezone"] == "Europe/Amsterdam"
+    assert load_config(runtime_paths).timezone == "Europe/Amsterdam"
+
+
+@pytest.mark.parametrize("operation", ["agent-create", "agent-update", "team-create", "config-patch"])
+def test_config_tools_preserve_new_includes_before_watcher_reload(
+    stale_monolith_app: FastAPI,
+    operation: str,
+) -> None:
+    """Authorized tools must preserve newly authored include source."""
+    before = _snapshot(stale_monolith_app)
+    runtime_paths = before.runtime_paths
+    source = runtime_paths.config_path.read_bytes()
+    config = load_config(runtime_paths)
+    manager = ConfigManagerTools(runtime_paths)
+    context = make_test_tool_runtime_context(
+        agent_name="operator",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id="$thread",
+            reply_to_event_id="$request",
+        ),
+        requester_id="@admin:example.org",
+        client=make_matrix_client_mock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_reader=make_conversation_reader_mock(),
+        relations=make_relation_lookup(),
+    )
+    with tool_runtime_context(context):
+        if operation == "agent-create":
+            result = manager.manage_agent(
+                operation="create",
+                agent_name="new_agent",
+                display_name="New Agent",
+                role="New role",
+            )
+        elif operation == "agent-update":
+            result = manager.manage_agent(operation="update", agent_name="operator", role="Updated role")
+        elif operation == "team-create":
+            result = manager.manage_team(
+                team_name="reviewers",
+                display_name="Reviewers",
+                role="Review",
+                agents=["operator"],
+            )
+        else:
+            result = manager.manage_config(
+                operation="patch",
+                changes=[{"op": "replace", "path": "/agents/operator/role", "value": "Updated role"}],
+            )
+
+    assert "!include" in result
+    assert "Changes were NOT applied." in result
+    assert runtime_paths.config_path.read_bytes() == source
+    assert _snapshot(stale_monolith_app) is before
+    (runtime_paths.config_path.parent / "entries" / "late_team.yaml").write_text(
+        "late_team: {display_name: Late Team, role: Later addition, agents: [operator]}\n",
+        encoding="utf-8",
+    )
+    assert "late_team" in load_config(runtime_paths).teams
+
+
+@pytest.mark.asyncio
+async def test_confirmed_config_change_preserves_new_includes_before_watcher_reload(
+    stale_monolith_app: FastAPI,
+) -> None:
+    """Confirmed command persistence must honor unpublished include topology."""
+    before = _snapshot(stale_monolith_app)
+    source = before.runtime_paths.config_path.read_bytes()
+
+    result = await apply_config_change("agents.operator.role", "Updated role", before.runtime_paths)
+
+    assert "!include" in result
+    assert "Changes were NOT applied." in result
+    assert before.runtime_paths.config_path.read_bytes() == source
+    assert _snapshot(stale_monolith_app) is before
+
+
+@pytest.mark.parametrize(
+    "broken_source",
+    [
+        pytest.param(b'timezone: "\\q"\nagents: !include missing.yaml\n', id="scanner-before-include"),
+        pytest.param(b'timezone: "\\q"\nagents: {}\n', id="scanner-monolith"),
+        pytest.param(b"# \xff\nagents: !include missing.yaml\n", id="unicode-before-include"),
+        pytest.param(b"# \xff\nagents: {}\n", id="unicode-monolith"),
+    ],
+)
+@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+def test_structured_writes_preserve_unknown_source_topology_before_watcher_reload(
+    stale_monolith_app: FastAPI,
+    write_kind: str,
+    broken_source: bytes,
+) -> None:
+    """Incomplete scans require source editing, even without a tag observed yet."""
+    before = _snapshot(stale_monolith_app)
+    runtime_paths = before.runtime_paths
+    runtime_paths.config_path.write_bytes(broken_source)
+    payload = copy.deepcopy(before.config_data)
+    payload["timezone"] = "Europe/Amsterdam"
+
+    if write_kind == "external":
+        with pytest.raises(config_lifecycle.ConfigRuntimeValidationError, match="could not determine"):
+            config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+    else:
+        writer = (
+            config_lifecycle.write_committed_config
+            if write_kind == "mutation"
+            else config_lifecycle.replace_committed_config
+        )
+        update = (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
+        with pytest.raises(HTTPException) as exc_info:
+            writer(_request_for(stale_monolith_app), update, error_prefix="Failed to save configuration")
+        assert exc_info.value.status_code == 422
+        assert "could not determine" in str(exc_info.value.detail)
+        assert "edit the source files instead" in str(exc_info.value.detail)
+
+    assert runtime_paths.config_path.read_bytes() == broken_source
+    assert _snapshot(stale_monolith_app) is before
+    assert not runtime_paths.config_path.with_suffix(".yaml.tmp").exists()
+
+    config_lifecycle.replace_raw_config_source(
+        _request_for(stale_monolith_app),
+        yaml.safe_dump(payload),
+        error_prefix="Failed to save raw configuration",
+    )
+    assert load_config(runtime_paths).timezone == "Europe/Amsterdam"
+    assert _snapshot(stale_monolith_app).uses_includes is False
+
+
+@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+def test_structured_writes_preserve_unreadable_existing_source(
+    stale_monolith_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    write_kind: str,
+) -> None:
+    """An unreadable existing root is not evidence that flattening is safe."""
+    before = _snapshot(stale_monolith_app)
+    runtime_paths = before.runtime_paths
+    path = runtime_paths.config_path
+    source = b"agents: !include missing.yaml\n"
+    path.write_bytes(source)
+    payload = copy.deepcopy(before.config_data)
+    payload["timezone"] = "Europe/Amsterdam"
+    original_read = Path.read_bytes
+
+    def deny_root_read(candidate: Path) -> bytes:
+        if candidate == path:
+            message = "Config root is temporarily unreadable"
+            raise PermissionError(message)
+        return original_read(candidate)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", deny_root_read)
+        if write_kind == "external":
+            with pytest.raises(config_lifecycle.ConfigRuntimeValidationError, match="could not determine"):
+                config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+        else:
+            writer = (
+                config_lifecycle.write_committed_config
+                if write_kind == "mutation"
+                else config_lifecycle.replace_committed_config
+            )
+            update = (
+                (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
+            )
+            with pytest.raises(HTTPException) as exc_info:
+                writer(_request_for(stale_monolith_app), update, error_prefix="Failed to save configuration")
+            assert exc_info.value.status_code == 422
+            assert "could not determine" in str(exc_info.value.detail)
+
+    assert path.read_bytes() == source
+    assert _snapshot(stale_monolith_app) is before
+
+
+@pytest.mark.parametrize("initial_snapshot", ["fresh", "monolith"])
+@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+def test_runtime_publication_preserves_incoming_includes_without_disk_source(
+    empty_include_runtime_paths: constants.RuntimePaths,
+    initial_snapshot: str,
+    write_kind: str,
+) -> None:
+    """A loaded runtime config must retain include evidence if its root disappears."""
+    runtime_paths = empty_include_runtime_paths
+    path = runtime_paths.config_path
+    include_source = path.read_text(encoding="utf-8")
+    api_app = _make_api_app(runtime_paths)
+    if initial_snapshot == "monolith":
+        path.write_text(
+            include_source.replace("agents: !include_dir_merge_named entries/", "agents: {}"),
+            encoding="utf-8",
+        )
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        path.write_text(include_source, encoding="utf-8")
+    assert _snapshot(api_app).uses_includes is not True
+    incoming = load_config(runtime_paths)
+    assert incoming.uses_includes is True
+    path.unlink()
+
+    assert config_lifecycle._publish_runtime_config_into_app(incoming, runtime_paths, api_app) is True
+    published = _snapshot(api_app)
+    assert published.runtime_config is incoming
+    assert published.uses_includes is True
+    assert published.config_load_result is not None
+    assert published.config_load_result.uses_includes is True
+    payload = incoming.authored_model_dump()
+    payload["timezone"] = "Europe/Amsterdam"
+    if write_kind == "external":
+        with pytest.raises(config_lifecycle._ConfigComposedFromIncludesError, match="!include"):
+            config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+    else:
+        writer = (
+            config_lifecycle.write_committed_config
+            if write_kind == "mutation"
+            else config_lifecycle.replace_committed_config
+        )
+        update = (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
+        with pytest.raises(HTTPException) as exc_info:
+            writer(_request_for(api_app), update, error_prefix="Failed to save configuration")
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail["code"] == "config_composed_from_includes"
+    assert not path.exists()
+    assert _snapshot(api_app) is published
+
+
+def test_newer_raw_removal_overrides_incoming_include_evidence_after_failed_read(
+    empty_include_runtime_paths: constants.RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raw commit during publication owns topology even when its payload is unchanged."""
+    runtime_paths = empty_include_runtime_paths
+    path = runtime_paths.config_path
+    incoming = load_config(runtime_paths)
+    monolith_source = path.read_text(encoding="utf-8").replace(
+        "agents: !include_dir_merge_named entries/",
+        "agents: {}",
+    )
+    api_app = _make_api_app(runtime_paths)
+    path.write_text(monolith_source, encoding="utf-8")
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+    assert _snapshot(api_app).config_data == incoming.authored_model_dump()
+    path.unlink()
+    observe_source = config_lifecycle._source_fingerprint_for_published_runtime_config
+    raw_commits: list[config_lifecycle.ApiSnapshot] = []
+
+    def commit_raw_after_failed_read(
+        paths: constants.RuntimePaths,
+        payload: dict[str, Any],
+    ) -> tuple[str, frozenset[Path] | None, bool | None]:
+        observed = observe_source(paths, payload)
+        assert observed[2] is None
+        config_lifecycle.replace_raw_config_source(
+            _request_for(api_app),
+            monolith_source,
+            error_prefix="Failed to save raw configuration",
+        )
+        raw_commits.append(_snapshot(api_app))
+        return observed
+
+    monkeypatch.setattr(
+        config_lifecycle,
+        "_source_fingerprint_for_published_runtime_config",
+        commit_raw_after_failed_read,
+    )
+    assert config_lifecycle._publish_runtime_config_into_app(incoming, runtime_paths, api_app) is True
+    committed = raw_commits[0]
+    published = _snapshot(api_app)
+    assert published.uses_includes is False
+    assert published.source_fingerprint == committed.source_fingerprint
+    assert published.source_files == committed.source_files
+    assert published.config_load_result is not None
+    assert published.config_load_result.uses_includes is False
+    assert path.read_text(encoding="utf-8") == monolith_source
+    config_lifecycle.replace_committed_config(
+        _request_for(api_app),
+        copy.deepcopy(published.config_data),
+        error_prefix="Failed to save configuration",
+    )
+
+
 class TestIncludeAwareSnapshots:
     """Committed snapshots track the full source-file set and its fingerprint."""
+
+    def test_expand_only_config_tracks_sources_and_blocks_structured_saves(self, tmp_path: Path) -> None:
+        """Expansion alone activates fingerprints and protects shared source files."""
+        config_path = tmp_path / "config.yaml"
+        source = "models:\n  default: {provider: ollama, id: test-model}\ndefaults:\n  tools: [!expand tools.yaml]\n"
+        config_path.write_text(source, encoding="utf-8")
+        shared = tmp_path / "tools.yaml"
+        shared.write_text("- calculator\n", encoding="utf-8")
+        runtime_paths = constants.resolve_primary_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path / "storage",
+            process_env={},
+        )
+        api_app = _make_api_app(runtime_paths)
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        before = _snapshot(api_app)
+        assert before.source_files == frozenset({config_path.resolve(), shared.resolve()})
+        assert config_lifecycle.config_uses_includes(_request_for(api_app)) is True
+
+        shared.write_text("- file\n", encoding="utf-8")
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        after = _snapshot(api_app)
+        assert after.source_fingerprint != before.source_fingerprint
+        assert after.config_data["defaults"]["tools"] == ["file"]
+
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.replace_committed_config(
+                _request_for(api_app),
+                copy.deepcopy(after.config_data),
+                error_prefix="Failed to save configuration",
+            )
+
+        assert exc_info.value.status_code == 409
+        assert config_path.read_text(encoding="utf-8") == source
+        assert shared.read_text(encoding="utf-8") == "- file\n"
 
     def test_load_publishes_source_files_and_multi_file_fingerprint(self, split_app: FastAPI) -> None:
         """Loading an include-based config records every source file in the snapshot."""
@@ -130,6 +1032,31 @@ class TestIncludeAwareSnapshots:
         snapshot = _snapshot(api_app)
         assert snapshot.source_fingerprint == hashlib.sha256(config_path.read_bytes()).hexdigest()
         assert snapshot.source_files == frozenset({config_path.resolve()})
+
+    def test_api_load_rejects_access_migration_with_include(self, tmp_path: Path) -> None:
+        """The API loader must leave every source untouched when legacy access uses includes."""
+        config_path = tmp_path / "config.yaml"
+        authorization_path = tmp_path / "authorization.yaml"
+        config_source = "authorization: !include authorization.yaml\n"
+        authorization_source = "global_users:\n  - '@owner:example.com'\n"
+        config_path.write_text(config_source, encoding="utf-8")
+        authorization_path.write_text(authorization_source, encoding="utf-8")
+        runtime_paths = constants.resolve_primary_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path / "storage",
+            process_env={},
+        )
+        api_app = _make_api_app(runtime_paths)
+
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is False
+
+        result = _snapshot(api_app).config_load_result
+        assert result is not None
+        assert result.error_status_code == 422
+        assert "does not support !include" in str(result.error_detail)
+        assert config_path.read_text(encoding="utf-8") == config_source
+        assert authorization_path.read_text(encoding="utf-8") == authorization_source
+        assert not config_path.with_name(f"{config_path.name}.pre-membership-access").exists()
 
     def test_fingerprint_changes_when_included_file_changes(self, split_app: FastAPI) -> None:
         """Editing only an included file changes the fingerprint and bumps the generation."""
@@ -386,6 +1313,28 @@ class TestRawSourceWithIncludes:
         assert exc_info.value.status_code == 422
         assert _snapshot(split_app).runtime_paths.config_path.read_text(encoding="utf-8") == top_before
 
+    def test_raw_replace_rejects_access_migration_with_include(self, split_app: FastAPI) -> None:
+        """The raw editor must reject rather than persist a legacy split configuration."""
+        snapshot = _snapshot(split_app)
+        authorization_path = snapshot.runtime_paths.config_path.parent / "authorization.yaml"
+        authorization_path.write_text("global_users:\n  - '@owner:example.com'\n", encoding="utf-8")
+        top_before = snapshot.runtime_paths.config_path.read_text(encoding="utf-8")
+        source = f"{top_before}authorization: !include authorization.yaml\n"
+
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.replace_raw_config_source(
+                _request_for(split_app),
+                source,
+                error_prefix="Failed to save raw configuration",
+            )
+
+        assert exc_info.value.status_code == 422
+        assert "does not support !include" in str(exc_info.value.detail)
+        assert snapshot.runtime_paths.config_path.read_text(encoding="utf-8") == top_before
+        assert not snapshot.runtime_paths.config_path.with_name(
+            f"{snapshot.runtime_paths.config_path.name}.pre-membership-access",
+        ).exists()
+
     def test_raw_replace_with_monolith_reenables_structured_saves(self, split_app: FastAPI) -> None:
         """Collapsing back to one file through the raw editor re-enables structured saves."""
         monolith_source = yaml.dump(copy.deepcopy(_snapshot(split_app).config_data))
@@ -543,3 +1492,97 @@ async def test_watch_config_recovers_after_fixing_a_broken_new_include(
 
     stop_event.set()
     await watch_task
+
+
+@pytest.mark.asyncio
+async def test_watched_config_mtimes_retries_when_snapshot_changes_during_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    split_app: FastAPI,
+    tmp_path: Path,
+) -> None:
+    """A completed scan must belong to the snapshot returned with it."""
+    replacement_config_path = _write_split_config(tmp_path / "replacement")
+    replacement_runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=replacement_config_path,
+        storage_path=tmp_path / "replacement-storage",
+        process_env={},
+    )
+    scanned_paths: list[frozenset[Path]] = []
+
+    async def fake_to_thread(function: Callable[..., object], paths: frozenset[Path]) -> object:
+        scanned_paths.append(paths)
+        if len(scanned_paths) == 1:
+            main.initialize_api_app(split_app, replacement_runtime_paths)
+        return function(paths)
+
+    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
+
+    runtime_paths, mtimes = await main._watched_config_mtimes(split_app)
+
+    assert runtime_paths == replacement_runtime_paths
+    assert set(mtimes) == {replacement_config_path}
+    assert len(scanned_paths) == 2
+
+
+@pytest.mark.asyncio
+async def test_watched_config_mtimes_retries_when_same_generation_snapshot_replaces_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    split_app: FastAPI,
+) -> None:
+    """A source-set replacement must invalidate an in-flight scan even without a generation bump."""
+    initial_snapshot = _snapshot(split_app)
+    runtime_config = initial_snapshot.runtime_config
+    assert runtime_config is not None
+    flattened_source = yaml.safe_dump(runtime_config.authored_model_dump(), sort_keys=True)
+    scanned_paths: list[frozenset[Path]] = []
+
+    async def fake_to_thread(function: Callable[..., object], paths: frozenset[Path]) -> object:
+        scanned_paths.append(paths)
+        if len(scanned_paths) == 1:
+            initial_snapshot.runtime_paths.config_path.write_text(flattened_source, encoding="utf-8")
+            assert config_lifecycle._publish_runtime_config_into_app(
+                runtime_config,
+                initial_snapshot.runtime_paths,
+                split_app,
+            )
+            replacement_snapshot = _snapshot(split_app)
+            assert replacement_snapshot is not initial_snapshot
+            assert replacement_snapshot.generation == initial_snapshot.generation
+            assert replacement_snapshot.source_files == frozenset(
+                {initial_snapshot.runtime_paths.config_path.resolve()},
+            )
+        return function(paths)
+
+    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
+
+    runtime_paths, mtimes = await main._watched_config_mtimes(split_app)
+
+    assert runtime_paths == initial_snapshot.runtime_paths
+    assert set(mtimes) == {initial_snapshot.runtime_paths.config_path.resolve()}
+    assert len(scanned_paths) == 2
+
+
+@pytest.mark.asyncio
+async def test_api_config_watcher_scans_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    split_runtime_paths: constants.RuntimePaths,
+) -> None:
+    """The API watcher stats every config source each poll, so it must offload the scan."""
+    main.initialize_api_app(main.app, split_runtime_paths)
+    assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app) is True
+
+    offloaded: list[str] = []
+    stop_event = asyncio.Event()
+
+    async def fake_to_thread(function: Callable[..., object], *args: object, **kwargs: object) -> object:
+        offloaded.append(getattr(function, "__name__", repr(function)))
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
+
+    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
+    await asyncio.sleep(0.05)
+    stop_event.set()
+    await asyncio.wait_for(watch_task, timeout=2)
+
+    assert offloaded.count("paths_mtime_snapshot") >= 2

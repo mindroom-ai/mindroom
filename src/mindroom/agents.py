@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from weakref import WeakValueDictionary
-from zoneinfo import ZoneInfo
 
-from agno.culture.manager import CultureManager
 from agno.db.base import BaseDb, SessionType
 from agno.knowledge.knowledge import Knowledge
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
@@ -24,34 +21,40 @@ from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
+from mindroom.mcp.toolkit import hide_mcp_function_collisions
 from mindroom.openai_tool_search import install_openai_deferred_tool_search, openai_native_tool_search_supported
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
-    resolve_private_requester_scope_root,
 )
+from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
-from mindroom.tool_approval import tool_requires_approval_for_openai_compat
+from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
-    default_worker_routed_tools,
     ensure_tool_registry_loaded,
     get_tool_by_name,
+)
+from mindroom.tool_system.declarations import (
+    MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
+    MATRIX_ROOM_RUNTIME_TOOL_NAMES,
 )
 from mindroom.tool_system.dynamic_toolkits import (
     VisibleToolSurface,
     deferred_tool_catalog_entries,
+    get_loaded_tools_for_session,
     has_deferred_tools,
-    resolve_dynamic_tool_selection,
     suppress_fully_deferred_toolkit_instructions,
     visible_tool_surface,
 )
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
+from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
@@ -60,6 +63,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_agent_owned_path,
     shared_storage_root,
 )
+from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
@@ -74,7 +78,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.agent_knowledge_descriptions import KnowledgeSourceDescription
-    from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
+    from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
     from mindroom.credentials import CredentialsManager
@@ -100,29 +104,30 @@ _PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
 
 
 @dataclass
-class _CachedCultureManager:
-    """Cached culture manager with a signature for invalidation on config changes."""
+class _AdditionalContextChunk:
+    """Chunk of preload context with omission metadata.
 
-    signature: tuple[str, str]
-    manager: CultureManager
+    ``omitted_chars`` records what the preload cap removed from this chunk so
+    the rendered section can tell the model which file was cut and by how much,
+    instead of letting a dropped file vanish without a trace.
+    """
+
+    title: str
+    body: str
+    omitted_chars: int = 0
 
 
 @dataclass(frozen=True)
-class _CultureAgentSettings:
-    """Culture feature flags to apply to the Agent constructor."""
+class _NativeDeferredToolkit:
+    """One authored native-search domain and its projected toolkit owner."""
 
-    add_culture_to_context: bool
-    update_cultural_knowledge: bool
-    enable_agentic_culture: bool
+    domain_name: str
+    toolkit: Toolkit
 
-
-@dataclass
-class _AdditionalContextChunk:
-    """Chunk of preload context with truncation priority metadata."""
-
-    kind: str
-    title: str
-    body: str
+    @property
+    def wire_function_names(self) -> tuple[str, ...]:
+        """Return the owner's functions that survive final surface projection."""
+        return (*self.toolkit.get_functions(), *self.toolkit.get_async_functions())
 
 
 @dataclass(frozen=True)
@@ -133,10 +138,27 @@ class _AgentToolAssembly:
     loaded_tools: tuple[str, ...]
     hidden_toolkits: frozenset[str]
     selected_dynamic_tools: tuple[str, ...]
-    # Wire-level function names to send with defer_loading on the native
-    # server-side tool-search path (Anthropic and OpenAI Responses); empty on
-    # the homegrown dynamic-tools path.
-    deferred_wire_tool_names: frozenset[str]
+    # Toolkits whose surviving functions should use native deferred loading.
+    # Keep the owners rather than a pre-projection name snapshot because final
+    # MCP collision projection may remove a deferred function while preserving
+    # an eager local function with the same wire name.
+    deferred_toolkits: tuple[_NativeDeferredToolkit, ...]
+    local_tool_names: tuple[str, ...]
+    worker_routed_tool_names: tuple[str, ...]
+
+    @property
+    def deferred_tool_names(self) -> tuple[str, ...]:
+        """Return authored native-search domains with a surviving function surface."""
+        return tuple(
+            dict.fromkeys(deferred.domain_name for deferred in self.deferred_toolkits if deferred.wire_function_names),
+        )
+
+    @property
+    def deferred_wire_tool_names(self) -> frozenset[str]:
+        """Return deferred wire names from the final projected toolkit surface."""
+        return frozenset(
+            function_name for deferred in self.deferred_toolkits for function_name in deferred.wire_function_names
+        )
 
 
 @dataclass(frozen=True)
@@ -145,23 +167,6 @@ class _AgentRoleContext:
 
     model_name: str
     role: str
-
-
-@dataclass(frozen=True)
-class _AgentCultureState:
-    """Culture manager and Agent constructor culture flags for one agent instance."""
-
-    manager: CultureManager | None
-    add_culture_to_context: bool | None
-    update_cultural_knowledge: bool
-    enable_agentic_culture: bool
-
-
-_CULTURE_MANAGER_CACHE: dict[tuple[str, str], _CachedCultureManager] = {}
-_PRIVATE_CULTURE_MANAGER_CACHE: WeakValueDictionary[
-    tuple[str, str, tuple[str, str]],
-    CultureManager,
-] = WeakValueDictionary()
 
 
 def show_tool_calls_for_agent(config: Config, agent_name: str) -> bool:
@@ -193,33 +198,13 @@ def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
             _ensure_default_mind_workspace(storage_path)
 
 
-def _get_datetime_context(
-    timezone_str: str,
-    *,
-    datetime_context_template: str,
-) -> str:
-    """Generate current date context for the agent.
-
-    Args:
-        timezone_str: Timezone string (e.g., 'America/New_York', 'UTC')
-        datetime_context_template: Prompt template used for the rendered date context.
-
-    Returns:
-        Formatted string with current date and timezone information
-
-    """
-    tz = ZoneInfo(timezone_str)
-    now = datetime.now(tz)
-
-    date_str = now.strftime("%A, %B %d, %Y")
-    timezone_abbrev = now.tzname() or timezone_str
-
-    return render_prompt_template(
-        datetime_context_template,
-        date_str=date_str,
-        timezone_str=timezone_str,
-        timezone_abbrev=timezone_abbrev,
-    )
+def agent_build_can_overlap_file_memory(agent_name: str, config: Config, storage_path: Path) -> bool:
+    """Return True when it is safe to overlap agent construction with file-memory reads."""
+    agent_config = config.get_agent(agent_name)
+    if not _uses_default_mind_workspace_scaffold(agent_name, agent_config):
+        return True
+    memory_path = agent_workspace_root_path(storage_path, agent_name) / "MEMORY.md"
+    return memory_path.is_file()
 
 
 def _get_mind_runtime_context(agent_name: str, runtime_paths: constants.RuntimePaths) -> str:
@@ -254,9 +239,10 @@ def _load_context_files(
         if resolved_path.is_file():
             body = _read_context_file(resolved_path)
             loaded_parts.append(
+                # The title is the full path so the rendered prompt tells the
+                # model exactly which file on disk each part came from.
                 _AdditionalContextChunk(
-                    kind="personality",
-                    title=resolved_path.name,
+                    title=str(resolved_path),
                     body=body,
                 ),
             )
@@ -270,74 +256,78 @@ def _read_context_file(resolved_path: Path) -> str:
     return resolved_path.read_text(encoding="utf-8").strip()
 
 
-def _render_context_chunks(section_heading: str, chunks: list[_AdditionalContextChunk]) -> str:
-    """Render context chunks into a markdown section."""
-    rendered = [f"### {chunk.title}\n{chunk.body.strip()}" for chunk in chunks if chunk.body.strip()]
+def _render_context_chunk(chunk: _AdditionalContextChunk, *, chunk_marker_template: str) -> str:
+    """Render one chunk under its source path, marking what the cap removed."""
+    body = chunk.body.strip()
+    if not chunk.omitted_chars:
+        return f"### {chunk.title}\n{body}" if body else ""
+    marker = render_prompt_template(
+        chunk_marker_template,
+        title=chunk.title,
+        omitted_chars=chunk.omitted_chars,
+    )
+    return f"### {chunk.title}\n{body}\n{marker}" if body else f"### {chunk.title}\n{marker}"
+
+
+def _render_context_chunks(
+    chunks: list[_AdditionalContextChunk],
+    *,
+    section_heading: str,
+    chunk_marker_template: str,
+) -> str:
+    """Render every chunk that still carries content or an omission marker."""
+    rendered = [
+        block
+        for chunk in chunks
+        if (block := _render_context_chunk(chunk, chunk_marker_template=chunk_marker_template))
+    ]
     if not rendered:
         return ""
     return f"{section_heading}\n" + "\n\n".join(rendered) + "\n\n"
 
 
-def _render_additional_context(
-    personality_chunks: list[_AdditionalContextChunk],
-    *,
-    section_heading: str,
-) -> str:
-    """Render full additional context from personality chunks."""
-    return _render_context_chunks(section_heading, personality_chunks)
-
-
-def _build_preload_truncation_groups(
-    personality_chunks: list[_AdditionalContextChunk],
-) -> list[list[_AdditionalContextChunk]]:
-    """Return truncation groups ordered from least to most critical context."""
-    return [[chunk for chunk in personality_chunks if chunk.kind == "personality"]]
-
-
 def _drop_whole_chunks(
-    groups: list[list[_AdditionalContextChunk]],
-    personality_chunks: list[_AdditionalContextChunk],
+    chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
     *,
-    section_heading: str,
+    render: Callable[[list[_AdditionalContextChunk]], str],
 ) -> int:
     """Drop entire chunk bodies (least critical first) until under the cap."""
     omitted = 0
-    for group in groups:
-        for chunk in group:
-            if (
-                len(_render_additional_context(personality_chunks, section_heading=section_heading))
-                <= max_preload_chars
-            ):
-                return omitted
-            if not chunk.body:
-                continue
-            omitted += len(chunk.body)
-            chunk.body = ""
+    remaining_body_chunks = sum(bool(chunk.body) for chunk in chunks)
+    for chunk in chunks:
+        if len(render(chunks)) <= max_preload_chars:
+            return omitted
+        if not chunk.body:
+            continue
+        if remaining_body_chunks == 1:
+            return omitted
+        omitted += len(chunk.body)
+        chunk.omitted_chars += len(chunk.body)
+        chunk.body = ""
+        remaining_body_chunks -= 1
     return omitted
 
 
 def _trim_chunk_tails(
-    groups: list[list[_AdditionalContextChunk]],
-    personality_chunks: list[_AdditionalContextChunk],
+    chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
     *,
-    section_heading: str,
+    render: Callable[[list[_AdditionalContextChunk]], str],
 ) -> int:
     """Trim from the *end* of chunks to preserve headers/identity at the top."""
     omitted = 0
-    for group in groups:
-        for chunk in group:
-            overflow = (
-                len(_render_additional_context(personality_chunks, section_heading=section_heading)) - max_preload_chars
-            )
+    for chunk in chunks:
+        while chunk.body:
+            overflow = len(render(chunks)) - max_preload_chars
             if overflow <= 0:
                 return omitted
-            if not chunk.body:
-                continue
             remove_count = min(overflow, len(chunk.body))
-            chunk.body = chunk.body[: len(chunk.body) - remove_count].rstrip()
-            omitted += remove_count
+            original_length = len(chunk.body)
+            chunk.body = chunk.body[: original_length - remove_count].rstrip()
+            actual_removed = original_length - len(chunk.body)
+            chunk.omitted_chars += actual_removed
+            omitted += actual_removed
     return omitted
 
 
@@ -347,41 +337,65 @@ def _apply_preload_cap(
     *,
     section_heading: str,
     truncation_marker_template: str,
+    chunk_marker_template: str,
 ) -> tuple[str, int]:
     """Apply hard preload cap with deterministic truncation priority.
 
     Truncation order is by file list order.
     First drops whole chunks, then trims from the *end* of remaining chunks.
+    Every touched file keeps a marker naming it and the chars it lost, so a
+    dropped context file is visible to the model instead of silently missing.
     """
-    rendered = _render_additional_context(personality_chunks, section_heading=section_heading)
+    render = partial(
+        _render_context_chunks,
+        section_heading=section_heading,
+        chunk_marker_template=chunk_marker_template,
+    )
+    rendered = render(personality_chunks)
     if len(rendered) <= max_preload_chars:
         return rendered, 0
 
-    groups = _build_preload_truncation_groups(personality_chunks)
+    # Trim against a budget that already reserves room for the summary marker,
+    # so file bodies cannot consume space required by omission metadata.
+    marker_upper_bound = render_prompt_template(
+        truncation_marker_template,
+        omitted_chars=sum(len(chunk.body) for chunk in personality_chunks),
+    )
+    marker_upper_bound_block = f"\n\n{marker_upper_bound}\n\n"
+    required_marker_chunks = [
+        replace(
+            chunk,
+            body="",
+            omitted_chars=chunk.omitted_chars + len(chunk.body),
+        )
+        for chunk in personality_chunks
+    ]
+    minimum_rendered = render(required_marker_chunks).rstrip("\n") + marker_upper_bound_block
+    if len(minimum_rendered) > max_preload_chars:
+        msg = (
+            f"max_preload_chars={max_preload_chars} cannot fit required context headings and omission markers; "
+            f"at least {len(minimum_rendered)} characters are required"
+        )
+        raise ValueError(msg)
+    trim_budget = max_preload_chars - len(marker_upper_bound_block)
+
     omitted_chars = _drop_whole_chunks(
-        groups,
         personality_chunks,
-        max_preload_chars,
-        section_heading=section_heading,
+        trim_budget,
+        render=render,
     )
     omitted_chars += _trim_chunk_tails(
-        groups,
         personality_chunks,
-        max_preload_chars,
-        section_heading=section_heading,
+        trim_budget,
+        render=render,
     )
 
-    rendered = _render_additional_context(personality_chunks, section_heading=section_heading)
+    rendered = render(personality_chunks)
     if omitted_chars <= 0:
         return rendered, 0
 
     marker = render_prompt_template(truncation_marker_template, omitted_chars=omitted_chars)
     marker_block = f"\n\n{marker}\n\n"
-    budget = max_preload_chars - len(marker_block)
-    if budget <= 0:
-        return marker_block[:max_preload_chars], omitted_chars
-    if len(rendered) > budget:
-        rendered = rendered[len(rendered) - budget :]
     return rendered.rstrip("\n") + marker_block, omitted_chars
 
 
@@ -393,6 +407,7 @@ def _build_additional_context(
     *,
     personality_section_heading: str,
     truncation_marker_template: str,
+    chunk_marker_template: str,
     workspace_context_files: tuple[Path, ...] = (),
     storage_path: Path,
     runtime_paths: constants.RuntimePaths,
@@ -419,6 +434,7 @@ def _build_additional_context(
         max_preload_chars,
         section_heading=personality_section_heading,
         truncation_marker_template=truncation_marker_template,
+        chunk_marker_template=chunk_marker_template,
     )
     if omitted_chars > 0:
         logger.warning(
@@ -494,6 +510,7 @@ def _build_registered_agent_tool(
     routing_agent_is_private: bool,
     execution_identity: ToolExecutionIdentity | None,
     runtime_overrides: dict[str, object] | None,
+    config: Config,
 ) -> Toolkit:
     """Build one registered toolkit using the resolved routing inputs for this agent."""
     worker_target = build_agent_toolkit_worker_target(
@@ -508,6 +525,7 @@ def _build_registered_agent_tool(
         tool_name,
         runtime_paths,
         credentials_manager=credentials_manager,
+        runtime_config=config,
         tool_config_overrides=tool_config_overrides,
         tool_init_overrides=_tool_base_dir_override(
             tool_name,
@@ -543,6 +561,34 @@ def _log_toolkits_without_unique_model_functions(
                     function_names=sorted(function_names),
                 )
             seen_function_names.update(function_names)
+
+
+def _hide_session_mcp_function_collisions(toolkits: list[Toolkit], *, agent_name: str) -> None:
+    """Project MCP functions against the exact session-local tool surface."""
+    for server_id, function_names in hide_mcp_function_collisions(toolkits).items():
+        logger.warning(
+            "Hiding colliding MCP functions from session tool surface",
+            agent=agent_name,
+            server_id=server_id,
+            function_names=list(function_names),
+        )
+
+
+class _MatrixRoomRuntimeToolCollisionError(ValueError):
+    """Raised when another registered tool claims a reserved runtime function."""
+
+
+def _reject_matrix_room_runtime_tool_function_collisions(
+    registered_tool_name: str,
+    toolkit: Toolkit,
+) -> None:
+    """Keep reserved room-runtime functions owned by their registered built-in tool."""
+    reserved_names = set(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
+    function_names = set(toolkit.get_functions()) | set(toolkit.get_async_functions())
+    collisions = sorted(name for name in function_names & reserved_names if registered_tool_name != name)
+    if collisions:
+        msg = f"Tool function name(s) {', '.join(collisions)} are reserved for Matrix room recovery tools."
+        raise _MatrixRoomRuntimeToolCollisionError(msg)
 
 
 def _agent_tool_output_file_policy(
@@ -657,6 +703,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     if tool_name == "delegate":
         # Imported lazily to avoid a circular import through DelegateTools -> create_agent.
         from mindroom.custom_tools import delegate  # noqa: PLC0415
+        from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH  # noqa: PLC0415
 
         if not agent_config.delegate_to:
             logger.warning(
@@ -664,12 +711,12 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 agent=agent_name,
             )
             return None
-        if delegation_depth >= delegate.MAX_DELEGATION_DEPTH:
+        if delegation_depth >= MAX_DELEGATION_DEPTH:
             logger.warning(
                 "Skipping delegate tool because delegation depth limit was reached",
                 agent=agent_name,
                 delegation_depth=delegation_depth,
-                max_delegation_depth=delegate.MAX_DELEGATION_DEPTH,
+                max_delegation_depth=MAX_DELEGATION_DEPTH,
             )
             return None
         return _wrap_direct_agent_toolkit_for_output_files(
@@ -759,6 +806,13 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 agent_name=agent_name,
                 config=config,
                 session_id=session_id,
+                worker_target=build_agent_toolkit_worker_target(
+                    agent_runtime.execution.execution_scope,
+                    agent_name,
+                    is_private=agent_runtime.execution.is_private,
+                    execution_identity=execution_identity,
+                    runtime_paths=runtime_paths,
+                ),
                 stop_after_tool_call=dynamic_tool_continuation,
                 hidden_tool_names=hidden_tool_names,
             ),
@@ -782,6 +836,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         agent_runtime.execution.is_private,
         execution_identity,
         runtime_overrides,
+        config,
     )
 
 
@@ -823,7 +878,85 @@ def resolve_runtime_worker_tools(
 
     if not tool_registry_preloaded:
         ensure_tool_registry_loaded(runtime_paths, config)
-    return default_worker_routed_tools(runtime_tool_names)
+    return [
+        tool_name
+        for tool_name in runtime_tool_names
+        if sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths)
+    ]
+
+
+def _render_tool_execution_environment(
+    *,
+    runtime_paths: constants.RuntimePaths,
+    local_tool_names: tuple[str, ...],
+    worker_routed_tool_names: tuple[str, ...],
+    worker_scope: WorkerScope | None,
+) -> str:
+    """Describe effective per-tool execution routing to the model."""
+
+    def tool_list(names: tuple[str, ...]) -> str:
+        return ", ".join(f"`{name}`" for name in names) if names else "none"
+
+    if not worker_routed_tool_names:
+        if not local_tool_names:
+            return "## Tool Execution Environment\n- No tools are available in this runtime."
+        return (
+            "## Tool Execution Environment\n"
+            f"- All available tools run in the primary MindRoom runtime: {tool_list(local_tool_names)}.\n"
+            "- No tools use a worker runtime."
+        )
+
+    backend = primary_worker_backend_name(runtime_paths)
+    lines = [
+        "## Tool Execution Environment",
+        f"- Local tools (primary MindRoom runtime): {tool_list(local_tool_names)}.",
+        f"- Worker-routed tools: {tool_list(worker_routed_tool_names)}.",
+        f"- Worker backend: `{backend}`.",
+    ]
+    if backend == "static_runner":
+        lines.append(
+            "- Worker reuse: requests use the configured static runner; no per-user or per-agent "
+            "worker state boundary is selected.",
+        )
+    else:
+        scope_description = {
+            None: "one runtime for this agent within the current tenant or account",
+            "shared": "one runtime for this agent, shared by all users",
+            "user": "one runtime for this user, shared across this user's agents",
+            "user_agent": "one runtime used only by this user-agent pair",
+        }[worker_scope]
+        idle_behavior = {
+            "docker": "the container stops",
+            "kubernetes": "the deployment scales to zero",
+        }[backend]
+        lines.extend(
+            (
+                f"- Worker reuse: {scope_description}.",
+                f"- Worker state is reused across turns for that scope. After the configured idle timeout, "
+                f"{idle_behavior}; persisted files and caches remain until an operator deletes that worker state.",
+            ),
+        )
+    lines.append("- Execution location is determined per tool; this agent is not sandboxed as a whole.")
+    return "\n".join(lines)
+
+
+def _registry_tool_routes_through_worker(
+    tool_name: str,
+    *,
+    runtime_paths: constants.RuntimePaths,
+    worker_tools: list[str],
+) -> bool:
+    """Return whether one successfully built registry toolkit uses worker routing."""
+    metadata = TOOL_METADATA.get(tool_name)
+    return (
+        metadata is not None
+        and metadata.factory is not None
+        and sandbox_proxy_enabled_for_tool(
+            tool_name,
+            runtime_paths=runtime_paths,
+            worker_tools_override=worker_tools,
+        )
+    )
 
 
 def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) -> bool:
@@ -903,6 +1036,21 @@ def _build_dynamic_tooling_instruction_block(
     )
 
 
+def _build_native_tool_search_instruction_blocks(
+    config: Config,
+    deferred_tool_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return compact discovery guidance for provider-native deferred tools."""
+    if not deferred_tool_names:
+        return ()
+    return (
+        config.render_prompt(
+            "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE",
+            tool_domains=", ".join(deferred_tool_names),
+        ),
+    )
+
+
 def _build_dynamic_tooling_state_suffix(
     config: Config,
     agent_name: str,
@@ -963,14 +1111,15 @@ def remove_run_by_event_id(
     )
     if session is None or not session.runs:
         return False
-    original_len = len(session.runs)
-    filtered_runs: list[Any] = []
+    removed_runs: list[RunOutput | TeamRunOutput] = []
     matched_run = False
     for run in session.runs:
-        if matched_run and remove_following_runs:
+        if not isinstance(run, (RunOutput, TeamRunOutput)):
             continue
-        if not isinstance(run, (RunOutput, TeamRunOutput)) or not run.metadata:
-            filtered_runs.append(run)
+        if matched_run and remove_following_runs:
+            removed_runs.append(run)
+            continue
+        if not run.metadata:
             continue
         raw_source_event_ids = run.metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
         raw_discovery_event_ids = run.metadata.get(constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY)
@@ -990,6 +1139,13 @@ def remove_run_by_event_id(
             if include_seen_event_ids and isinstance(raw_seen_event_ids, list)
             else []
         )
+        revisions = run.metadata.get(constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY)
+        if include_seen_event_ids and isinstance(revisions, dict):
+            seen_event_ids.extend(
+                revision[1]
+                for revision in revisions.values()
+                if isinstance(revision, list | tuple) and len(revision) == 2 and isinstance(revision[1], str)
+            )
         matches_event_id = run.metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY) == event_id
         if (
             matches_event_id
@@ -998,88 +1154,13 @@ def remove_run_by_event_id(
             or event_id in seen_event_ids
         ):
             matched_run = True
-            continue
-        filtered_runs.append(run)
-    session.runs = filtered_runs
-    if len(session.runs) == original_len:
+            removed_runs.append(run)
+    if not removed_runs:
         return False
-    storage.upsert_session(session)
+    # Team member runs hang off the team run through parent_run_id and go with it.
+    kept = agent_storage.runs_without(session.runs, [run.run_id for run in removed_runs if run.run_id])
+    agent_storage.replace_runs(storage, session, [run for run in kept if not any(run is gone for gone in removed_runs)])
     return True
-
-
-def _resolve_culture_settings(mode: CultureMode) -> _CultureAgentSettings:
-    """Map a culture mode to Agno culture feature flags."""
-    if mode == "automatic":
-        return _CultureAgentSettings(
-            add_culture_to_context=True,
-            update_cultural_knowledge=True,
-            enable_agentic_culture=False,
-        )
-    if mode == "agentic":
-        return _CultureAgentSettings(
-            add_culture_to_context=True,
-            update_cultural_knowledge=False,
-            enable_agentic_culture=True,
-        )
-    return _CultureAgentSettings(
-        add_culture_to_context=True,
-        update_cultural_knowledge=False,
-        enable_agentic_culture=False,
-    )
-
-
-def _culture_signature(culture_config: CultureConfig) -> tuple[str, str]:
-    return (culture_config.mode, culture_config.description)
-
-
-@timed("system_prompt_assembly.agent_create.culture_manager")
-def _resolve_agent_culture(
-    agent_name: str,
-    config: Config,
-    storage_path: Path,
-    model: Model,
-    *,
-    cache_private: bool = False,
-) -> tuple[CultureManager | None, _CultureAgentSettings | None]:
-    """Resolve shared culture manager and feature flags for an agent."""
-    culture_assignment = config.resolve_entity(agent_name).culture
-    if culture_assignment is None:
-        return None, None
-
-    culture_name, culture_config = culture_assignment
-    settings = _resolve_culture_settings(culture_config.mode)
-    cache_key = (str(storage_path.resolve()), culture_name)
-    signature = _culture_signature(culture_config)
-    if cache_private:
-        private_cache_key = (*cache_key, signature)
-        cached_private_manager = _PRIVATE_CULTURE_MANAGER_CACHE.get(private_cache_key)
-        if cached_private_manager is not None:
-            cached_private_manager.model = model
-            return cached_private_manager, settings
-    else:
-        cached_manager = _CULTURE_MANAGER_CACHE.get(cache_key)
-        if cached_manager is not None and cached_manager.signature == signature:
-            cached_manager.manager.model = model
-            return cached_manager.manager, settings
-
-    culture_scope = culture_config.description.strip() or "Shared best practices and principles."
-    culture_manager = CultureManager(
-        model=model,
-        db=agent_storage.create_culture_storage(culture_name, storage_path),
-        culture_capture_instructions=f"Culture '{culture_name}': {culture_scope}",
-        add_knowledge=culture_config.mode != "manual",
-        update_knowledge=culture_config.mode != "manual",
-        delete_knowledge=False,
-        clear_knowledge=False,
-    )
-    if cache_private:
-        _PRIVATE_CULTURE_MANAGER_CACHE[private_cache_key] = culture_manager
-    else:
-        _CULTURE_MANAGER_CACHE[cache_key] = _CachedCultureManager(
-            signature=signature,
-            manager=culture_manager,
-        )
-    return culture_manager, settings
 
 
 @timed("system_prompt_assembly.agent_create.load_plugins")
@@ -1112,38 +1193,6 @@ def _build_agent_tool_hook_bridge(
     )
 
 
-def _prune_openai_incompatible_tools(
-    toolkit: Toolkit,
-    *,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-) -> Toolkit | None:
-    """Hide tools from OpenAI-compatible agents when `/v1` cannot run them."""
-    if execution_identity is None or execution_identity.channel != "openai_compat":
-        return toolkit
-
-    hidden_tool_names = {
-        tool_name
-        for tool_name in (*toolkit.functions, *toolkit.async_functions)
-        if tool_requires_approval_for_openai_compat(config, tool_name)
-    }
-    if not hidden_tool_names:
-        return toolkit
-
-    toolkit.functions = {
-        tool_name: function for tool_name, function in toolkit.functions.items() if tool_name not in hidden_tool_names
-    }
-    toolkit.async_functions = {
-        tool_name: function
-        for tool_name, function in toolkit.async_functions.items()
-        if tool_name not in hidden_tool_names
-    }
-
-    if toolkit.functions or toolkit.async_functions:
-        return toolkit
-    return None
-
-
 def _prune_toolkit_functions(
     toolkit: Toolkit,
     tool_function_filter: Callable[[Function], bool] | None,
@@ -1159,6 +1208,50 @@ def _prune_toolkit_functions(
     return toolkit if toolkit.functions or toolkit.async_functions else None
 
 
+def apply_tool_approval_capability(
+    toolkit: Toolkit | None,
+    config: Config,
+    *,
+    supports_native_tool_approval: bool,
+    registered_tool_name: str | None = None,
+) -> Toolkit | None:
+    """Expose gated functions only where an Agno paused run can be resumed."""
+    if toolkit is None:
+        return None
+
+    def function_may_require_approval(function: Function) -> bool:
+        is_matrix_room_runtime_function = (
+            registered_tool_name == function.name
+            and function.name in MATRIX_ROOM_RUNTIME_TOOL_NAMES
+            and function.approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
+        )
+        return not is_matrix_room_runtime_function and tool_may_require_approval(config, function.name)
+
+    if supports_native_tool_approval:
+        for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
+            if registered_tool_name == "delegate" and function.name in {"run_subagent", "continue_subagent"}:
+                # The delegation driver owns the policy gate and exact child wait.
+                function.external_execution = True
+                function.external_execution_silent = True
+                function.requires_confirmation = False
+                continue
+            if function_may_require_approval(function) and function.requires_confirmation is not True:
+                function.requires_confirmation = True
+                function.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
+        return toolkit
+    toolkit.functions = {
+        name: function
+        for name, function in toolkit.functions.items()
+        if function.requires_confirmation is not True and not function_may_require_approval(function)
+    }
+    toolkit.async_functions = {
+        name: function
+        for name, function in toolkit.async_functions.items()
+        if function.requires_confirmation is not True and not function_may_require_approval(function)
+    }
+    return toolkit if toolkit.functions or toolkit.async_functions else None
+
+
 @timed("system_prompt_assembly.agent_create.dynamic_tool_selection")
 def _resolve_agent_dynamic_tool_selection(
     *,
@@ -1168,6 +1261,8 @@ def _resolve_agent_dynamic_tool_selection(
     delegation_depth: int,
     native_deferred_tools: bool,
     eager_deferred_tools: bool,
+    include_matrix_room_runtime_tools: bool,
+    required_tool_names: tuple[str, ...],
 ) -> VisibleToolSurface:
     if native_deferred_tools or eager_deferred_tools:
         # Attach every authored deferred tool and skip the dynamic-tools
@@ -1178,12 +1273,23 @@ def _resolve_agent_dynamic_tool_selection(
             loaded_tools=_visible_deferred_tool_names(config, agent_name),
             delegation_depth=delegation_depth,
             enable_dynamic_tools_manager=False,
+            include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
         )
-    return resolve_dynamic_tool_selection(
+    loaded_tools = (
+        [
+            *get_loaded_tools_for_session(agent_name=agent_name, config=config, session_id=session_id),
+            *required_tool_names,
+        ]
+        if required_tool_names
+        else None
+    )
+    return visible_tool_surface(
         agent_name=agent_name,
         config=config,
         session_id=session_id,
+        loaded_tools=loaded_tools,
         delegation_depth=delegation_depth,
+        include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
     )
 
 
@@ -1261,6 +1367,7 @@ def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
         "Callable[[Function], bool] | None",
         agent_kwargs.pop("tool_function_filter", None),
     )
+    install_message_builder_patch()
     agent = Agent(**agent_kwargs)
     agent.knowledge_sources = knowledge_sources
     agent.tool_function_filter = tool_function_filter
@@ -1269,6 +1376,12 @@ def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
 
 def _agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
+
+
+def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
+    """Attach the configured toolkit identity to its executable functions."""
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = authored_name
 
 
 def _assemble_agent_toolkits(
@@ -1286,8 +1399,10 @@ def _assemble_agent_toolkits(
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     dynamic_tool_continuation: bool,
+    supports_native_tool_approval: bool,
     native_deferred_tools: bool,
     eager_deferred_tools: bool,
+    required_tool_names: tuple[str, ...],
 ) -> _AgentToolAssembly:
     """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
     plugins = _load_agent_plugins(config, runtime_paths)
@@ -1304,6 +1419,11 @@ def _assemble_agent_toolkits(
     )
     # Dynamic tool state is keyed by agent and session scope, so team members
     # sharing one Matrix thread do not leak loaded tools across agents.
+    include_matrix_room_runtime_tools = (
+        execution_identity is not None
+        and execution_identity.channel == "matrix"
+        and execution_identity.room_id is not None
+    )
     dynamic_tool_selection = _resolve_agent_dynamic_tool_selection(
         agent_name=agent_name,
         config=config,
@@ -1311,6 +1431,8 @@ def _assemble_agent_toolkits(
         delegation_depth=delegation_depth,
         native_deferred_tools=native_deferred_tools,
         eager_deferred_tools=eager_deferred_tools,
+        include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
+        required_tool_names=required_tool_names,
     )
     hidden_toolkits = _context_hidden_toolkits(execution_identity)
     resolved_tool_configs = {entry.name: entry for entry in dynamic_tool_selection.runtime_tool_configs}
@@ -1345,7 +1467,9 @@ def _assemble_agent_toolkits(
         )
     entity_view = config.resolve_entity(agent_name)
     tools: list[Toolkit] = []
-    deferred_wire_tool_names: set[str] = set()
+    local_tool_names: list[str] = []
+    worker_routed_tool_names: list[str] = []
+    deferred_toolkits: list[_NativeDeferredToolkit] = []
     for tool_name, tool_entry in resolved_tool_configs.items():
         try:
             runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
@@ -1366,22 +1490,40 @@ def _assemble_agent_toolkits(
                     dynamic_tool_continuation=dynamic_tool_continuation,
                 )
             if toolkit:
-                toolkit = _prune_openai_incompatible_tools(
-                    toolkit,
-                    config=config,
-                    execution_identity=execution_identity,
-                )
-            if toolkit:
+                _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
                 toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
+            toolkit = apply_tool_approval_capability(
+                toolkit,
+                config,
+                supports_native_tool_approval=supports_native_tool_approval,
+                registered_tool_name=tool_name,
+            )
             if toolkit:
                 toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
+                _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
                 tools.append(toolkit)
+                target_names = (
+                    worker_routed_tool_names
+                    if _registry_tool_routes_through_worker(
+                        tool_name,
+                        runtime_paths=runtime_paths,
+                        worker_tools=worker_tools,
+                    )
+                    else local_tool_names
+                )
+                target_names.append(tool_name)
                 # initial deferred tools were always loaded, so they stay in
                 # the rendered prompt prefix as plain non-deferred tools.
                 if native_deferred_tools and tool_entry.defer and not tool_entry.initial:
                     suppress_fully_deferred_toolkit_instructions(toolkit)
-                    deferred_wire_tool_names.update(toolkit.get_functions())
-                    deferred_wire_tool_names.update(toolkit.get_async_functions())
+                    deferred_toolkits.append(
+                        _NativeDeferredToolkit(
+                            domain_name=tool_entry.authored_name or tool_name,
+                            toolkit=toolkit,
+                        ),
+                    )
+        except _MatrixRoomRuntimeToolCollisionError:
+            raise
         except (ValueError, ImportError) as exc:
             logger.warning(
                 "Could not load tool for agent construction",
@@ -1394,7 +1536,9 @@ def _assemble_agent_toolkits(
         loaded_tools=loaded_tools,
         hidden_toolkits=hidden_toolkits,
         selected_dynamic_tools=dynamic_tool_selection.loaded_tools,
-        deferred_wire_tool_names=frozenset(deferred_wire_tool_names),
+        deferred_toolkits=tuple(deferred_toolkits),
+        local_tool_names=tuple(local_tool_names),
+        worker_routed_tool_names=tuple(worker_routed_tool_names),
     )
 
 
@@ -1413,7 +1557,7 @@ def _open_agent_session_storage(
             return history_storage
         return agent_storage.create_state_storage(
             agent_name,
-            agent_runtime.state_root,
+            agent_runtime.session_state_root,
             subdir="sessions",
             session_table=f"{agent_name}_sessions",
         )
@@ -1429,8 +1573,10 @@ def _build_agent_role_context(
     active_model_name: str | None,
     include_openai_compat_guidance: bool,
     disable_runtime_capabilities: bool,
+    local_tool_names: tuple[str, ...],
+    worker_routed_tool_names: tuple[str, ...],
 ) -> _AgentRoleContext:
-    """Resolve the model name and render identity, datetime, and preload context into the role."""
+    """Resolve the model name and render shared identity and preload context into the role."""
     # Get model config for identity context
     model_name = active_model_name or agent_config.model or "default"
     if model_name in config.models:
@@ -1453,16 +1599,15 @@ def _build_agent_role_context(
             include_openai_compat_guidance=include_openai_compat_guidance,
         )
 
-    # Add current date context with the user's configured timezone
-    datetime_context = _get_datetime_context(
-        config.timezone,
-        datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
-    )
-
-    # Combine identity, datetime, and live installation contexts.
-    full_context = identity_context + datetime_context + _get_mind_runtime_context(agent_name, runtime_paths)
+    full_context = identity_context + _get_mind_runtime_context(agent_name, runtime_paths)
 
     if not disable_runtime_capabilities:
+        full_context += "\n\n" + _render_tool_execution_environment(
+            runtime_paths=runtime_paths,
+            local_tool_names=local_tool_names,
+            worker_routed_tool_names=worker_routed_tool_names,
+            worker_scope=agent_runtime.execution.execution_scope,
+        )
         workspace = agent_runtime.workspace
         full_context += _build_additional_context(
             agent_name,
@@ -1470,6 +1615,7 @@ def _build_agent_role_context(
             config.defaults.max_preload_chars,
             personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
             truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
+            chunk_marker_template=config.get_prompt("CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE"),
             workspace_context_files=workspace.context_files if workspace is not None else (),
             storage_path=runtime_paths.storage_root,
             runtime_paths=runtime_paths,
@@ -1490,6 +1636,7 @@ def _build_agent_instructions(
     disable_runtime_capabilities: bool,
     hidden_toolkits: frozenset[str],
     loaded_tools: tuple[str, ...],
+    native_deferred_tool_names: tuple[str, ...],
     all_deferred_tools_eager: bool,
 ) -> list[str]:
     """Accumulate the configured and runtime instruction blocks for one agent instance."""
@@ -1497,6 +1644,13 @@ def _build_agent_instructions(
 
     if skills and skills.get_skill_names():
         instructions.append(config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"))
+
+    instructions.extend(
+        _build_native_tool_search_instruction_blocks(
+            config,
+            native_deferred_tool_names,
+        ),
+    )
 
     # Native server-side tool search replaces the load_tool catalog and
     # loaded-state prompt blocks, so the native path emits neither.
@@ -1546,66 +1700,6 @@ def _build_agent_instructions(
     return instructions
 
 
-def _resolve_agent_culture_state(
-    agent_name: str,
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-    agent_runtime: ResolvedAgentRuntime,
-    model: Model,
-    *,
-    persist_runtime_state: bool,
-) -> _AgentCultureState:
-    """Resolve the culture manager and Agent culture flags for one agent instance."""
-    if not persist_runtime_state:
-        return _AgentCultureState(
-            manager=None,
-            add_culture_to_context=None,
-            update_cultural_knowledge=False,
-            enable_agentic_culture=False,
-        )
-
-    culture_storage_root = runtime_paths.storage_root
-    cache_private_culture = False
-    if agent_runtime.execution.is_private:
-        worker_key = agent_runtime.execution.worker_key
-        if worker_key is None:
-            msg = f"Private agent '{agent_name}' requires a worker key to resolve culture state"
-            raise ValueError(msg)
-        execution_scope = agent_runtime.execution.execution_scope
-        execution_identity = agent_runtime.execution.execution_identity
-        if execution_scope is None or execution_identity is None:
-            msg = f"Private agent '{agent_name}' requires an execution scope and identity to resolve culture state"
-            raise ValueError(msg)
-        culture_storage_root = resolve_private_requester_scope_root(
-            runtime_paths=runtime_paths,
-            execution_scope=execution_scope,
-            execution_identity=execution_identity,
-            worker_key=worker_key,
-        )
-        cache_private_culture = True
-
-    culture_manager, culture_settings = _resolve_agent_culture(
-        agent_name,
-        config,
-        culture_storage_root,
-        model,
-        cache_private=cache_private_culture,
-    )
-    add_culture_to_context: bool | None = None
-    update_cultural_knowledge = False
-    enable_agentic_culture = False
-    if culture_settings is not None:
-        add_culture_to_context = culture_settings.add_culture_to_context
-        update_cultural_knowledge = culture_settings.update_cultural_knowledge
-        enable_agentic_culture = culture_settings.enable_agentic_culture
-    return _AgentCultureState(
-        manager=culture_manager,
-        add_culture_to_context=add_culture_to_context,
-        update_cultural_knowledge=update_cultural_knowledge,
-        enable_agentic_culture=enable_agentic_culture,
-    )
-
-
 @timed("system_prompt_assembly.agent_create")
 def create_agent(
     agent_name: str,
@@ -1627,7 +1721,9 @@ def create_agent(
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     dynamic_tool_continuation: bool = False,
+    supports_native_tool_approval: bool = False,
     eager_deferred_tools: bool = False,
+    required_tool_names: tuple[str, ...] = (),
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -1650,7 +1746,7 @@ def create_agent(
         include_openai_compat_guidance: Whether to include OpenAI-compatible
             history-format guidance in the shared identity prompt.
         persist_runtime_state: Whether this agent instance should write durable
-            Agno history, learning, and culture state.
+            Agno history and learning state.
         disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
             and preloaded context files for a restricted in-process agent run.
         disabled_tool_names: Resolved tool names to omit from this instance.
@@ -1665,9 +1761,13 @@ def create_agent(
             envelope and materialized team members both do). Embedded agents
             without such a loop leave it False so a load/unload takes effect on
             the next request instead of truncating the run.
+        supports_native_tool_approval: Whether the caller can persist and resume
+            Agno confirmation pauses. Gated functions are hidden when false.
         eager_deferred_tools: Whether to materialize every deferred toolkit and
             omit the dynamic-tools manager for a runtime with an immutable tool
             schema.
+        required_tool_names: Authored toolkits needed by a saved approval. These
+            augment this instance without changing the session's tool selection.
 
     Returns:
         Configured Agent instance
@@ -1696,11 +1796,14 @@ def create_agent(
     runtime_model_config = config.models.get(active_model_name or agent_config.model or "default")
     native_deferred_tools = runtime_model_config is not None and (
         native_tool_search_supported(runtime_model_config.provider, runtime_model_config.id)
-        or openai_native_tool_search_supported(
-            runtime_model_config.provider,
-            runtime_model_config.id,
-            base_url=(runtime_model_config.extra_kwargs or {}).get("base_url")
-            or runtime_paths.env_value("OPENAI_BASE_URL"),
+        or (
+            runtime_model_config.api != "chat_completions"
+            and openai_native_tool_search_supported(
+                runtime_model_config.provider,
+                runtime_model_config.id,
+                base_url=(runtime_model_config.extra_kwargs or {}).get("base_url")
+                or runtime_paths.env_value("OPENAI_BASE_URL"),
+            )
         )
     )
 
@@ -1718,9 +1821,12 @@ def create_agent(
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
         dynamic_tool_continuation=dynamic_tool_continuation,
+        supports_native_tool_approval=supports_native_tool_approval,
         native_deferred_tools=native_deferred_tools,
         eager_deferred_tools=eager_deferred_tools,
+        required_tool_names=required_tool_names,
     )
+    _hide_session_mcp_function_collisions(tool_assembly.tools, agent_name=agent_name)
     storage = _open_agent_session_storage(
         agent_name,
         agent_runtime,
@@ -1747,10 +1853,17 @@ def create_agent(
         active_model_name=active_model_name,
         include_openai_compat_guidance=include_openai_compat_guidance,
         disable_runtime_capabilities=disable_runtime_capabilities,
+        local_tool_names=tool_assembly.local_tool_names,
+        worker_routed_tool_names=tool_assembly.worker_routed_tool_names,
     )
 
     # Create agent with defaults applied
-    model = _load_agent_model_instance(config, runtime_paths, role_context.model_name, execution_identity)
+    model = _load_agent_model_instance(
+        config,
+        runtime_paths,
+        role_context.model_name,
+        replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
+    )
     if tool_assembly.deferred_wire_tool_names:
         # Each installer no-ops on the other provider family's model class.
         install_claude_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
@@ -1790,25 +1903,16 @@ def create_agent(
         disable_runtime_capabilities=disable_runtime_capabilities,
         hidden_toolkits=tool_assembly.hidden_toolkits,
         loaded_tools=tool_assembly.loaded_tools,
+        native_deferred_tool_names=tool_assembly.deferred_tool_names,
         all_deferred_tools_eager=native_deferred_tools or eager_deferred_tools,
     )
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
 
     entity_view = config.resolve_entity(agent_name)
-    knowledge_enabled = (
-        not disable_runtime_capabilities and bool(entity_view.knowledge_base_ids) and knowledge is not None
-    )
+    knowledge_enabled = not disable_runtime_capabilities and knowledge is not None
     knowledge_sources = (
         knowledge_source_descriptions(knowledge) if knowledge_enabled and isinstance(knowledge, Knowledge) else ()
-    )
-    culture = _resolve_agent_culture_state(
-        agent_name,
-        config,
-        runtime_paths,
-        agent_runtime,
-        model,
-        persist_runtime_state=persist_runtime_state,
     )
 
     # Shared history-policy source of truth with the team replay path.
@@ -1829,6 +1933,12 @@ def create_agent(
         tools=tool_assembly.tools,
         skills=skills,
         instructions=instructions,
+        additional_context=render_session_context(
+            render_date_context(
+                config.timezone,
+                datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
+            ),
+        ),
         db=storage,
         learning=_resolve_agent_learning(agent_config, defaults, learning_storage) if persist_runtime_state else False,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
@@ -1842,10 +1952,6 @@ def create_agent(
         num_history_messages=history_policy.num_history_messages,
         # Keep persisted runs raw even though Agno replays history natively.
         store_history_messages=False,
-        culture_manager=culture.manager,
-        add_culture_to_context=culture.add_culture_to_context,
-        update_cultural_knowledge=culture.update_cultural_knowledge,
-        enable_agentic_culture=culture.enable_agentic_culture,
         compress_tool_results=compress_tool_results,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
         telemetry=False,
@@ -1865,6 +1971,8 @@ def create_agent(
 
 
 __all__ = [
+    "agent_build_can_overlap_file_memory",
+    "apply_tool_approval_capability",
     "build_agent_toolkit",
     "create_agent",
     "describe_agent",

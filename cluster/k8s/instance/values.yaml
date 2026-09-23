@@ -42,16 +42,19 @@ matrixOidc:
   issuer: ""
   clientId: "mindroom-synapse"
   clientSecret: ""
-authorizationGlobalUsers: []
-matrixRoomAccess:
-  mode: single_user_private
-  multiUserJoinRule: public
-  publishToRoomDirectory: false
-  inviteOnlyRooms: []
-  reconcileExistingRooms: false
+administrators: []
+roomDefaults:
+  joinPolicy: invite
+  listed: false
+  encrypted: false
+  inviteUsers: []
+  admins: []
 matrixAutoJoinRoomKeys: []
 matrixHomeserverStartupTimeoutSeconds: 0  # 0 means wait forever for Matrix at startup.
 workerBackend: static_runner  # `static_runner` keeps the shared sidecar; `kubernetes` creates dedicated worker pods
+# Dedicated browser/display only: requires kubernetes, user_agent scope and browser worker_tools.
+# Configure MINDROOM_COMPUTER_ALLOWED_ORIGINS on the primary runtime; see docs/tools/worker-computer.md.
+workerComputerEnabled: false
 workerCleanupIntervalSeconds: 30
 controlPlaneNodeName: ""  # Optional explicit node pin for the control plane and dedicated workers when using shared ReadWriteOnce storage.
 kubernetesWorkerImage: ""  # Defaults to mindroom_image when empty
@@ -63,6 +66,9 @@ kubernetesWorkerPort: 8766
 kubernetesWorkerReadyTimeoutSeconds: 60
 kubernetesWorkerIdleTimeoutSeconds: 1800
 kubernetesWorkerEnableServiceLinks: false
+kubernetesWorkerRuntimeClassName: ""  # Optional RuntimeClass applied to every dedicated worker pod.
+# Optional node-installed profile applied only to the main worker container.
+kubernetesWorkerSeccompProfile: {}
 
 # API keys and secrets (referenced via Secret in deployment)
 # Production provisioner deploys create this Secret outside Helm so secret values
@@ -78,6 +84,8 @@ openrouter_key: ""
 deepseek_key: ""
 sandbox_proxy_token: ""
 credentials_encryption_key: ""
+# Dedicated Synapse registration shared secret when Helm creates the instance Secret.
+# With instanceSecrets.create=false, populate matrix_registration_shared_secret in the existing instance Secret instead.
 matrixRegistrationSharedSecret: ""
 
 # Supabase (shared auth)
@@ -91,6 +99,7 @@ trustedUpstreamAuth:
   emailHeader: ""
   matrixUserIdHeader: ""
   emailToMatrixUserIdTemplate: ""
+  emailDomain: ""
   requireJwt: "false"
   jwtHeader: ""
   jwksUrl: ""
@@ -100,5 +109,8 @@ trustedUpstreamAuth:
   jwtUserIdClaim: ""
   jwtMatrixUserIdClaim: ""
 
-# Matrix admin user (leave empty and set via --set or Secret)
+# Optional Synapse secret seed for macaroon_secret_key and form_secret in the ConfigMap.
+# Also used as the registration-secret fallback when matrixRegistrationSharedSecret is empty.
+# Does not create an admin login; use random secret material rather than a login password.
+# These ConfigMap fields do not support an existing-Secret reference.
 matrix_admin_password: ""

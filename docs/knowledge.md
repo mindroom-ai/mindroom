@@ -56,6 +56,9 @@ agents:
 Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom watch shared local bases with `watch: true`.
 Chat uses the last successfully published index and continues without blocking when a base is missing, stale, or failed.
 When a watched file changes, MindRoom marks the published index stale, refreshes in the background, and atomically publishes the replacement when it succeeds.
+A refresh builds that replacement by reusing the published index's stored vectors for every file whose content is unchanged, so it only embeds files that were added or edited.
+Changing `chunk_size`, `chunk_overlap`, the embedder, or any corpus filter invalidates the stored vectors, and the next refresh re-embeds the whole base.
+An explicit reindex from the dashboard or API rebuilds every vector instead of reusing any, which is how you replace an index you no longer trust.
 When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation.
 Knowledge base IDs are the keys under `knowledge_bases`.
 Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, names containing `/` or `\`, or names containing line breaks.
@@ -99,6 +102,7 @@ knowledge_bases:
     mode: semantic                    # "semantic" builds a vector search index; "files" skips embeddings
     path: ./knowledge_docs/my_docs   # Folder containing documents
     watch: false                      # Direct external edits require reindex; API mutations still schedule refresh
+    require_content_before_publish: false  # Keep a cold semantic index initializing until a managed file exists
     chunk_size: 5000                  # Max characters per chunk
     chunk_overlap: 0                  # Overlap between adjacent chunks
 ```
@@ -109,6 +113,7 @@ knowledge_bases:
 | `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index while `files` skips embeddings and lets workspace-aware agents inspect the source files directly |
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
 | `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
+| `require_content_before_publish` | bool | `false` | Keep a cold semantic index initializing until at least one managed source file exists |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent chunks (must be `< chunk_size`) |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns to include before extension filtering |
@@ -123,6 +128,12 @@ Set `skip_hidden: false` if your knowledge folder intentionally contains dot-pre
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
 `chunk_size` and `chunk_overlap` only affect semantic mode.
 If chunking is too large, semantic indexing retries will fail with embedder 500 errors.
+Semantic refreshes index up to 4 files concurrently by default.
+Set `MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY` to an integer from 1 through 128 to tune this process-wide limit for large corpora; invalid values fail when knowledge managers start.
+Local `sentence_transformers` embedding is serialized regardless of this limit, because torch's Metal shader caches are not thread-safe.
+Each background refresh runs in a child process; successful children exit normally, while timed-out or cancelled children are terminated.
+The default timeout is one hour.
+Set `MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS` to a finite positive number of seconds to widen or narrow that timeout for very large corpora.
 
 ### File Type Filtering
 
@@ -144,6 +155,11 @@ The allowed set is always explicit configuration and never changes based on the 
 Non-text formats such as `.pdf`, `.docx`, or `.pptx` require their reader package (for example `pypdf`, `python-docx`, or `python-pptx`) in the MindRoom environment.
 When a reader package is missing, the refresh indexes every other file, logs a warning naming the file and the missing package, and records a partial-index error instead of publishing an index without the opted-in content.
 Extension filtering does not apply in `files` mode, which exposes every managed file.
+
+A `.json` file is normally split into one document per top-level JSON value, which keeps structured entries separately searchable.
+When such a file is not valid JSON, the refresh indexes its raw text instead of failing the file, and logs a warning naming the file and the line and column of the parse error.
+The file then counts as successfully indexed, so its content stays searchable, but it is chunked like plain text rather than split per JSON value.
+Fix the reported parse error to get structured chunking back.
 
 ### Private Agent Knowledge
 
@@ -243,8 +259,8 @@ When an agent has multiple semantic knowledge bases, results are interleaved fai
 ## Git-Backed Knowledge Bases
 
 Knowledge bases can sync from a Git repository.
-MindRoom starts a background refresh for configured shared Git knowledge bases when runtime support starts.
-After that, it schedules another background refresh every `poll_interval_seconds`.
+MindRoom waits one `poll_interval_seconds` interval before the first background refresh for a configured shared Git knowledge base, avoiding a refresh burst during startup.
+It then schedules another background refresh after each interval.
 Reads keep using the last published index while a refresh is running.
 
 ```yaml
@@ -268,7 +284,7 @@ knowledge_bases:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `repo_url` | string | *required* | HTTPS repository URL to clone/fetch |
+| `repo_url` | string | *required* | Repository URL to clone/fetch. See the accepted forms below |
 | `branch` | string | `main` | Branch to track |
 | `poll_interval_seconds` | int | `300` | Interval for scheduling background Git refreshes |
 | `credentials_service` | string | `null` | Service name in CredentialsManager for private repos |
@@ -281,16 +297,44 @@ knowledge_bases:
 When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` flows.
 Bundled container images already include it.
 
+#### Accepted `repo_url` forms
+
+MindRoom writes `repo_url` into the checkout's `origin` remote, so a network form is accepted only when its host resolves; hostless local forms are accepted on their own terms. Anything else is refused rather than guessed at.
+
+| Form | Example |
+|------|---------|
+| URL with a host | `https://github.com/org/repo.git`, `ssh://git@host/org/repo.git` |
+| scp-style SSH | `git@github.com:org/repo.git`, `github.com:org/repo.git` |
+| Absolute local path | `/srv/repos/repo.git` |
+| `file:` URL | `file:///srv/repos/repo.git` |
+
+Refused, with an error naming the reason: relative and home-relative paths (`./repo.git`, `../repo.git`, `~/repo.git`, `repo.git`), URLs with an empty authority (`https:///org/repo.git`), URLs whose separator is percent-encoded or written as a lookalike codepoint, and anything embedding a second URL.
+
+**Do not embed credentials in `repo_url`.** A password in a well-formed URL is stripped before the remote is written, so it never reaches `.git/config` — but it is still in your config file, and still handed to Git for every command.
+A password MindRoom cannot strip with confidence is refused outright rather than written: that covers forms where the scheme has been dropped, such as `oauth2:TOKEN@gitlab.com:org/repo.git` or `x-access-token:TOKEN@github.com/org/repo.git`.
+Use `credentials_service` instead: those credentials are passed to Git for the duration of one command and are never written to disk.
+
+If a checkout already holds a credential-bearing remote from before this check existed, the refusal cannot clean it — delete the checkout directory so the next sync clones afresh.
+
 ### Sync Behavior
 
 - Chat and runtime requests never wait for Git sync or indexing.
 - Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
 - Explicit dashboard/API reindex or sync runs Git sync first for Git-backed bases.
-- Semantic Git refresh then rebuilds a candidate index, while files-only Git refresh publishes source metadata.
-- When `lfs: true`, MindRoom disables implicit LFS smudge during clone/checkout/reset and explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
-- Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
+- Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
+- MindRoom disables implicit LFS smudge during clone, checkout, and reset for every Git-backed knowledge base.
+- When `lfs: true`, MindRoom explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
+- When sync realigns the checkout to a different fetched revision, it forcibly checks out and resets tracked files, discarding tracked edits and restoring tracked deletions.
+- If local HEAD already equals the fetched revision, sync skips that reset, so ordinary tracked edits or deletions can remain; LFS hydration is a separate step.
+- Change detection for Git-backed bases uses the tracked revision, not file contents: an ordinary refresh can republish the compatible existing index without reading the corpus when its revision is unchanged.
+- A forced reindex bypasses index reuse and rebuilds from the current checkout, but does not force Git to repair an unchanged checkout.
+- The checkout is MindRoom-owned; edit the source repository and sync instead of editing the working tree.
 - Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and sync or reindex instead.
 - Successful refresh publishes a new last successfully published index while failed refresh preserves the previous one and records the error in status metadata.
+- Semantic refresh is resumable: an interrupted or failed build keeps its private candidate index and continues it on the next refresh instead of restarting from zero.
+- A candidate is only continued when its recorded indexing settings, embedder identity, and source identity still match; otherwise it is discarded and one clean candidate is started.
+- Source changes during a build are reconciled against the candidate, so unchanged files keep their vectors, changed files are re-embedded, and deleted files have their vectors removed.
+- Transient embedding failures (timeouts, connection errors, HTTP 408/429/5xx) are retried with bounded backoff; permanent failures such as authentication errors stop the pass immediately and preserve the candidate.
 
 ### File Filtering with Patterns
 
@@ -364,15 +408,36 @@ Accepted credential fields:
 | `username` + `password` | Basic HTTP auth |
 | `api_key` | Uses `x-access-token` as username automatically |
 
+For unattended GitHub repositories, a GitHub App installation can replace a personal access token:
+
+```json
+{
+  "auth_type": "github_app",
+  "app_id": 12345,
+  "installation_id": 67890,
+  "private_key_file": "/var/run/secrets/github-app/private-key.pem"
+}
+```
+
+Store this object under the service named by `credentials_service`.
+`private_key_file` must be an absolute path to a read-only secret mount; do not put the PEM contents in the credential object.
+The remote must use the canonical `https://github.com/<owner>/<repository>` form.
+MindRoom reads the key when needed and mints a repository-scoped installation token with read-only Contents permission.
+The control-plane runtime caches that token until shortly before GitHub's reported expiry.
+Scheduled refresh children receive the cached token and expiry only through their stdin request pipe, then pass the token only to Git.
+The handoff includes the non-secret App, installation, repository, and key-path identity, and a child ignores the token if its current credentials no longer match.
+MindRoom never copies the token into the checkout config, credential store, refresh-child launch environment, metadata, or logs.
+
 ## Embedder Configuration
 
-Semantic knowledge bases use the same embedder configured in the `memory` section.
+Semantic knowledge bases use the embedder configured in the `memory` section.
+Semantic knowledge and file-memory indexes support `openai`, `ollama`, and `sentence_transformers`; the separate Mem0 backend also supports `huggingface`.
 File-mode knowledge bases do not use an embedder.
 
 ```yaml
 memory:
   embedder:
-    provider: openai        # or "ollama", "huggingface", or "sentence_transformers"
+    provider: openai        # or "ollama" or "sentence_transformers"
     config:
       model: text-embedding-3-small
       credentials_service: embedder # Optional strict credential binding
@@ -397,7 +462,32 @@ The base ID is sanitized to alphanumerics, hyphens, and underscores only, and th
 For PrivateAgentKnowledge, the effective private-root path is part of that hash, so each requester-local root gets an isolated index.
 File-mode refreshes may write lightweight source metadata, but local file-only bases do not need a vector database.
 
+While a semantic build is in progress, that directory also holds `candidate_index.json` and `candidate_index.jsonl`, the durable record of which files the in-progress candidate has already indexed.
+Those files are removed once the candidate is published.
+At most one owned candidate collection per knowledge base is retained, and superseded owned candidates are deleted.
+Collections whose ownership cannot be proven from the base identity are preserved and reported rather than removed, so unrelated collections in that directory may remain.
+
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
+
+## Process isolation
+
+Published semantic searches run in short-lived subprocesses.
+Embedding credentials and provider health stay in the application; query vectors, filters, and document data cross the typed read boundary.
+Each child exits after one operation, releasing its native Chroma memory.
+At most four read children run at once.
+Async searches wait for shared read capacity without occupying executor threads, then start the child while the parent obtains the query embedding.
+Their single 30-second budget includes capacity waiting, child startup, embedding, and native execution.
+Synchronous semantic searches use the 30-second timeout for native execution and fail immediately as busy when all read slots are occupied.
+Queries spanning multiple bases search those bases sequentially so one query cannot exhaust the child limit.
+A timed-out child is killed and reaped; async cancellation or embedding failure also cleans up the child before releasing its slot.
+Providers without async embedding support run in a thread, which may continue after cancellation; the native child is still cleaned up immediately.
+Native database stalls therefore do not hold the application process's Python lock.
+Fresh processes add startup and index-loading cost to each semantic search.
+Collection-existence probes instead read SQLite publication metadata directly in the application, with a five-second database lock timeout and no subprocess read-slot admission.
+The probe does not initialize the native Chroma search engine; unavailable or corrupt metadata raises an error instead of being treated as a missing collection.
+
+Manual reindexing and scheduled refreshes share the existing refresh subprocess and its timeout and process-group cleanup.
+These boundaries also cover semantic file-memory knowledge overlays; the separate Mem0 backend is unchanged.
 
 ## Dashboard Management
 
@@ -409,7 +499,7 @@ The web dashboard provides a Knowledge tab for managing knowledge bases without 
 - Configure Git sync settings
 - Upload and remove files for non-Git-backed bases
 - Trigger a full reindex or Git sync on demand
-- Monitor indexing status (file count vs. indexed count)
+- Monitor published indexing status (file count vs. indexed count)
 - Assign knowledge bases to agents from the Agents tab
 
 ## API Endpoints

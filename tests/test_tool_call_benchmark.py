@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
+import pytest
+
+from scripts.testing import benchmark_tool_call_overhead
 from scripts.testing.benchmark_tool_call_overhead import summarize_samples
+
+
+@pytest.mark.asyncio
+async def test_shell_benchmark_measures_both_inputs_without_counting_warmup() -> None:
+    """Shell input modes must run real commands and report only measured iterations."""
+    results = await benchmark_tool_call_overhead._run_shell_benchmark(iterations=2, warmup=1)
+    assert {row["case"]: row["count"] for row in results} == {"shell_argv": 2, "shell_string": 2}
+    assert all(row["mean_ms"] > 0 for row in results)
 
 
 def test_summarize_samples_reports_zeroes_for_empty_samples() -> None:

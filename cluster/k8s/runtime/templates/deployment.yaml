@@ -25,6 +25,9 @@ metadata:
   {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if ne .Values.progressDeadlineSeconds nil }}
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds | int64 }}
+  {{- end }}
   strategy:
     type: Recreate
   selector:
@@ -85,9 +88,9 @@ spec:
             - -c
             - |
               set -eu
-              mkdir -p "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} "/state/{{ .Values.stateStorage.syncTokens.subPath }}"{{ end }}
-              chown -R {{ .Values.stateStorage.initPermissions.runAsUser }}:{{ .Values.stateStorage.initPermissions.fsGroup }} "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} "/state/{{ .Values.stateStorage.syncTokens.subPath }}"{{ end }}
-              chmod {{ .Values.stateStorage.initPermissions.chmod }} "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} "/state/{{ .Values.stateStorage.syncTokens.subPath }}"{{ end }}
+              mkdir -p "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncContinuity.enabled }} "/state/{{ .Values.stateStorage.syncContinuity.subPath }}"{{ end }}
+              chown -R {{ .Values.stateStorage.initPermissions.runAsUser }}:{{ .Values.stateStorage.initPermissions.fsGroup }} "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncContinuity.enabled }} "/state/{{ .Values.stateStorage.syncContinuity.subPath }}"{{ end }}
+              chmod {{ .Values.stateStorage.initPermissions.chmod }} "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncContinuity.enabled }} "/state/{{ .Values.stateStorage.syncContinuity.subPath }}"{{ end }}
           volumeMounts:
             - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
               mountPath: /state
@@ -156,6 +159,14 @@ spec:
             - {{ .Values.runtime.apiHost | quote }}
             - --api-port
             - {{ .Values.runtime.apiPort | quote }}
+            {{- if .Values.config.bootstrapBundlePath }}
+            - --bootstrap-config-bundle
+            - {{ .Values.config.bootstrapBundlePath | quote }}
+            {{- end }}
+            {{- if .Values.config.bootstrapBundleRevision }}
+            - --bootstrap-config-bundle-revision
+            - {{ .Values.config.bootstrapBundleRevision | quote }}
+            {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.runtime.apiPort }}
@@ -235,6 +246,8 @@ spec:
             - name: MINDROOM_SANDBOX_PROXY_URL
               value: {{ printf "http://localhost:%v" .Values.workers.staticRunner.port | quote }}
             {{- else if eq .Values.workers.backend "kubernetes" }}
+            - name: MINDROOM_WORKER_COMPUTER_ENABLED
+              value: {{ .Values.workers.computerEnabled | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_NAMESPACE
               value: {{ include "mindroom-runtime.workerNamespace" . | quote }}
             {{- if $workerAuthSecretName }}
@@ -275,6 +288,14 @@ spec:
               value: {{ .Values.workers.kubernetes.namePrefix | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS
               value: {{ .Values.workers.kubernetes.enableServiceLinks | quote }}
+            {{- with .Values.workers.kubernetes.runtimeClassName }}
+            - name: MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.workers.kubernetes.seccompProfile }}
+            - name: MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON
+              value: {{ toJson . | quote }}
+            {{- end }}
             - name: MINDROOM_KUBERNETES_WORKER_LABELS_JSON
               value: {{ toJson .Values.workers.kubernetes.extraLabels | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON
@@ -291,6 +312,10 @@ spec:
               value: {{ .Values.workers.kubernetes.resources.requests.cpu | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_CPU_LIMIT
               value: {{ .Values.workers.kubernetes.resources.limits.cpu | quote }}
+            - name: MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE
+              value: {{ .Values.workers.kubernetes.scriptResources.defaultProfile | quote }}
+            - name: MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON
+              value: {{ toJson .Values.workers.kubernetes.scriptResources.profiles | quote }}
             {{- if .Values.workers.kubernetes.nodeName }}
             - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
               value: {{ .Values.workers.kubernetes.nodeName | quote }}
@@ -456,10 +481,10 @@ spec:
               mountPath: {{ .Values.stateStorage.encryptionKeys.mountPath }}
               subPath: {{ .Values.stateStorage.encryptionKeys.subPath }}
             {{- end }}
-            {{- if .Values.stateStorage.syncTokens.enabled }}
+            {{- if .Values.stateStorage.syncContinuity.enabled }}
             - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
-              mountPath: {{ .Values.stateStorage.syncTokens.mountPath }}
-              subPath: {{ .Values.stateStorage.syncTokens.subPath }}
+              mountPath: {{ .Values.stateStorage.syncContinuity.mountPath }}
+              subPath: {{ .Values.stateStorage.syncContinuity.subPath }}
             {{- end }}
             {{- end }}
             {{- if .Values.approvedEgress.enabled }}

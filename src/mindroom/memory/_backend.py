@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-    from ._shared import MemoryResult, MemorySearchOutcome
+    from ._shared import MemoryEntrypointContext, MemoryResult, MemorySearchOutcome
 
 
 class ResolvedMemoryBackend(Protocol):
@@ -124,7 +124,7 @@ class ResolvedMemoryBackend(Protocol):
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
-    ) -> str:
+    ) -> MemoryEntrypointContext:
         """Return the stable session preamble context for an agent, if any."""
 
 

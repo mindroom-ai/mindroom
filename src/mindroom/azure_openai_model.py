@@ -14,9 +14,9 @@ from dataclasses import dataclass
 # this import in a try/except stub whose fallback is not a Model.
 from agno.models.azure.openai_chat import AzureOpenAI
 
-from mindroom.openai_models import ChatToolArgumentsCompat
+from mindroom.openai_models import OpenAIChatProviderCompat
 
 
 @dataclass
-class MindRoomAzureOpenAI(ChatToolArgumentsCompat, AzureOpenAI):
+class MindRoomAzureOpenAI(OpenAIChatProviderCompat, AzureOpenAI):
     """Azure OpenAI model that can replay tool calls from other providers."""

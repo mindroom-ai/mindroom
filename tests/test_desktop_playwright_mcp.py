@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import os
+import shutil
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 from mcp.types import CallToolResult, ImageContent, TextContent
 
@@ -18,10 +21,8 @@ from mindroom.desktop.playwright_mcp import (
     PlaywrightActionOutcomeUnknownError,
     PlaywrightBrowserError,
     PlaywrightMCPBrowserProvider,
-    _act_call,
     _mcp_calls,
     _provider_result,
-    _QueuedCall,
     browser_action_requires_control,
 )
 
@@ -73,7 +74,7 @@ def test_provider_launches_pinned_extension_server_for_existing_profile(
         PLAYWRIGHT_MCP_PACKAGE,
         "--extension",
         "--caps",
-        "vision,pdf",
+        "vision",
         "--output-dir",
         str((tmp_path / "output").resolve()),
         "--output-mode",
@@ -94,10 +95,6 @@ def test_browser_actions_map_to_high_level_playwright_mcp_tools() -> None:
         "action": "new",
         "url": "https://example.com",
     }
-    navigate = _mcp_calls("navigate", {"targetUrl": "https://example.com/form"})
-    assert [(call.tool_name, call.arguments) for call in navigate] == [
-        ("browser_navigate", {"url": "https://example.com/form"}),
-    ]
     snapshot = _mcp_calls("snapshot", {"selector": "main", "depth": 8, "maxChars": 4000})
     assert snapshot[-1].tool_name == "browser_snapshot"
     assert snapshot[-1].arguments == {"target": "main", "depth": 8}
@@ -109,36 +106,6 @@ def test_browser_actions_map_to_high_level_playwright_mcp_tools() -> None:
         "type": "jpeg",
         "scale": "css",
         "fullPage": False,
-    }
-
-
-def test_act_mapping_covers_semantic_interaction_parity() -> None:
-    """The stable browser act vocabulary maps to Playwright's semantic primitives."""
-    click = _act_call({"kind": "click", "ref": "e3", "doubleClick": True})
-    assert click.tool_name == "browser_click"
-    assert click.arguments == {"element": "e3", "target": "e3", "doubleClick": True}
-
-    fill = _act_call(
-        {
-            "kind": "fill",
-            "fields": [
-                {"ref": "e4", "name": "Full name", "type": "textbox", "value": "Ada Lovelace"},
-                {"ref": "e5", "name": "Updates", "type": "checkbox", "value": "true"},
-            ],
-        },
-    )
-    assert fill.tool_name == "browser_fill_form"
-    assert fill.arguments["fields"] == [
-        {"element": "Full name", "name": "Full name", "target": "e4", "type": "textbox", "value": "Ada Lovelace"},
-        {"element": "Updates", "name": "Updates", "target": "e5", "type": "checkbox", "value": "true"},
-    ]
-
-    evaluate = _act_call({"kind": "evaluate", "fn": "element => element.textContent", "ref": "e6"})
-    assert evaluate.tool_name == "browser_evaluate"
-    assert evaluate.arguments == {
-        "function": "element => element.textContent",
-        "element": "e6",
-        "target": "e6",
     }
 
 
@@ -178,22 +145,23 @@ def test_provider_result_rejects_mcp_tool_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provider_navigates_only_the_current_extension_tab(
+async def test_provider_opens_and_navigates_a_new_tab_in_one_upstream_call(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """One Matrix command navigates without trusting a mutable tab-list index."""
+    """The upstream call creates a new Tab and navigates that retained object."""
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    call_tool = AsyncMock(return_value=_text_result("navigated"))
+    call_tool = AsyncMock(return_value=_text_result("opened"))
     monkeypatch.setattr(provider, "_call_tool", call_tool)
 
     result = await provider.execute(
-        "navigate",
+        "open",
         {"targetUrl": "https://example.com/checkout"},
     )
 
-    assert result.payload["result"] == "navigated"
-    call_tool.assert_awaited_once_with("browser_navigate", {"url": "https://example.com/checkout"})
+    assert result.payload["result"] == "opened"
+    assert result.payload["stable_targeting"] is False
+    call_tool.assert_awaited_once_with("browser_tabs", {"action": "new", "url": "https://example.com/checkout"})
 
 
 @pytest.mark.asyncio
@@ -274,12 +242,8 @@ async def test_actor_hardens_existing_browser_workspace_permissions(
     output_dir.chmod(0o777)
     provider = PlaywrightMCPBrowserProvider(output_dir=output_dir)
     monkeypatch.setattr("mindroom.desktop.playwright_mcp.shutil.which", lambda _command: "/usr/bin/npx")
-    monkeypatch.setattr(provider, "_run_actor", AsyncMock())
-    future: asyncio.Future[CallToolResult] = asyncio.get_running_loop().create_future()
-
-    provider._start_actor(_QueuedCall("browser_tabs", {"action": "list"}, future))
-    assert provider._actor_task is not None
-    await provider._actor_task
+    session = provider._new_session()
+    await session.close()
 
     assert output_dir.stat().st_mode & 0o777 == 0o700
 
@@ -294,7 +258,8 @@ async def test_timed_out_screenshot_is_removed_after_late_mcp_completion(
 
     class FakeStdio:
         async def __aenter__(self) -> tuple[object, object]:
-            return object(), object()
+            writer, reader = anyio.create_memory_object_stream(0)
+            return reader, writer
 
         async def __aexit__(self, *_args: object) -> None:
             return None
@@ -320,7 +285,9 @@ async def test_timed_out_screenshot_is_removed_after_late_mcp_completion(
         ) -> CallToolResult:
             if tool_name == "browser_tabs":
                 return _text_result("started")
-            await asyncio.sleep(0.05)
+            # Simulate output arriving during cancellation cleanup.
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(0.05)
             filename = arguments["filename"]
             assert isinstance(filename, str)
             (tmp_path / filename).write_bytes(b"late screenshot")
@@ -328,8 +295,8 @@ async def test_timed_out_screenshot_is_removed_after_late_mcp_completion(
             return _text_result("captured")
 
     monkeypatch.setattr("mindroom.desktop.playwright_mcp.shutil.which", lambda _command: "/usr/bin/npx")
-    monkeypatch.setattr("mindroom.desktop.playwright_mcp.stdio_client", lambda _parameters: FakeStdio())
-    monkeypatch.setattr("mindroom.desktop.playwright_mcp.ClientSession", FakeSession)
+    monkeypatch.setattr("mindroom.playwright_mcp_session.stdio_client", lambda _parameters: FakeStdio())
+    monkeypatch.setattr("mindroom.playwright_mcp_session.ClientSession", FakeSession)
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
     provider._call_timeout_seconds = 0.01
     await provider.execute("start", {})
@@ -383,9 +350,9 @@ async def test_failed_control_action_reports_unknown_outcome(
     monkeypatch.setattr(provider, "_call_tool", call_tool)
 
     with pytest.raises(PlaywrightActionOutcomeUnknownError, match="extension disconnected"):
-        await provider.execute("navigate", {"targetUrl": "https://example.com/checkout"})
+        await provider.execute("open", {"targetUrl": "https://example.com/checkout"})
 
-    call_tool.assert_awaited_once_with("browser_navigate", {"url": "https://example.com/checkout"})
+    call_tool.assert_awaited_once_with("browser_tabs", {"action": "new", "url": "https://example.com/checkout"})
 
 
 @pytest.mark.parametrize("action", ["focus", "snapshot", "navigate", "close"])
@@ -405,76 +372,8 @@ def test_mutable_playwright_tab_index_inside_act_request_is_rejected() -> None:
         "request": {"kind": "click", "ref": "e1", "targetId": "1"},
     }
 
-    with pytest.raises(PlaywrightBrowserError, match="tab indices can change"):
+    with pytest.raises(PlaywrightBrowserError, match="stable page identity"):
         _mcp_calls("act", parameters)
-
-
-@pytest.mark.asyncio
-async def test_uploads_are_confined_to_the_browser_workspace(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """The extension child never receives an upload path outside its documented workspace."""
-    output_dir = tmp_path / "browser"
-    output_dir.mkdir()
-    allowed_file = output_dir / "invoice.txt"
-    allowed_file.write_text("invoice")
-    outside_file = tmp_path / "secret.txt"
-    outside_file.write_text("secret")
-    provider = PlaywrightMCPBrowserProvider(output_dir=output_dir)
-    call_tool = AsyncMock(return_value=_text_result("uploaded"))
-    monkeypatch.setattr(provider, "_call_tool", call_tool)
-
-    await provider.execute("upload", {"paths": ["invoice.txt"]})
-
-    call_tool.assert_awaited_once_with("browser_file_upload", {"paths": [str(allowed_file.resolve())]})
-    with pytest.raises(PlaywrightBrowserError, match="must exist under"):
-        await provider.execute("upload", {"paths": [str(outside_file)]})
-
-
-@pytest.mark.asyncio
-async def test_actor_skips_a_call_whose_request_already_timed_out(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A queued mutation cannot execute after its Matrix-side caller has abandoned it."""
-    call_tool = AsyncMock(return_value=_text_result("late mutation"))
-
-    class FakeStdio:
-        async def __aenter__(self) -> tuple[object, object]:
-            return object(), object()
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-    class FakeSession:
-        def __init__(self, *_args: object) -> None:
-            pass
-
-        async def __aenter__(self) -> FakeSession:
-            return self
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-        async def initialize(self) -> None:
-            return None
-
-        async def call_tool(self, *args: object, **kwargs: object) -> CallToolResult:
-            return await call_tool(*args, **kwargs)
-
-    monkeypatch.setattr("mindroom.desktop.playwright_mcp.stdio_client", lambda _parameters: FakeStdio())
-    monkeypatch.setattr("mindroom.desktop.playwright_mcp.ClientSession", FakeSession)
-    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    queue: asyncio.Queue[_QueuedCall | None] = asyncio.Queue()
-    future: asyncio.Future[CallToolResult] = asyncio.get_running_loop().create_future()
-    future.cancel()
-    queue.put_nowait(_QueuedCall("browser_click", {"target": "e1"}, future))
-    queue.put_nowait(None)
-
-    await provider._run_actor(queue)
-
-    call_tool.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -485,6 +384,8 @@ async def test_status_is_lazy_until_extension_use(tmp_path: Path) -> None:
     result = await provider.execute("status", {})
 
     assert result.payload == {
+        "stable_targeting": False,
+        "supported_control_actions": ["start", "stop", "open"],
         "action": "status",
         "provider": "playwright_mcp_extension",
         "running": False,
@@ -501,7 +402,7 @@ async def test_mcp_startup_failure_reaches_first_queued_call_immediately(
     """A child-process startup failure must not strand the first request until its timeout."""
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path, call_timeout_seconds=5)
     monkeypatch.setattr(
-        "mindroom.desktop.playwright_mcp.stdio_client",
+        "mindroom.playwright_mcp_session.stdio_client",
         lambda _parameters: _FailingStdioContext(),
     )
 
@@ -512,43 +413,120 @@ async def test_mcp_startup_failure_reaches_first_queued_call_immediately(
 
 
 @pytest.mark.asyncio
-async def test_permanent_close_rejects_calls_while_actor_finishes(tmp_path: Path) -> None:
-    """A final close cannot race with a fresh MCP actor start."""
+async def test_permanent_close_rejects_calls(tmp_path: Path) -> None:
+    """Final closure forbids restarting the shared transport."""
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    queue: asyncio.Queue[_QueuedCall | None] = asyncio.Queue()
-    sentinel_seen = asyncio.Event()
-    finish_actor = asyncio.Event()
-
-    async def actor() -> None:
-        assert await queue.get() is None
-        sentinel_seen.set()
-        await finish_actor.wait()
-
-    provider._queue = queue
-    provider._actor_task = asyncio.create_task(actor())
-    close_task = asyncio.create_task(provider.close())
-    await sentinel_seen.wait()
-
+    await provider.close()
     with pytest.raises(PlaywrightBrowserError, match="provider is closed"):
         await provider._call_tool("browser_tabs", {"action": "list"})
-
-    finish_actor.set()
-    await close_task
-    assert provider.running is False
 
 
 @pytest.mark.asyncio
 async def test_browser_stop_remains_restartable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The user-facing stop action releases MCP without permanently closing the provider."""
+    """Stop retires a live stdio session; each restart creates a fresh process and session."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node fixture required")
+    script = tmp_path / "server.cjs"
+    script.write_text("""
+require('readline').createInterface({input:process.stdin}).on('line', line => {
+  const request = JSON.parse(line);
+  let result;
+  if (request.method === 'initialize') {
+    result = {protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};
+  } else if (request.method === 'tools/list') {
+    result = {tools:[{name:'browser_tabs',inputSchema:{type:'object'}}]};
+  } else if (request.method === 'tools/call') {
+    result = {content:[{type:'text',text:String(process.pid)}]};
+  }
+  if (result) console.log(JSON.stringify({jsonrpc:'2.0',id:request.id,result}));
+});
+""")
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path, command=node, call_timeout_seconds=5)
+    monkeypatch.setattr(provider, "_server_args", lambda: [str(script)])
+    previous_session = None
+    process_ids: set[str] = set()
+    try:
+        for _ in range(3):
+            started = await provider.execute("start", {})
+            session = provider._session
+            assert session is not None
+            assert session is not previous_session
+            assert session.running
+            assert provider.running
+            process_id = started.payload["result"]
+            assert isinstance(process_id, str)
+            assert process_id.isdigit()
+            assert process_id not in process_ids
+            process_ids.add(process_id)
+            stopped = await asyncio.wait_for(provider.execute("stop", {}), 6)
+            assert stopped.payload["running"] is False
+            assert not provider.running
+            assert not session.running
+            with pytest.raises(RuntimeError, match="session is closed"):
+                await session.call_tool("browser_tabs", {"action": "list"})
+            previous_session = session
+    finally:
+        await provider.close()
+    with pytest.raises(PlaywrightBrowserError, match="provider is closed"):
+        await provider.execute("start", {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "parameters"),
+    [
+        ("navigate", {"targetUrl": "https://example.com/checkout"}),
+        ("close", {}),
+        ("focus", {}),
+        ("pdf", {}),
+        ("upload", {"paths": ["invoice.txt"]}),
+        ("dialog", {"accept": True}),
+        ("act", {"request": {"kind": "click", "ref": "e3"}}),
+        ("act", {"request": {"kind": "evaluate", "fn": "() => document.title"}}),
+    ],
+)
+async def test_existing_page_control_is_rejected_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    action: str,
+    parameters: dict[str, object],
+) -> None:
+    """No unbound operation may reach whichever tab replaced the observed page."""
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    call_tool = AsyncMock(return_value=_text_result("would affect replacement"))
+    monkeypatch.setattr(provider, "_call_tool", call_tool)
+    with pytest.raises(PlaywrightBrowserError, match="stable page identity") as error:
+        await provider.execute(action, parameters)
+    assert not isinstance(error.value, PlaywrightActionOutcomeUnknownError)
+    assert "reconnect" in str(error.value)
+    call_tool.assert_not_awaited()
 
-    def complete_start(queued_call: _QueuedCall) -> None:
-        queued_call.future.set_result(_text_result("started"))
 
-    monkeypatch.setattr(provider, "_start_actor", complete_start)
+@pytest.mark.asyncio
+async def test_same_url_and_title_after_replacement_cannot_authorize_a_click(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An indistinguishable tab-list result cannot turn old element refs into authority."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    monkeypatch.setattr(PlaywrightMCPBrowserProvider, "running", property(lambda _self: True))
+    observed_tabs = "- 0: (current) [Checkout](https://example.com/checkout)"
+    call_tool = AsyncMock(return_value=_text_result(observed_tabs))
+    monkeypatch.setattr(provider, "_call_tool", call_tool)
+    first = await provider.execute("tabs", {})
+    # The old Page closes; a different Page now has the same index, URL and title.
+    replacement = await provider.execute("tabs", {})
+    assert first.payload["result"] == replacement.payload["result"]
+    with pytest.raises(PlaywrightBrowserError, match="stable page identity"):
+        await provider.execute("act", {"request": {"kind": "click", "ref": "e3"}})
+    assert [call.args[0] for call in call_tool.await_args_list] == ["browser_tabs", "browser_tabs"]
 
-    stopped = await provider.execute("stop", {})
-    started = await provider.execute("start", {})
 
-    assert stopped.payload["running"] is False
-    assert started.payload["result"] == "started"
+@pytest.mark.asyncio
+async def test_provider_reports_stable_targeting_limit_before_start(tmp_path: Path) -> None:
+    """Capability discovery truthfully bounds control before launching the extension."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    status = await provider.execute("status", {})
+    assert status.payload["stable_targeting"] is False
+    assert status.payload["supported_control_actions"] == ["start", "stop", "open"]

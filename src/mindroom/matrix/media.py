@@ -6,11 +6,15 @@ import io
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, TypeGuard
+from urllib.parse import urlsplit
 
 import nio
+from aiohttp import ClientResponse
 from nio import crypto
+from nio.http import TransportResponse
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.encrypted_file import encrypted_file_content
 
 logger = get_logger(__name__)
 
@@ -32,6 +36,12 @@ _MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*_IMAGE_MESSAGE_EVENT_TYPES, *_FILE_OR_VID
 MATRIX_MEDIA_EVENT_TYPES = (*_MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *_AUDIO_MESSAGE_EVENT_TYPES)
 _MATRIX_MEDIA_MSGTYPES = frozenset({"m.image", "m.audio", "m.video", "m.file"})
 _matrix_media_max_bytes = 64 * 1024 * 1024
+_AVATAR_MAX_BYTES = 1024 * 1024
+_AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
+
+class MatrixMediaUpstreamError(RuntimeError):
+    """A Matrix profile or thumbnail request failed upstream."""
 
 
 @dataclass(frozen=True)
@@ -117,9 +127,111 @@ def upload_content_uri(upload_result: object) -> str | None:
     return None
 
 
+def _is_upstream_matrix_error(response: nio.ErrorResponse) -> bool:
+    if response.status_code == "M_NOT_FOUND":
+        return False
+    if response.status_code is not None:
+        return True
+    if isinstance(response.transport_response, TransportResponse):
+        http_status = response.transport_response.status_code
+    elif isinstance(response.transport_response, ClientResponse):
+        http_status = response.transport_response.status
+    else:
+        http_status = None
+    return http_status == 429 or (http_status is not None and http_status >= 500)
+
+
+def matrix_profile_avatar_uri(response: object) -> str | None:
+    """Return a profile avatar URI while preserving typed Matrix failures."""
+    if isinstance(response, nio.ProfileGetResponse):
+        return response.avatar_url
+    if isinstance(response, nio.ProfileGetError) and _is_upstream_matrix_error(response):
+        raise MatrixMediaUpstreamError
+    return None
+
+
+async def fetch_matrix_thumbnail(
+    client: nio.AsyncClient,
+    mxc_uri: object,
+) -> tuple[bytes, str] | None:
+    """Fetch one bounded raster thumbnail from a validated Matrix content URI."""
+    if not isinstance(mxc_uri, str):
+        return None
+    try:
+        uri = urlsplit(mxc_uri)
+    except ValueError:
+        return None
+    if (
+        uri.scheme != "mxc"
+        or not uri.netloc
+        or not uri.path.strip("/")
+        or uri.path.count("/") != 1
+        or uri.query
+        or uri.fragment
+    ):
+        return None
+    thumbnail = await client.thumbnail(uri.netloc, uri.path[1:], width=96, height=96)
+    if isinstance(thumbnail, nio.ThumbnailError):
+        if _is_upstream_matrix_error(thumbnail):
+            raise MatrixMediaUpstreamError
+        return None
+    if (
+        not isinstance(thumbnail, nio.ThumbnailResponse)
+        or not isinstance(thumbnail.body, bytes)
+        or not 0 < len(thumbnail.body) <= _AVATAR_MAX_BYTES
+        or thumbnail.content_type not in _AVATAR_MIME_TYPES
+    ):
+        return None
+    return thumbnail.body, thumbnail.content_type
+
+
 def media_payload_exceeds_limit(media_bytes: bytes | None) -> bool:
     """Return whether a Matrix media payload exceeds the runtime ingestion cap."""
     return media_bytes is not None and len(media_bytes) > _matrix_media_max_bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedMediaUpload:
+    """Upload bytes and metadata after the caller has resolved room encryption."""
+
+    data: bytes
+    content_type: str
+    filename: str
+    info: dict[str, Any]
+    encryption_keys: dict[str, Any] | None
+
+    def encrypted_file_content(self) -> dict[str, Any] | None:
+        """Build encrypted metadata separately so callers retain their error boundaries."""
+        if self.encryption_keys is None:
+            return None
+        return encrypted_file_content(
+            url="",
+            key=self.encryption_keys["key"],
+            iv=self.encryption_keys["iv"],
+            hashes=self.encryption_keys["hashes"],
+            mime_type=self.info["mimetype"],
+            size=self.info["size"],
+        )
+
+
+def prepare_media_upload(
+    media_bytes: bytes,
+    *,
+    filename: str,
+    mimetype: str,
+    encrypt: bool,
+) -> _PreparedMediaUpload:
+    """Prepare media without discovering room state, uploading, or handling failures."""
+    upload_bytes, encryption_keys = (
+        crypto.attachments.encrypt_attachment(media_bytes) if encrypt else (media_bytes, None)
+    )
+    return _PreparedMediaUpload(
+        data=upload_bytes,
+        content_type="application/octet-stream" if encrypt else mimetype,
+        filename=f"{filename}.enc" if encrypt else filename,
+        info={"size": len(media_bytes), "mimetype": mimetype},
+        encryption_keys=encryption_keys,
+    )
 
 
 async def upload_media_bytes(

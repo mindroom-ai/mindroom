@@ -16,49 +16,53 @@ classifiers = [
 ]
 dynamic = [ "version" ]
 dependencies = [
-  "agno[anthropic,google,ollama,openai]==2.6.12",
+  "agno[anthropic,google,ollama,openai]==3.0.9",
   "aiohttp>=3.13.3",
   "aiosqlite>=0.20",
-  "anthropic>=0.77",
+  "anthropic>=0.120.2",
   "anyio>=4.10",
   "authlib>=1.6",
   "cerebras-cloud-sdk>=1.46",
-  "chromadb>=1.0.15",
+  "chromadb>=1.5.8",
   "cron-descriptor>=1.4.5",
   "croniter>=6",
   "cryptography>=47",
-  "fastapi[standard]>=0.116.1",
+  "fastapi[standard]>=0.136.3",
   "filetype>=1.2",
   "google-auth>=2.40.3",
-  # agno 2.6.12 imports the pre-2.9 google-genai streaming delta layout (google.genai.interactions.step_delta);
-  # google-genai >=2.9 removed it. Drop the cap when bumping agno to >=2.6.21 (which has a version compat shim).
-  "google-genai>=2,<2.9",
+  "google-genai>=2",
   "groq>=0.31",
   "httpx>=0.27",
   "humanize>=4.12.3",
+  "idna>=3.13",
   "jinja2>=3.1",
   "json5>=0.13",
+  "jsonschema>=4.26",
   "markdown-it-py>=4",
-  "mcp[cli]>=1.12.4",
+  "mcp[cli]>=1.28.1,<2",
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
-  # Arbitrary Olm to-device encryption uses the fork's tested internal API; update only with its round-trip tests.
-  "mindroom-nio[e2e]==0.28",
+  # Owned to-device transport requires the durable NIO API.
+  "mindroom-nio[e2e]==1.1.1",
   "openai",
   "packaging>=24",
+  "pillow>=10.2",
   "pydantic>=2",
   "pydantic-settings>=2.10.1",
   "pygments>=2.20",
-  "pyjwt>=2.8",
+  "pyjwt>=2.13",
   "python-dotenv>=1",
   "pyyaml>=6",
+  "referencing>=0.37",
   "rich",
+  "starlette>=1.3.1",
   "structlog>=24.1",
   "tenacity>=9.1.2",
   "tiktoken>=0.12",
   "typer>=0.24",
   "uvicorn>=0.35",
   "watchfiles>=1",
+  "websockets>=14",
 ]
 [[project.authors]]
 name = "mindroom team"
@@ -102,6 +106,7 @@ brandfetch = [
 brightdata = [
   "requests",
 ]
+browser_mcp = []
 browser = [
   "playwright",
 ]
@@ -118,6 +123,7 @@ callback_manager = []
 cartesia = [
   "cartesia",
 ]
+chat_ui = []
 claude_agent = [
   "claude-agent-sdk>=0.1.35",
 ]
@@ -145,16 +151,10 @@ csv = [
 custom_api = [
   "requests",
 ]
-dalle = [
-  "openai",
-]
 daytona = [
   "daytona",
 ]
 delegate = []
-desi_vocal = [
-  "requests",
-]
 discord = [
   "requests",
 ]
@@ -202,7 +202,8 @@ giphy = [
   "httpx>=0.27",
 ]
 github = [
-  "pygithub>=2.5",
+  # PyGithub 2.9 injects URL metadata into dictionary responses, breaking Agno's numeric language parser.
+  "pygithub>=2.5,<2.9",
 ]
 gmail = [
   "google-api-python-client>=2.178",
@@ -255,6 +256,7 @@ hackernews = [
 homeassistant = [
   "httpx>=0.27",
 ]
+invite_router = []
 jina = [
   "httpx>=0.27",
   "pydantic>=2",
@@ -273,7 +275,7 @@ lumalabs = [
 ]
 matrix_api = []
 matrix_calls = [
-  "livekit-agents[openai]>=1.6.4",
+  "livekit-agents[openai]>=1.8.1",
 ]
 matrix-e2ee = []
 matrix_message = []
@@ -299,6 +301,7 @@ newspaper = [
 notion = [
   "notion-client",
 ]
+oauth_connections = []
 openai = [
   "openai",
 ]
@@ -336,6 +339,7 @@ resend = [
   "resend",
 ]
 scheduler = []
+script = []
 scrapegraph = [
   "scrapegraph-py>=2.1",
 ]
@@ -371,7 +375,6 @@ spotify = [
 sql = [
   "sqlalchemy",
 ]
-subagents = []
 supabase = [
   "supabase>=2.18.1",
 ]
@@ -380,6 +383,7 @@ tavily = [
 ]
 telegram = [
   "httpx>=0.27",
+  "pytelegrambotapi>=4.32",
 ]
 thread_model = []
 thread_resolution = []
@@ -400,6 +404,7 @@ twilio = [
 ]
 unsplash = []
 update_awareness = []
+usage_stats = []
 visualization = [
   "matplotlib",
 ]
@@ -440,6 +445,7 @@ desktop = [
   "pyautogui>=0.9.54",
   "pyobjc-framework-applicationservices>=12.2.1; sys_platform=='darwin'",
   "pyobjc-framework-cocoa>=12.2.1; sys_platform=='darwin'",
+  "pyobjc-framework-screencapturekit>=12.2.1; sys_platform=='darwin'",
 ]
 [project.scripts]
 mindroom = "mindroom.cli.main:main"
@@ -451,12 +457,13 @@ repository = "https://github.com/mindroom-ai/mindroom"
 [dependency-groups]
 dev = [
   "aioresponses>=0.7.8",
+  "hypothesis>=6.161.1",
   "markdown>=3.10.2",
   "markdown-code-runner>=2.4",
   "markdown-gfm-admonition",
   "pre-commit>=4.2",
   "pre-commit-uv>=4.1.4",
-  "privata>=0.2.1",
+  "privata>=0.8",
   "pytest>=8.4.1",
   "pytest-asyncio>=1.1",
   "pytest-cov>=6.2.1",
@@ -469,6 +476,21 @@ dev = [
   "ty>=0.0.17",
   "vulture>=2.16",
   "zensical",
+]
+# Only the frozen helper's dependencies; the backend's ML packages are not needed.
+# uv resolves this group with the application's exact NIO pin in the same lockfile.
+desktop-helper = [
+  "mcp[cli]>=1.28.1,<2",
+  "mindroom-nio[e2e]",
+  "pillow>=10.2",
+  "pyautogui>=0.9.54",
+  "pyinstaller==6.16",
+  "pyobjc-framework-applicationservices>=12.2.1; sys_platform=='darwin'",
+  "pyobjc-framework-cocoa>=12.2.1; sys_platform=='darwin'",
+  "pyobjc-framework-screencapturekit>=12.2.1; sys_platform=='darwin'",
+  "python-dotenv>=1.1.1",
+  "pyyaml>=6.0.2",
+  "structlog>=25.4",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -543,24 +565,34 @@ per-file-ignores."src/mindroom/tools/*" = [
   "PLC0415", # `import` should be at the top-level of a file"
 ]
 
+[tool.vulture]
+paths = [ "src/mindroom", "vulture_whitelist.py" ]
+min_confidence = 60
+sort_by_size = true
+
 [tool.ty.environment]
 python-version = "3.13"
+# Mock patterns cause many false positives in tests (e.g., mock.call_args
+# returns _Call | None, attribute access on MagicMock, passing mocks as typed
+# arguments).
 [[tool.ty.overrides]]
 include = [ "tests/" ]
-[tool.ty.overrides.rules]
-# Mock patterns cause many false positives in tests (e.g., mock.call_args
-# returns _Call | None, attribute access on MagicMock, passing mocks as
-# typed arguments).
-call-non-callable = "ignore"
-invalid-argument-type = "ignore"
-invalid-assignment = "ignore"
-invalid-return-type = "ignore"
-no-matching-overload = "ignore"
-not-iterable = "ignore"
-not-subscriptable = "ignore"
-too-many-positional-arguments = "ignore"
-unresolved-attribute = "ignore"
-unsupported-operator = "ignore"
+rules = { call-non-callable = "ignore", invalid-argument-type = "ignore", invalid-assignment = "ignore", invalid-return-type = "ignore", no-matching-overload = "ignore", not-iterable = "ignore", not-subscriptable = "ignore", too-many-positional-arguments = "ignore", unresolved-attribute = "ignore", unsupported-operator = "ignore" }
+
+# The macOS accessibility backend imports pyobjc, declared
+# `sys_platform=='darwin'` and so genuinely absent everywhere else. Checking on
+# another platform cannot resolve it and should not pretend to; the alternative
+# is declaring the whole project macOS-targeted, which would hide real errors in
+# the paths that are not. The imports are already function-level.
+#
+# `unused-ignore-comment` goes with it: the per-attribute ignores in those files
+# are load-bearing on macOS, where pyobjc resolves and ty sees real types, and
+# necessarily unused wherever the import does not resolve. One file cannot
+# satisfy both platforms, so the warning is scoped off rather than the
+# directives deleted.
+[[tool.ty.overrides]]
+include = [ "src/mindroom/desktop/" ]
+rules = { unresolved-import = "ignore", unused-ignore-comment = "ignore" }
 [tool.ty.rules]
 deprecated = "ignore"  # FastAPI on_event deprecation; refactor to lifespan separately
 [tool.ty.src]
@@ -577,6 +609,7 @@ addopts = """
     -p no:tach
     -q
     -n auto
+    --dist worksteal
     --asyncio-mode=strict
     --timeout 60
     --durations 20
@@ -585,6 +618,7 @@ markers = [
   "requires_matrix: marks tests that require a real Matrix server connection (deselect with '-m \"not requires_matrix\"')",
   "e2e: marks end-to-end tests",
   "slow: marks tests as slow",
+  "ledger_loads_from_disk: the test warms its own handled-turn ledger and needs the real database read",
 ]
 
 [tool.coverage.report]
@@ -594,8 +628,3 @@ exclude_lines = [
   "if TYPE_CHECKING",
   "if __name__ == .__main__.:",
 ]
-
-[tool.vulture]
-paths = [ "src/mindroom", "vulture_whitelist.py" ]
-min_confidence = 60
-sort_by_size = true

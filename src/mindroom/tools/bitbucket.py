@@ -26,22 +26,22 @@ if TYPE_CHECKING:
             label="Username",
             type="text",
             required=True,
-            placeholder="Bitbucket username",
-            description="Bitbucket username",
+            placeholder="you@example.com",
+            description="Atlassian account email for Bitbucket Cloud; Basic-auth username for other deployments",
         ),
         ConfigField(
             name="password",
-            label="App Password",
+            label="Password",
             type="password",
             required=False,
-            description="App password. Use either this or token.",
+            description="Basic-auth password for deployments that support it; use token for Bitbucket Cloud.",
         ),
         ConfigField(
             name="token",
             label="Token",
             type="password",
             required=False,
-            description="Access token. Use either this or password.",
+            description="Scoped Bitbucket Cloud API token; takes precedence over password.",
         ),
         ConfigField(
             name="workspace",
@@ -71,10 +71,22 @@ if TYPE_CHECKING:
             required=False,
             default="2.0",
         ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
+        ),
     ],
     dependencies=["requests"],
     docs_url="https://docs.agno.com/tools/toolkits/others/bitbucket",
-    helper_text="Create an app password at [Bitbucket Settings](https://bitbucket.org/account/settings/app-passwords/)",
+    helper_text=(
+        "For Bitbucket Cloud, [create a scoped API token]"
+        "(https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/) "
+        "and store it in Token, with your Atlassian account email in Username. "
+        "Other deployments must accept the supplied credentials through Basic authentication."
+    ),
     function_names=(
         "create_repository",
         "get_pull_request_changes",

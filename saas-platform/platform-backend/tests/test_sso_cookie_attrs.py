@@ -91,7 +91,11 @@ def test_sso_cookie_has_security_flags() -> None:
     limiter.reset()
     client = TestClient(app)
     # Use a unique client IP to avoid interference with rate-limit tests
-    r = client.post("/my/sso-cookie", headers={"authorization": "Bearer tok", "X-Forwarded-For": "10.1.2.3"}, data="x")
+    r = client.post(
+        "/my/sso-cookie",
+        headers={"authorization": "Bearer tok", "X-Forwarded-For": "10.1.2.3"},
+        content="x",
+    )
     assert r.status_code == 200
     set_cookie = _token_cookie(r.headers.get_list("set-cookie")).lower()
     # Basic flags
@@ -108,7 +112,7 @@ def test_sso_cookie_returns_401_without_bearer_token() -> None:
     limiter.reset()
     client = TestClient(app)
 
-    response = client.post("/my/sso-cookie", headers={"X-Forwarded-For": "10.1.2.6"}, data="x")
+    response = client.post("/my/sso-cookie", headers={"X-Forwarded-For": "10.1.2.6"}, content="x")
 
     assert response.status_code == 401
     assert response.json() == {"detail": "Missing bearer token"}
@@ -123,7 +127,7 @@ def test_sso_cookie_is_shared_with_tenant_subdomains() -> None:
     client = TestClient(app)
 
     response = client.post(
-        "/my/sso-cookie", headers={"authorization": "Bearer tok", "X-Forwarded-For": "10.1.2.4"}, data="x"
+        "/my/sso-cookie", headers={"authorization": "Bearer tok", "X-Forwarded-For": "10.1.2.4"}, content="x"
     )
 
     assert response.status_code == 200

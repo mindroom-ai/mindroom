@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="mem0",
+    requires_primary_runtime=True,
     display_name="Mem0 Memory",
     description="Persistent memory system that stores, retrieves, searches, and manages user memories and context",
     category=ToolCategory.PRODUCTIVITY,  # Database tools → Productivity
@@ -21,13 +22,6 @@ if TYPE_CHECKING:
     icon="Brain",
     icon_color="text-purple-600",  # Memory/brain theme
     config_fields=[
-        ConfigField(
-            name="config",
-            label="Config",
-            type="text",
-            required=False,
-            default=None,
-        ),
         ConfigField(
             name="api_key",
             label="API Key",

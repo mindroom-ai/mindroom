@@ -53,7 +53,9 @@ The hook system has four execution modes, determined by the event, not by indivi
 
 Hooks run serially.
 Each hook sees the context as read-only (except designated mutable fields like `suppress`).
-Failures lose only that hook's side effects; the next hook still runs.
+Ordinary observer failures are isolated and the next hook still runs; completed external side effects are not rolled back.
+An `agent:started` hook can declare `required=True` when startup must not proceed without its initialization.
+Failure or timeout in a required startup hook aborts that bot's startup before its room reconciliation, using the existing startup failure handling.
 
 ```python
 from mindroom.hooks import hook
@@ -159,6 +161,7 @@ async def block_secret_reads(ctx):
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
 | `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
 | `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router bot after a live human `m.room.member` join, excluding initial sync history, configured agents, the internal `mindroom_user`, and `bot_accounts` | None (frozen) |
+| `room:member_left` | Observer | `RoomMemberLeftContext` | On the router bot after a human's self-authored `m.room.member` transition from `join` to `leave`, excluding configured agents, the internal `mindroom_user`, and `bot_accounts` | None (frozen) |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call runs | `decline()` |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None (observer result snapshot) |
@@ -171,8 +174,13 @@ Use `message:final_response_transform` for one text-only best-effort replacement
 For `compaction:before` and `compaction:after`, `ctx.messages` contains raw `agno.models.message.Message` objects from the compacted session payload.
 MindRoom does not sanitize attachments, media, tool calls, tool args, provider metadata, citations, reasoning fields, metrics, references, or extra Pydantic fields before these hooks run.
 For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation, interruption, suppression, and delivery failure recovery.
-`room:member_joined` is emitted once per room/user pair using MindRoom's durable tracking state under `mindroom_data/tracking/`.
-This makes it suitable for lobby-based onboarding hooks that should create or invite a private agent only once.
+`room:member_joined` uses at-least-once delivery because MindRoom records the durable room/user marker only after the hook completes.
+A process interruption or marker-write failure after a handler side effect can replay the same room/user pair, so handlers that create or invite resources must be idempotent.
+Historical joins and membership state snapshots silently record existing members in the journal admission transaction before Nio acknowledgement, preventing later profile updates from triggering onboarding.
+A baseline never completes a live join hook still pending in the application journal.
+Baselines and completed-hook markers are indexed journal rows scoped to the bot principal, room, and user; they survive restarts and room departures without rewriting an installation-wide file.
+`room:member_left` reads `display_name` and `avatar_url` from the joined membership state that the leave replaces.
+Actionable room-lifecycle events remain pending until their callback completes, so an interruption can replay a leave before journal settlement and handlers must be idempotent.
 
 ### Default timeouts
 
@@ -187,6 +195,7 @@ This makes it suitable for lobby-based onboarding hooks that should create or in
 | `message:cancelled` | 3000 |
 | `reaction:received` | 500 |
 | `room:member_joined` | 3000 |
+| `room:member_left` | 3000 |
 | `schedule:fired` | 1000 |
 | `agent:started` | 5000 |
 | `agent:stopped` | 5000 |
@@ -226,6 +235,7 @@ async def enrich_weather(ctx):
 | `name` | `str` | function name | Hook identifier (unique within a plugin) |
 | `priority` | `int` | `100` | Execution order; lower values run first |
 | `timeout_ms` | `int \| None` | per-event default | Override the event's default timeout |
+| `required` | `bool` | `False` | For `agent:started` only: abort bot startup if this hook fails or times out |
 | `agents` | `Iterable[str] \| None` | `None` (all) | Only fire for these agent names |
 | `rooms` | `Iterable[str] \| None` | `None` (all) | Only fire for these room IDs |
 
@@ -467,17 +477,21 @@ If you are writing internal code or tests and already have an explicit `HookRegi
 ### Fault isolation
 
 Every hook invocation runs inside an `asyncio.timeout()` with structured error logging.
-No hook can crash the bot.
+Ordinary `Exception` and `SystemExit` failures are logged and isolated so later hooks can continue.
+Required startup hooks instead raise a `RuntimeError` with the original failure as its cause, stopping subsequent startup hooks and the bot's room reconciliation.
+Use a short, separate required hook for ownership or other necessary initialization; keep optional backfill, welcomes, and enrichment in ordinary hooks.
+Cancellation follows the caller and event policy, and external side effects completed before a failure cannot be rolled back.
 
 Failure semantics are mode-aware:
 
-- **Observer** failures lose only side effects; the next hook still runs
+- **Observer** failures stop that callback; completed external side effects remain, and the next hook still runs
 - **Collector** failures lose only that hook's contributed items
-- **Transformer** failures lose only that hook's draft changes; the previous draft continues
+- **`message:before_response` transformer** failures preserve mutations already made to the shared draft before the failure
+- **`message:final_response_transform` transformer** failures discard the failed hook's copy and continue with the previous draft
 
 ### No quarantine, no cooldown
 
-A hook that raises is logged and skipped for that one event. The next event invokes it again. If it keeps raising, you keep getting logs — fix it (combined with [plugin hot reload](plugins.md#live-development-hot-reload), the next save is live within ~1s) and the next invocation just works. There is no failure threshold, no muting, no cooldown to wait out.
+An ordinary hook that raises is logged and skipped for that one event. The next event invokes it again. If it keeps raising, you keep getting logs — fix it (combined with [plugin hot reload](plugins.md#live-development-hot-reload), the next save is live within ~1s) and the next invocation just works. There is no failure threshold, no muting, no cooldown to wait out.
 
 ### No automatic retries
 
@@ -509,9 +523,9 @@ Scoped sub-paths (per-room, per-user) are the plugin author's responsibility.
 
 ## Context reference
 
-### Base fields (all hooks)
+### Base fields (non-tool hooks)
 
-Every hook context includes these fields:
+Contexts derived from `HookContext` include these fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -522,10 +536,13 @@ Every hook context includes these fields:
 | `runtime_paths` | `RuntimePaths` | Storage paths and environment values |
 | `logger` | `BoundLogger` | Plugin-scoped structured logger |
 | `correlation_id` | `str` | Unique ID per inbound event |
-| `runtime_started_at` | `float \| None` | Unix timestamp for the current runtime freshness boundary, useful when plugin state must ignore cache rows from before the latest bot start |
+| `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful when plugin state must ignore anything recorded before it |
 | `state_root` | `Path` | Plugin state directory (property) |
 
-Every hook context also exposes the following helpers:
+Those non-tool contexts also expose the following helpers:
+
+`ToolBeforeCallContext` and `ToolAfterCallContext` use a separate tool-hook surface.
+Their `config` and `runtime_paths` values may be absent, and they do not expose `runtime_started_at` or `get_latest_agent_message_snapshot()`.
 
 **`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`**
 Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
@@ -549,10 +566,10 @@ When both the current bot and the router can query room state, MindRoom tries th
 Transport exceptions from the underlying Matrix client propagate to the hook.
 
 **`await ctx.get_latest_agent_message_snapshot(room_id, sender, *, thread_id=None)`**
-Returns the latest visible cached `m.room.message` from `sender` in the given room or thread scope.
-The helper automatically applies `ctx.runtime_started_at` so room-level reads ignore visible cache rows from before the current bot runtime.
-It returns `None` when no reader is bound, when the advisory cache is disabled or missing usable rows, or when the sender has no cached message in that scope.
-It raises `AgentMessageSnapshotUnavailable` when a thread snapshot exists but fails the cache freshness contract, such as a stale or invalidated thread cache row.
+Returns the latest visible `m.room.message` from `sender` in the given room or thread scope, read from the conversation projection.
+`thread_id=None` means the unthreaded room conversation, so a threaded reply never answers a room-scope question.
+The read never blocks on the homeserver and is bounded to the 50 most recent messages in that scope.
+It returns `None` when no reader is bound, when the sender has no visible message inside that window, or when the sender's newest message is awaiting a server refetch because its visible revision was redacted.
 
 **`await ctx.put_room_state(room_id, event_type, state_key, content)`**
 Writes a single Matrix room state event and returns `True` on success, `False` on Matrix error response.
@@ -564,9 +581,17 @@ Transport exceptions from the underlying Matrix client propagate to the hook.
 Provides a narrow Matrix admin facade when MindRoom has a router-backed admin client available for the current hook context.
 This facade is part of the supported hook contract and is intentionally not the raw Matrix client.
 It is `None` when no admin-capable client is bound.
-The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `get_room_members(room_id)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
+The available methods are `get_joined_rooms()`, `retain_room(room_id)`, `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `force_join_user(room_id, user_id)`, `kick_user(room_id, user_id, reason=None)`, `get_room_members(room_id)`, `get_profile_avatar(user_id)`, `get_room_state_event(room_id, event_type, state_key)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
+Membership mutation methods return a boolean success result and surface transport exceptions consistently with the other admin operations.
 `get_room_members` returns `None` when the membership fetch fails, so callers can distinguish an unreadable room from a genuinely empty one.
+`get_joined_rooms()` returns the bound account's joined room IDs, or `None` when the request fails; plugins can use one lookup to verify membership across their recorded rooms.
+`get_profile_avatar` returns the user's Matrix avatar content URI, or `None` when no avatar is available or Matrix returns an error response.
+`get_room_state_event` returns `(True, content)` for a successful object response, `(True, None)` when Matrix confirms the event is missing, and `(False, None)` for other Matrix errors or malformed non-object content.
+Transport exceptions from read methods propagate to the caller.
 Rooms created via `create_room` are retained for the creating bot across room cleanup and restarts, the same way rooms it is invited to are kept.
+When reconciling an existing plugin-owned room, call the synchronous `retain_room(room_id)` after verifying the bound bot is still a member.
+It restores the same local retention record used by the bot's membership lifecycle, changes no Matrix membership, and raises `OSError` if persistence fails.
+Retention applies only to managed entities with invite acceptance enabled; it does not override disabled invitation policy.
 
 ### Transport objects
 
@@ -650,6 +675,18 @@ RoomMemberJoinedContext(
     prev_membership: str | None,
 )
 
+RoomMemberLeftContext(
+    agent_name: str,
+    room_id: str,
+    event_id: str,
+    user_id: str,
+    sender_id: str,
+    display_name: str | None,
+    avatar_url: str | None,
+    membership: str,
+    prev_membership: str | None,
+)
+
 ToolBeforeCallContext(
     tool_name: str,
     arguments: dict[str, Any],
@@ -679,6 +716,12 @@ ToolAfterCallContext(
 
 For `schedule:fired`, `ScheduleFiredContext.thread_id` is the resolved delivery thread.
 This may differ from `workflow.thread_id` when the workflow starts a new thread or resolves to room mode.
+Visible and silent schedules both emit `schedule:fired` before their trigger is sent.
+For recurring schedules, `ctx.correlation_id` identifies the intended occurrence and stays the same across preparation retries.
+A crash or preparation failure before the trigger is durably frozen can invoke the hook again with that ID.
+Side-effecting hooks must use an idempotent destination; use the correlation ID as its idempotency key.
+Once the trigger is frozen, delivery retries reuse its prepared content without invoking hooks again.
+Setting `ctx.suppress = True` cancels the fire, while replacing `ctx.message_text` with an empty or whitespace-only value produces a visible scheduled-task failure notice.
 
 ## Testing
 

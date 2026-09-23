@@ -5,11 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.cancellation import cancel_source_from_failure_reason
+from mindroom.constants import AI_RUN_METADATA_KEY
+
 if TYPE_CHECKING:
+    from mindroom.cancellation import CancelSource
     from mindroom.interactive import InteractiveMetadata
     from mindroom.tool_system.events import ToolTraceEntry
 
-_TerminalStatus = Literal["completed", "cancelled", "error"]
+_StreamTerminalStatus = Literal["completed", "cancelled", "error"]
+_TerminalStatus = Literal[_StreamTerminalStatus, "suspended"]
 VisibleBodyState = Literal["none", "placeholder_only", "visible_body"]
 _VisibleDeliveryKind = Literal["sent", "edited"]
 
@@ -17,9 +22,10 @@ _VisibleDeliveryKind = Literal["sent", "edited"]
 @dataclass(frozen=True)
 class StreamTransportOutcome:  # noqa: D101
     last_physical_stream_event_id: str | None
-    terminal_status: _TerminalStatus
+    terminal_status: _StreamTerminalStatus
     rendered_body: str | None
     visible_body_state: VisibleBodyState
+    terminal_update_committed: bool = False
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
     interactive_metadata: InteractiveMetadata | None = None
@@ -36,6 +42,13 @@ class StreamTransportOutcome:  # noqa: D101
         """Return the current streamed body snapshot used for hook and outcome decisions."""
         return self.rendered_body or ""
 
+    @property
+    def resolved_cancel_source(self) -> CancelSource | None:
+        """Resolve cancellation provenance from the persisted transport failure reason."""
+        if self.terminal_status != "cancelled":
+            return None
+        return cancel_source_from_failure_reason(self.failure_reason)
+
 
 @dataclass(frozen=True)
 class FinalDeliveryOutcome:  # noqa: D101
@@ -44,6 +57,7 @@ class FinalDeliveryOutcome:  # noqa: D101
     is_visible_response: bool = False
     final_visible_body: str | None = None
     delivery_kind: _VisibleDeliveryKind | None = None
+    cancel_source: Literal["user_stop", "sync_restart", "interrupted"] | None = None
     failure_reason: str | None = None
     suppressed: bool = False
     tool_trace: tuple[ToolTraceEntry, ...] = ()
@@ -55,12 +69,44 @@ class FinalDeliveryOutcome:  # noqa: D101
         object.__setattr__(self, "extra_content", dict(self.extra_content or {}))
 
     @property
+    def response_run_id(self) -> str | None:
+        """Read a valid run identity from the authoritative final delivery payload."""
+        metadata = (self.extra_content or {}).get(AI_RUN_METADATA_KEY)
+        run_id = metadata.get("run_id") if isinstance(metadata, dict) else None
+        return run_id if isinstance(run_id, str) and run_id else None
+
+    @property
     def final_visible_event_id(self) -> str | None:  # noqa: D102
         return self.event_id if self.is_visible_response else None
 
     @property
+    def resolved_cancel_source(self) -> CancelSource | None:
+        """Resolve cancellation provenance: explicit provenance wins, else the persisted failure reason."""
+        if self.cancel_source is not None:
+            return self.cancel_source
+        if self.terminal_status == "cancelled":
+            return cancel_source_from_failure_reason(self.failure_reason)
+        return None
+
+    @property
     def mark_handled(self) -> bool:  # noqa: D102
-        return self.event_id is not None and self.is_visible_response and not self.suppressed
+        return (
+            self.terminal_status != "suspended"
+            and self.event_id is not None
+            and self.is_visible_response
+            and not self.suppressed
+        )
+
+    @property
+    def delivered_substantive_content(self) -> bool:
+        """Return whether this outcome proves that nonblank response text reached Matrix."""
+        return (
+            self.terminal_status == "completed"
+            and self.is_visible_response
+            and self.delivery_kind is not None
+            and self.final_visible_body is not None
+            and bool(self.final_visible_body.strip())
+        )
 
     @property
     def response_text(self) -> str:  # noqa: D102

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,24 +13,30 @@ import aiohttp
 import httpx
 import nio
 import pytest
+from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
+from nio.crypto import DeviceStore, OlmDevice
+from pydantic import ValidationError
+from structlog.testing import capture_logs
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.calls import CallsConfig, CascadedCallProfile, RealtimeCallProfile
+from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import ModelConfig
 from mindroom.config.voice import SpeechServiceConfig
+from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix_rtc.call_manager import (
     _MAX_PENDING_KEYS_PER_ROOM,
     _PENDING_KEY_TTL_MS,
     CallManager,
     _build_call_instructions,
+    _build_live_instructions,
     maybe_build_call_manager,
 )
-from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps
+from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps, CallStartRevokedError
 from mindroom.matrix_rtc.call_tools import CallAgentResponse, CallAgentTooling
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
@@ -41,20 +48,26 @@ from mindroom.matrix_rtc.events import (
     membership_state_key,
 )
 from mindroom.matrix_rtc.focus import SfuGrant
+from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
 from mindroom.matrix_rtc.voice_agent import (
     CallVoiceAgentOptions,
     CascadedVoiceAgentOptions,
     CascadedVoiceBridge,
+    LiveVoiceAgentOptions,
+    LiveVoiceUsage,
     RealtimeVoiceBridge,
     VoiceAgentOptions,
 )
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from mindroom.model_loading import get_model_instance
+from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.token_budget import approximate_o200k_tokens
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
+from mindroom.usage_stats import collect_admin_usage
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from agno.models.openai.chat import OpenAIChat
@@ -67,6 +80,11 @@ BOT_DEVICE = "BOTDEV"
 ROOM_ID = "!room:example.org"
 SERVICE_URL = "https://rtc.example.org"
 GRANT = SfuGrant(url="wss://sfu.example.org", jwt="jwt-token")
+
+
+async def _admission_available() -> bool:
+    """Return the always-live runtime state used by constructor-only tests."""
+    return True
 
 
 class FakeBridge:
@@ -154,6 +172,11 @@ def _client() -> AsyncMock:
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = BOT_USER
     client.device_id = BOT_DEVICE
+    client.rooms = {}
+    devices = DeviceStore()
+    for device_id in ("ALICEDEV", "ALICESECOND"):
+        devices.add(OlmDevice("@alice:example.org", device_id, {"curve25519": "curve", "ed25519": "signing"}))
+    client.olm = SimpleNamespace(device_store=devices)
     client.get_openid_token.return_value = nio.responses.GetOpenIDTokenResponse(
         "opaque-token",
         3600,
@@ -234,11 +257,25 @@ def _config(*, enabled: bool = True, credentials_service: str = "openai") -> Con
                 role="Answer questions",
                 instructions=["Be kind."],
                 rooms=[ROOM_ID],
+                access=ResponderAccessConfig(users=["@alice:example.org"]),
             ),
         },
         models={},
-        authorization=AuthorizationConfig(global_users=["@alice:example.org"]),
         calls=_realtime_calls(enabled=enabled, credentials_service=credentials_service),
+    )
+
+
+def _set_helper_access(
+    config: Config,
+    *,
+    users: list[str] | None = None,
+    members_of_rooms: list[str] | None = None,
+) -> None:
+    """Replace the helper's authored responder policy for one test."""
+    config.administrators = []
+    config.agents["helper"].access = ResponderAccessConfig(
+        users=users or [],
+        members_of_rooms=members_of_rooms or [],
     )
 
 
@@ -294,7 +331,7 @@ def _cascaded_config(*, local: bool = False, call_model: str | None = None) -> C
                 model=call_model,
                 stt=SpeechServiceConfig(
                     provider="openai_compatible" if local else "openai",
-                    model="whisper-large-v3" if local else "gpt-4o-transcribe",
+                    model="whisper-large-v3" if local else "gpt-transcribe",
                     api_key=None if local else "stt-key",
                     host="http://127.0.0.1:9000" if local else None,
                     extra_kwargs={"language": "en"},
@@ -322,7 +359,16 @@ def _manager(
     tool_support: object = object(),
     clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     invited_rooms_by_agent: dict[str, set[str]] | None = None,
+    agent_reply_memberships: AgentReplyMembershipIndex | None = None,
+    response_admission_gate: ResponseAdmissionGate | None = None,
+    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]] | None = None,
 ) -> CallManager:
+    admission_gate = response_admission_gate or ResponseAdmissionGate()
+
+    async def wait_for_admission() -> bool:
+        await admission_gate.wait_until_open()
+        return True
+
     return CallManager(
         agent_name="helper",
         config=config or _config(),
@@ -333,7 +379,34 @@ def _manager(
         tool_support=tool_support,  # type: ignore[arg-type]
         get_invited_rooms_by_agent=lambda: invited_rooms_by_agent or {},
         clock_ms=clock_ms,
+        agent_reply_memberships=agent_reply_memberships or AgentReplyMembershipIndex(),
+        response_admission_gate=admission_gate,
+        wait_for_admission_or_shutdown=wait_for_admission_or_shutdown or wait_for_admission,
     )
+
+
+def _live_config(*, agent_model: str | None = None) -> Config:
+    """Configure Live credentials independently from the normal agent model."""
+    config = _config()
+    if agent_model is not None:
+        config.models[agent_model] = ModelConfig(provider="anthropic", id="claude-sonnet-5")
+    config.calls = CallsConfig.model_validate(
+        {
+            "enabled": True,
+            "profiles": {
+                "live": {
+                    "backend": "live",
+                    "model": "gpt-live-1",
+                    "credentials_service": "openai_live",
+                    "voice": "marin",
+                    "agent_model": agent_model,
+                },
+            },
+            "agents": {"helper": "live"},
+            "livekit_service_url": SERVICE_URL,
+        },
+    )
+    return config
 
 
 def _room(*, encrypted: bool = False, room_id: str = ROOM_ID) -> nio.MatrixRoom:
@@ -373,7 +446,7 @@ def _frame_key_event(
         source=source,
         sender=user_id,
         type=CALL_ENCRYPTION_KEYS_EVENT_TYPE,
-        authenticated_device_id=device_id,
+        authenticated_sender=AuthenticatedDevice(user_id, device_id, "curve", "signing"),
     )
 
 
@@ -394,6 +467,8 @@ def _stub_join_externals(monkeypatch: pytest.MonkeyPatch) -> None:
             tools=(),
             instructions="You are Helper.",
             execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            responder=AsyncMock(return_value=CallAgentResponse("answer")),
+            get_system_prompt=AsyncMock(return_value="You are Helper."),
         )
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
@@ -470,10 +545,10 @@ async def test_manager_joins_requester_private_agent_in_owned_rooms(
                 display_name="Helper",
                 rooms=[] if invited_room else [ROOM_ID],
                 private=AgentPrivateConfig(per="user_agent"),
+                access=ResponderAccessConfig(users=["@alice:example.org"]),
             ),
         },
         models={},
-        authorization=AuthorizationConfig(global_users=["@alice:example.org"]),
         calls=_realtime_calls(),
     )
     client = _client()
@@ -649,7 +724,7 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
     options = bridge.agent_options
     assert isinstance(options, CascadedVoiceAgentOptions)
     assert (options.stt.model, options.stt.api_key, options.stt.base_url) == (
-        "gpt-4o-transcribe",
+        "gpt-transcribe",
         "stt-key",
         "https://api.openai.com/v1",
     )
@@ -662,6 +737,142 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
     assert options.tts.extra_kwargs == {"voice": "ash"}
     assert options.close_responder is close_responder
     await manager.shutdown()
+
+
+def _assert_safe_oversized_live_instructions(instructions: str) -> None:
+    """Check the strict fallback without duplicating the backend-selection test."""
+    assert approximate_o200k_tokens(instructions) <= 16_384
+    assert instructions.startswith("You are speaking as Helper 🌿, the configured agent in a live voice call.")
+    assert "## Your Identity" not in instructions
+    assert "FINAL SAFETY" not in instructions
+    assert "full caller-bound instructions and context" in instructions
+    assert "Delegate every substantive user request" in instructions
+    assert "Do not answer substantive requests from your own knowledge" in instructions
+    assert "Never claim to have checked information or completed work" in instructions
+    assert "\ufffd" not in instructions
+    assert instructions.encode("utf-8").decode("utf-8") == instructions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_model", [None, "delegate"])
+async def test_manager_selects_live_backend_with_normal_agent_delegate(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    agent_model: str | None,
+) -> None:
+    """Live bounds its speech prompt while preserving its delegate and authorization."""
+    tooling_kwargs: dict[str, object] = {}
+    close_responder = AsyncMock()
+    full_prompt = (
+        "## Your Identity\nYou are the caller's concise voice assistant. 🌿\n"
+        + "Caller-scoped background context. 你好世界。\n" * 2_000
+        + "\nFINAL SAFETY: Never ignore the caller's authorization boundaries. 🛡️"
+    )
+    get_system_prompt = AsyncMock(return_value=full_prompt)
+
+    async def respond(
+        transcript: str,
+        _on_tools_executed: Callable[[list[str]], None] | None,
+    ) -> CallAgentResponse:
+        return CallAgentResponse(f"Completed: {transcript}")
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        tooling_kwargs.update(kwargs)
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            get_system_prompt=get_system_prompt,
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            responder=respond,
+            close=close_responder,
+        )
+
+    services: list[str] = []
+
+    def get_key(service: str, _runtime_paths: RuntimePaths) -> str | None:
+        services.append(service)
+        return {"openai_live": "sk-live", "openai": "sk-other"}.get(service)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_service", get_key)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _live_config(agent_model=agent_model)
+    config.agents["helper"].display_name = "Helper 🌿"
+    manager = _manager(client, bridge, tmp_path, config)
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    options = bridge.agent_options
+    assert isinstance(options, LiveVoiceAgentOptions)
+    assert options.model == "gpt-live-1"
+    assert options.api_key == "sk-live"
+    assert options.voice == "marin"
+    assert options.respond is respond
+    assert options.close_responder is close_responder
+    live_instructions = await options.get_instructions()
+    _assert_safe_oversized_live_instructions(live_instructions)
+    assert await options.get_instructions() == live_instructions
+    get_system_prompt.assert_awaited()
+    assert await options.respond("Check status", None) == CallAgentResponse("Completed: Check status")
+    assert services == ["openai_live"]
+    assert tooling_kwargs["enable_responder"] is True
+    assert tooling_kwargs["active_model_name"] == agent_model
+    assert tooling_kwargs["reconcile_spoken_response"] is False
+    assert str(tooling_kwargs["session_id"]).startswith(f"{ROOM_ID}:call:")
+    assert tooling_kwargs["requester_id"] == "@alice:example.org"
+    assert callable(tooling_kwargs["authorize_operation"])
+    assert options.on_conversation_turn is not None
+    assert options.on_tools_executed is not None
+    assert options.on_session_error is not None
+    assert options.on_session_terminated is not None
+    assert options.record_usage is not None
+    await options.record_usage(LiveVoiceUsage("provider-1", "gpt-live-1", 1_700_000_000, 12.5, False))
+    await options.record_usage(LiveVoiceUsage("provider-1", "gpt-live-1", 1_700_000_000, 20.0, True))
+    await options.record_usage(LiveVoiceUsage("provider-2", "gpt-live-1", 1_700_000_030, 7.5, False))
+    report = collect_admin_usage(config=config, runtime_paths=test_runtime_paths(tmp_path)).to_dict()
+    assert report["voice_breakdown"] == [
+        {
+            "entity": "helper",
+            "user_id": "@alice:example.org",
+            "provider": "OpenAI",
+            "model": "gpt-live-1",
+            "created_at": 1_700_000_000,
+            "duration_seconds": 20.0,
+            "finalized": True,
+        },
+        {
+            "entity": "helper",
+            "user_id": "@alice:example.org",
+            "provider": "OpenAI",
+            "model": "gpt-live-1",
+            "created_at": 1_700_000_030,
+            "duration_seconds": 7.5,
+            "finalized": False,
+        },
+    ]
+    assert report["totals"]["total_tokens"] == 0
+    assert report["model_breakdown"] == []
+    await manager.shutdown()
+
+
+def test_live_backend_requires_its_named_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A generic OpenAI key cannot silently satisfy the explicit Live binding."""
+    services: list[str] = []
+
+    def get_key(service: str, _runtime_paths: RuntimePaths) -> str | None:
+        services.append(service)
+        return "sk-other" if service == "openai" else None
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_service", get_key)
+    manager = _manager(_client(), FakeBridge(), tmp_path, _live_config())
+
+    assert manager.voice_backend_available is False
+    assert services == ["openai_live"]
 
 
 @pytest.mark.asyncio
@@ -747,7 +958,7 @@ def test_openai_speech_with_custom_host_uses_named_credential(
     service = manager._resolve_speech_service(
         SpeechServiceConfig(
             provider="openai",
-            model="gpt-4o-transcribe",
+            model="gpt-transcribe",
             credentials_service="openai-realtime",
             host="https://proxy.example.test",
         ),
@@ -818,7 +1029,7 @@ def test_openai_cloud_speech_uses_explicit_endpoint(
     manager = _manager(_client(), FakeBridge(), tmp_path, _cascaded_config())
 
     service = manager._resolve_speech_service(
-        SpeechServiceConfig(provider="openai", model="gpt-4o-transcribe", api_key="cloud-key"),
+        SpeechServiceConfig(provider="openai", model="gpt-transcribe", api_key="cloud-key"),
         component="stt",
         room_id=ROOM_ID,
     )
@@ -859,6 +1070,9 @@ def test_call_manager_uses_assigned_realtime_profile(
         ssl_verify=True,
         tool_support=object(),  # type: ignore[arg-type]
         get_invited_rooms_by_agent=dict,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        response_admission_gate=ResponseAdmissionGate(),
+        wait_for_admission_or_shutdown=_admission_available,
     )
 
     backend = manager._resolve_voice_backend(ROOM_ID)
@@ -888,6 +1102,7 @@ def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path) ->
         agents={
             "helper": AgentConfig(display_name="Helper"),
             "other": AgentConfig(display_name="Other"),
+            "speaker": AgentConfig(display_name="Speaker"),
         },
         models={},
         calls=CallsConfig(
@@ -900,10 +1115,17 @@ def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path) ->
                     voice="marin",
                 ),
                 "cascaded": CascadedCallProfile(backend="cascaded", stt=stt, tts=tts),
+                "live": LiveCallProfile(
+                    backend="live",
+                    model="gpt-live-1",
+                    credentials_service="openai_live",
+                    voice="marin",
+                ),
             },
             agents={
                 "helper": "realtime",
                 "other": "cascaded",
+                "speaker": "live",
             },
         ),
     )
@@ -915,6 +1137,9 @@ def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path) ->
         ssl_verify=True,
         tool_support=object(),  # type: ignore[arg-type]
         get_invited_rooms_by_agent=dict,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        response_admission_gate=ResponseAdmissionGate(),
+        wait_for_admission_or_shutdown=_admission_available,
     )
     cascaded_manager = CallManager(
         agent_name="other",
@@ -924,13 +1149,30 @@ def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path) ->
         ssl_verify=True,
         tool_support=object(),  # type: ignore[arg-type]
         get_invited_rooms_by_agent=dict,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        response_admission_gate=ResponseAdmissionGate(),
+        wait_for_admission_or_shutdown=_admission_available,
     )
 
     realtime_bridge = realtime_manager._bridge_factory("@helper:example.org:BOTDEV", False)
     cascaded_bridge = cascaded_manager._bridge_factory("@other:example.org:BOTDEV", False)
+    live_manager = CallManager(
+        agent_name="speaker",
+        config=config,
+        client=_client(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        ssl_verify=True,
+        tool_support=object(),  # type: ignore[arg-type]
+        get_invited_rooms_by_agent=dict,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        response_admission_gate=ResponseAdmissionGate(),
+        wait_for_admission_or_shutdown=_admission_available,
+    )
+    live_bridge = live_manager._bridge_factory("@speaker:example.org:BOTDEV", False)
 
     assert isinstance(realtime_bridge, RealtimeVoiceBridge)
     assert isinstance(cascaded_bridge, CascadedVoiceBridge)
+    assert isinstance(live_bridge, LiveVoiceBridge)
     assert realtime_manager._call_config.backend == "realtime"
     assert realtime_manager._call_config.model == "gpt-realtime-custom"
     assert realtime_manager._call_config.voice == "marin"
@@ -1049,13 +1291,15 @@ async def test_manager_ignores_calls_outside_agent_rooms(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_manager_rejects_unauthorized_call_members(tmp_path: Path) -> None:
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("backend", ["realtime", "live"])
+async def test_manager_rejects_unauthorized_call_members(tmp_path: Path, backend: str) -> None:
     """A participant must pass normal room authorization before the agent joins."""
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
-    config = _config()
-    config.authorization = AuthorizationConfig()
+    config = _live_config() if backend == "live" else _config()
+    _set_helper_access(config)
     manager = _manager(client, bridge, tmp_path, config)
 
     await manager.on_room_event(_room(), _member_unknown_event())
@@ -1064,18 +1308,463 @@ async def test_manager_rejects_unauthorized_call_members(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_manager_rejects_members_denied_by_agent_reply_permissions(tmp_path: Path) -> None:
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_manager_rejects_members_denied_by_agent_access(tmp_path: Path) -> None:
     """Per-agent reply permissions also gate whole-call admission."""
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
     config = _config()
-    config.authorization.agent_reply_permissions = {"helper": ["@other:example.org"]}
+    _set_helper_access(config, users=["@other:example.org"])
     manager = _manager(client, bridge, tmp_path, config)
 
     await manager.on_room_event(_room(), _member_unknown_event())
 
     assert bridge.connected_grant is None
+
+
+@pytest.mark.asyncio
+async def test_manager_accepts_call_member_authorized_by_grant_room(tmp_path: Path) -> None:
+    """Conversation membership grants should apply to the central call admission gate."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    config.agents["helper"].rooms = ["grant"]
+    _set_helper_access(config, members_of_rooms=["grant"])
+    runtime_paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("grant", ROOM_ID, "#grant:example.org", "Grant")
+    state.save(runtime_paths=runtime_paths)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[ROOM_ID])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@alice:example.org", None, None)],
+        room_id=ROOM_ID,
+    )
+    memberships = AgentReplyMembershipIndex()
+    await memberships.refresh(config, runtime_paths, client)
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        agent_reply_memberships=memberships,
+    )
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert bridge.connected_grant is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("backend", ["realtime", "live"])
+async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_path: Path, backend: str) -> None:
+    """A grant-room departure must end an active call without another call-room event."""
+    grant_room_id = "!grant:example.org"
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _live_config() if backend == "live" else _config()
+    config.agents["helper"].rooms = [ROOM_ID, "grant"]
+    _set_helper_access(config, members_of_rooms=["grant"])
+    runtime_paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
+    state.save(runtime_paths=runtime_paths)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@alice:example.org", None, None)],
+        room_id=grant_room_id,
+    )
+    memberships = AgentReplyMembershipIndex()
+    await memberships.refresh(config, runtime_paths, client)
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        agent_reply_memberships=memberships,
+    )
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.connected_grant is not None
+
+    memberships.apply_member_event(
+        config,
+        runtime_paths,
+        grant_room_id,
+        nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": "$grant-leave",
+                "sender": "@alice:example.org",
+                "state_key": "@alice:example.org",
+                "origin_server_ts": 1,
+                "content": {"membership": "leave"},
+                "unsigned": {"prev_content": {"membership": "join"}},
+            },
+        ),
+        control_user_id=BOT_USER,
+    )
+    await manager.reconcile_reply_authorization()
+
+    assert bridge.closed
+    assert not manager._sessions
+    assert not manager._logical_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_manager_starts_observed_call_after_grant_snapshot_becomes_ready(tmp_path: Path) -> None:
+    """A successful refresh must reconsider a call denied while grants were unready."""
+    grant_room_id = "!grant:example.org"
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    config.agents["helper"].rooms = [ROOM_ID, "grant"]
+    _set_helper_access(config, members_of_rooms=["grant"])
+    runtime_paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
+    state.save(runtime_paths=runtime_paths)
+    memberships = AgentReplyMembershipIndex()
+    memberships.invalidate(config, reason="startup")
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        agent_reply_memberships=memberships,
+    )
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.connected_grant is None
+
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@alice:example.org", None, None)],
+        room_id=grant_room_id,
+    )
+    await memberships.refresh(config, runtime_paths, client)
+    await manager.reconcile_reply_authorization()
+
+    assert bridge.connected_grant is GRANT
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_manager_starts_observed_call_after_live_grant_join(tmp_path: Path) -> None:
+    """A live grant-room join must reconsider a previously denied joined call."""
+    grant_room_id = "!grant:example.org"
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    config.agents["helper"].rooms = [ROOM_ID, "grant"]
+    _set_helper_access(config, members_of_rooms=["grant"])
+    runtime_paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
+    state.save(runtime_paths=runtime_paths)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=grant_room_id)
+    memberships = AgentReplyMembershipIndex()
+    await memberships.refresh(config, runtime_paths, client)
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        agent_reply_memberships=memberships,
+    )
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.connected_grant is None
+
+    memberships.apply_member_event(
+        config,
+        runtime_paths,
+        grant_room_id,
+        nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": "$grant-join",
+                "sender": "@alice:example.org",
+                "state_key": "@alice:example.org",
+                "origin_server_ts": 1,
+                "content": {"membership": "join"},
+                "unsigned": {"prev_content": {"membership": "invite"}},
+            },
+        ),
+        control_user_id=BOT_USER,
+    )
+    await manager.reconcile_reply_authorization()
+
+    assert bridge.connected_grant is GRANT
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_positive_call_reconciliation_waits_for_admission_and_rechecks_policy(tmp_path: Path) -> None:
+    """A call queued behind reload admission must use the replacement policy."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    gate = ResponseAdmissionGate()
+    assert gate.close_if_idle()
+    wait_started = asyncio.Event()
+
+    async def wait_for_admission() -> bool:
+        wait_started.set()
+        await gate.wait_until_open()
+        return True
+
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        response_admission_gate=gate,
+        wait_for_admission_or_shutdown=wait_for_admission,
+    )
+    reconcile = asyncio.create_task(manager.reconcile_joined_rooms())
+    await asyncio.wait_for(wait_started.wait(), timeout=1)
+    client.room_get_state.assert_not_awaited()
+
+    _set_helper_access(config)
+    gate.reopen()
+    await reconcile
+
+    assert bridge.connected_grant is None
+    assert not manager._sessions
+
+
+@pytest.mark.asyncio
+async def test_call_start_holds_response_admission_through_session_handoff(tmp_path: Path) -> None:
+    """A replacement cannot commit while an authorized call start is in flight."""
+
+    class BlockingBridge(FakeBridge):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_started = asyncio.Event()
+            self.release_connect = asyncio.Event()
+
+        async def connect(self, grant: SfuGrant) -> None:
+            self.connect_started.set()
+            await self.release_connect.wait()
+            await super().connect(grant)
+
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = BlockingBridge()
+    gate = ResponseAdmissionGate()
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        response_admission_gate=gate,
+    )
+
+    reconcile = asyncio.create_task(manager.on_room_event(_room(), _member_unknown_event()))
+    await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
+    assert not gate.close_if_idle()
+    bridge.release_connect.set()
+    await reconcile
+
+    assert gate.close_if_idle()
+    gate.reopen()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_reply_revocation_stops_call_while_admission_is_closed(tmp_path: Path) -> None:
+    """Revocation is control-plane cleanup and must not wait for positive admission."""
+    grant_room_id = "!grant:example.org"
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    config.agents["helper"].rooms = [ROOM_ID, "grant"]
+    _set_helper_access(config, members_of_rooms=["grant"])
+    runtime_paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
+    state.save(runtime_paths=runtime_paths)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@alice:example.org", None, None)],
+        room_id=grant_room_id,
+    )
+    memberships = AgentReplyMembershipIndex()
+    await memberships.refresh(config, runtime_paths, client)
+    gate = ResponseAdmissionGate()
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        agent_reply_memberships=memberships,
+        response_admission_gate=gate,
+    )
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.connected_grant is GRANT
+    assert gate.close_if_idle()
+
+    memberships.apply_member_event(
+        config,
+        runtime_paths,
+        grant_room_id,
+        nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": "$grant-leave-closed",
+                "sender": "@alice:example.org",
+                "state_key": "@alice:example.org",
+                "origin_server_ts": 1,
+                "content": {"membership": "leave"},
+                "unsigned": {"prev_content": {"membership": "join"}},
+            },
+        ),
+        control_user_id=BOT_USER,
+    )
+    await asyncio.wait_for(manager.revoke_reply_authorization(), timeout=1)
+
+    assert bridge.closed
+    assert gate.closed
+    gate.reopen()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -> None:
+    """A grant-room departure must not wait for voice-agent startup to finish."""
+
+    class StartingBridge(FakeBridge):
+        def __init__(self) -> None:
+            super().__init__()
+            self.agent_starting = asyncio.Event()
+            self.release_agent = asyncio.Event()
+
+        async def start_agent(self, options: CallVoiceAgentOptions) -> None:
+            self.agent_options = options
+            self.agent_starting.set()
+            await self.release_agent.wait()
+
+    grant_room_id = "!grant:example.org"
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = StartingBridge()
+    config = _config()
+    config.agents["helper"].rooms = [ROOM_ID, "grant"]
+    _set_helper_access(config, members_of_rooms=["grant"])
+    runtime_paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
+    state.save(runtime_paths=runtime_paths)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@alice:example.org", None, None)],
+        room_id=grant_room_id,
+    )
+    memberships = AgentReplyMembershipIndex()
+    await memberships.refresh(config, runtime_paths, client)
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        agent_reply_memberships=memberships,
+    )
+
+    join_task = asyncio.create_task(manager.on_room_event(_room(), _member_unknown_event()))
+    await asyncio.wait_for(bridge.agent_starting.wait(), timeout=1)
+    memberships.apply_member_event(
+        config,
+        runtime_paths,
+        grant_room_id,
+        nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": "$grant-leave-during-start",
+                "sender": "@alice:example.org",
+                "state_key": "@alice:example.org",
+                "origin_server_ts": 1,
+                "content": {"membership": "leave"},
+                "unsigned": {"prev_content": {"membership": "join"}},
+            },
+        ),
+        control_user_id=BOT_USER,
+    )
+
+    try:
+        await asyncio.wait_for(manager.revoke_reply_authorization(), timeout=1)
+    finally:
+        bridge.release_agent.set()
+        await join_task
+
+    assert bridge.closed
+    assert not manager._sessions
+    assert not manager._logical_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_manager_uses_reloaded_reply_policy(tmp_path: Path) -> None:
+    """Authorization-only reloads must replace the call manager's live config."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    initial_config = _config()
+    _set_helper_access(initial_config, users=["@other:example.org"])
+    manager = _manager(client, bridge, tmp_path, initial_config)
+    reloaded_config = _config()
+
+    manager.update_config(reloaded_config)
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    assert bridge.connected_grant is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_manager_rechecks_active_call_after_reply_policy_reload(tmp_path: Path) -> None:
+    """Removing a static reply grant must end an already active call immediately."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    initial_config = _config()
+    manager = _manager(client, bridge, tmp_path, initial_config)
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.connected_grant is not None
+
+    reloaded_config = _config()
+    _set_helper_access(reloaded_config, users=["@other:example.org"])
+    manager.update_config(reloaded_config)
+    for _ in range(10):
+        if bridge.closed:
+            break
+        await asyncio.sleep(0)
+
+    assert bridge.closed
+    assert not manager._sessions
+
+
+@pytest.mark.asyncio
+async def test_reply_recheck_does_not_clear_state_after_tracked_call_already_ended(tmp_path: Path) -> None:
+    """A stale recheck task must not disturb state created after its call ended."""
+    manager = _manager(_client(), FakeBridge(), tmp_path)
+    expiry = MagicMock(spec=asyncio.TimerHandle)
+    manager._pending_keys[ROOM_ID] = {}
+    manager._expiry_handles[ROOM_ID] = expiry
+
+    await manager._reconcile_room_reply_authorization(ROOM_ID)
+
+    assert ROOM_ID in manager._pending_keys
+    assert manager._expiry_handles[ROOM_ID] is expiry
+    expiry.cancel.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1124,10 +1813,12 @@ async def test_manager_leaves_when_a_denied_member_joins(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_leaves_when_second_authorized_user_joins(tmp_path: Path) -> None:
     """Mixed speakers cannot share one requester identity for tool calls."""
     config = _config()
-    config.authorization.global_users.append("@bob:example.org")
+    assert config.agents["helper"].access is not None
+    config.agents["helper"].access.users.append("@bob:example.org")
     client = _client()
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path, config)
@@ -1145,6 +1836,7 @@ async def test_manager_leaves_when_second_authorized_user_joins(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_restarts_when_sole_requester_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1162,7 +1854,8 @@ async def test_manager_restarts_when_sole_requester_changes(
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
     config = _config()
-    config.authorization.global_users.append("@bob:example.org")
+    assert config.agents["helper"].access is not None
+    config.agents["helper"].access.users.append("@bob:example.org")
     client = _client()
     alice_bridge = FakeBridge()
     bob_bridge = FakeBridge()
@@ -1176,6 +1869,9 @@ async def test_manager_restarts_when_sole_requester_changes(
         bridge_factory=lambda _identity, _e2ee: next(bridges),
         tool_support=object(),  # type: ignore[arg-type]
         get_invited_rooms_by_agent=dict,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        response_admission_gate=ResponseAdmissionGate(),
+        wait_for_admission_or_shutdown=_admission_available,
     )
     client.room_get_state.return_value = _state_response(_remote_member_event())
     await manager.on_room_event(_room(), _member_unknown_event())
@@ -1205,6 +1901,90 @@ async def test_manager_reconciles_active_calls_after_sync(tmp_path: Path) -> Non
     await manager.reconcile_joined_rooms()
 
     assert bridge.connected_grant is GRANT
+
+
+@pytest.mark.asyncio
+async def test_manager_reconciles_only_requested_joined_rooms(tmp_path: Path) -> None:
+    """A scoped pass must not refresh an unrelated configured call room."""
+    other_room_id = "!other-call:example.org"
+    config = _config()
+    config.agents["helper"].rooms.append(other_room_id)
+    client = _client()
+    client.rooms = {
+        ROOM_ID: _room(),
+        other_room_id: _room(room_id=other_room_id),
+    }
+    client.room_get_state.return_value = nio.RoomGetStateResponse([], ROOM_ID)
+    manager = _manager(client, FakeBridge(), tmp_path, config)
+
+    await manager.reconcile_joined_rooms({ROOM_ID})
+
+    assert [request.args[0] for request in client.room_get_state.await_args_list] == [ROOM_ID]
+
+
+@pytest.mark.asyncio
+async def test_manager_explicit_empty_reconciliation_scope_does_no_work(tmp_path: Path) -> None:
+    """An empty scoped pass is distinct from a full startup pass."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    manager = _manager(client, FakeBridge(), tmp_path)
+
+    await manager.reconcile_joined_rooms(set())
+
+    client.room_get_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_manager_full_reconciliation_visits_every_configured_room(tmp_path: Path) -> None:
+    """The no-argument startup path must retain whole-account discovery."""
+    other_room_id = "!other-call:example.org"
+    config = _config()
+    config.agents["helper"].rooms.append(other_room_id)
+    client = _client()
+    client.rooms = {
+        ROOM_ID: _room(),
+        other_room_id: _room(room_id=other_room_id),
+    }
+    client.room_get_state.return_value = nio.RoomGetStateResponse([], ROOM_ID)
+    manager = _manager(client, FakeBridge(), tmp_path, config)
+
+    await manager.reconcile_joined_rooms()
+
+    assert {request.args[0] for request in client.room_get_state.await_args_list} == {ROOM_ID, other_room_id}
+
+
+@pytest.mark.asyncio
+async def test_scoped_reconciliation_does_not_join_after_room_leave(tmp_path: Path) -> None:
+    """A departure while admission is closed must fence an in-flight scoped pass."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    bridge = FakeBridge()
+    gate = ResponseAdmissionGate()
+    assert gate.close_if_idle()
+    wait_started = asyncio.Event()
+
+    async def wait_for_admission() -> bool:
+        wait_started.set()
+        await gate.wait_until_open()
+        return True
+
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        response_admission_gate=gate,
+        wait_for_admission_or_shutdown=wait_for_admission,
+    )
+    reconcile = asyncio.create_task(manager.reconcile_joined_rooms({ROOM_ID}))
+    await asyncio.wait_for(wait_started.wait(), timeout=1)
+
+    await manager.on_sync_room_membership(joined_room_ids=set(), left_room_ids={ROOM_ID})
+    gate.reopen()
+    await reconcile
+
+    client.room_get_state.assert_not_awaited()
+    assert bridge.connected_grant is None
+    assert manager._sessions == {}
 
 
 @pytest.mark.asyncio
@@ -1337,6 +2117,9 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
         ssl_verify=True,
         tool_support=object(),
         get_invited_rooms_by_agent=dict,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        response_admission_gate=ResponseAdmissionGate(),
+        wait_for_admission_or_shutdown=_admission_available,
     )
     assert disabled is None
     not_listed = maybe_build_call_manager(
@@ -1347,6 +2130,9 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
         ssl_verify=True,
         tool_support=object(),
         get_invited_rooms_by_agent=dict,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        response_admission_gate=ResponseAdmissionGate(),
+        wait_for_admission_or_shutdown=_admission_available,
     )
     assert not_listed is None
     enabled = maybe_build_call_manager(
@@ -1357,6 +2143,9 @@ def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None
         ssl_verify=True,
         tool_support=object(),
         get_invited_rooms_by_agent=dict,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        response_admission_gate=ResponseAdmissionGate(),
+        wait_for_admission_or_shutdown=_admission_available,
     )
     assert isinstance(enabled, CallManager)
 
@@ -1380,6 +2169,9 @@ def test_maybe_build_call_manager_survives_missing_livekit_package(
         ssl_verify=True,
         tool_support=object(),
         get_invited_rooms_by_agent=dict,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        response_admission_gate=ResponseAdmissionGate(),
+        wait_for_admission_or_shutdown=_admission_available,
     )
     assert manager is None
 
@@ -1455,6 +2247,17 @@ def test_build_call_instructions_appends_voice_guidance() -> None:
     assert "Answer questions" not in text
 
 
+def test_build_live_instructions_preserves_prompt_that_fits() -> None:
+    """A normal prompt keeps all caller context before the fixed voice rules."""
+    system_prompt = "## Your Identity\nYou are Helper.\n\nAlways respect caller authorization."
+
+    text = _build_live_instructions(system_prompt, agent_display_name="Helper")
+
+    assert text.startswith(f"{system_prompt}\n\n")
+    assert "context was omitted" not in text
+    assert "Never claim to have checked information or completed work" in text
+
+
 def _member(
     user: str,
     device: str,
@@ -1487,6 +2290,7 @@ def _session(client: AsyncMock, bridge: FakeBridge, transport: FakeKeyTransport,
             fetch_grant=fetch_grant,
             agent_options=VoiceAgentOptions(instructions="hi", model="gpt-realtime-2.1", api_key="sk-test"),
             livekit_service_url=SERVICE_URL,
+            start_is_allowed=lambda: True,
             clock_ms=lambda: clock[0],
         ),
     )
@@ -1512,6 +2316,30 @@ async def test_session_distributes_and_applies_first_key_on_start() -> None:
     assert bridge.frame_keys[0][0] == own_identity
     assert bridge.frame_keys[0][2] == 0
     await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_rechecks_start_authorization_before_publishing_membership() -> None:
+    """A grant revoked during SFU connect must not publish or start the agent."""
+
+    class RevokingBridge(FakeBridge):
+        async def connect(self, grant: SfuGrant) -> None:
+            start_allowed[0] = False
+            await super().connect(grant)
+
+    start_allowed = [True]
+    client = _client()
+    bridge = RevokingBridge()
+    session = _session(client, bridge, FakeKeyTransport(), [1_000])
+    session.deps.start_is_allowed = lambda: start_allowed[0]
+
+    with pytest.raises(CallStartRevokedError):
+        await session.start([_member("@alice:example.org", "ALICEDEV")])
+
+    published_contents = [call.args[2] for call in client.room_put_state.await_args_list]
+    assert published_contents == [{}]
+    assert bridge.agent_options is None
+    assert bridge.closed
 
 
 @pytest.mark.asyncio
@@ -2080,9 +2908,14 @@ async def test_manager_accepts_key_for_alias_only_configured_room(
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
     config = Config(
-        agents={"helper": AgentConfig(display_name="Helper", rooms=["#voice:example.org"])},
+        agents={
+            "helper": AgentConfig(
+                display_name="Helper",
+                rooms=["#voice:example.org"],
+                access=ResponderAccessConfig(users=["@alice:example.org"]),
+            ),
+        },
         models={},
-        authorization=AuthorizationConfig(global_users=["@alice:example.org"]),
         calls=_realtime_calls(),
     )
     room = _room(encrypted=True)
@@ -2144,6 +2977,7 @@ def test_manager_bounds_and_deduplicates_pending_keys(tmp_path: Path) -> None:
                 key_index=index,
                 received_at_ms=index,
             ),
+            _frame_key_event(),
         )
 
     pending = manager._pending_keys[ROOM_ID]
@@ -2157,15 +2991,17 @@ def test_manager_bounds_and_deduplicates_pending_keys(tmp_path: Path) -> None:
         key_index=1,
         received_at_ms=999,
     )
-    manager._queue_pending_key(ROOM_ID, replacement)
+    manager._queue_pending_key(ROOM_ID, replacement, _frame_key_event())
     assert len(pending) == _MAX_PENDING_KEYS_PER_ROOM
-    assert pending[("@alice:example.org", "ALICEDEV", 1)] is replacement
+    assert pending[("@alice:example.org", "ALICEDEV", 1)].received is replacement
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("revoked", [False, True])
 async def test_manager_replays_a_key_received_while_starting(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    revoked: bool,
 ) -> None:
     """A key received after call membership publication is applied once the bridge is ready."""
 
@@ -2197,10 +3033,12 @@ async def test_manager_replays_a_key_received_while_starting(
     assert ROOM_ID in manager._pending_keys
     assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) not in bridge.frame_keys
 
+    if revoked:
+        client.olm.device_store["@alice:example.org"]["ALICEDEV"].deleted = True
     release_agent.set()
     await asyncio.gather(join_task, key_task)
 
-    assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
+    assert (("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys) is (not revoked)
     await manager.shutdown()
 
 
@@ -2599,9 +3437,11 @@ async def test_call_events_cannot_bypass_pending_join_backoff(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_cascaded_retries_reuse_logical_call_session_id(
+@pytest.mark.parametrize("backend", ["cascaded", "live"])
+async def test_delegated_call_retries_reuse_logical_call_session_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    backend: str,
 ) -> None:
     """Media reconnects retain chat history until the remote call empties."""
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager._RECONCILE_RETRY_DELAYS_S", (0.0,))
@@ -2618,11 +3458,12 @@ async def test_cascaded_retries_reuse_logical_call_session_id(
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    manager = _manager(client, FakeBridge(), tmp_path, _cascaded_config())
+    config = _live_config() if backend == "live" else _cascaded_config()
+    manager = _manager(client, FakeBridge(), tmp_path, config)
     results = iter(("retry", "joined", "joined"))
 
     async def fake_join(room: nio.MatrixRoom, members: list[CallMember]) -> str:
-        await manager._build_tooling(room.room_id, requester_id=members[0].user_id, cascaded=True)
+        await manager._build_tooling(room.room_id, requester_id=members[0].user_id)
         return next(results)
 
     manager._join = fake_join  # type: ignore[method-assign]
@@ -2673,6 +3514,7 @@ async def test_terminal_voice_close_stops_session_and_retries_only_when_allowed(
 async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path: Path) -> None:
     """A connected-but-broken voice provider cannot fail as silent audio."""
     client = _client()
+    client.rooms = {ROOM_ID: _room()}
     client.room_get_state.return_value = _state_response(_remote_member_event())
     client.room_send.return_value = nio.RoomSendResponse("$notice", ROOM_ID)
     bridge = FakeBridge()
@@ -2689,7 +3531,7 @@ async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path:
     await asyncio.gather(*list(manager._background_tasks))
 
     client.room_send.assert_awaited_once_with(
-        ROOM_ID,
+        room_id=ROOM_ID,
         message_type="m.room.message",
         content={
             "msgtype": "m.notice",
@@ -2697,6 +3539,57 @@ async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path:
             "chat.mindroom.call_failure": {"version": 1},
         },
         ignore_unverified_devices=True,
+    )
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_voice_runtime_error_waits_for_reload_and_rechecks_authorization(tmp_path: Path) -> None:
+    """A queued call failure notice must not publish after its requester is revoked."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    client.room_send.return_value = nio.RoomSendResponse("$notice", ROOM_ID)
+    bridge = FakeBridge()
+    config = _config()
+    gate = ResponseAdmissionGate()
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        response_admission_gate=gate,
+    )
+    await manager.on_room_event(_room(), _member_unknown_event())
+    assert bridge.agent_options is not None
+    assert bridge.agent_options.on_session_error is not None
+    assert gate.close_if_idle()
+
+    bridge.agent_options.on_session_error("Voice call failed.")
+    _set_helper_access(config)
+    gate.reopen()
+    await asyncio.gather(*list(manager._background_tasks))
+
+    client.room_send.assert_not_awaited()
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_voice_runtime_error_does_not_report_success_without_delivery(tmp_path: Path) -> None:
+    """A normalized delivery failure remains visible in call diagnostics."""
+    manager = _manager(_client(), FakeBridge(), tmp_path)
+
+    with (
+        patch("mindroom.matrix_rtc.call_manager.send_room_event_result", new=AsyncMock(return_value=None)),
+        patch("mindroom.matrix_rtc.call_manager.logger.warning") as warning,
+    ):
+        await manager._send_call_failure_notice(ROOM_ID, "@alice:example.org", "Voice call failed.")
+
+    warning.assert_called_once_with(
+        "call_failure_notice_send_failed",
+        room_id=ROOM_ID,
+        error="no Matrix response",
     )
     await manager.shutdown()
 
@@ -2772,6 +3665,7 @@ def _plain_session(
             fetch_grant=fetch_grant,
             agent_options=VoiceAgentOptions(instructions="x", model="m", api_key="k"),
             livekit_service_url=SERVICE_URL,
+            start_is_allowed=lambda: True,
             on_stopped=on_stopped,  # type: ignore[arg-type]
         ),
     )
@@ -3259,7 +4153,7 @@ def test_calls_config_rejects_agents_sharing_a_room() -> None:
 
 def test_cascaded_calls_require_both_speech_services() -> None:
     """The discriminated cascaded profile requires both speech legs."""
-    stt = SpeechServiceConfig(model="gpt-4o-transcribe", credentials_service="openai")
+    stt = SpeechServiceConfig(model="gpt-transcribe", credentials_service="openai")
     tts = SpeechServiceConfig(model="tts-1", credentials_service="openai")
 
     config = CallsConfig(
@@ -3286,7 +4180,7 @@ def test_cascaded_calls_require_both_speech_services() -> None:
 
 def test_cascaded_calls_accept_optional_model_override() -> None:
     """A cascaded profile can select a configured model for its agent turns."""
-    stt = SpeechServiceConfig(model="gpt-4o-transcribe", credentials_service="openai")
+    stt = SpeechServiceConfig(model="gpt-transcribe", credentials_service="openai")
     tts = SpeechServiceConfig(model="tts-1", credentials_service="openai")
     config = Config(
         models={"call_fast": ModelConfig(provider="anthropic", id="claude-haiku-4-5")},
@@ -3311,7 +4205,7 @@ def test_cascaded_calls_accept_optional_model_override() -> None:
 
 def test_calls_config_rejects_unknown_cascaded_model() -> None:
     """Call model aliases must exist in the top-level model catalog."""
-    stt = SpeechServiceConfig(model="gpt-4o-transcribe", credentials_service="openai")
+    stt = SpeechServiceConfig(model="gpt-transcribe", credentials_service="openai")
     tts = SpeechServiceConfig(model="tts-1", credentials_service="openai")
 
     with pytest.raises(ValueError, match=r"voice -> missing"):
@@ -3332,6 +4226,74 @@ def test_calls_config_rejects_unknown_cascaded_model() -> None:
         )
 
 
+def test_live_calls_validate_delegate_model_separately_from_voice_model() -> None:
+    """Live accepts a provider model while its delegate must name a configured alias."""
+    calls = {
+        "profiles": {
+            "voice": {
+                "backend": "live",
+                "model": "gpt-live-1",
+                "credentials_service": "openai_live",
+                "voice": "marin",
+                "agent_model": "delegate",
+            },
+        },
+        "agents": {"helper": "voice"},
+    }
+    config = Config.model_validate(
+        {
+            "agents": {"helper": {"display_name": "Helper"}},
+            "models": {"delegate": {"provider": "anthropic", "id": "claude-sonnet-5"}},
+            "calls": calls,
+        },
+    )
+    assert config.calls.model_dump(exclude_defaults=True) == calls
+
+    calls["profiles"]["voice"]["agent_model"] = "missing"
+    with pytest.raises(ValueError, match=r"voice -> missing"):
+        Config.model_validate(
+            {"agents": {"helper": {"display_name": "Helper"}}, "models": {}, "calls": calls},
+        )
+
+
+@pytest.mark.parametrize("missing_field", ["credentials_service", "voice"])
+def test_live_calls_require_explicit_credentials_and_voice(missing_field: str) -> None:
+    """Live cannot select credentials or a voice implicitly."""
+    profile = {
+        "backend": "live",
+        "model": "gpt-live-1",
+        "credentials_service": "openai_live",
+        "voice": "marin",
+    }
+    profile.pop(missing_field)
+    with pytest.raises(ValidationError) as error:
+        CallsConfig.model_validate({"profiles": {"voice": profile}})
+    assert [(item["loc"], item["type"]) for item in error.value.errors()] == [
+        (("profiles", "voice", "live", missing_field), "missing"),
+    ]
+
+
+@pytest.mark.parametrize("service", ["", "../openai", "openai/live"])
+def test_live_calls_reject_invalid_credential_service(service: str) -> None:
+    """Live credential bindings use the same strict service names as realtime."""
+    with pytest.raises(ValidationError) as error:
+        CallsConfig.model_validate(
+            {
+                "profiles": {
+                    "voice": {
+                        "backend": "live",
+                        "model": "gpt-live-1",
+                        "credentials_service": service,
+                        "voice": "marin",
+                    },
+                },
+            },
+        )
+    assert [(item["loc"], item["type"]) for item in error.value.errors()] == [
+        (("profiles", "voice", "live", "credentials_service"), "value_error"),
+    ]
+
+
 def test_openai_compatible_speech_config_requires_endpoint() -> None:
     """A compatible provider cannot silently fall through to OpenAI cloud."""
     with pytest.raises(ValueError, match="require host"):
@@ -3349,7 +4311,7 @@ def test_speech_config_normalizes_blank_optional_fields() -> None:
     """Blank form values use the same fallback behavior as omitted fields."""
     service = SpeechServiceConfig(
         provider="openai",
-        model="gpt-4o-transcribe",
+        model="gpt-transcribe",
         credentials_service="openai",
         host=" ",
         api_key="",
@@ -3382,7 +4344,7 @@ def test_speech_config_rejects_connection_fields_in_extra_kwargs() -> None:
     """Typed connection fields cannot be ambiguously overridden by provider options."""
     with pytest.raises(ValueError, match="must not redefine: api_key, base_url, client"):
         SpeechServiceConfig(
-            model="gpt-4o-transcribe",
+            model="gpt-transcribe",
             extra_kwargs={"api_key": "wrong", "base_url": "https://wrong.example", "client": "wrong"},
         )
 
@@ -3516,3 +4478,55 @@ def test_manager_fails_closed_when_live_room_resolves_multiple_call_agents(tmp_p
     room.canonical_alias = "#voice:example.org"
 
     assert not manager._is_configured_call_room(room)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("signal", ["sync", "active", "cached", "expired", "left_call", "invited", "departed", "self"])
+async def test_manager_ownership_warning_requires_live_call_signal(tmp_path: Path, signal: str) -> None:
+    """Idle ambiguity stays diagnostic without new I/O; a live caller still warns."""
+    config = _config()
+    config.agents["helper"].rooms = []
+    config.agents["helper"].accept_invites = True
+    config.agents["other"] = AgentConfig(display_name="Other", accept_invites=True)
+    config.calls.agents["other"] = "realtime"
+    client = _client()
+    room = _room()
+    client.rooms = {ROOM_ID: room}
+    caller = BOT_USER if signal == "self" else "@alice:example.org"
+    if signal not in {"departed", "cached"}:
+        room.add_member(caller, "Caller", None, invited=signal == "invited")
+    if signal == "cached":
+        client.joined_members.return_value = nio.JoinedMembersResponse(
+            [nio.RoomMember(caller, "Caller", None)],
+            ROOM_ID,
+        )
+        assert await ensure_room_membership_synced(client, room, sender_id=caller)
+        assert caller not in room.users
+        client.joined_members.reset_mock()
+    source = _remote_member_event(user=caller, created_ts=0 if signal == "expired" else None)
+    source["event_id"] = "$call-member"
+    if signal == "left_call":
+        source["content"] = {}
+    event = nio.UnknownEvent(source, CALL_MEMBER_EVENT_TYPE)
+    bridge = FakeBridge()
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        invited_rooms_by_agent={"helper": {ROOM_ID}, "other": {ROOM_ID}},
+    )
+
+    with capture_logs() as logs:
+        if signal == "sync":
+            await manager.reconcile_joined_rooms()
+        else:
+            await manager.on_room_event(room, event)
+
+    diagnostics = [row for row in logs if row["event"] == "call_room_ownership_ambiguous"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["log_level"] == ("warning" if signal in {"active", "cached"} else "debug")
+    assert manager._sessions == {}
+    assert bridge.connected_grant is None
+    client.room_get_state.assert_not_awaited()
+    client.joined_members.assert_not_awaited()

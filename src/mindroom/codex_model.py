@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import httpx
 from agno.models.response import ModelResponse
@@ -17,7 +16,7 @@ from agno.utils.http import get_default_async_client, get_default_sync_client
 from openai import AsyncOpenAI, OpenAI
 
 from mindroom.file_locks import advisory_file_lock
-from mindroom.model_defaults import CODEX_GPT, CODEX_GPT_ENDPOINT
+from mindroom.model_defaults import CODEX_GPT, CODEX_GPT_ALIAS, CODEX_GPT_ENDPOINT
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 
@@ -26,16 +25,13 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
     from pydantic import BaseModel
 
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
 _CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _CODEX_REFRESH_URL = "https://auth.openai.com/oauth/token"
 _CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _CODEX_REFRESH_SKEW_SECONDS = 30
 _CODEX_MODEL_PREFIX = "openai-codex/"
-_CODEX_MODEL_ALIASES = {CODEX_GPT: CODEX_GPT_ENDPOINT}
+_CODEX_MODEL_ALIASES = {CODEX_GPT_ALIAS: CODEX_GPT_ENDPOINT}
 _CODEX_UNSUPPORTED_REQUEST_PARAMS = {"max_output_tokens", "temperature"}
-_CODEX_PROMPT_CACHE_KEY_PREFIX = "mindroom"
 _CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
 _CODEX_WINDOW_ID_HEADER = "x-codex-window-id"
 
@@ -190,29 +186,11 @@ def _update_tokens(tokens: dict[str, Any], refreshed: dict[str, Any]) -> None:
             tokens[key] = refreshed[key]
 
 
-def derive_codex_prompt_cache_key(identity: ToolExecutionIdentity) -> str | None:
-    """Derive a stable Codex prompt-cache routing key for one active execution."""
-    if identity.session_id is None:
-        return None
-    source = ":".join(
-        (
-            identity.channel,
-            identity.agent_name,
-            identity.requester_id or "",
-            identity.room_id or "",
-            identity.resolved_thread_id or identity.thread_id or "",
-            identity.session_id,
-        ),
-    )
-    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
-    return f"{_CODEX_PROMPT_CACHE_KEY_PREFIX}-{digest}"
-
-
-def _codex_prompt_cache_headers(prompt_cache_key: str) -> dict[str, str]:
+def _codex_session_headers(session_id: str) -> dict[str, str]:
     return {
-        "session_id": prompt_cache_key,
-        "x-client-request-id": prompt_cache_key,
-        _CODEX_WINDOW_ID_HEADER: f"{prompt_cache_key}:0",
+        "session_id": session_id,
+        "x-client-request-id": session_id,
+        _CODEX_WINDOW_ID_HEADER: f"{session_id}:0",
     }
 
 
@@ -256,6 +234,9 @@ def _merge_codex_extra_body(request_params: dict[str, Any], codex_extra_body: di
 class CodexResponses(MindRoomOpenAIResponses):
     """Agno Responses model backed by the local Codex CLI ChatGPT OAuth credentials."""
 
+    # The ChatGPT Codex endpoint rejects the public API's explicit-cache field.
+    supports_prompt_cache_breakpoints: ClassVar[bool] = False
+
     id: str = CODEX_GPT
     name: str = "CodexResponses"
     provider: str = "OpenAI Codex"
@@ -263,6 +244,7 @@ class CodexResponses(MindRoomOpenAIResponses):
     store: bool = False
     codex_home: str | None = None
     prompt_cache_key: str | None = None
+    session_id: str | None = None
     default_instructions: str = CODEX_DEFAULT_INSTRUCTIONS
 
     def __post_init__(self) -> None:
@@ -294,15 +276,13 @@ class CodexResponses(MindRoomOpenAIResponses):
         instructions = [self.system_prompt, *(self.instructions or [])]
         return "\n\n".join(instruction for instruction in instructions if instruction) or self.default_instructions
 
-    def _prompt_cache_key(self) -> str | None:
-        return self.prompt_cache_key
-
     def get_request_params(
         self,
         messages: list[Message] | None = None,
         response_format: dict[Any, Any] | type[BaseModel] | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        run_response: RunOutput | None = None,
     ) -> dict[str, Any]:
         """Add the top-level instructions field required by the Codex endpoint."""
         request_params = super().get_request_params(
@@ -310,15 +290,18 @@ class CodexResponses(MindRoomOpenAIResponses):
             response_format=response_format,
             tools=tools,
             tool_choice=tool_choice,
+            run_response=run_response,
         )
         request_params.setdefault("instructions", self._instructions_text())
-        prompt_cache_key = self._prompt_cache_key()
+        prompt_cache_key = self.prompt_cache_key
         if prompt_cache_key:
             request_params.setdefault("prompt_cache_key", prompt_cache_key)
+        if self.session_id:
             extra_headers = dict(request_params.get("extra_headers") or {})
-            for header_name, header_value in _codex_prompt_cache_headers(prompt_cache_key).items():
+            for header_name, header_value in _codex_session_headers(self.session_id).items():
                 extra_headers.setdefault(header_name, header_value)
             request_params["extra_headers"] = extra_headers
+        if prompt_cache_key or self.session_id:
             _merge_codex_extra_body(
                 request_params,
                 _codex_prompt_cache_extra_body(
@@ -354,7 +337,6 @@ class CodexResponses(MindRoomOpenAIResponses):
         ):
             _merge_response_delta(model_response, response_delta)
 
-        self._populate_assistant_message(assistant_message, model_response)
         return model_response
 
     async def ainvoke(
@@ -382,7 +364,6 @@ class CodexResponses(MindRoomOpenAIResponses):
         ):
             _merge_response_delta(model_response, response_delta)
 
-        self._populate_assistant_message(assistant_message, model_response)
         return model_response
 
     def get_client(self) -> OpenAI:

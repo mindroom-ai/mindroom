@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.file_locks import advisory_file_lock, async_exclusive_file_lock
+from mindroom.file_locks import advisory_file_lock, async_exclusive_file_lock, file_lock_is_held
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -58,6 +59,38 @@ async def test_async_exclusive_file_lock_released_on_cancellation(tmp_path: Path
 
     # A cancelled waiter/holder must release the lock, so this acquires without hanging.
     assert await asyncio.wait_for(acquire_once(), timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_async_exclusive_file_lock_outlives_parent_handle_when_fd_is_inherited(tmp_path: Path) -> None:
+    lock_path = tmp_path / "index.lock"
+
+    async with async_exclusive_file_lock(
+        lock_path,
+        poll_seconds=0.01,
+        retain_for_inherited_fds=True,
+    ) as lock_file:
+        inherited_fd = os.dup(lock_file.fileno())
+
+    try:
+        assert file_lock_is_held(lock_path) is True
+    finally:
+        os.close(inherited_fd)
+
+    assert file_lock_is_held(lock_path) is False
+
+
+@pytest.mark.asyncio
+async def test_async_exclusive_file_lock_releases_inherited_fd_by_default(tmp_path: Path) -> None:
+    lock_path = tmp_path / "index.lock"
+
+    async with async_exclusive_file_lock(lock_path, poll_seconds=0.01) as lock_file:
+        inherited_fd = os.dup(lock_file.fileno())
+
+    try:
+        assert file_lock_is_held(lock_path) is False
+    finally:
+        os.close(inherited_fd)
 
 
 def test_advisory_file_lock_exclusive_blocks_second_holder(tmp_path: Path) -> None:

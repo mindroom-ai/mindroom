@@ -18,7 +18,7 @@ register_builtin_tool_metadata(
     ToolMetadata(
         name="memory",
         display_name="Agent Memory",
-        description="Explicitly store and search agent memories on demand",
+        description="Save, find, and update information the agent remembers",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

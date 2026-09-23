@@ -13,25 +13,41 @@ It should own lifecycle, callback registration, sync, room membership, presence,
 `InboundTurnNormalizer` owns raw input shaping.
 It should turn text, voice, sidecars, and media into canonical turn inputs before policy or execution runs.
 
+`VoiceReadiness` owns preparing a voice source for dispatch.
+It restores or checkpoints the prepared content through `TurnStore`, and waits for required router echo publication through `VisibleVoiceEchoLifecycle`.
+Only normalization failures select raw-audio fallback; checkpoint, publication, and ingress metadata failures retain the source for durable retry.
+
 `ConversationResolver` owns conversation identity.
 It should resolve explicit thread identity, history, mentions, and normalized ingress envelopes.
 
 `DeliveryGateway` owns Matrix transport.
 It should send, edit, redact, and finalize already-generated responses.
 
+`response_turn.py` owns continuation and terminal settlement for fresh and resumed agent attempts.
+`AgentApprovalExecution` restores saved execution, validates exact approved calls, and supplies the resumed attempt to that shared driver.
+The driver distinguishes a completed model attempt from a completed response and reports typed execution status independently of display metadata.
+Approval pauses retain the response's continuation count and active model in `ApprovalContinuation`, so resuming does not reset the remaining budget.
+`FinalDeliveryOutcome` exposes terminal run identity from the frozen delivery payload through its typed contract, keeping live and recovered history linkage consistent.
+
+`ResponseSources` captures immutable pending events, logical sources, discovery aliases, and the selected edit receipt for one request.
+The journal registers `ResponseAttempt` identity atomically with approval creation or response delivery enqueue, and binds the visible response on acknowledgement.
+Normalized attempt rows survive approval deletion; `approval_continuation_sources` alone owns pending approval settlement.
+Current `TurnRecord` selection and STOP watermarks govern edits selected before execution, while the outbox alone owns frozen payloads, results, acknowledgement, and retirement.
+STOP and stale approval failure decisions query exact durable identity; prepared turn snapshots remain solely for terminal commit and recovery.
+`response_sources.py` owns the immutable runtime values, `event_journal/response_attempts.py` owns normalized durable registration and lookup, and `event_journal/legacy_response_attempts.py` owns one-time transactional adoption from released snapshots.
+
 `EditRegenerator` owns the edited-message replay workflow.
 It is still coupled to the current persistence split, but its workflow boundary is real.
 
-`RedactedTurnCleanup` owns durable source-redaction tombstoning and advisory cache sanitization.
-`TurnStore` removes redacted persisted replay before the next response starts in the affected conversation.
-`AgentBot` only delegates the Matrix redaction callback to that collaborator.
+`TurnStore` owns source-redaction tombstoning, and removes redacted persisted replay before the next response starts in the affected conversation.
+The projection learns about a redaction through journal admission; the Matrix callback records the exact tombstone and joins it to retained physical revision owners.
 
 ## Current Problems
 
 `TurnController` is the real turn owner now, but it is still too large.
 `TurnPolicy` is pure now, but `ResponseRunner` still owns too much execution detail.
 `IngressHookRunner` is a thin hook adapter with a vague name.
-`TurnStore` gives the runtime one durable turn boundary, but it still has to reconcile ledger state with persisted run metadata under the hood.
+`TurnStore` gives the runtime one durable turn boundary, while saved run metadata remains an import source for requested rows removed by ledger compaction.
 `MessageTarget` still combines conversation identity and delivery placement.
 
 ## Target Runtime Vocabulary
@@ -57,10 +73,197 @@ Matrix callback
 `TurnStore` owns durable turn truth.
 `DeliveryGateway` owns Matrix transport only.
 
+## Durable Dispatch Boundary
+
+Orderly shutdown closes response and journal callback admission before withdrawing runtime capabilities, and tags both sets of owners before cancelling them.
+The source-quiescence request stays latched across supervisor retries and late startup completion, so transport lifecycle notifications cannot reopen admission.
+Interrupted callbacks remain pending for exact replay, including edited messages whose revision has not reached a final response.
+If process shutdown upgrades an earlier generic cancellation, the response attempt retags and retains its existing child until that child finishes unwinding.
+Callback cleanup and response recovery share bounded preparation and finalization budgets; a timeout retains their owners and keeps the Matrix client and journal open until cleanup finishes.
+Shutdown invalidates membership readiness after owners finish, so readiness loss cannot settle an accepted source as revoked authorization.
+
+Nio's owned ingestion session persists prepared source work, and MindRoom's batch pump validates and commits its sequence advance and semantic effects before acknowledging the batch.
+The pump wakes journal dispatch after batch acknowledgement; a crash between journal commit and Nio acknowledgement replays the batch without duplicating semantic work.
+Room-backed authorization uses authenticated batch provenance: uncertainty revokes grants before admission, and live membership changes update grants after admission.
+Every principal shares one durable store at `tracking/event_journal.db`, or one PostgreSQL database, and each bot reads only its own principal-bound view of it.
+Writes are serialized per store rather than per entity, so one principal's admission waits behind another's write transaction; the reader pool is separate, so reads do not.
+A row is keyed `(principal_id, event_id)`, so one Matrix event is one row no matter how many features could have claimed it, and the callback kind is a column on that row rather than part of its identity.
+Pending rows retain the original room and event source in `source_json` for replay.
+`state` holds one of exactly two values, `pending` and `settled`, so a callback that has never run and a callback that ran and deferred its source to a turn are the same durable fact.
+The dispatcher asks in-memory turn and response owners whether pending work is already running; after a restart those owners are gone, so interrupted turns replay from the journal.
+Settling clears `source_json` and any claimed semantic consumer in place rather than deleting the row, so terminal truth stays compact while the row goes on proving that this event already produced its one turn.
+Why the work ended, answered or deliberately not answered, is not recorded: that column existed for a while and was never read back.
+`journal_events` grows by one row per admitted event, and a settled row is retained rather than deleted so a replayed Matrix event is recognised by ID instead of admitted twice.
+Operators can inspect growth by running `SELECT state, COUNT(*) FROM journal_events GROUP BY state;` against that store.
+Terminal rows must not be deleted unless duplicate callback execution after future Matrix redelivery is acceptable.
+Classic Sync tokens are opaque and may be invalidated, forcing a no-`since` sync whose limited timeline backfill can redeliver an older event, so there is no checkpoint-relative pruning frontier that preserves exact de-duplication.
+Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
+Global journal scans discover rooms; a reserved room lane reads its own pending pages in receipt order.
+The journal query remains authoritative for replay eligibility, including approval continuations, and the global scan cursor never selects the next callback within a room.
+Each room retains its page position across bounded passes, and its continuation runs independently of global discovery.
+Callback and room-read failures pause only that room with exponential retry delays from one to thirty seconds; other rooms continue, and admissions or recovery drains cannot bypass the cooldown.
+Revisiting an eligible receipt at or before the room's latest admitted receipt also starts a cooldown, preventing immediate downstream handoffs from trapping recovery in a retry loop.
+This receipt marker survives bounded page passes and resets when the cooldown ends, using constant memory per room.
+Successful progress past the failed receipt resets that room's retry delay.
+Room admission and retry history remain alive while downstream responses own unsettled sources, including after the room lane exits.
+Retry handoffs carry their room ID and invalidate that room's current page synchronously, without waiting for a source lookup or affecting another room's progress.
+Fallback liveness checks rotate through a bounded batch; the periodic sweep yields between batches so a large backlog does not multiply probes for every callback or delay the next sweep by a full period per batch.
+Once scheduled, the sweep repeats while deferred owners remain, independently of discovery or lane completion.
+Silent owner loss invalidates room admission when the fallback detects it, through the same room wake used by explicit completion notifications.
+Shutdown cancels lane and retry owners without settling unfinished work, which remains available for startup recovery.
+Visible response paths persist `TurnStore` truth, while pure policy ignores, unmentioned managed senders, blocked deep synthetic relays, and commands owned by another entity settle their journal events directly instead of recording a turn.
+This keeps ignored high-volume traffic out of the handled-turn ledger without weakening exact callback de-duplication.
+An in-memory claim loser waits for the competing owner, then yields to durable terminal truth or retries ingress when that owner exits without a terminal outcome.
+Ingress-lane readiness and delivery failures return the exact source to the existing durable retry owner after the lane releases it.
+A successful empty readiness result explicitly settles the exact source as intentionally ignored instead of repeating download or transcription work forever.
+An unpublished required voice echo is a retry, never an empty readiness result.
+Prepared voice body, Matrix content, batching scope, and preparation/echo thread are checkpointed before publication waits, so replay after restart reuses the same transcript and identities.
+The batching scope and echo thread are distinct: a root audio source can enter the room's batch while its echo starts a thread rooted at that source.
+The final coalesced reply target continues to follow the current dispatch policy.
+The router retains its source when initial echo publication fails; responders can also recognize the router's persisted publication receipt after restart.
+Router delivery failure raises back into that same retry path instead of completing without terminal truth.
+Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
+Recovery callbacks may rely on the room ID, while cached membership and state are best-effort because recovery does not wait for a new sync.
+Recovery logs and skips rows that cannot be decoded as `JournalEvent` values, retaining those rows pending for repair so other valid rows can continue.
+If a decoded event raises `JournalCorruptionError` during replay or its payload type does not match its stored kind, recovery logs the corruption and settles it, clearing its replay payload.
+To repair a retained unreadable pending row, stop MindRoom, back up the affected database, and restore a known-good copy before restarting.
+Deleting one of those unrecoverable retained rows is a last resort that accepts losing that callback.
+Pending-row repair cannot recover payloads already cleared by settlement.
+Message and media obligations remain unsettled only while their callback, gate, competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to an explicit settlement.
+Recovery intent travels with queued ingress so pre-existing lane and coalescing workers cannot turn a temporarily unavailable recovered router target into a terminal fallback response.
+Nio 1.0 owns receive cursors, prepared source batches, provenance, and recognition of local membership echoes.
+MindRoom commits each batch's sequence advance, membership effects, semantic events, and projection together, then runs ordered application hooks before acknowledging that batch.
+Each consumer keeps one admitted sequence boundary; earlier or skipped sequences cannot replay.
+A failed admission leaves the batch available for retry; a failure after commit retries its remaining hooks without admitting the semantic events twice.
+The journal retains producer membership positions separately from the application tenures attached to events and deliveries.
+An admitted departure advances the application tenure and invalidates old conversation projections, pending work, approvals, and unsent deliveries.
+Attempted deliveries retain their frozen transaction identity for exact reconciliation.
+MindRoom keeps no separate departure-echo counters or reported-departure alias runs.
+Local joins and leaves use nio's durable membership command, waiting for earlier prepared input to be admitted before choosing the expected producer position.
+MindRoom keeps authoritative joined-member lookups in an application cache for responder and display-name decisions, without changing nio's room members or certifying its projection as complete.
+Nio alone owns encryption recipients and room-key sharing.
+Application lookups are reused until the room projection changes, a membership or history-loss record arrives, or nio replaces the room; concurrent lookups share one request.
+Nio history-loss records create a durable `room_history_recovery` obligation in the same transaction as the admitted sequence.
+The obligation exists even when the projection is empty, and recording it retracts completeness for every room and thread marker.
+A repairable room reads as unhydrated for every conversation in it, so the next read walks `/messages` past the prompt window until readable server exhaustion or a configured cost ceiling.
+Only readable server exhaustion clears the obligation; malformed or unreadable events fail the read and leave it repairable, while a cost ceiling retains a truncated obligation and bounded context without claiming completeness.
+Every later signal resets the obligation to repairable and increments its revision, and settlement compares that exact revision so an older walk cannot clear a newer gap.
+A departure drops the old membership's obligation, and a signal received while departure remains fenced is ignored.
+An event that never reached either durable owner and later falls outside Matrix replay is the explicit pre-admission loss boundary.
+Application first-sync readiness remains separate from the transport cursor and is published from an admitted batch's completion marker.
+`matrix/journal_ingress.py` uses nio provenance to admit `HISTORY` events as `CONTEXT_ONLY`, while live and recovered events may own actionable work.
+Historical events update the conversation projection without starting a turn.
+Unreadable history retains a settled identity so a late key can add context without reviving old work.
+Unreadable live and recovered ciphertext belongs to Nio recovery, with separate best-effort runtime diagnostics for authorized key requests and warnings; it does not claim or settle an application message ID.
+The same event-scoped provenance gates auxiliary room callbacks, so one live event cannot license unrelated historical call-state mutations.
+`SyncContinuityStore` persists only pending join/decrypt fences, with locked fresh-read updates and crash-atomic replacement.
+The store automatically converts v2/v3 files to v4, preserving pending fences and discarding obsolete sync checkpoints.
+Malformed fence records fail closed, and reads and writes run off the event loop.
+Live `room-member-joined` hooks remain at-least-once because hook emission happens before durable settlement.
+Invite callbacks have no stable event ID for a semantic journal row, so their pending room and inviter are persisted before background handling starts.
+The pending record wakes unfinished work but never grants inviter authority: routers and agents re-read nio's current inviter after the join fence is durable and immediately before requesting the join.
+A failed join keeps the pending invitation and decrypt fence for retry.
+Invite handling remains independent from responder conversation authorization.
+Auxiliary callback records dispatch after journal admission and before nio acknowledgement; a callback failure leaves the batch available for retry.
+Call-manager membership and unknown-event callbacks remain reconciliation wakeups because their standalone payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
+To-device call inputs and desktop pairing receivers remain best-effort because they do not share a stable replayable timeline-event identity, so their background failures are logged without semantic journal ownership.
+
+## Turn Lifecycle Vocabulary
+
+### Ordering identities
+
+Receipt ordering, batching, and response serialization use five different identities because they protect different invariants.
+
+- Physical sender: the Matrix user ID that physically sent the event.
+- Effective requester: the trusted user ID the turn is attributed to after ingress validation; trusted-relay promotion can make it differ from the physical sender.
+- Receipt lane: the per-(room, effective requester) FIFO in `ingress_lanes.py`, keyed by `ReceiptLaneKey`, that preserves receipt order while asynchronous readiness (voice STT, media downloads) resolves.
+- Batching owner: the `CoalescingOwner` inside `CoalescingKey`, built through `requester_coalescing_key` or `active_follow_up_coalescing_key`; the gate in `coalescing.py` merges only same-owner messages into one batch, and a busy conversation reroutes admissions to an `ActiveFollowUpCoalescingOwner` key so follow-ups batch behind the active response.
+- Delivery target: `MessageTarget`, the authoritative identity for where a response is sent; the response-lifecycle lock that serializes visible responses derives from it as `ResponseLifecycleKey` via `MessageTarget.lifecycle_key`.
+
+### Prepared ingress
+
+`PreparedIngress` is the sole canonical prepared value.
+Ordinary text is normalized exactly once at admission, before the coalescing gate; dispatch never re-normalizes.
+Per-source evidence travels as named frozen fields on the value: effective requester, source kind, policy source kind, hook source, message depth, trust evidence, discovery alias, and the recovery flag.
+Raw Matrix media events are wrapped at enqueue with their caption as body and the protocol object retained on `raw_event` for attachment registration and media planning.
+`PendingEvent` carries one `PreparedIngress` plus only queue-local state (enqueue timing and opaque dispatch metadata); the busy-reroute policy stamp is a `dataclasses.replace` on the frozen value.
+
+### Durable turn and callback states
+
+An ordinary callback moves through these lifecycle phases; durable and in-process markers can coexist.
+
+- Journal pending: the durable acceptance row exists and still owns the callback work.
+- Executing in-process: `PendingEventWorker` marks one process as running the persisted callback without adding a durable running state.
+- Downstream-owned: the callback handed the source to lane, coalescing, or turn work, so the journal row stays pending while the live owner exists.
+- Prepared voice checkpoint: an incomplete `TurnStore` record preserves normalized content before response ownership begins; the pending journal source still owns retry.
+- Durably pending turn: `TurnStore.record_pending_turn` wrote `completed=False`; response ownership has begun.
+- Terminal delivery: the final outbox enqueue or an intentional no-answer decision settles the journal source; delivery acknowledgement commits the corresponding terminal turn record when needed.
+
+Two claim types cross these states.
+
+- Pending turn claim: the in-memory exclusive claim on one physical source event ID (`TurnStore.try_claim_turn`); it is acquired before normalization, released on every non-admission or failure path, and transferred into dispatch metadata across the coalescing gate.
+- Semantic consumer: `SemanticConsumer`, the durable single-consumer claim used only for multi-purpose callbacks (approval replies and reactions); it is not the ordinary message-turn ownership token.
+- Settled journal row: the compact terminal row that blocks re-execution when Matrix redelivers an old event.
+
+### Delivery text evidence
+
+The delivery contract keeps three text values separate.
+
+- Canonical delivery text: the unrendered response selected by the response driver before response hooks and Matrix formatting, currently the blocking `response_text` or the streaming `canonical_final_body_candidate`.
+- Rendered Matrix text: the post-hook formatted body actually supplied to a successful send or edit; it is the only source for a known `final_visible_body`.
+- Replayable assistant text: the execution-owned `CompletedAttempt.replayable_text` or streaming recorder text; it is never reconstructed from post-hook or rendered Matrix text.
+
+### Ordinary-turn durable sequence
+
+The ordinary message and media path follows this sequence.
+
+```text
+journal event pending
+  -> in-process journal execution claim
+  -> pending physical-source turn claim
+  -> normalization and ingress admission under that claim
+  -> journal event remains pending while downstream owns work
+  -> durable pending TurnStore record when response ownership begins
+  -> final outbox enqueue settles the journal sources atomically
+  -> delivery acknowledgement projects the server-ordered Matrix event and binds its terminal TurnStore record atomically
+```
+
+The pending claim must be acquired before normalization and released on every non-admission or failure path.
+The exact crash guarantee is durable callback acceptance with retryable callback execution, followed by durable turn ownership and terminal deduplication once the turn record exists.
+
+### Multi-purpose callback sequence
+
+Approval replies and reactions can have several semantic consumers, so they follow a different sequence.
+
+```text
+journal event pending
+  -> in-process journal execution claim
+  -> SemanticConsumer durable claim selects exactly one consumer
+  -> claimed consumer runs its side effects or transfers work downstream
+  -> synchronous consumers settle after their side effects
+  -> deferred interactive responses settle at terminal delivery
+```
+
+For those callback families only, `SemanticConsumer` is the durable authority that prevents a second consumer from claiming the same callback.
+Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
+An interactive reaction remains pending while its detached response owns the selection, so a restart can replay it until response delivery becomes durable.
+Reaction and numeric-answer admission atomically snapshot the prompt revision that the journal projection currently exposes; later edits cannot reinterpret that stored selection, and unrelated Matrix origin clocks are never treated as causal order.
+Active prompts are derived by joining those immutable revisions to the Matrix-visible projection, so history recovery and refetch can restore an unconsumed revision without resurrecting one already answered.
+The active Matrix target and the pending source's immutable selection use separate journal rows, while the exact selecting source—not the reusable target event ID—is the response turn's execution and deduplication identity.
+When the current event is present in Matrix thread history, execution preparation bounds that history at its position before selecting unseen messages or applying a scheduled history budget.
+Later thread entries cannot enter that backlog turn's Matrix context or displace its prior history from the budget.
+Interactive selections use the selecting source as their history boundary while retaining the question as the Matrix reply target, so intervening clarification remains available.
+
+### Deferred callback outcome
+
+`TurnDispatchOutcome.DEFERRED` means live downstream work owns the source, so `JournalDispatcher` leaves the row pending and `PendingEventWorker` tracks its in-memory owner.
+`TurnDispatchOutcome.INTENTIONALLY_IGNORED` means the callback is complete and the journal row may settle immediately.
+There is deliberately no persisted deferred state: after a restart, an unsettled row replays because the former in-memory owner no longer exists.
+
 ## Completed Simplifications
 
 `TurnController` is now the only normal-turn owner.
-It sequences `precheck -> normalize -> resolve -> decide -> execute -> record`.
+It sequences `precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record`.
 
 `TurnPolicy` is now pure.
 It no longer sends messages, runs AI, or writes persistence state.
@@ -68,30 +271,102 @@ It no longer sends messages, runs AI, or writes persistence state.
 `TurnStore` is now the main durable turn boundary for the extracted runtime flows.
 `TurnController` and `EditRegenerator` read and write through `TurnStore` instead of owning their own persistence helpers.
 Command handling now records terminal outcomes through `TurnStore` as well.
+Potentially mutating chat commands use an at-most-once execution-attempt journal: `TurnStore` records that execution is about to begin before the handler runs, then records the exact result before visible delivery.
+Recovery re-delivers a recorded result, while an interrupted execution attempt without a result is not rerun and instead produces an explicit uncertain-outcome response that requires the requester to inspect state before retrying.
+Startup loads turn truth without pruning, repairs ledger records for answers the outbox proves were delivered, replays turn-backed journal events, then applies age and count cleanup while retaining pending redaction work, replayable incomplete turns, and every group referenced by an unsettled journal row.
+Recovery and its post-recovery ledger cleanup run under one background retry owner, independently of bot startup and Matrix sync lifecycle progress.
+Multi-purpose callbacks durably claim one application consumer before that consumer's side effects, and recovery routes only to the claimed consumer instead of rediscovering intent from mutable runtime state.
+Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
+`!config set` uses a separate Matrix-backed `preview -> decision -> execution -> result` journal because its mutation begins only after the requester reacts to the preview.
 
 `TurnRecord` is the single immutable schema for turn identity, outcome, and regeneration facts.
 One codec projects that schema into the versioned handled-turn ledger and recoverable Agno run metadata.
 Interactive-selection discovery aliases remain separate from canonical source identity, so recovery can index every triggering event without making one message look coalesced.
-The two physical stores remain intentionally redundant so run metadata can repair a ledger write lost during a crash.
-`TurnStore` applies deterministic field precedence: a present ledger record owns canonical source identity and anchor, while a newer delivered run can repair mutable response and regeneration facts after a crash.
-Recovery never replaces a ledger record that changed while run metadata was loading.
-Older or incomplete run metadata only backfills absent optional facts, and conflicting discovery aliases are pruned instead of claiming another completed turn.
-Run metadata supplies a complete record when the ledger row is absent and otherwise participates only through that precedence rule.
-`TurnStore` immediately writes a recovered or enriched record back to the ledger, so callers never own backfill or repair decisions.
-One runtime process owns each ledger's semantic ordering, while the advisory file lock protects exact durable writes without defining cross-process turn precedence.
+Coalesced router relays persist each human discovery alias on its physical source metadata so later edits and redactions update the owned prompt.
+Per-source Matrix revision tuples identify the selected canonical prompt body.
+The owning turn's typed physical revision map retains edit ordering independently, so canonical refill may select a surviving original or older body while stale callbacks remain stale.
+`EditRegenerator` groups edits by room, response anchor, and requester in a bounded per-response mailbox.
+One draining owner folds each source's newest Matrix revision into a complete response request and loops when newer edits arrive.
+Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
+A committed service-restart or generic terminal interruption note records its exact source room in `InterruptedTurnRooms`.
+Replacement recovery uses the registered room directly, while next-startup cleanup discovers acknowledged INITIAL deliveries without an owning FINAL in the current membership epoch.
+Discovery pages the existing delivery outbox, including acknowledgements made before turn attribution, and an empty inventory requires no Matrix history calls.
+Recovery reads each owned response and its complete same-sender replacement history by exact event ID; unreadable content remains untouched for retry.
+Repair and relay publication use the same per-delivery owner as normal Matrix delivery, with ownership checked inside bounded room tasks and again before mutation.
+Before publishing a continuation, recovery reads the complete candidate thread to check for later human work and an already-published continuation.
+An interrupted edit revision remains uncommitted for re-drive.
+Pending journal replay, active generation, and owed or acknowledged FINAL delivery preclude synthetic continuation.
+Same-requester supersession preserves canonical replay when an INITIAL already owns durable delivery work, including unattempted sends and acknowledgements that precede response attribution.
+When every current source is deleted and no FINAL owns the response, its unfinished INITIAL remains durable cleanup debt until Matrix disappearance and visible-response attribution detachment are confirmed.
+Fallback eligibility and edits share the delivery lock with cleanup, and the transactional ledger prevents late completion writes from restoring a deleted INITIAL or inventing an answer.
+Cleanup preserves the INITIAL identity for surviving sources, and stale history for a surviving request retries canonical preparation with a refreshed payload.
+An approval continuation retains its response INITIAL even when all source messages are deleted; the approval card remains the explicit consent surface.
+
+Policy approval events eligible for timed grants expose a canonical `approval_scope` containing an opaque scope ID, entity, invoking agent, and concrete operation (including MCP server and remote tool when applicable).
+One-shot-only approvals omit this optional scope and remain individually reviewable.
+The same operation descriptor supplies the private configuration-bound grant identity and the public review metadata.
+`response_event_id` associates approval history with the response that paused; clients must not infer this association from tool names or argument similarity.
+Approved calls retain immutable `approval_provenance`: `kind: once`, or `kind: timed_grant` with grant ID, originating card, granting user, decision time, duration, and fixed expiry.
+`event_journal/approval_card_state.py` projects terminal content from the frozen original and the actual transaction decision; runtime callers provide authenticated actor/time metadata instead of rebuilding request evidence.
+Terminal edits omit inline full arguments, automatic originals retain their complete evidence, and revocation updates only the live grant on the frozen decision.
+Only the originating grant card carries mutable `auto_approval` controls; revocation and expiry do not change the historical authorization of covered calls.
+Clients render compact history from the original event plus its latest same-sender terminal edit, retaining complete argument evidence from the original inline `full_arguments` or its encrypted/plain Matrix attachment.
+Timed cards offload large complete arguments before reservation so subsequent decision metadata does not overflow the event envelope.
+Calls covered by an existing grant atomically commit their exact-call decision, grant audit, and non-actionable approved INITIAL receipt without reserving another pending approval card.
+Timed decisions return their affected card deliveries; command handling flushes those INITIAL/FINAL effects without scanning unrelated approval debt.
+Revocation flushes the originating approval before targeted grant maintenance can publish its later edit.
+`ApprovalManager` owns deadline work and its `ApprovalRecovery` collaborator owns startup gates, retries, and unavailable-owner settlement; the orchestrator creates that collaborator before bootstrap readiness and binds the same instance to the manager.
+Transport prepares, sends, and adopts cards and unavailable-owner notices, while manager shutdown stops both recovery and deadline tasks.
+Shared failure preparation fences the observed continuation and settles cards, after each caller checks its own frozen FINAL policy: unavailable-owner cleanup preserves any FINAL, and response failure settlement protects successful FINALs.
+Receipt publication uses the existing Matrix outbox, including restart reconciliation; after a device change, a missing terminal receipt may be republished because it offers no action.
+Clients deduplicate those receipts by their exact approval and tool-call identity, scoped to the event sender.
+Acknowledged terminal receipts retire their payloads while retaining the existing grant audit and approval tombstone; unacknowledged receipt debt remains recoverable.
+Replies to duplicate receipt events are verified against the router's exact Matrix event and retained grant audit, then remembered as terminal aliases even after payload retirement.
+Approval creation and source-redaction admission serialize on the existing room-membership row, so creation cannot acquire a source that deletion already settled.
+Recovery can finish a failing approval whose INITIAL was already retired only after card expiration; `event_journal/legacy_approval_recovery.py` proves no FINAL debt and exact tombstones for its acknowledged response and every owned source inside the current owner's transaction.
+That cleanup settles journal ownership without sending replacement text or recording tool success.
+Saved run metadata remains intentionally redundant so older turns removed by ledger compaction can still be restored for edits.
+`TurnStore` returns any present ledger record unchanged without opening model session storage.
+Run metadata supplies a complete candidate only when the requested ledger identity is absent.
+Import publication waits for conflicting provisional writes, rechecks the requested source or discovery alias, and returns any concurrent owner unchanged.
+An occupied recovered physical source remains authoritative, while any collision confined to a recovered discovery alias declines the historical import.
+`TurnStore` immediately writes an imported record into the ledger, so every later load uses journal authority.
+One runtime process owns each ledger's semantic ordering, and nothing defines cross-process turn precedence.
+Conversation and pending-cleanup lookups use indexes derived from the ledger's shared in-memory records, so ordinary response preparation does not scan unrelated retained history.
+Each alias publication, committed replacement, and rollback updates those indexes under the same lock as the primary record map; startup and retention rebuild them from that map.
+The indexes retain references to existing records and add no durable schema or separate recovery state.
+Preparation still scales with the selected conversation's retained records and outstanding cleanup work.
+Terminal records live in the journal database rather than a per-agent JSON file, so the advisory file lock that used to make the file update atomic is gone; the database serializes the write itself.
+One process must own one agent's records; the database merges delivery acknowledgements with ledger writes for that owner, without coordinating independent runtimes against the same storage path.
 Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
 
-Matrix source redactions are durably tombstoned before the advisory conversation cache is mutated.
+Matrix source redactions are durably tombstoned in the same transaction that withholds the redacted body, and every projection install path consults that tombstone table.
 A tombstone becomes a retained cleanup intent once the entity has recorded the affected conversation context, while unrelated redactions remain bounded ledger barriers without storage probes.
 Pending normal and interactive responses durably record their exact target and history scope off the event loop before generation, and every source-backed response checks tombstones again under the lifecycle lock.
 Before a response starts, `TurnStore` removes the matching run and its causal suffix from every history scope recorded for the conversation, clears summary-backed replay state, preserves compaction run tombstones, and sanitizes coalesced prompt metadata used by later edit regeneration.
+Physical edits register on the owning turn before prompt retention or generation, including edits consumed only as another turn's context, without becoming source indexes or completion aliases.
+Exact edit tombstones invalidate those revisions while preserving the original source, completed response identity, and any unrelated surviving revision.
+Consumed-history metadata retains physical revision IDs through compaction; only legacy records lacking that provenance use retained source ownership to invalidate an ambiguous compacted summary.
+Registration, tombstone reconciliation, and cleanup share ledger conflict keys, and unsettled physical edits or pending cleanup pin their owners through retention.
+Recovery sanitizes each candidate before removing revision tags or backfilling missing prompts, and cleanup acknowledgement occurs only after all affected scopes are durably clean.
+The revision map remains ledger-owned; model runs carry consumption provenance without mutable cleanup debt.
+Each physical revision may retain a completed response ID as historical consumption proof, which registration alone never grants and deletion never erases.
+Successful edit generation freezes its selected turn record in the final outbox result before sending; internal prompts and ledger metadata never enter the Matrix payload.
+A winning acknowledgement under active delivery ownership commits that exact historical consumption proof with the canonical response identity, merging current tombstones, STOP, and newer edit facts in the same transaction.
+Acknowledgements and ordinary ledger writes claim the same existing canonical rows before merging, so a delayed cached write cannot erase delivered proof before cache publication or restart.
+Cache publication uses the actual committed record; final-delivery recovery uses the frozen outbox result without another model call.
+Coalesced regeneration refills invalidated slots through strict paginated reads proving source, requester, and visible revision, including sidecars.
+An exact principal/room/source projection tombstone proves canonical deletion during refill, allowing the edit owner to reconcile cleanup and rebuild surviving sources before the room FIFO reaches the deletion callback; missing unproven data still blocks generation.
+The locked edit preparation gate explicitly requests a rebuild for an invalid snapshot, preserving other pending edits when the driving revision is deleted.
+The source-preparation callback receives the actual request history both at early admission and after the final locked history and payload refresh, so context-only revisions are registered before consumption.
+Physical snapshot validation follows awaited cleanup and STOP preparation; synchronous stale-run pruning happens at most once for each immutable edit request.
 Redacted replay may remain in local session storage until that conversation's next response, but no model receives it.
 Semantic memory backends such as Mem0 have a separate lifecycle and are not altered by persisted replay cleanup.
 
 ## Tool Dispatch Contracts
 
 There are now four active runtime contracts for tool and scheduling dispatch.
-`ToolRuntimeContext` is the live Matrix runtime object with client, caches, hook bindings, and attachment scope.
+`ToolRuntimeContext` is the live Matrix runtime object with client, conversation reader, relation lookup, hook bindings, and attachment scope.
 `LiveToolDispatchContext` is the strict live contract that pairs one `ToolRuntimeContext` with a matching `ToolExecutionIdentity`.
 `ToolDispatchContext` is the detached contract for cases that only have a serializable execution identity and no live Matrix runtime.
 `SchedulingRuntime` is the explicit live scheduling contract consumed by command and tool scheduling entrypoints.
@@ -104,19 +379,32 @@ Interactive reactions and numeric text selections now share the same controller-
 That path sends the acknowledgment, runs response generation, and records the handled turn once.
 
 `ResponseAttemptRunner` now owns visible response attempts.
-It sends thinking placeholders, registers stop tracking, runs the cancellable response task, logs cancellation provenance, and clears stop tracking.
+It registers stop tracking, runs the cancellable response task, logs cancellation provenance, and clears stop tracking.
 `ResponseRunner` keeps the existing attempt entry point, but delegates attempt mechanics through this deeper module.
+
+It deliberately does not send the turn's placeholder.
+The durable `INITIAL` outbox row that `ResponseRunner` writes when it takes the lifecycle lock is the only thing allowed to put a placeholder in the room, so a send whose outcome Matrix never confirmed is resolved by resending that row under its own transaction ID rather than by a second, unowned send.
+When the durable placeholder cannot be delivered, the turn runs without one and the `FINAL` row becomes its first visible message.
+Every durable outbox-owned Matrix delivery freezes the room membership epoch that authorized it, except when a visible approval card and both delivery stages atomically transfer their already-decided terminal cleanup to a successor membership.
+Departure retires unsent rows as identity tombstones, while acknowledgement always records the physical Matrix result but projects it into conversation history only when that frozen membership is still current.
 
 The ingress-to-execution seam is now one-way.
 Ingress (`TurnController` and `text_ingress_dispatch`) builds an immutable `ResponsePayloadPreparation` value and hands it to the runner inside `ResponseRequest`.
 The runner acquires the lifecycle lock, refreshes thread history, then calls `ResponsePayloadPreparer.prepare` as a first-class execution step to assemble the final payload, run enrichment hooks, and log startup latency.
 The old `prepare_after_lock` callback that ran payload building back inside `TurnController` is deleted; data crosses the seam as values, not closures.
 
+Ordering identities are named types now: `ReceiptLaneKey` for receipt lanes, the `CoalescingOwner` union for batching, and `ResponseLifecycleKey` (via `MessageTarget.lifecycle_key`) for response serialization; no synthetic requester string or bare tuple crosses these boundaries.
+Ordinary ingress is normalized once at admission into the canonical `PreparedIngress`, which also owns the per-source evidence that used to travel in mutable parallel fields.
+`DeliveryGateway` constructs `FinalDeliveryOutcome` values for its Matrix delivery operations and translates typed Matrix delivery failures (`MatrixDeliveryFailure`) into its failure vocabulary.
+`response_runner.py` also constructs these outcomes for participation suppression and approval lifecycle settlement.
+The delivery types own cancellation provenance (`resolved_cancel_source`) and final event-ID precedence.
+Agent and team outer settlement share extracted helpers for blocking cancellation, failed-turn persistence, delivery timing, and streamed finalization; the shared blocking and streaming drivers are unchanged.
+The router relay lives in `router_relay.py` behind the narrow `_RouterRelaySupport` protocol.
+
 ## Next Simplification Work
 
-Shrink `ResponseRunner` further.
-It keeps locking, streaming, AI or team execution, and post-response effects.
-The under-lock payload-assembly side path now lives in `ResponsePayloadPreparer`; the remaining follow-up is to fold `execution_preparation.py` into the execution side and move any other side paths that belong to ingress or delivery out of `ResponseRunner`.
+The router relay lives in `router_relay.py`, and voice preparation, checkpoint reuse, and publication gating live in `voice_readiness.py`.
+Interactive-selection execution, response-action assembly, and the `ResponseRunner` domain clusters (team turn driver, interrupted persistence, inbox tracking, enrichment helpers) are the remaining moves.
 
 Revisit `IngressHookRunner`.
 It may stay as a helper, but it should not grow into another top-level orchestration object.

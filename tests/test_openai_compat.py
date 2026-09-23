@@ -15,6 +15,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from tests.conftest import seed_session
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
 
@@ -22,6 +24,7 @@ import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.models.message import Message
 from agno.models.ollama import Ollama
+from agno.models.response import ModelResponse
 from agno.run.agent import RunContentEvent, RunOutput
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import TeamRunOutput
@@ -45,12 +48,14 @@ from mindroom.api.openai_compat import (
 )
 from mindroom.api.openai_request_parsing import _extract_content_text
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
+from mindroom.config.judgment import TypeSafeJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import _PreparedExecutionContext
-from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
+from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import CompactionDecision, HistoryScope, PreparedHistoryState, ResolvedReplayPlan
+from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
@@ -59,9 +64,11 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.provider_media_fallback import install_provider_media_fallback
+from mindroom.routing import ResponderSelection
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
-from mindroom.tool_approval import _shutdown_approval_store
+from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.tool_calls import record_tool_success
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -70,7 +77,9 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.identity_helpers import persist_entity_accounts
 
-_TEST_MODEL = "openai:gpt-5.4"
+_TEST_MODEL = "openai:gpt-6-astra"
+_QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
+_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
 
 
 def _make_test_agent(name: str) -> AgnoAgent:
@@ -191,9 +200,9 @@ def _prepared_team_execution_context(
 @pytest.fixture(autouse=True)
 def reset_approval_store() -> Iterator[None]:
     """Keep the module-level approval store isolated per test."""
-    asyncio.run(_shutdown_approval_store())
+    asyncio.run(shutdown_approval_runtime())
     yield
-    asyncio.run(_shutdown_approval_store())
+    asyncio.run(shutdown_approval_runtime())
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
@@ -279,7 +288,7 @@ def test_load_config_uses_dynamic_runtime_config_path(
     """OpenAI-compatible config loading should follow the active runtime config path."""
     config_path = tmp_path / "alt-config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\n"
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
         "agents:\n  only_alt:\n    display_name: OnlyAlt\n    role: alt\n    rooms: []\n"
         "router:\n  model: default\n",
         encoding="utf-8",
@@ -322,7 +331,7 @@ def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> Non
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "agents:\n"
@@ -344,7 +353,7 @@ def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> Non
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "agents:\n"
@@ -612,7 +621,7 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "agents:\n"
@@ -687,7 +696,7 @@ def test_list_models_tolerate_missing_plugin_path(tmp_path: Path) -> None:
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "agents: {}\n"
@@ -746,7 +755,7 @@ def test_chat_completions_tolerate_missing_plugin_path_during_model_validation(t
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "agents:\n"
@@ -1676,6 +1685,64 @@ class TestStreamingCompletion:
         assert response.status_code == 200
         assert len(observed_session_ids) == 2
         assert all(session_id is not None for session_id in observed_session_ids)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+    async def test_prefetched_provider_stream_completes_under_asgi(
+        self,
+        test_config: Config,
+        spec_version: str,
+    ) -> None:
+        """The real API prefetch and ASGI response may advance a model in different tasks."""
+        model = Ollama(id="synthetic-model")
+        closed = False
+
+        async def provider(**_kwargs: object) -> AsyncIterator[ModelResponse]:
+            nonlocal closed
+            try:
+                yield ModelResponse(content="Hello")
+                yield ModelResponse(content=" world")
+            finally:
+                closed = True
+
+        model.ainvoke_stream = provider
+        install_provider_media_fallback(model, fallback_prompt="Continue without inline media.")
+
+        async def agent_stream(_ctx: object, **_kwargs: object) -> AsyncIterator[RunContentEvent]:
+            async for chunk in model._ainvoke_stream_with_retry(messages=[Message(role="user", content="Hello")]):
+                yield RunContentEvent(content=chunk.content)
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=agent_stream):
+            response = await openai_compat._stream_completion(
+                "general",
+                "Hello",
+                "session-123",
+                test_config,
+                _runtime_paths(),
+                None,
+                None,
+            )
+
+        assert isinstance(response, openai_compat._OpenAIStreamingResponse)
+        sent: list[bytes] = []
+
+        async def receive() -> dict[str, object]:
+            await asyncio.Event().wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message: dict[str, object]) -> None:
+            if message["type"] == "http.response.body":
+                sent.append(cast("bytes", message["body"]))
+
+        await response({"type": "http", "asgi": {"spec_version": spec_version}}, receive, send)
+
+        assert closed
+        assert response.completion_predicate is not None
+        assert response.completion_predicate()
+        body = b"".join(sent).decode()
+        assert '"content":"Hello"' in body
+        assert '"content":" world"' in body
+        assert body.endswith("data: [DONE]\n\n")
 
     @pytest.mark.asyncio
     async def test_streaming_close_from_other_task_keeps_execution_identity(self, test_config: Config) -> None:
@@ -2623,18 +2690,25 @@ class TestAutoRouting:
 
     def test_auto_routes_to_suggested_agent(self, app_client: TestClient) -> None:
         """Auto model routes to the agent suggested by suggest_responder()."""
+        observed: list[tuple[str | None, str | None]] = []
+
+        async def respond(*_args: object, **_kwargs: object) -> str:
+            (identity,) = config_lifecycle.app_state(app_client.app).openai_responses
+            observed.append((identity.responder, identity.requester_id))
+            return "Here is your code"
+
         with (
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", side_effect=respond),
         ):
-            mock_route.return_value = "code"
-            mock_ai.return_value = "Here is your code"
+            mock_route.return_value = ResponderSelection("code")
 
             response = app_client.post(
                 "/v1/chat/completions",
                 json={
                     "model": "auto",
                     "messages": [{"role": "user", "content": "Write Python code"}],
+                    "user": "@bob:example.org",
                 },
             )
 
@@ -2643,6 +2717,60 @@ class TestAutoRouting:
         # Response model field shows the resolved agent, not "auto"
         assert data["model"] == "code"
         assert data["choices"][0]["message"]["content"] == "Here is your code"
+        assert observed == [("code", None)]
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_auto_no_fit_does_not_fall_back_to_first_agent(
+        self,
+        app_client: TestClient,
+        test_config: Config,
+        monkeypatch: pytest.MonkeyPatch,
+        stream: bool,
+    ) -> None:
+        """An accepted no-fit returns an error before invoking any response agent."""
+        test_config.router.judgment = TypeSafeJudgmentConfig(provider="typesafe")
+        posted = []
+        original_env_value = RuntimePaths.env_value
+
+        def env_value(paths: RuntimePaths, key: str, *args: object, **kwargs: object) -> str | None:
+            return "synthetic" if key == "TYPESAFE_API_KEY" else original_env_value(paths, key, *args, **kwargs)
+
+        async def post(_self: SystemOneClient, body: bytes) -> bytes:
+            payload = json.loads(body)
+            posted.append(payload)
+            return json.dumps(
+                {
+                    "model": PINNED_MODEL,
+                    "answers": {
+                        "responder_selection": {
+                            "type": "choice",
+                            "choice": "no_fit",
+                            "confidence": 1,
+                            "probabilities": {
+                                key: int(key == "no_fit")
+                                for key in payload["questions"]["responder_selection"]["criteria"]
+                            },
+                        },
+                    },
+                    "usage": {"input_tokens": 42, "output_tokens": 1},
+                },
+            ).encode()
+
+        monkeypatch.setattr(RuntimePaths, "env_value", env_value)
+        monkeypatch.setattr(SystemOneClient, "_post", post)
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as response_agent:
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "An unsupported request"}],
+                    "stream": stream,
+                },
+            )
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "no_suitable_responder"
+        assert len(posted) == 1
+        response_agent.assert_not_called()
 
     def test_auto_fallback_when_routing_fails(self, app_client: TestClient) -> None:
         """When suggest_responder returns None, falls back to first agent."""
@@ -2671,7 +2799,7 @@ class TestAutoRouting:
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
         ):
-            mock_route.return_value = "general"
+            mock_route.return_value = ResponderSelection("general")
             mock_ai.return_value = "Response"
 
             app_client.post(
@@ -2705,7 +2833,7 @@ class TestAutoRouting:
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream),
         ):
-            mock_route.return_value = "research"
+            mock_route.return_value = ResponderSelection("research")
 
             response = app_client.post(
                 "/v1/chat/completions",
@@ -2763,7 +2891,7 @@ class TestAutoRouting:
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
         ):
-            mock_route.return_value = "code"
+            mock_route.return_value = ResponderSelection("code")
             mock_ai.return_value = "Response"
 
             app_client.post(
@@ -4492,7 +4620,7 @@ class TestTeamCompletion:
 
     @pytest.mark.asyncio
     async def test_prepare_openai_team_prompt_scrubs_queued_notices_and_uses_team_renderer(self) -> None:
-        """OpenAI team prep should match the main team path for cleanup and assistant-role rendering."""
+        """OpenAI team prep should recover notice facts and preserve assistant-role rendering."""
         config = Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
             models={"default": ModelConfig(provider="openai", id="test-model")},
@@ -4501,6 +4629,7 @@ class TestTeamCompletion:
         runtime_paths = _runtime_paths()
         agent = _make_test_agent("GeneralAgent")
         team = _make_test_team(name="General Team", team_id="general-team")
+        prior_response_id = "prior-openai-team-response"
 
         with open_bound_scope_session_context(
             agents=[agent],
@@ -4523,7 +4652,10 @@ class TestTeamCompletion:
                         Message(
                             role="user",
                             content=QUEUED_MESSAGE_NOTICE_TEXT,
-                            provider_data={"mindroom_queued_message_notice": True},
+                            provider_data={
+                                _QUEUED_NOTICE_MARKER_KEY: True,
+                                _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
+                            },
                         ),
                     ],
                     member_responses=[
@@ -4534,14 +4666,17 @@ class TestTeamCompletion:
                                 Message(
                                     role="user",
                                     content=QUEUED_MESSAGE_NOTICE_TEXT,
-                                    provider_data={"mindroom_queued_message_notice": True},
+                                    provider_data={
+                                        _QUEUED_NOTICE_MARKER_KEY: True,
+                                        _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
+                                    },
                                 ),
                             ],
                         ),
                     ],
                 ),
             ]
-            scope_context.storage.upsert_session(scope_context.session)
+            seed_session(scope_context.storage, scope_context.session)
 
         with open_bound_scope_session_context(
             agents=[agent],
@@ -4572,7 +4707,23 @@ class TestTeamCompletion:
                     if isinstance(run, (RunOutput, TeamRunOutput))
                     for message in collect_messages(run)
                 ]
-                assert not any(message.provider_data for message in persisted_messages)
+                persisted_notices = [
+                    message
+                    for message in persisted_messages
+                    if isinstance(message.provider_data, dict)
+                    and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) == "persisted"
+                ]
+                assert len(persisted_notices) == 1
+                assert persisted_notices[0].content == QUEUED_MESSAGE_NOTICE_TEXT
+                assert persisted_notices[0].provider_data == {
+                    _QUEUED_NOTICE_MARKER_KEY: "persisted",
+                    _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
+                }
+                assert not any(
+                    isinstance(message.provider_data, dict)
+                    and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) is True
+                    for message in persisted_messages
+                )
                 return _prepared_team_execution_context(
                     final_prompt="Previous team reply\n\nAnalyze this.",
                     messages=[
@@ -4625,7 +4776,22 @@ class TestTeamCompletion:
             persisted_messages = [
                 message for run in scope_context.session.runs or [] for message in (run.messages or [])
             ]
-        assert not any(message.provider_data for message in persisted_messages)
+        persisted_notices = [
+            message
+            for message in persisted_messages
+            if isinstance(message.provider_data, dict)
+            and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) == "persisted"
+        ]
+        assert len(persisted_notices) == 1
+        assert persisted_notices[0].content == QUEUED_MESSAGE_NOTICE_TEXT
+        assert persisted_notices[0].provider_data == {
+            _QUEUED_NOTICE_MARKER_KEY: "persisted",
+            _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
+        }
+        assert not any(
+            isinstance(message.provider_data, dict) and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) is True
+            for message in persisted_messages
+        )
 
     def test_collaborate_mode_delegates_to_all(self) -> None:
         """Collaborate mode sets delegate_to_all_members=True on Team."""
@@ -5282,7 +5448,8 @@ class TestKnowledgeIntegration:
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch(
-                "mindroom.api.openai_compat.resolve_agent_knowledge_access",
+                "mindroom.api.openai_compat.resolve_agent_knowledge_access_async",
+                new_callable=AsyncMock,
                 side_effect=RuntimeError("DB connection failed"),
             ),
         ):
@@ -5300,3 +5467,126 @@ class TestKnowledgeIntegration:
         assert mock_ai.call_args.kwargs["knowledge"] is None
         data = response.json()
         assert data["choices"][0]["message"]["content"] == "Response without knowledge"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_response_activity_tracks_full_openai_request(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """OpenAI work remains visible through generation and streaming finalization."""
+    state = config_lifecycle.app_state(app_client.app)
+    observed: list[int] = []
+
+    async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
+        observed.append(len(state.openai_responses))
+        if not stream:
+            return JSONResponse({"ok": True})
+
+        async def chunks() -> AsyncIterator[str]:
+            observed.append(len(state.openai_responses))
+            yield "data: hello\n\n"
+            observed.append(len(state.openai_responses))
+
+        return StreamingResponse(chunks())
+
+    monkeypatch.setattr(openai_compat, "_chat_completions", complete)
+    response = app_client.post(
+        "/v1/chat/completions",
+        json={"model": "general", "messages": [{"role": "user", "content": "Hello"}], "stream": stream},
+    )
+    assert response.status_code == 200, response.text
+    assert observed == ([1, 1, 1] if stream else [1])
+    assert len(state.openai_responses) == 0
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_response_activity_releases_failed_openai_request(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """Generation and stream failures cannot leak an activity slot."""
+    state = config_lifecycle.app_state(app_client.app)
+    observed: list[int] = []
+
+    async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
+        observed.append(len(state.openai_responses))
+        if not stream:
+            message = "generation failed"
+            raise RuntimeError(message)
+
+        async def chunks() -> AsyncIterator[str]:
+            observed.append(len(state.openai_responses))
+            yield "data: hello\n\n"
+            message = "generation failed"
+            raise RuntimeError(message)
+
+        return StreamingResponse(chunks())
+
+    monkeypatch.setattr(openai_compat, "_chat_completions", complete)
+    with pytest.raises(RuntimeError, match="generation failed"):
+        app_client.post(
+            "/v1/chat/completions",
+            json={"model": "general", "messages": [{"role": "user", "content": "Hello"}], "stream": stream},
+        )
+    assert observed == ([1, 1] if stream else [1])
+    assert len(state.openai_responses) == 0
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_response_activity_releases_cancelled_openai_request(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """A cancelled HTTP request releases activity only after its stream unwinds."""
+    import httpx  # noqa: PLC0415
+
+    state = config_lifecycle.app_state(app_client.app)
+
+    async def check() -> None:
+        started = asyncio.Event()
+        unwound: list[int] = []
+
+        async def wait_for_cancel() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                unwound.append(len(state.openai_responses))
+
+        async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
+            if not stream:
+                await wait_for_cancel()
+                return JSONResponse({})
+
+            async def chunks() -> AsyncIterator[str]:
+                yield "data: hello\n\n"
+                await wait_for_cancel()
+
+            return StreamingResponse(chunks())
+
+        monkeypatch.setattr(openai_compat, "_chat_completions", complete)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app_client.app),
+            base_url="http://test",
+        ) as client:
+            task = asyncio.create_task(
+                client.post(
+                    "/v1/chat/completions",
+                    json={"model": "general", "messages": [{"role": "user", "content": "Hello"}], "stream": stream},
+                ),
+            )
+            try:
+                await asyncio.wait_for(started.wait(), timeout=2)
+                assert len(state.openai_responses) == 1
+            finally:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        assert unwound == [1]
+        assert len(state.openai_responses) == 0
+
+    asyncio.run(check())

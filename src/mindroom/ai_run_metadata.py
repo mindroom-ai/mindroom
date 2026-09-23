@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from agno.models.metrics import Metrics
+from agno.metrics import RunMetrics
 from agno.run.base import RunStatus
 
 from mindroom.constants import AI_RUN_METADATA_KEY
@@ -32,7 +32,40 @@ def empty_request_metric_totals() -> dict[str, int]:
     }
 
 
-def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
+def accumulate_model_request_metrics(
+    totals: dict[str, int],
+    observed_fields: set[str],
+    *,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    total_tokens: int | None,
+    reasoning_tokens: int | None,
+    cache_read_tokens: int | None,
+    cache_write_tokens: int | None,
+    time_to_first_token: float | None,
+    first_token_latency: float | None,
+) -> float | None:
+    """Accumulate observed integer counters and retain the first numeric latency.
+
+    The caller owns counter initialization; missing counters are left untouched.
+    """
+    for field_name, value in (
+        ("input_tokens", input_tokens),
+        ("output_tokens", output_tokens),
+        ("total_tokens", total_tokens),
+        ("reasoning_tokens", reasoning_tokens),
+        ("cache_read_tokens", cache_read_tokens),
+        ("cache_write_tokens", cache_write_tokens),
+    ):
+        if isinstance(value, int):
+            observed_fields.add(field_name)
+            totals[field_name] = totals.get(field_name, 0) + value
+    if first_token_latency is None and isinstance(time_to_first_token, (int, float)):
+        return float(time_to_first_token)
+    return first_token_latency
+
+
+def _serialize_metrics(metrics: RunMetrics | dict[str, Any] | None) -> dict[str, Any] | None:
     def _sanitize_metrics_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         sanitized: dict[str, Any] = {}
         for key, value in payload.items():
@@ -44,7 +77,7 @@ def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, An
 
     if metrics is None:
         return None
-    if isinstance(metrics, Metrics):
+    if isinstance(metrics, RunMetrics):
         metrics_dict = metrics.to_dict()
         if not isinstance(metrics_dict, dict):
             return None
@@ -174,7 +207,31 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
     return {AI_RUN_METADATA_KEY: dict(ai_run_metadata)}
 
 
-def build_ai_run_metadata_content(  # noqa: C901, PLR0912
+def _context_provider_key(provider: str | None) -> str:
+    key = (provider or "").strip().lower().replace("-", "_")
+    return {"vertexai_claude": "vertexai", "bedrock_claude": "awsbedrock"}.get(key, key)
+
+
+def _native_context_counts(
+    metrics: RunMetrics | None,
+    model_id: str | None,
+    provider: str | None,
+) -> tuple[int | None, int | None, int | None] | None:
+    """Read final-iteration context separately from accumulated billing."""
+    if isinstance(metrics, RunMetrics):
+        for detail in (metrics.details or {}).get("model", []):
+            if detail.id == model_id and _context_provider_key(detail.provider) == _context_provider_key(provider):
+                usage = (detail.provider_metrics or {}).get("context_usage")
+                if isinstance(usage, dict):
+                    return (
+                        _int_usage_value(usage, "input_tokens"),
+                        _int_usage_value(usage, "cache_read_tokens"),
+                        _int_usage_value(usage, "cache_write_tokens"),
+                    )
+    return None
+
+
+def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     *,
     config: Config,
     model_name: str,
@@ -183,8 +240,9 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     status: RunStatus | str | None,
     model: str | None,
     model_provider: str | None,
-    metrics: Metrics | dict[str, Any] | None = None,
+    metrics: RunMetrics | dict[str, Any] | None = None,
     metrics_fallback: dict[str, Any] | None = None,
+    context_metrics: RunMetrics | None = None,
     context_raw_input_tokens: int | None = None,
     context_input_tokens: int | None = None,
     context_cache_read_tokens: int | None = None,
@@ -198,6 +256,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     It must not be re-resolved here: the per-thread override store can change
     mid-run (for example via `switch_thread_model`), and this metadata must
     describe the model that actually produced the response.
+    `context_metrics` belongs to that model run before team-member billing is aggregated.
     """
     model_config = config.models.get(model_name)
     model_id = model or (model_config.id if model_config is not None else None)
@@ -215,6 +274,10 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     usage_input_tokens = usage_payload.get("input_tokens") if usage_payload else None
     if not isinstance(usage_input_tokens, int):
         usage_input_tokens = None
+    # Native compaction adds a billed sampling iteration. Its cost is included
+    # above, while the final iteration alone describes the active context.
+    if native_counts := _native_context_counts(context_metrics, model_id, provider):
+        context_raw_input_tokens, context_cache_read_tokens, context_cache_write_tokens = native_counts
     explicit_context_scope = any(
         value is not None
         for value in (
@@ -260,6 +323,8 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
         raw_status = status.value if isinstance(status, RunStatus) else str(status)
         payload["status"] = raw_status.lower()
     model_payload: dict[str, Any] = {"config": model_name}
+    if model_config is not None and model_config.display_name:
+        model_payload["display_name"] = model_config.display_name
     if model_id is not None:
         model_payload["id"] = model_id
     if provider is not None:

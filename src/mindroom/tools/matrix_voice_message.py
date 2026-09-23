@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="matrix_voice_message",
     display_name="Matrix Voice Message",
-    description="Generate speech from text and send it as a Matrix voice message with room/thread context defaults",
+    description="Turn text into speech and send it as a Matrix voice message",
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,

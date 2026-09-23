@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from mindroom.tool_system.worker_routing import (
@@ -87,3 +89,13 @@ def test_parse_tool_execution_identity_payload_round_trips_transport_agent_name(
     parsed = parse_tool_execution_identity_payload(serialize_tool_execution_identity(_identity()))
 
     assert parsed == _identity()
+
+
+def test_mcp_execution_channel_survives_worker_serialization() -> None:
+    """Gateway tool execution must retain its transport across worker boundaries."""
+    identity = replace(_identity(), channel="mcp")
+    payload = serialize_tool_execution_identity(identity)
+    parsed = parse_tool_execution_identity_payload(payload)
+    assert parsed == identity
+    assert parsed.channel == "mcp"
+    assert parsed.requester_id == "@alice:example.org"

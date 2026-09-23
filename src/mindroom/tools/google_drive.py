@@ -20,10 +20,11 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="google_drive",
     display_name="Google Drive",
-    description="Search, read, upload, and organize files in the connected user's Google Drive",
+    description="Search, read, upload, and organize files in Google Drive",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
+    requires_primary_runtime=True,
     consumes_workspace_paths=True,
     auth_provider="google_drive",
     icon="SiGoogledrive",
@@ -67,7 +68,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=True,
-            description="Allow uploading, creating folders, moving or renaming files, and trashing files.",
+            description="Allow uploading, replacing file contents, creating folders, moving or renaming, and trashing.",
         ),
         ConfigField(
             name="max_read_size",
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.RUNTIME_CONFIG,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
     ),
     dependencies=[
@@ -97,6 +99,7 @@ if TYPE_CHECKING:
         "google_drive_read_file",
         "google_drive_download_file",
         "google_drive_upload_file",
+        "google_drive_update_file",
         "google_drive_create_folder",
         "google_drive_move_file",
         "google_drive_trash_file",

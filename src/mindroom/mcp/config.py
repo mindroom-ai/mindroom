@@ -54,7 +54,7 @@ def normalize_mcp_server_id(server_id: str) -> str:
 
 
 class MCPOAuthConfig(BaseModel):
-    """OAuth settings for requester-scoped remote MCP servers."""
+    """OAuth settings for worker-scoped remote MCP servers."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -78,6 +78,12 @@ class MCPOAuthConfig(BaseModel):
     extra_token_params: dict[str, str] = Field(default_factory=dict, description="Extra token request params")
     client_config_services: list[str] = Field(default_factory=list, description="Provider-specific client config")
     shared_client_config_services: list[str] = Field(default_factory=list, description="Shared client config services")
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        """Trim OAuth labels so blank names use the provider and catalog fallbacks."""
+        return (value.strip() or None) if value is not None else None
 
     @field_validator("provider_id")
     @classmethod
@@ -110,6 +116,9 @@ class MCPServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = Field(default=True, description="Whether the server is active")
+    display_name: str | None = Field(default=None, description="Human-readable tool name for the dashboard and catalog")
+    summary: str | None = Field(default=None, description="Short capability summary for the dashboard and tool catalog")
+    icon: str | None = Field(default=None, description="Optional dashboard icon name, such as SiConfluence or Calendar")
     description: str | None = Field(
         default=None,
         description="What the server provides; appended to the OAuth bridge tool descriptions shown to the model. Requires auth.",
@@ -126,7 +135,7 @@ class MCPServerConfig(BaseModel):
     url: str | None = Field(default=None, description="Remote URL for SSE or streamable HTTP")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers for remote transports")
     tool_prefix: str | None = Field(default=None, description="Prefix for model-visible function names")
-    auth: MCPOAuthConfig | None = Field(default=None, description="Optional requester-scoped MCP auth")
+    auth: MCPOAuthConfig | None = Field(default=None, description="Optional worker-scoped MCP auth")
     include_tools: list[str] = Field(default_factory=list, description="Optional remote tool allowlist")
     exclude_tools: list[str] = Field(default_factory=list, description="Optional remote tool denylist")
     startup_timeout_seconds: float = Field(default=20.0, gt=0, description="Startup timeout")
@@ -134,10 +143,10 @@ class MCPServerConfig(BaseModel):
     max_concurrent_calls: int = Field(default=1, ge=1, description="Maximum concurrent calls")
     auto_reconnect: bool = Field(default=True, description="Whether to reconnect automatically")
 
-    @field_validator("description")
+    @field_validator("display_name", "summary", "description", "icon")
     @classmethod
-    def normalize_description(cls, value: str | None) -> str | None:
-        """Collapse blank descriptions to None so callers can test truthiness."""
+    def normalize_display_metadata(cls, value: str | None) -> str | None:
+        """Trim optional display metadata and collapse blank values to None."""
         if value is None:
             return None
         return value.strip() or None

@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
-from mindroom.claude_stream_retry import install_claude_stream_retry_hook
 from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host, get_secret_from_env
@@ -13,6 +12,9 @@ from mindroom.google_adc import load_google_application_credentials
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, ZAI_BASE_URL_DEFAULT
+from mindroom.prompt_cache_key import derive_agent_prompt_cache_key, derive_session_routing_key
+from mindroom.provider_media_fallback import install_provider_media_fallback
+from mindroom.provider_stream_retry import install_provider_stream_retry_hook
 from mindroom.runtime_env_policy import (
     AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
     AZURE_OPENAI_ENV_BY_KEY,
@@ -137,6 +139,20 @@ def _set_bedrock_claude_session(extra_kwargs: dict[str, Any], aws_profile: str |
     extra_kwargs["session"] = boto3.session.Session(**session_kwargs)
 
 
+def _set_agent_prompt_cache_key(
+    extra_kwargs: dict[str, Any],
+    execution_identity: ToolExecutionIdentity | None,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Share cache accounting across an agent's threads unless explicitly overridden."""
+    if "prompt_cache_key" in extra_kwargs or execution_identity is None:
+        return
+    extra_kwargs["prompt_cache_key"] = derive_agent_prompt_cache_key(
+        execution_identity,
+        storage_root=runtime_paths.storage_root,
+    )
+
+
 def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     provider: str,
     model_id: str,
@@ -155,7 +171,17 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     if (
         canonical_provider_key
-        not in {"ollama", "llama_cpp", "vertexai_claude", "codex", "openai_codex", _BEDROCK_CLAUDE_PROVIDER}
+        not in {
+            "ollama",
+            "llama_cpp",
+            "vertexai_claude",
+            "codex",
+            "openai_codex",
+            "synthetic",
+            "kimi",
+            "kimi_code",
+            _BEDROCK_CLAUDE_PROVIDER,
+        }
         and "api_key" not in extra_kwargs
     ):
         api_key = get_api_key_for_provider(canonical_provider_key, runtime_paths=runtime_paths)
@@ -192,11 +218,17 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         extra_kwargs.setdefault("timeout", _CLAUDE_REQUEST_TIMEOUT_SECONDS)
 
     if canonical_provider_key == "ollama":
-        from agno.models.ollama import Ollama  # noqa: PLC0415
+        from mindroom.ollama_model import MindRoomOllama  # noqa: PLC0415
 
         host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT
         logger.debug("using_ollama_host", host=host)
-        return Ollama(id=model_id, host=host, **extra_kwargs)
+        return MindRoomOllama(id=model_id, host=host, **extra_kwargs)
+
+    if canonical_provider_key == "synthetic":
+        from mindroom.synthetic_model import SyntheticModel  # noqa: PLC0415
+
+        extra_kwargs.pop("api_key", None)
+        return SyntheticModel(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "openrouter":
         from mindroom.openai_models import MindRoomOpenRouter  # noqa: PLC0415
@@ -234,16 +266,24 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if canonical_provider_key in {"codex", "openai_codex"}:
         from mindroom.codex_model import (  # noqa: PLC0415
             CodexResponses,
-            derive_codex_prompt_cache_key,
             normalize_codex_model_id,
         )
 
         extra_kwargs.pop("api_key", None)
-        if "prompt_cache_key" not in extra_kwargs and execution_identity is not None:
-            prompt_cache_key = derive_codex_prompt_cache_key(execution_identity)
-            if prompt_cache_key is not None:
-                extra_kwargs["prompt_cache_key"] = prompt_cache_key
+        _set_agent_prompt_cache_key(extra_kwargs, execution_identity, runtime_paths)
+        if execution_identity is not None:
+            extra_kwargs["session_id"] = derive_session_routing_key(
+                execution_identity,
+                storage_root=runtime_paths.storage_root,
+            )
         return CodexResponses(id=normalize_codex_model_id(model_id), **extra_kwargs)
+
+    if canonical_provider_key in {"kimi", "kimi_code"}:
+        from mindroom.kimi_model import KimiChat, normalize_kimi_model_id  # noqa: PLC0415
+
+        extra_kwargs.pop("api_key", None)
+        _set_agent_prompt_cache_key(extra_kwargs, execution_identity, runtime_paths)
+        return KimiChat(id=normalize_kimi_model_id(model_id), **extra_kwargs)
 
     if canonical_provider_key == _BEDROCK_CLAUDE_PROVIDER:
         extra_kwargs.pop("api_key", None)
@@ -254,15 +294,20 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             missing_message="Missing AWS Bedrock dependencies. Install with: pip install 'mindroom[aws_bedrock]'",
         )
         _populate_bedrock_claude_runtime_kwargs(extra_kwargs, runtime_paths)
-        from agno.models.aws.claude import Claude as AwsBedrockClaude  # noqa: PLC0415
+        from mindroom.bedrock_claude import MindRoomBedrockClaude  # noqa: PLC0415
 
-        return AwsBedrockClaude(id=model_id, **extra_kwargs)
+        return MindRoomBedrockClaude(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "openai":
         from mindroom.openai_tool_search import openai_native_tool_search_supported  # noqa: PLC0415
 
         base_url = extra_kwargs.get("base_url") or runtime_paths.env_value("OPENAI_BASE_URL")
-        if openai_native_tool_search_supported(canonical_provider_key, model_id, base_url=base_url):
+        if base_url:
+            extra_kwargs["base_url"] = base_url
+        if model_config.api == "responses" or (
+            model_config.api is None
+            and openai_native_tool_search_supported(canonical_provider_key, model_id, base_url=base_url)
+        ):
             from mindroom.openai_models import MindRoomOpenAIResponses  # noqa: PLC0415
 
             return MindRoomOpenAIResponses(id=model_id, **extra_kwargs)
@@ -277,14 +322,14 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return MindRoomAzureOpenAI(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "anthropic":
-        from agno.models.anthropic import Claude  # noqa: PLC0415
+        from mindroom.anthropic_claude import MindRoomAnthropicClaude  # noqa: PLC0415
 
-        return Claude(id=model_id, **extra_kwargs)
+        return MindRoomAnthropicClaude(id=model_id, **extra_kwargs)
 
     if canonical_provider_key in {"gemini", "google"}:
-        from agno.models.google import Gemini  # noqa: PLC0415
+        from mindroom.google_gemini import MindRoomGoogleGemini  # noqa: PLC0415
 
-        return Gemini(id=model_id, **extra_kwargs)
+        return MindRoomGoogleGemini(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "vertexai_claude":
         from mindroom.vertex_claude_compat import MindroomVertexAIClaude  # noqa: PLC0415
@@ -301,14 +346,14 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return MindRoomLlamaCpp(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "cerebras":
-        from agno.models.cerebras import Cerebras  # noqa: PLC0415
+        from mindroom.cerebras_model import MindRoomCerebras  # noqa: PLC0415
 
-        return Cerebras(id=model_id, **extra_kwargs)
+        return MindRoomCerebras(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "groq":
-        from agno.models.groq import Groq  # noqa: PLC0415
+        from mindroom.groq_model import MindRoomGroq  # noqa: PLC0415
 
-        return Groq(id=model_id, **extra_kwargs)
+        return MindRoomGroq(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "deepseek":
         from mindroom.openai_models import MindRoomDeepSeek  # noqa: PLC0415
@@ -370,5 +415,9 @@ def get_model_instance(
         configured_provider=provider,
     )
     install_claude_prompt_cache_hook(model)
-    install_claude_stream_retry_hook(model)
+    install_provider_stream_retry_hook(model)
+    install_provider_media_fallback(
+        model,
+        fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
+    )
     return model

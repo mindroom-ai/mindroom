@@ -6,6 +6,9 @@ nameOverride: ""
 fullnameOverride: ""
 
 replicaCount: 1
+# Optional rollout progress deadline for the MindRoom Deployment, in seconds.
+# Leave null to use the Kubernetes default.
+progressDeadlineSeconds: null
 
 image:
   repository: ghcr.io/mindroom-ai/mindroom
@@ -86,6 +89,12 @@ config:
   # file reads an absolute path that already exists in the runtime filesystem, commonly copied by contentBundles.
   source: configMap
   path: ""
+  # Optional source directory for native initialize-only installation before run.
+  # Requires source: file and path inside its own directory below storage.mountPath.
+  # contentBundles can transport files here; initialization runs in the runtime image.
+  bootstrapBundlePath: ""
+  # Optional opaque revision; a new value validates and installs the bootstrap bundle.
+  bootstrapBundleRevision: ""
   create: true
   existingConfigMap: ""
   key: config.yaml
@@ -95,20 +104,19 @@ config:
   data: ""
 
 eventCache:
-  # The runtime chart defaults to PostgreSQL because Kubernetes deployments need a restart-safe cache backend.
-  # Set this to sqlite for lightweight installs.
+  # Backs the durable Matrix event journal. The chart defaults to PostgreSQL
+  # because Kubernetes deployments need a restart-safe store; set this to
+  # sqlite for lightweight installs.
+  #
+  # The value keys keep their `eventCache` name so that upgrading this chart
+  # does not rename the managed database, its Secret, or its PersistentVolumeClaim.
   backend: postgres
-  # Logical namespace for rows in a shared PostgreSQL event-cache database.
-  # Defaults to the Helm release namespace.
-  namespace: ""
   databaseUrlEnv: MINDROOM_EVENT_CACHE_DATABASE_URL
   databaseUrl:
     # Use this for an externally managed PostgreSQL database, or when adopting an existing Secret for a chart-managed database.
     # The secret should contain a full psycopg-compatible connection string.
     existingSecret: ""
     key: ""
-  sqlite:
-    dbPath: ""
   postgres:
     create: true
     nameOverride: ""
@@ -120,6 +128,7 @@ eventCache:
       tag: "17"
       pullPolicy: IfNotPresent
     service:
+      # Shared by the PostgreSQL listener, probes, Service, and generated connection URL.
       port: 5432
       annotations: {}
     auth:
@@ -185,10 +194,10 @@ stateStorage:
     enabled: true
     mountPath: /app/agent_data/encryption_keys
     subPath: encryption_keys
-  syncTokens:
+  syncContinuity:
     enabled: true
-    mountPath: /app/agent_data/sync_tokens
-    subPath: sync_tokens
+    mountPath: /app/agent_data/sync_continuity
+    subPath: sync_continuity
   initPermissions:
     enabled: true
     image: busybox:1.36
@@ -290,6 +299,10 @@ probes:
     failureThreshold: 6
 
 workers:
+  # Opt-in visible browser; requires backend=kubernetes, user_agent scope and
+  # browser worker_tools. Set MINDROOM_COMPUTER_ALLOWED_ORIGINS via env.extra.
+  # See docs/tools/worker-computer.md for trusted Chat origin and WSS routing.
+  computerEnabled: false
   # static_runner keeps a sandbox-runner sidecar in this pod.
   # kubernetes lets the MindRoom runtime create worker Deployments on demand.
   backend: static_runner
@@ -342,6 +355,11 @@ workers:
     namePrefix: mindroom-worker
     storageSubpathPrefix: workers
     enableServiceLinks: false
+    # Optional RuntimeClass applied to every generated worker pod.
+    runtimeClassName: ""
+    # Optional node-installed profile applied only to the main worker container.
+    # Example: {type: Localhost, localhostProfile: profiles/worker-computer.json}
+    seccompProfile: {}
     configMapName: ""
     configKey: ""
     configPath: ""
@@ -360,6 +378,30 @@ workers:
       limits:
         cpu: 500m
         memory: 1Gi
+    scriptResources:
+      defaultProfile: small
+      profiles:
+        small:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        standard:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        large:
+          requests:
+            cpu: 500m
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 8Gi
     # Per-worker Agent Vault egress. When enabled, each dedicated worker pod
     # gets an init container that mints a proxy-role Agent Vault token for that
     # worker's vault into an in-pod volume; the sandbox runner composes
@@ -411,6 +453,11 @@ workers:
         # Key in bootstrapSecretName holding the master password that protects
         # the vault's encryption key.
         masterPasswordSecretKey: AGENT_VAULT_MASTER_PASSWORD
+        # Raw Kubernetes EnvVar entries appended to the Agent Vault server.
+        # Cannot override the chart-managed master password or enabled SMTP settings.
+        extraEnv: []
+        # Raw Kubernetes EnvFromSource entries for the Agent Vault server.
+        envFrom: []
         persistence:
           enabled: true
           size: 1Gi
@@ -607,6 +654,10 @@ approvedEgress:
     enabled: false
     host: agent-vault
     port: 14322
+    # Route these destinations directly after the normal allowlist/grant check.
+    # Use an exact hostname or a leading dot for a domain and its subdomains.
+    # Useful for signed URLs that must skip parent-proxy credential injection.
+    bypassDomains: []
   resources:
     requests:
       cpu: 100m

@@ -21,7 +21,6 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     ToolAuthoredOverrideValidator,
     ToolCategory,
-    ToolExecutionTarget,
     ToolManagedInitArg,
     ToolMetadata,
     ToolValidationInfo,
@@ -55,6 +54,18 @@ if TYPE_CHECKING:
     from mindroom.credentials import CredentialsManager
 
 logger = get_logger(__name__)
+
+# These verified media defaults supersede older provider SDK constructor defaults.
+# Keep unrelated optional settings under their existing SDK/default semantics.
+_MEDIA_MODEL_DEFAULT_FIELDS = {
+    "openai": ("transcription_model", "text_to_speech_model", "image_model"),
+    "gemini": ("image_generation_model", "video_generation_model"),
+    "groq": ("tts_model", "tts_voice"),
+    "cartesia": ("model_id",),
+    "eleven_labs": ("model_id",),
+    "fal": ("model",),
+    "replicate": ("model",),
+}
 
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
 _TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "string[]", "text", "url"})
@@ -169,6 +180,19 @@ def _tool_config_fields(metadata: ToolMetadata | ToolValidationInfo) -> tuple[Co
     return fields + tuple(field for field in _TOOLKIT_FILTER_CONFIG_FIELDS if field.name not in declared_names)
 
 
+def _authored_tool_config_fields(
+    metadata: ToolMetadata | ToolValidationInfo,
+    *,
+    include_agent_only: bool = True,
+) -> tuple[ConfigField, ...]:
+    """Return fields that may be set on one authored tool entry."""
+    fields = _tool_config_fields(metadata)
+    if not include_agent_only:
+        return fields
+    declared_names = {field.name for field in fields}
+    return fields + tuple(field for field in (metadata.agent_override_fields or ()) if field.name not in declared_names)
+
+
 def _validate_text_authored_override_value(
     tool_name: str,
     field: ConfigField,
@@ -261,7 +285,13 @@ def _validate_authored_overrides(
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
-    fields_by_name = {field.name: field for field in _tool_config_fields(metadata)}
+    fields_by_name = {
+        field.name: field
+        for field in _authored_tool_config_fields(
+            metadata,
+            include_agent_only=config_path_prefix is None or not config_path_prefix.startswith("defaults.tools"),
+        )
+    }
     unexpected_fields = sorted(set(overrides) - set(fields_by_name))
     if unexpected_fields:
         unexpected = ", ".join(unexpected_fields)
@@ -389,7 +419,7 @@ def coerce_optional_finite_number(value: object) -> int | float | None:
         raise TypeError
     if isinstance(value, int | float):
         if math.isfinite(value):
-            return value
+            return int(value) if isinstance(value, float) and value.is_integer() else value
         raise OverflowError
     if isinstance(value, str):
         raw_value = value.strip()
@@ -469,13 +499,16 @@ def _build_tool_config_init_kwargs(
     runtime_overrides: dict[str, object] | None,
 ) -> dict[str, object]:
     """Collect safe config-field kwargs for one tool constructor."""
-    init_kwargs: dict[str, object] = {}
     fields = _tool_config_fields(metadata)
+    model_default_fields = _MEDIA_MODEL_DEFAULT_FIELDS.get(tool_name, ())
+    init_kwargs: dict[str, object] = {
+        field.name: field.default for field in fields if field.name in model_default_fields
+    }
     _apply_tool_config_init_values(init_kwargs, tool_name=tool_name, fields=fields, values=credentials)
     _apply_tool_config_init_values(
         init_kwargs,
         tool_name=tool_name,
-        fields=fields,
+        fields=_authored_tool_config_fields(metadata),
         values=tool_config_overrides,
         skip_inherited=True,
     )
@@ -547,6 +580,7 @@ def _build_managed_tool_init_kwargs(
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
     worker_target: ResolvedWorkerTarget | None,
+    runtime_config: Config | None,
     tool_output_workspace_root: Path | None,
     worker_tools_override: list[str] | None,
 ) -> dict[str, object]:
@@ -559,6 +593,8 @@ def _build_managed_tool_init_kwargs(
             init_kwargs[init_arg.value] = credentials_manager
         elif init_arg == ToolManagedInitArg.WORKER_TARGET:
             init_kwargs[init_arg.value] = worker_target
+        elif init_arg == ToolManagedInitArg.RUNTIME_CONFIG:
+            init_kwargs[init_arg.value] = runtime_config
         elif init_arg == ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT:
             init_kwargs[init_arg.value] = tool_output_workspace_root
         elif init_arg == ToolManagedInitArg.WORKER_TOOLS_OVERRIDE:
@@ -566,6 +602,8 @@ def _build_managed_tool_init_kwargs(
         elif init_arg == ToolManagedInitArg.CURRENT_ROOM_ID:
             execution_identity = worker_target.execution_identity if worker_target is not None else None
             init_kwargs[init_arg.value] = execution_identity.room_id if execution_identity is not None else None
+        elif init_arg == ToolManagedInitArg.AGENT_NAME:
+            init_kwargs[init_arg.value] = worker_target.routing_agent_name if worker_target is not None else None
     return init_kwargs
 
 
@@ -590,6 +628,7 @@ def _build_tool_instance(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
+    runtime_config: Config | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
@@ -659,6 +698,7 @@ def _build_tool_instance(
             runtime_paths=runtime_paths,
             credentials_manager=resolved_credentials_manager,
             worker_target=worker_target,
+            runtime_config=runtime_config,
             tool_output_workspace_root=tool_output_workspace_root,
             worker_tools_override=worker_tools_override,
         ),
@@ -704,6 +744,7 @@ def get_tool_by_name(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
+    runtime_config: Config | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
@@ -727,6 +768,7 @@ def get_tool_by_name(
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
         credentials_manager=credentials_manager,
+        runtime_config=runtime_config,
         tool_config_overrides=tool_config_overrides,
         tool_init_overrides=tool_init_overrides,
         worker_tools_override=worker_tools_override,
@@ -783,13 +825,26 @@ class _ResolvedToolState:
     unresolved_plugin_tool_sources: frozenset[str] = frozenset()
 
 
+@dataclass(frozen=True, slots=True)
+class _ModuleOrigin:
+    """One live module's resolved file and most recent plugin containment check."""
+
+    module_file: str
+    resolved_file: Path | None
+    root: Path
+    within_root: bool
+
+
+# Validation scans all loaded modules twice. A fixed-size LRU below that working
+# set evicts every path before the next scan reaches it. Weak keys retain one
+# entry per live module and release transient plugin modules after unloading.
+_MODULE_ORIGIN_CACHE: weakref.WeakKeyDictionary[ModuleType, _ModuleOrigin] = weakref.WeakKeyDictionary()
+
+
 @functools.lru_cache(maxsize=8192)
-def _resolved_module_file(module_file: str) -> Path | None:
-    """Return the resolved on-disk path for one module file, cached across calls."""
-    try:
-        return Path(module_file).resolve()
-    except OSError:
-        return None
+def _module_directory_within_root(directory: Path, root: Path) -> bool:
+    """Share containment checks across modules in the same resolved directory."""
+    return directory.is_relative_to(root)
 
 
 def _module_origin_within_root(module: ModuleType, root: Path) -> bool:
@@ -797,8 +852,19 @@ def _module_origin_within_root(module: ModuleType, root: Path) -> bool:
     module_file = getattr(module, "__file__", None)
     if not isinstance(module_file, str):
         return False
-    resolved = _resolved_module_file(module_file)
-    return resolved is not None and resolved.is_relative_to(root)
+    cached = _MODULE_ORIGIN_CACHE.get(module)
+    if cached is not None and cached.module_file == module_file:
+        if cached.root == root:
+            return cached.within_root
+        resolved = cached.resolved_file
+    else:
+        try:
+            resolved = Path(module_file).resolve()
+        except OSError:
+            resolved = None
+    within_root = resolved is not None and (resolved == root or _module_directory_within_root(resolved.parent, root))
+    _MODULE_ORIGIN_CACHE[module] = _ModuleOrigin(module_file, resolved, root, within_root)
+    return within_root
 
 
 def _execute_validation_plugin_module(
@@ -1058,6 +1124,7 @@ def _tool_validation_snapshot_from_state(
             authored_override_validator=metadata.authored_override_validator,
             supports_toolkit_filters=metadata.supports_toolkit_filters,
             requires_room_context=metadata.requires_room_context,
+            requires_primary_runtime=metadata.requires_primary_runtime,
             runtime_loadable=tool_name in tool_registry,
             unavailable_due_to_plugin_load_error=tool_name in unavailable_plugin_tool_names,
         )
@@ -1202,6 +1269,7 @@ def serialize_tool_validation_snapshot(
             "authored_override_validator": info.authored_override_validator.value,
             "supports_toolkit_filters": info.supports_toolkit_filters,
             "requires_room_context": info.requires_room_context,
+            "requires_primary_runtime": info.requires_primary_runtime,
             "runtime_loadable": info.runtime_loadable,
             "unavailable_due_to_plugin_load_error": info.unavailable_due_to_plugin_load_error,
         }
@@ -1223,6 +1291,21 @@ def _deserialize_tool_validation_fields(raw_fields: object, *, field_name: str) 
             raise TypeError(msg)
         fields.append(ConfigField(**cast("dict[str, Any]", raw_field)))
     return tuple(fields)
+
+
+def _deserialize_tool_validation_bool(
+    raw_info: Mapping[str, object],
+    *,
+    tool_name: str,
+    field_name: str,
+    default: bool,
+) -> bool:
+    """Read one strictly typed boolean from serialized tool validation metadata."""
+    value = raw_info.get(field_name, default)
+    if not isinstance(value, bool):
+        msg = f"Tool validation snapshot entry for '{tool_name}' must set {field_name} to a boolean."
+        raise TypeError(msg)
+    return value
 
 
 def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValidationInfo]:
@@ -1253,25 +1336,36 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 f"authored_override_validator '{raw_validator}'."
             )
             raise TypeError(msg) from exc
-        raw_runtime_loadable = raw_info_mapping.get("runtime_loadable", True)
-        if not isinstance(raw_runtime_loadable, bool):
-            msg = f"Tool validation snapshot entry for '{tool_name}' must set runtime_loadable to a boolean."
-            raise TypeError(msg)
-        raw_unavailable_due_to_plugin_load_error = raw_info_mapping.get("unavailable_due_to_plugin_load_error", False)
-        if not isinstance(raw_unavailable_due_to_plugin_load_error, bool):
-            msg = (
-                f"Tool validation snapshot entry for '{tool_name}' must set "
-                "unavailable_due_to_plugin_load_error to a boolean."
-            )
-            raise TypeError(msg)
-        raw_requires_room_context = raw_info_mapping.get("requires_room_context", False)
-        if not isinstance(raw_requires_room_context, bool):
-            msg = f"Tool validation snapshot entry for '{tool_name}' must set requires_room_context to a boolean."
-            raise TypeError(msg)
-        raw_supports_toolkit_filters = raw_info_mapping.get("supports_toolkit_filters", False)
-        if not isinstance(raw_supports_toolkit_filters, bool):
-            msg = f"Tool validation snapshot entry for '{tool_name}' must set supports_toolkit_filters to a boolean."
-            raise TypeError(msg)
+        raw_runtime_loadable = _deserialize_tool_validation_bool(
+            raw_info_mapping,
+            tool_name=tool_name,
+            field_name="runtime_loadable",
+            default=True,
+        )
+        raw_unavailable_due_to_plugin_load_error = _deserialize_tool_validation_bool(
+            raw_info_mapping,
+            tool_name=tool_name,
+            field_name="unavailable_due_to_plugin_load_error",
+            default=False,
+        )
+        raw_requires_room_context = _deserialize_tool_validation_bool(
+            raw_info_mapping,
+            tool_name=tool_name,
+            field_name="requires_room_context",
+            default=False,
+        )
+        raw_requires_primary_runtime = _deserialize_tool_validation_bool(
+            raw_info_mapping,
+            tool_name=tool_name,
+            field_name="requires_primary_runtime",
+            default=False,
+        )
+        raw_supports_toolkit_filters = _deserialize_tool_validation_bool(
+            raw_info_mapping,
+            tool_name=tool_name,
+            field_name="supports_toolkit_filters",
+            default=False,
+        )
         snapshot[tool_name] = ToolValidationInfo(
             name=tool_name,
             config_fields=_deserialize_tool_validation_fields(
@@ -1285,20 +1379,11 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
             authored_override_validator=authored_override_validator,
             supports_toolkit_filters=raw_supports_toolkit_filters,
             requires_room_context=raw_requires_room_context,
+            requires_primary_runtime=raw_requires_primary_runtime,
             runtime_loadable=raw_runtime_loadable,
             unavailable_due_to_plugin_load_error=raw_unavailable_due_to_plugin_load_error,
         )
     return snapshot
-
-
-def default_worker_routed_tools(tool_names: list[str]) -> list[str]:
-    """Return the tool names that default to worker execution."""
-    selected_tools: list[str] = []
-    for tool_name in tool_names:
-        metadata = TOOL_METADATA.get(tool_name)
-        if metadata is not None and metadata.default_execution_target == ToolExecutionTarget.WORKER:
-            selected_tools.append(tool_name)
-    return selected_tools
 
 
 def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) -> list[dict[str, Any]]:
@@ -1312,8 +1397,15 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value
         tool_dict["default_execution_target"] = metadata.default_execution_target.value
+        if metadata.oauth_fallback_fields:
+            tool_dict["oauth_fallback_fields"] = list(metadata.oauth_fallback_fields)
+        else:
+            tool_dict.pop("oauth_fallback_fields", None)
+        if not metadata.requires_primary_runtime:
+            tool_dict.pop("requires_primary_runtime", None)
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
+        tool_dict.pop("worker_inert_agent_functions", None)
         tool_dict.pop("supports_toolkit_filters", None)
         tool_dict.pop("factory", None)
         tools.append(tool_dict)

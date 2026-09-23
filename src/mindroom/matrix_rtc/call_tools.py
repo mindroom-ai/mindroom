@@ -7,7 +7,8 @@ workspace-aware base dirs, and worker routing) and wraps every agno function
 as a raw livekit function tool. Tool calls run inside the standard MindRoom
 tool runtime context for the call's room and sole Matrix requester. Tools
 needing confirmation, user input, external execution, or approval are omitted
-because voice has no approval UI.
+because voice has no approval UI. Exact built-in room-recovery functions remain
+available so an agent can restore the router needed by approval policy.
 
 The cascaded backend delegates each transcript to the normal ``ai_response``
 path instead. LiveKit receives no tools there; Agno remains the sole model and
@@ -24,7 +25,6 @@ from inspect import isasyncgenfunction, iscoroutinefunction
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from agno.agent._tools import determine_tools_for_model
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -32,9 +32,20 @@ from agno.session import AgentSession as AgnoAgentSession
 from agno.tools.function import Function, FunctionCall
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
+from mindroom.agent_storage import create_session_storage, run_session_storage_operation, save_independent_usage
 from mindroom.agents import create_agent
+from mindroom.agno_compat_prepared_tools import prepare_agent_tools
+from mindroom.background_tasks import (
+    run_blocking_until_complete,
+    run_coroutine_until_complete,
+    wait_for_future_until_complete,
+)
+from mindroom.claude_prompt_cache import (
+    aclose_anthropic_async_client,
+    arefresh_session_backed_bedrock_async_client,
+)
 from mindroom.history.interrupted_replay import persist_interrupted_replay
-from mindroom.history.runtime import (
+from mindroom.history.session_context import (
     close_agent_runtime_state_dbs,
     create_scope_session_storage,
     open_resolved_scope_session_context,
@@ -42,15 +53,21 @@ from mindroom.history.runtime import (
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
-from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access
+from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access_async
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.pre_model_preparation import prewarm_agent_model_client
 from mindroom.session_ids import create_session_id
-from mindroom.tool_approval import tool_requires_approval_for_openai_compat
+from mindroom.tool_approval import tool_may_require_approval
+from mindroom.tool_system.declarations import (
+    MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
+    MATRIX_ROOM_RUNTIME_TOOL_NAMES,
+)
 from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from contextlib import AbstractAsyncContextManager
 
     from agno.agent import Agent as AgnoAgent
     from agno.knowledge.protocol import KnowledgeProtocol
@@ -59,9 +76,13 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+type _CallAuthorizationGuard = Callable[[], AbstractAsyncContextManager[bool]]
 
 logger = get_logger(__name__)
 
@@ -71,7 +92,7 @@ _TEXT_CHAT_REQUIRED_MESSAGE = (
 )
 
 _MAX_TOOL_RESULT_CHARS = 8000
-_CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS = frozenset({"run_workflow", "sessions_send", "sessions_spawn"})
+_CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS = frozenset({"run_workflow"})
 
 
 @dataclass(frozen=True)
@@ -81,6 +102,44 @@ class CallAgentResponse:
     text: str
     tool_names: tuple[str, ...] = ()
     turn_id: str | None = None
+
+
+async def record_call_voice_usage(
+    usage: LiveVoiceUsage,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+) -> None:
+    """Upsert billed voice duration in the same caller-owned ledger as its delegate."""
+    agent_name = execution_identity.agent_name
+    session_id = execution_identity.session_id
+    if agent_name is None or session_id is None:
+        msg = "Voice usage requires an owned agent conversation"
+        raise ValueError(msg)
+    await run_session_storage_operation(
+        functools.partial(create_session_storage, agent_name, config, runtime_paths, execution_identity),
+        functools.partial(
+            save_independent_usage,
+            session_id=session_id,
+            usage_id=f"live_voice:{usage.provider_session_id}",
+            kind="live_voice",
+            requester_id=execution_identity.requester_id,
+            initial_session=AgnoAgentSession(
+                session_id=session_id,
+                agent_id=agent_name,
+                created_at=int(usage.created_at),
+                updated_at=int(usage.created_at),
+            ),
+            run={
+                "model_provider": "OpenAI",
+                "model": usage.model,
+                "created_at": usage.created_at,
+                "voice_seconds": usage.duration_seconds,
+                "voice_finalized": usage.finalized,
+            },
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -97,6 +156,7 @@ class CallAgentTooling:
     responder: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]] | None = None
     finalize_spoken_response: Callable[[str | None, str, bool], Awaitable[None] | None] | None = None
     close: Callable[[], Awaitable[None]] | None = None
+    get_system_prompt: Callable[[], Awaitable[str]] | None = None
 
 
 @dataclass(frozen=True)
@@ -202,7 +262,7 @@ class _CallResponseTracker:
 
 @dataclass
 class _CallAgentCache:
-    """Own one serially reused cascaded agent for the lifetime of a call."""
+    """Own one serially reused delegate for the lifetime of a call."""
 
     agent_name: str
     config: Config
@@ -216,6 +276,35 @@ class _CallAgentCache:
     refresh_scheduler: KnowledgeRefreshScheduler | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
+    async def get_system_prompt(self, *, requester_id: str) -> str:
+        """Prepare the full caller-bound prompt and retain its agent for delegation."""
+        scheduler = (
+            self.context.orchestrator.knowledge_refresh_scheduler if self.context.orchestrator is not None else None
+        )
+        resolution = await resolve_agent_knowledge_access_async(
+            self.agent_name,
+            self.config,
+            self.runtime_paths,
+            refresh_scheduler=scheduler,
+            execution_identity=self.execution_identity,
+        )
+
+        async def render(agent: AgnoAgent) -> str:
+            session, run_context, tools = await _prepare_call_agent_tools(
+                agent,
+                agent_name=self.agent_name,
+                session_id=self.session_id,
+                requester_id=requester_id,
+            )
+            return await _render_system_prompt(agent, session, run_context, tools)
+
+        return await self.run(
+            knowledge=resolution.knowledge,
+            knowledge_identity=knowledge_runtime_identity(resolution.knowledge),
+            refresh_scheduler=scheduler,
+            operation=render,
+        )
+
     async def run(
         self,
         *,
@@ -226,12 +315,31 @@ class _CallAgentCache:
     ) -> str:
         """Run one turn, rebuilding only when call dependencies change identity."""
         async with self.lock:
+            reusing_agent = self._can_reuse_agent(
+                knowledge_identity=knowledge_identity,
+                refresh_scheduler=refresh_scheduler,
+            )
             agent = await self._get_agent(
                 knowledge=knowledge,
                 knowledge_identity=knowledge_identity,
                 refresh_scheduler=refresh_scheduler,
             )
+            if reusing_agent:
+                await arefresh_session_backed_bedrock_async_client(agent.model)
             return await operation(agent)
+
+    def _can_reuse_agent(
+        self,
+        *,
+        knowledge_identity: tuple[int, ...],
+        refresh_scheduler: KnowledgeRefreshScheduler | None,
+    ) -> bool:
+        """Return whether the cached agent matches this turn's dependencies."""
+        return (
+            self.agent is not None
+            and self.knowledge_identity == knowledge_identity
+            and self.refresh_scheduler is refresh_scheduler
+        )
 
     async def aclose(self) -> None:
         """Close the cached agent's caller-owned runtime state."""
@@ -240,7 +348,19 @@ class _CallAgentCache:
             self.knowledge_identity = ()
             self.refresh_scheduler = None
             if agent is not None:
-                await asyncio.to_thread(close_agent_runtime_state_dbs, agent)
+                await self._close_agent(agent)
+
+    @staticmethod
+    async def _close_agent(agent: AgnoAgent) -> None:
+        """Release one cached agent's async client and runtime databases."""
+
+        async def release() -> None:
+            try:
+                await aclose_anthropic_async_client(agent.model)
+            finally:
+                await run_blocking_until_complete(close_agent_runtime_state_dbs, agent)
+
+        await run_coroutine_until_complete(release())
 
     async def _get_agent(
         self,
@@ -249,20 +369,30 @@ class _CallAgentCache:
         knowledge_identity: tuple[int, ...],
         refresh_scheduler: KnowledgeRefreshScheduler | None,
     ) -> AgnoAgent:
-        if (
-            self.agent is not None
-            and self.knowledge_identity == knowledge_identity
-            and self.refresh_scheduler is refresh_scheduler
+        if self._can_reuse_agent(
+            knowledge_identity=knowledge_identity,
+            refresh_scheduler=refresh_scheduler,
         ):
+            assert self.agent is not None
             return self.agent
         if self.agent is not None:
-            await asyncio.to_thread(close_agent_runtime_state_dbs, self.agent)
-            self.agent = None
-        agent = await asyncio.to_thread(
-            self._build_agent,
-            knowledge=knowledge,
-            refresh_scheduler=refresh_scheduler,
+            agent, self.agent = self.agent, None
+            self.knowledge_identity = ()
+            self.refresh_scheduler = None
+            await self._close_agent(agent)
+        build_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._build_agent,
+                knowledge=knowledge,
+                refresh_scheduler=refresh_scheduler,
+            ),
         )
+        try:
+            agent = await wait_for_future_until_complete(build_task)
+        except asyncio.CancelledError:
+            if not build_task.cancelled() and build_task.exception() is None:
+                await self._close_agent(build_task.result())
+            raise
         self.agent = agent
         self.knowledge_identity = knowledge_identity
         self.refresh_scheduler = refresh_scheduler
@@ -282,8 +412,9 @@ class _CallAgentCache:
             runtime_paths=self.runtime_paths,
             execution_identity=self.execution_identity,
         )
+        agent: AgnoAgent | None = None
         try:
-            return create_agent(
+            agent = create_agent(
                 self.agent_name,
                 self.config,
                 self.runtime_paths,
@@ -299,9 +430,12 @@ class _CallAgentCache:
                 dynamic_tool_continuation=True,
                 eager_deferred_tools=True,
             )
+            prewarm_agent_model_client(agent, history_storage)
         except Exception:
             history_storage.close()
             raise
+        else:
+            return agent
 
 
 async def build_call_tools(
@@ -312,8 +446,10 @@ async def build_call_tools(
     tool_support: ToolRuntimeSupport,
     room_id: str,
     requester_id: str,
+    authorize_operation: _CallAuthorizationGuard,
     session_id: str | None = None,
     enable_responder: bool = False,
+    reconcile_spoken_response: bool = True,
     voice_instructions: str | None = None,
     active_model_name: str | None = None,
 ) -> CallAgentTooling:
@@ -394,18 +530,21 @@ async def build_call_tools(
             response_tracker=response_tracker,
             agent_cache=agent_cache,
             active_model_name=active_model_name,
+            authorize_operation=authorize_operation,
+            reconcile_spoken_response=reconcile_spoken_response,
         )
         return CallAgentTooling(
             tools=(),
             instructions="",
             execution_identity=execution_identity,
             responder=responder,
-            finalize_spoken_response=response_tracker.finalize,
+            finalize_spoken_response=response_tracker.finalize if reconcile_spoken_response else None,
             close=functools.partial(_close_cascaded_call_resources, response_tracker, agent_cache),
+            get_system_prompt=functools.partial(agent_cache.get_system_prompt, requester_id=requester_id),
         )
 
     refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
-    knowledge_resolution = resolve_agent_knowledge_access(
+    knowledge_resolution = await resolve_agent_knowledge_access_async(
         agent_name,
         config,
         runtime_paths,
@@ -429,6 +568,49 @@ async def build_call_tools(
             eager_deferred_tools=True,
         ),
     )
+    session, run_context, effective_tools = await _prepare_call_agent_tools(
+        agent,
+        agent_name=agent_name,
+        session_id=session_id,
+        requester_id=requester_id,
+    )
+    tools: list[Any] = []
+    visible_functions: list[Function | dict[Any, Any]] = []
+    for tool in effective_tools:
+        if not isinstance(tool, Function):
+            msg = f"Voice calls cannot expose provider-native tool definitions for agent {agent_name}"
+            raise TypeError(msg)
+        if _function_requires_text_chat(tool, config):
+            logger.info("call_tool_hidden_needs_text_chat", tool=tool.name, agent=agent_name)
+            continue
+        visible_functions.append(tool)
+        tools.append(
+            _wrap_agno_function(
+                tool,
+                context=context,
+                agent_name=agent_name,
+                config=config,
+                authorize_operation=authorize_operation,
+            ),
+        )
+    instructions = await _render_system_prompt(agent, session, run_context, visible_functions)
+    logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
+    return CallAgentTooling(
+        tools=tuple(tools),
+        instructions=instructions,
+        execution_identity=execution_identity,
+    )
+
+
+async def _prepare_call_agent_tools(
+    agent: AgnoAgent,
+    *,
+    agent_name: str,
+    session_id: str,
+    requester_id: str,
+) -> tuple[AgnoAgentSession, RunContext, list[Function | dict[Any, Any]]]:
+    """Prepare canonical tool instructions before rendering a call's system prompt."""
+    assert agent.model is not None
     run_id = f"{session_id}:voice"
     session = AgnoAgentSession(session_id=session_id, agent_id=agent_name, user_id=requester_id)
     run_output = RunOutput(
@@ -450,40 +632,14 @@ async def build_call_tools(
         session=session,
         user_id=requester_id,
     )
-    effective_tools = determine_tools_for_model(
+    effective_tools = prepare_agent_tools(
         agent,
-        model=agent.model,
         processed_tools=processed_tools,
         run_response=run_output,
         run_context=run_context,
         session=session,
-        async_mode=True,
     )
-    tools: list[Any] = []
-    visible_functions: list[Function | dict[Any, Any]] = []
-    for tool in effective_tools:
-        if not isinstance(tool, Function):
-            msg = f"Voice calls cannot expose provider-native tool definitions for agent {agent_name}"
-            raise TypeError(msg)
-        if _function_requires_text_chat(tool, config):
-            logger.info("call_tool_hidden_needs_text_chat", tool=tool.name, agent=agent_name)
-            continue
-        visible_functions.append(tool)
-        tools.append(
-            _wrap_agno_function(
-                tool,
-                context=context,
-                agent_name=agent_name,
-                config=config,
-            ),
-        )
-    instructions = await _render_system_prompt(agent, session, run_context, visible_functions)
-    logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
-    return CallAgentTooling(
-        tools=tuple(tools),
-        instructions=instructions,
-        execution_identity=execution_identity,
-    )
+    return session, run_context, effective_tools
 
 
 async def _run_call_agent(
@@ -503,70 +659,118 @@ async def _run_call_agent(
     response_tracker: _CallResponseTracker,
     agent_cache: _CallAgentCache,
     active_model_name: str | None,
+    authorize_operation: _CallAuthorizationGuard,
+    reconcile_spoken_response: bool = True,
 ) -> CallAgentResponse:
-    """Run one finalized call transcript through the normal MindRoom agent."""
-    from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
-
+    """Run one finalized transcript only while its current caller remains authorized."""
     await response_tracker.wait_for_settlements()
-    refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
-    knowledge_resolution = resolve_agent_knowledge_access(
-        agent_name,
-        config,
-        runtime_paths,
-        refresh_scheduler=refresh_scheduler,
-        execution_identity=execution_identity,
-    )
-    transient_enrichment_items = append_knowledge_availability_enrichment(
-        (),
-        knowledge_resolution.unavailable,
-    )
-    recorder = TurnRecorder(user_message=transcript)
-    fallback_run_id = f"{session_id}:turn:{uuid4().hex}"
-    turn = ResponseTurnContext(
-        entity_label=agent_name,
-        session_id=session_id,
-        run_id=None,
-        correlation_id=uuid4().hex,
-        reply_to_event_id=None,
-        room_id=room_id,
-        thread_id=None,
-        requester_id=requester_id,
-        matrix_run_metadata=None,
-        active_model_name=active_model_name,
-        transient_enrichment_items=transient_enrichment_items,
-        system_enrichment_items=voice_enrichment_items,
-    )
-    run_metadata: dict[str, Any] = {}
-
-    async def _respond(agent: AgnoAgent) -> str:
-        try:
-            return await ai_response(
-                turn,
-                prompt=transcript,
-                runtime_paths=runtime_paths,
-                config=config,
-                knowledge=knowledge_resolution.knowledge,
-                run_id_callback=recorder.set_run_id,
-                include_interactive_questions=False,
-                tool_function_filter=context.tool_function_filter,
-                show_tool_calls=False,
-                run_metadata_collector=run_metadata,
-                execution_identity=execution_identity,
-                refresh_scheduler=refresh_scheduler,
-                turn_recorder=recorder,
-                eager_deferred_tools=True,
-                reusable_agent=agent,
-            )
-        finally:
-            recorder.set_run_metadata({**(recorder.run_metadata or {}), **run_metadata})
-
-    async def _run_with_agent(agent: AgnoAgent) -> str:
-        return await tool_support.run_in_context(
-            tool_context=context,
-            operation=functools.partial(_respond, agent),
+    async with authorize_operation() as authorized:
+        if not authorized:
+            return CallAgentResponse(text="")
+        return await _run_authorized_call_agent(
+            transcript,
+            on_tools_executed,
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            tool_support=tool_support,
+            context=context,
+            execution_identity=execution_identity,
+            room_id=room_id,
+            requester_id=requester_id,
+            session_id=session_id,
+            voice_enrichment_items=voice_enrichment_items,
+            response_tracker=response_tracker,
+            agent_cache=agent_cache,
+            active_model_name=active_model_name,
+            reconcile_spoken_response=reconcile_spoken_response,
         )
 
+
+async def _run_authorized_call_agent(
+    transcript: str,
+    on_tools_executed: Callable[[list[str]], None] | None = None,
+    *,
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    tool_support: ToolRuntimeSupport,
+    context: ToolRuntimeContext,
+    execution_identity: ToolExecutionIdentity,
+    room_id: str,
+    requester_id: str,
+    session_id: str,
+    voice_enrichment_items: tuple[EnrichmentItem, ...],
+    response_tracker: _CallResponseTracker,
+    agent_cache: _CallAgentCache,
+    active_model_name: str | None,
+    reconcile_spoken_response: bool = True,
+) -> CallAgentResponse:
+    """Run one admitted call transcript through the normal MindRoom agent."""
+    from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
+
+    recorder = TurnRecorder(user_message=transcript)
+    fallback_run_id = f"{session_id}:turn:{uuid4().hex}"
     try:
+        refresh_scheduler = (
+            context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
+        )
+        knowledge_resolution = await resolve_agent_knowledge_access_async(
+            agent_name,
+            config,
+            runtime_paths,
+            refresh_scheduler=refresh_scheduler,
+            execution_identity=execution_identity,
+        )
+        transient_enrichment_items = append_knowledge_availability_enrichment(
+            (),
+            knowledge_resolution.unavailable,
+        )
+        turn = ResponseTurnContext(
+            entity_label=agent_name,
+            session_id=session_id,
+            run_id=None,
+            correlation_id=uuid4().hex,
+            reply_to_event_id=None,
+            room_id=room_id,
+            thread_id=None,
+            requester_id=requester_id,
+            matrix_run_metadata=None,
+            active_model_name=active_model_name,
+            transient_enrichment_items=transient_enrichment_items,
+            system_enrichment_items=voice_enrichment_items,
+        )
+        run_metadata: dict[str, Any] = {}
+
+        async def _respond(agent: AgnoAgent) -> str:
+            try:
+                return await ai_response(
+                    turn,
+                    prompt=transcript,
+                    runtime_paths=runtime_paths,
+                    config=config,
+                    knowledge=knowledge_resolution.knowledge,
+                    run_id_callback=recorder.set_run_id,
+                    include_interactive_questions=False,
+                    tool_function_filter=context.tool_function_filter,
+                    show_tool_calls=False,
+                    run_metadata_collector=run_metadata,
+                    execution_identity=execution_identity,
+                    refresh_scheduler=refresh_scheduler,
+                    turn_recorder=recorder,
+                    eager_deferred_tools=True,
+                    reusable_agent=agent,
+                    attempt_model_runtime=tool_support,
+                )
+            finally:
+                recorder.set_run_metadata({**(recorder.run_metadata or {}), **run_metadata})
+
+        async def _run_with_agent(agent: AgnoAgent) -> str:
+            return await tool_support.run_in_context(
+                tool_context=context,
+                operation=functools.partial(_respond, agent),
+            )
+
         response = await agent_cache.run(
             knowledge=knowledge_resolution.knowledge,
             knowledge_identity=knowledge_runtime_identity(knowledge_resolution.knowledge),
@@ -586,8 +790,10 @@ async def _run_call_agent(
         if on_tools_executed is not None and tool_names:
             on_tools_executed(list(tool_names))
     state = _call_agent_run_state(recorder, session_id=session_id, fallback_run_id=fallback_run_id)
-    turn_id = response_tracker.register(state) if response else None
-    if not response and state.outcome == "interrupted":
+    # Live commentary can be paraphrased or omitted; only cascaded TTS owns a
+    # one-to-one mapping between this answer and the eventual spoken turn.
+    turn_id = response_tracker.register(state) if response and reconcile_spoken_response else None
+    if (not response or not reconcile_spoken_response) and state.outcome == "interrupted":
         await response_tracker.persist_unspoken(state, default_status=RunStatus.cancelled)
     return CallAgentResponse(text=response, tool_names=tool_names, turn_id=turn_id)
 
@@ -664,13 +870,16 @@ def _function_requires_async_execution(function: Function) -> bool:
 
 def _function_requires_text_chat(function: Function, config: Config) -> bool:
     """Return whether voice must hide a function with no usable approval UI."""
+    is_matrix_room_runtime_function = (
+        function.name in MATRIX_ROOM_RUNTIME_TOOL_NAMES and function.approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
+    )
     return (
         function.requires_confirmation
         or function.requires_user_input
         or function.external_execution
         or function.approval_type == "required"
         or function.name in _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS
-        or tool_requires_approval_for_openai_compat(config, function.name)
+        or (not is_matrix_room_runtime_function and tool_may_require_approval(config, function.name))
     )
 
 
@@ -693,6 +902,7 @@ def _wrap_agno_function(
     context: ToolRuntimeContext,
     agent_name: str,
     config: Config,
+    authorize_operation: _CallAuthorizationGuard,
 ) -> RawFunctionTool:
     """Wrap one agno function as a livekit raw function tool."""
     from livekit.agents import llm  # noqa: PLC0415
@@ -713,22 +923,25 @@ def _wrap_agno_function(
         if _function_requires_text_chat(function, config):
             logger.info("call_tool_blocked_needs_text_chat", tool=function.name, agent=agent_name)
             return _TEXT_CHAT_REQUIRED_MESSAGE
-        logger.info("call_tool_executing", tool=function.name, agent=agent_name, room_id=context.room_id)
-        try:
-            with tool_runtime_context(context):
-                # create_agent installs MindRoom's canonical hook bridge on
-                # every function. It owns approval evaluation, including the
-                # defensive argument copy, so do not preflight policy here.
-                execution = FunctionCall(function=function, arguments=raw_arguments)
-                if _function_requires_async_execution(function):
-                    result = await execution.aexecute()
-                else:
-                    # asyncio.to_thread copies the current contextvars context,
-                    # so hooks and the tool see the call's runtime context.
-                    result = await asyncio.to_thread(execution.execute)
-        except Exception as error:
-            logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=str(error))
-            return f"Tool {function.name} failed: {error}"
+        async with authorize_operation() as authorized:
+            if not authorized:
+                return "Call access was revoked before this tool could run."
+            logger.info("call_tool_executing", tool=function.name, agent=agent_name, room_id=context.room_id)
+            try:
+                with tool_runtime_context(context):
+                    # create_agent installs MindRoom's canonical hook bridge on
+                    # every function. It owns approval evaluation, including the
+                    # defensive argument copy, so do not preflight policy here.
+                    execution = FunctionCall(function=function, arguments=raw_arguments)
+                    if _function_requires_async_execution(function):
+                        result = await execution.aexecute()
+                    else:
+                        # asyncio.to_thread copies the current contextvars context,
+                        # so hooks and the tool see the call's runtime context.
+                        result = await asyncio.to_thread(execution.execute)
+            except Exception as error:
+                logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=str(error))
+                return f"Tool {function.name} failed: {error}"
         if result.status != "success":
             error = result.error or "unknown error"
             logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=error)

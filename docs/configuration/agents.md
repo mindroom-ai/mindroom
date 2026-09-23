@@ -57,8 +57,15 @@ agents:
       - lobby
       - dev
 
-    # Accept authorized ad-hoc room invites for this agent
+    # Accept all, none, or matching inviter ID patterns
     accept_invites: true
+
+    # Conversation access is separate from invitation acceptance
+    access:
+      current_room_members: false
+      members_of_rooms:
+        - lobby
+      users: []
 
     # Enable markdown formatting
     markdown: true
@@ -97,8 +104,6 @@ agents:
       bridge_telegram: room
       "!abc123:example.com": room
 
-    # Participate in room-level startup prewarm for rooms already joined at first sync (default: true)
-    startup_thread_prewarm: true
 
     # Tools to run in the sandbox proxy instead of the main process (optional, inherits from defaults)
     worker_tools: [shell, file]
@@ -121,12 +126,17 @@ agents:
     max_tool_calls_from_history: null
 
     # Required compaction is enabled by default.
-    # Soft thresholds do not compact by themselves while history still fits.
-    # Set enabled: false to disable automatic pre-reply compaction for this agent.
+    # Eligible models and history policies use native compaction at the threshold.
+    # Set enabled: false to disable automatic native and pre-reply text compaction.
     compaction:
       enabled: true
       threshold_percent: 0.8
       reserve_tokens: 16384
+      timeout_seconds: 600
+
+    # Keep <workspace>/thread_exports/ current with YAML exports of this agent's rooms
+    # (true enables the defaults; see Thread Exports below)
+    thread_exports: true
 
 ```
 
@@ -142,7 +152,9 @@ agents:
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
-| `accept_invites` | bool | `true` | Accept authorized inbound Matrix room invites for this agent. Invited room IDs are persisted so ad-hoc memberships survive restarts and room cleanup. Set to `false` to ignore new invites for this agent. Approval-gated tools still require the router to be joined to the room, so ad-hoc invited rooms only support approval if the router is already joined there |
+| `participation` | object or null | `null` | Opt into adaptive replies in existing multi-human threads across authorized rooms, including ad hoc rooms; see [Adaptive Participation](#adaptive-participation) |
+| `mid_turn` | object or null | `null` | Judge whether queued messages can wait until this agent finishes its active task; see [Mid-Turn Coalescing](#mid-turn-coalescing) |
+| `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted ad-hoc room IDs are persisted so memberships survive restarts and room cleanup. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when the router's policy allows the current Matrix transport account |
 | `markdown` | bool | `null` | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`) |
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
@@ -150,10 +162,11 @@ agents:
 | `memory_search` | object | `null` | File-memory search override for this agent. Supports `mode`, `include`, and `include_entrypoint`; omitted fields inherit from global `memory.search` |
 | `private` | object | `null` | Optional requester-private state for one shared agent definition |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
+| `access` | object | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this agent's own managed `rooms`. See [Authorization](../authorization.md) |
+| `credential_managers` | list | `[]` | Concrete Matrix user IDs allowed to manage this agent's credentials and shared OAuth connections. Does not grant conversation access. Eligible requesters manage their own isolated OAuth connections separately; see [OAuth authorization](../oauth-framework.md) |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
-| `startup_thread_prewarm` | bool | `true` | When enabled, this bot may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
 | `num_history_runs` | int | `null` | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages` |
 | `num_history_messages` | int | `null` | Max messages from history. Mutually exclusive with `num_history_runs` |
 | `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `false`). On Anthropic and Vertex Claude models, setting this to `true` can mutate replayed tool messages and invalidate prompt-cache prefixes |
@@ -163,12 +176,14 @@ agents:
 | `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](../deployment/sandbox-proxy.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
 | `worker_scope` | string | `null` | How sandbox runtimes are shared for non-private agents. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` already defines the requester partition for that agent |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
-| `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
+| `delegate_to` | list | `[]` | Allowed agent names for `run_subagent`, including itself if listed (see [Agent Delegation](#agent-delegation)) |
+| `thread_exports` | bool or object | `null` | Continuously export every thread from rooms this agent is joined to as YAML under `<workspace>/thread_exports/`. `true` enables the defaults; an object sets `invited_rooms` and `private_room_scope` (see [Thread Exports](#thread-exports)) |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 See [Knowledge Bases](../knowledge.md) for `mode: semantic` and `mode: files`.
 
-Per-agent fields with a `null` default inherit from the `defaults` section at runtime.
+Per-agent fields with a corresponding setting in `defaults` inherit that setting when `null`.
+`participation: null` disables adaptive participation; it does not inherit a global default.
 Per-agent values override them.
 `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent.
 Use `memory_backend: none` for stateless agents that should skip prompt memory lookup, automatic memory persistence, and the explicit `memory` tool.
@@ -176,32 +191,39 @@ Use `memory_backend: none` for stateless agents that should skip prompt memory l
 Unset `memory_search` fields inherit from top-level `memory.search`.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
-
-Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
-Agents use `agents.<name>.accept_invites`, while the router uses its own `router.accept_invites` option with the same durable invite semantics.
-Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted as durable desired membership.
-Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an entity to join and persist a room.
+Agents use `agents.<name>.accept_invites`, while teams and the router use their own `accept_invites` options with the same durable invite semantics.
+`true` accepts every valid invitation, `false` and `[]` reject every invitation, and a list accepts exact or wildcard Matrix user IDs after human-only alias resolution; non-human accounts retain their exact transport ID.
+Invite acceptance and responder access are independent, so joining a room does not authorize its inviter to interact with the agent.
+The agent continues to apply `access.users`, `access.current_room_members`, and `access.members_of_rooms` to every interaction after joining.
 Approval-gated tools are stricter than plain ad-hoc chat access.
-Approval-gated tools only work there while the router is already joined.
+When approval needs a missing router, the agent can call `invite_router` to invite it into the current room and then retry.
+The tool waits briefly for joined membership and, if the invite remains pending, tells the agent to retry only after the router joins.
+The router accepts and persists that internal invite when `router.accept_invites` allows the current Matrix transport account's user ID.
+For a team execution, that identity is the team's Matrix account rather than the member agent's account.
 
-MindRoom compacts in one visible lifecycle.
-Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, and `fallback_model`.
+MindRoom uses native provider compaction when the active model and history policy support it, with portable text compaction as the fallback.
+Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, `fallback_model`, and `timeout_seconds`.
 When the active runtime model has a known `context_window`, MindRoom always computes a per-run replay plan that reduces or disables persisted replay before the model call if needed.
-Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
-`threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices.
-Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
+Automatic compaction is enabled by default through `defaults.compaction`.
+`threshold_tokens` and `threshold_percent` control the native provider trigger; on text-only routes they remain soft planning thresholds.
+Native compaction runs inside ordinary provider requests and stores a provider-specific checkpoint alongside the original conversation.
+The next request replays the latest compatible checkpoint and its following messages.
+Canonical runs remain stored for model switching and portable text compaction.
+See [native compaction eligibility](models.md#native-compaction) for supported routes and fallback conditions.
+Destructive text compaction runs before the reply when history exceeds the hard replay budget or when explicitly requested.
 
 You can tune compaction behavior with these settings:
 
-- Use `replay_window_tokens` to cap persisted replay, required-compaction planning, and summary input chunks below the model's real context window without lowering the provider request limit.
+- Use `replay_window_tokens` to cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
 - Use `reserve_tokens` to leave hard-budget headroom.
 - Use `model` to choose the summary model.
-- Use `fallback_model` to name a different model config that resends the unchanged summary prompt and input once (only the target model differs) when the summary model refuses for safeguards; after a successful fallback, that model serves the remaining compaction chunks and is reported as the summary model.
-- Set `enabled: false` to disable automatic pre-reply compaction for this agent.
+- Use `fallback_model` to name a different model config retried once when the summary model refuses for safeguards; the same input is reused when it fits, otherwise it is rebuilt under the fallback model's own context budget, and after success that model serves the remaining chunks.
+- Use `timeout_seconds` to bound each primary, retry, or fallback summary request; it defaults to 600 seconds, while an explicitly shorter provider timeout remains the stricter cap.
+- Set `enabled: false` to disable automatic native and pre-reply text compaction for this agent.
 
 When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
-The effective replay window also caps each compaction summary input chunk.
+Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
 Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
 With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
@@ -212,13 +234,51 @@ Manual `compact_context` remains available when a compaction model and context w
 MindRoom does not run a separate background post-response compaction path.
 It always plans the replay that is safe for the current model call when the active runtime model has a known `context_window`.
 That replay planner can keep configured replay, reduce raw replay, fall back to summary-only replay, or disable persisted replay for the run.
-Compaction rewrites the persisted Agno session in SQLite.
+Portable text compaction rewrites the persisted Agno session in SQLite.
 Older compacted runs are removed from `session.runs` and replaced by the merged `session.summary`, so raw pre-compaction runs are not retained for later audit or debugging.
 
 Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
 `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`).
 When the effective memory backend is `file`, the agent's canonical file memory root is that same workspace directory.
 Absolute paths and `..` traversal are rejected.
+
+Each part of the `Personality Context` section is headed by the resolved path of the file it was read from, and the section states that those files are already inlined so the agent does not spend a turn re-reading them.
+When the rendered section exceeds `defaults.max_preload_chars`, MindRoom drops earlier file bodies first, trims the final surviving body from its end, and leaves a per-file marker giving each affected path and omitted-character count, followed by a summary marker for the section.
+A dropped file therefore still appears with its path, so the agent can open it when it needs the omitted part.
+If the configured cap cannot contain the section heading plus all required per-file and summary markers, agent materialization fails explicitly instead of silently removing source paths.
+
+## Adaptive Participation
+
+Set `agents.<name>.participation: {}` to enable adaptive participation with the defaults below.
+Omitting it or setting it to `null` disables adaptive participation for that agent.
+These settings follow the agent into all authorized rooms, including ad hoc rooms; they do not grant room access or recruit an agent into a thread it has not joined.
+Only untagged messages in threads with multiple humans and an earlier reply from that agent are eligible.
+See [Adaptive Agent Participation](index.md#adaptive-agent-participation) for the full eligibility rules and judgment backend examples.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `debounce_seconds` | number | `3.0` | Quiet window for eligible text; must be finite and between `0` and `30` seconds, inclusive |
+| `instructions` | string | `""` | Additional guidance for deciding whether the agent should participate |
+| `decline_reaction` | string or null | `null` | Reaction to a deliberate decline; nonblank and at most 64 characters, such as `"👍"`; `null` keeps declines invisible |
+| `judgment` | object or null | `null` | Optional separate judgment backend; `provider: llm` requires a configured `model` alias, while `provider: typesafe` selects System One; `null` uses the agent's reply model |
+
+The [judgment backend reference](index.md#participation-judgment-backends) documents provider-specific thresholds, timeouts, credentials, and fallback behavior.
+The retired top-level `room_participation` configuration is rejected; there are no room-level overrides.
+
+## Mid-Turn Coalescing
+
+Set `agents.<name>.mid_turn` to let a judge decide whether a queued message can wait for this agent's active task to finish.
+Like participation, the setting follows the agent's Matrix user across all authorized rooms, including ad hoc rooms.
+It is separate from participation eligibility and message debounce.
+Omitting the setting or using `null` keeps the normal wrap-up notice; teams do not inherit it from their members.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `judgment` | object | Required | Shared LLM model alias or TypeSafe backend |
+| `instructions` | string | `""` | Extra guidance for the finish-or-wrap-up decision |
+| `defer_reaction` | string or null | `null` | Optional acknowledgement such as `"👀"` when a queued message can wait; the message remains queued |
+
+See [Mid-Turn Coalescing](index.md#mid-turn-coalescing) for backend configuration, context limits, and decision behavior.
 
 ## Per-Agent Tool Configuration
 
@@ -361,9 +421,12 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 ## Worker Routing
 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
-When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
+An explicit agent `worker_tools` list takes precedence, followed by `defaults.worker_tools`; an explicit empty list selects local execution.
+When both are omitted, MindRoom follows the [sandbox environment routing policy](../deployment/sandbox-proxy.md#execution-modes).
+With the default static backend, no proxy URL, and no environment routing overrides, tools execute locally.
+Invalid non-empty execution modes are rejected when that environment policy is read.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Some local-only tools stay in the primary runtime even when listed: `attachments`, `desktop`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
+Tools whose catalog metadata sets `requires_primary_runtime=True` stay in the primary runtime even when listed.
 Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
 Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
 Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
@@ -371,10 +434,11 @@ Config-adjacent `.env` files are intentionally masked as files inside those Dock
 A filtered public startup-runtime env payload can still propagate from exported env vars and allowed `.env` values.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
-That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
-OAuth-backed remote MCP tools use requester-scoped OAuth credentials and can be used with `worker_scope: user` or `worker_scope: user_agent`.
+That list includes `spotify` and `homeassistant`.
+Configured `mcp_<server_id>` tools work on every worker scope: generated OAuth providers follow the selected agent's effective credential scope, while non-OAuth servers use the shared MCP session without requester credentials.
+For OAuth-backed MCP, `shared` uses one agent-owned connection, `user` reuses one requester-owned connection across agents, `user_agent` isolates each requester-agent pair, and unscoped uses one installation-level connection.
 Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
-`gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` also always stay local.
+Credential-backed integrations that declare `requires_primary_runtime=True` also always stay local.
 `spotify` can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
@@ -422,8 +486,8 @@ Workers mount those canonical private-instance roots.
 They do not own them.
 
 The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
-OAuth providers that support scoped dashboard flows, such as the Google Drive, Docs, Gmail, Calendar, and Sheets providers, are the exception.
-For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime.
+The Google Drive, Docs, Gmail, Calendar, and Sheets OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
+GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
 Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md).
@@ -547,9 +611,86 @@ For a `mind` agent with `private.per: user`, different users get different priva
 - Custom templates are fully supported.
 - The Mind-style filenames shown above are a convention, not a requirement, unless you choose to reference them in `private.context_files` or `private.knowledge.path`.
 
+## Thread Exports
+
+`thread_exports` keeps a YAML copy of the agent's conversation history inside its workspace, so its `file` and `shell` tools can grep past threads without any Matrix API access.
+
+```yaml
+agents:
+  code:
+    thread_exports: true            # defaults below
+  research:
+    thread_exports:
+      invited_rooms: false          # config rooms only
+      private_room_scope: owner     # private agents only
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `invited_rooms` | bool | `true` | Also export user-created rooms the agent joined through invites. Current membership is always required |
+| `private_room_scope` | string | `"owner_and_agent"` | Private agents only. Within the agent's configured and invited rooms, `owner_and_agent` requires both the requester and agent to be joined; `owner` requires only the requester |
+
+Exports land at `<storage_root>/agents/<agent>/workspace/thread_exports/<urlencoded room key>/<urlencoded thread id>.yaml`, the same layout `mindroom threads export` writes.
+Inside the agent's own tools that directory is `$MINDROOM_AGENT_WORKSPACE/thread_exports/`.
+Each thread file holds `version`, `room` metadata, `thread` metadata including the latest thread summary as `thread.summary`, and a `messages` list.
+Each room directory also holds an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
+
+MindRoom re-exports a room within about two seconds of a message, edit, redaction, or membership change in it, batching everything that arrives in that window into one pass, and runs one full pass at startup and after every config reload.
+A full pass also removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any configured agent whose `thread_exports` was removed.
+A full pass that could export no room at all skips that directory-wide removal, because an empty result cannot be told apart from a failed one; the same guard and its manual-cleanup guidance are described under [`threads export`](../cli.md#threads-export).
+Files are rewritten only when a thread's content changed.
+Agents may edit or delete their exported files; deleted files return on the next pass that touches the room.
+Each workspace is populated only through that agent's running Matrix account and principal-bound event-journal projection, so a pass costs no Matrix history call for threads that agent has seen.
+
+### Security and Retention
+
+Thread export authorization controls which data future passes may write.
+Export cleanup is best-effort workspace maintenance, not a revocation or data-erasure boundary.
+Previously exported data may remain or may have been copied or committed by the agent.
+Principal isolation does not trigger a one-time purge or migration of existing exports.
+
+Shared agents export only rooms where the agent's own Matrix account is currently joined.
+Private agents (`private:`) get one export tree per materialized instance under `<storage_root>/private_instances/<scope-key>/<agent>/<private root>/thread_exports/`; each tree stays within that agent's configured and invited rooms and is scoped to the requester's current room memberships, so one requester's private workspace never accumulates other users' conversations.
+A membership lookup failure blocks new writes for that room and leaves existing files in place until a successful lookup proves that access was revoked.
+
+### Semantic Search Over Exports
+
+The exports are plain YAML, so file-aware tools already cover keyword search.
+With an embedder configured (`memory.embedder`), point a knowledge base at the export directory for semantic search through `search_knowledge_base`.
+
+```yaml
+knowledge_bases:
+  code_threads:
+    path: ./mindroom_data/agents/code/workspace/thread_exports
+    description: Exported Matrix conversation history for the code agent
+    exclude_patterns: ["*/index.json"]
+agents:
+  code:
+    thread_exports: true
+    knowledge_bases: [code_threads]
+```
+
+For a private agent, index the private-root-relative path instead:
+
+```yaml
+agents:
+  secret:
+    thread_exports: true
+    private:
+      per: user
+      knowledge:
+        path: thread_exports
+        description: Your exported conversation history
+```
+
+The active thread's file rewrites on every message, so a watching semantic index re-embeds that thread per message.
+This is negligible with a local embedder but costs real money with paid embedding APIs in busy rooms.
+
 ## Thread Mode Resolution
 
 Thread mode is resolved per message using the current room ID.
+A persisted `!thread_mode room` or `!thread_mode thread` override takes precedence for all entities in that room.
+Room admins can use `!thread_mode reset` to restore the static resolution rules below; see [Chat Commands](../chat-commands.md).
 For an agent, MindRoom checks `room_thread_modes` in this order.
 First, it checks an exact room ID key.
 Second, it checks the managed room key/alias associated with that room ID.
@@ -581,11 +722,25 @@ The normal Matrix and OpenAI-compatible reply paths build fresh agent instances 
 
 ## Agent Delegation
 
-Agents can delegate tasks to other agents using the `delegate_to` field.
+Set `delegate_to` to the agent names allowed as subagents; the dashboard labels this list **Allowed subagents**.
+The model-facing tools are `run_subagent(task: str, agent_name: str | None = None, model: str | None = None)` and `continue_subagent(subagent_id: str, message: str)`.
 When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
-The delegated agent runs as a fresh, one-shot instance with no shared session or history.
-It executes the task and returns its response as the tool result.
+The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, and tool policy.
+Pass a configured alias from `models:` as `model` to choose a different model for that child, including a fresh copy of yourself.
+An explicit model takes precedence over thread and room choices; omitted or `None` keeps normal model selection.
+Unknown model aliases are rejected before execution.
+The selected model is retained for follow-ups, approval continuations, and restarts without changing the parent or agent configuration.
+The caller waits for the child to execute the task, then receives its answer, stable subagent ID, and an audit reference as the tool result.
+Use `continue_subagent` with that ID for a follow-up in the same child session after its previous turn returns.
+The ID stays scoped to the original caller, requester, and conversation across parent turns and restarts.
+Follow-ups recheck current permissions, preserve nesting depth, and create separate audit records.
+The task must include relevant context, constraints, and expected output, because the child does not inherit the conversation.
+Listing the caller itself allows a fresh copy with the same configured capabilities.
+Omitting `agent_name` or passing `None` selects the caller itself; the same `delegate_to` allowlist still applies.
+For an ongoing Matrix conversation, use [matrix_message](../tools/matrix-message.md#agent-conversations).
+Each child writes redacted execution records under `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in its resolved workspace, and the caller receives `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its resolved workspace.
+Approval-gated child calls use the native Matrix approval flow in the source room and thread while the parent-child continuation remains durable.
 
 ```yaml
 agents:
@@ -593,7 +748,7 @@ agents:
     display_name: Leader
     role: Orchestrate tasks by delegating to specialist agents
     model: sonnet
-    delegate_to: [code, research]
+    delegate_to: [leader, code, research]
     rooms: [lobby]
 
   code:
@@ -615,8 +770,9 @@ agents:
 **Constraints:**
 
 - Targets must reference existing agent names in the config
-- An agent cannot delegate to itself
+- An agent may delegate to itself only when its own name appears in `delegate_to`
 - Recursive delegation is supported (agent A delegates to B, B delegates to C) up to a maximum depth of 3
+- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel
 
 ## Naming Rules
 
@@ -625,8 +781,8 @@ Agent and team names must be distinct — the same key cannot appear in both `ag
 
 ## Defaults
 
-The `defaults` section sets fallback values for all agents.
-Any agent that omits a setting inherits the value from here.
+The `defaults` section sets fallback values for supported per-agent override fields and global-only agent behavior.
+Supported override fields inherit when omitted, `defaults.tools` is merged only when `include_default_tools` is true, and global-only defaults apply to every agent.
 
 ```yaml
 defaults:
@@ -654,6 +810,7 @@ defaults:
     enabled: true
     threshold_percent: 0.8
     reserve_tokens: 16384
+    timeout_seconds: 600
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true                 # Show tool-call markers and trace metadata; hidden mode still allows generic worker warmup copy
   worker_tools: null                     # Tool names to route through workers (null = use MindRoom's default routing policy, [] = disable)
@@ -671,5 +828,5 @@ agents:
     display_name: Researcher
     role: Focus on deep research
     include_default_tools: false
-    tools: [web_search]
+    tools: [duckduckgo]
 ```

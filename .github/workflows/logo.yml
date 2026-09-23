@@ -1,0 +1,52 @@
+name: Logo artwork
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - assets/logo/**
+      - frontend/public/logo*
+      - frontend/public/favicon.png
+      - docs/assets/logo*
+      - docs/assets/favicon.png
+      - saas-platform/platform-frontend/public/res/branding/mindroom.*
+      - saas-platform/platform-frontend/src/app/favicon.ico
+      - avatars/spaces/root_space.png
+      - macos/MindRoom/Resources/MindRoom.icon/Assets/*.png
+      - macos/MindRoom/Sources/MindRoom/Resources/logo*
+      - .github/workflows/logo.yml
+  pull_request:
+    paths:
+      - assets/logo/**
+      - frontend/public/logo*
+      - frontend/public/favicon.png
+      - docs/assets/logo*
+      - docs/assets/favicon.png
+      - saas-platform/platform-frontend/public/res/branding/mindroom.*
+      - saas-platform/platform-frontend/src/app/favicon.ico
+      - avatars/spaces/root_space.png
+      - macos/MindRoom/Resources/MindRoom.icon/Assets/*.png
+      - macos/MindRoom/Sources/MindRoom/Resources/logo*
+      - .github/workflows/logo.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          lfs: true
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.13"
+      - name: Test geometry and lossless export budgets
+        run: >-
+          uv run --isolated --no-project --with pytest==8.4.2 --with lxml==5.4.0
+          --with numpy==2.4.4 --with pillow==10.4.0 --with resvg-py==0.5.0 --with scipy==1.17.1 pytest
+          -c /dev/null -p no:cacheprovider assets/logo/ -q
+      - name: Check generated artwork
+        run: uv run assets/logo/generate.py --check

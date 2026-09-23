@@ -25,11 +25,10 @@ local-matrix-down:
 local-matrix-logs:
     cd local/matrix && docker compose logs -f
 
-# Reset Matrix + DB stack (remove volumes)
+# Reset local Matrix volumes, selected runtime Matrix state, and repository tmp/
 local-matrix-reset:
     cd local/matrix && docker compose down -v
-    rm -f matrix_state.yaml
-    docker volume prune -f
+    uv run python -c "from mindroom.constants import matrix_state_file, resolve_runtime_paths; matrix_state_file(resolve_runtime_paths()).unlink(missing_ok=True)"
     rm -rf tmp/
     @echo "✅ Reset complete! Run 'just local-matrix-up' then 'mindroom run' to start fresh."
 
@@ -225,9 +224,18 @@ test-backend-coverage *args:
 test-standard:
     ./run-tests.sh
 
+# Boots a disposable Tuwunel, a deterministic model stub, and this worktree's
+# MindRoom, then restarts MindRoom mid-turn around forty times. Needs Docker,
+# free ports, and a mostly idle machine for 30-60 minutes. Deliberately not in
+# CI; scripts/README.md explains why and says what a pass has to show.
+# Live pre-merge gate for Matrix ingress, journal, dispatch, and shutdown changes
+test-live-journal-gate *args:
+    uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45 --restart-interval 5 {{args}}
+    uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression {{args}}
+
 # Check for public symbols that should be private
 check-module-privacy:
-    uv run privata .
+    uv run privata --methods .
 
 #############################
 # Developer-friendly aliases

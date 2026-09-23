@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="e2b",
+    requires_primary_runtime=True,
     display_name="E2B Code Execution",
     description="Code execution sandbox environment with Python, file operations, and web server capabilities",
     category=ToolCategory.DEVELOPMENT,

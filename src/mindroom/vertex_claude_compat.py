@@ -6,81 +6,62 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from agno.exceptions import ContextWindowExceededError, ModelProviderError
+from agno.exceptions import ContextWindowExceededError
 from agno.models.vertexai.claude import Claude as VertexAIClaude
-from agno.utils.models.claude import format_messages, format_tools_for_model
+from agno.utils.models.claude import format_messages
 from agno.utils.tokens import count_schema_tokens
-from anthropic.lib.streaming import MessageStopEvent, ParsedBetaMessageStopEvent, ParsedMessageStopEvent
-from anthropic.types import Message as AnthropicMessage
-from anthropic.types.beta import BetaMessage
 
+from mindroom.agno_compat_vertex_claude_tools import (
+    format_tools_for_vertex_claude,
+    strip_vertex_claude_tool_strict,
+)
+from mindroom.claude_compat import ClaudeProviderCompat
 from mindroom.claude_prompt_cache import (
     SERVER_TOOL_USE_BLOCK_TYPE,
     TOOL_SEARCH_RESULT_BLOCK_TYPE,
     TOOL_SEARCH_TOOL_TYPE,
     prepare_claude_request_kwargs,
 )
-from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.logging_config import get_logger
+from mindroom.native_compaction import common_native_endpoint
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-    from typing import NoReturn
 
     from agno.models.message import Message
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
+    from anthropic import AnthropicVertex, AsyncAnthropicVertex
 
 logger = get_logger(__name__)
 
 _EXACT_COUNT_THRESHOLD_RATIO = 0.5
 _EXACT_COUNT_BLOCK_TYPES = frozenset({"document", "image"})
-_VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES = frozenset(
-    {SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE},
+_VERTEX_COUNT_AS_TEXT_BLOCK_TYPES = frozenset(
+    {SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE, "compaction"},
 )
 # Before any tools are discovered, Vertex generation reports 213 input tokens
 # for the native regex search tool on both Claude Haiku 4.5 and Sonnet 4.6.
 # Keep a small margin because count_tokens cannot count that server-tool prefix.
 _VERTEX_TOOL_SEARCH_TOKEN_RESERVE = 256
-_CLAUDE_SAFEGUARD_STOP_REASON = "refusal"
 
 
-def _strip_vertex_claude_tool_strict(
-    tools: list[dict[str, Any]] | None,
-) -> list[dict[str, Any]] | None:
-    """Return Vertex-compatible tool definitions without mutating the caller's list.
-
-    Agno 2.5.13 can emit OpenAI-style ``strict`` flags on tool definitions.
-    Anthropic-on-Vertex rejects those provider-level fields with a 400 error
-    (``tools.0.custom.strict``), while schema properties named ``strict`` are
-    valid user data and must be preserved. Strip only the provider metadata here
-    until Agno normalizes Vertex Claude tool payloads itself.
-    """
-    if not tools:
-        return tools
-
-    changed = False
-    sanitized: list[dict[str, Any]] = []
-    for tool in tools:
-        next_tool = tool
-        if "strict" in next_tool:
-            next_tool = dict(next_tool)
-            next_tool.pop("strict", None)
-            changed = True
-
-        function = next_tool.get("function")
-        if isinstance(function, dict) and "strict" in function:
-            if next_tool is tool:
-                next_tool = dict(next_tool)
-            next_function = dict(function)
-            next_function.pop("strict", None)
-            next_tool["function"] = next_function
-            changed = True
-
-        sanitized.append(next_tool)
-
-    return sanitized if changed else tools
+def _messages_with_replay_safe_reasoning(messages: list[Message]) -> list[Message]:
+    """Omit reasoning that cannot be replayed as an Anthropic thinking block."""
+    sanitized_messages: list[Message] | None = None
+    for index, message in enumerate(messages):
+        if message.reasoning_content is None or message.provider_data is None:
+            continue
+        signature = message.provider_data.get("signature")
+        if isinstance(signature, str) and signature:
+            continue
+        if sanitized_messages is None:
+            sanitized_messages = list(messages)
+        sanitized_message = message.model_copy(deep=True)
+        sanitized_message.reasoning_content = None
+        sanitized_messages[index] = sanitized_message
+    return sanitized_messages if sanitized_messages is not None else messages
 
 
 def _blocks_require_exact_count(blocks: list[Any]) -> bool:
@@ -132,7 +113,7 @@ def _referenced_tool_names(search_result_block: object) -> set[str]:
 
 
 def _messages_for_vertex_token_count(messages: object) -> tuple[list[Any] | None, set[str]]:
-    """Convert native search history to text and collect selected tool names."""
+    """Convert unsupported blocks to countable text and collect selected tool names."""
     referenced_tool_names: set[str] = set()
     count_messages: list[Any] | None = None
     if not isinstance(messages, list):
@@ -148,7 +129,7 @@ def _messages_for_vertex_token_count(messages: object) -> tuple[list[Any] | None
             referenced_tool_names.update(_referenced_tool_names(block))
         count_content = [
             {"type": "text", "text": stable_serialize(block)}
-            if isinstance(block, dict) and block.get("type") in _VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES
+            if isinstance(block, dict) and block.get("type") in _VERTEX_COUNT_AS_TEXT_BLOCK_TYPES
             else block
             for block in content
         ]
@@ -192,7 +173,7 @@ def _tools_for_vertex_token_count(
 
 
 def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """Build a countable equivalent of a native tool-search request.
+    """Build a countable equivalent of native provider output.
 
     Vertex generation accepts Anthropic's native tool-search schema, but its
     count-tokens endpoint rejects the search tool, ``defer_loading``, and the
@@ -201,6 +182,8 @@ def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dic
     server-side search prefix separately. Definitions selected by a new search
     are generated inside the server-tool loop and cannot be known by any
     preflight count; they become countable on the following request.
+    Compaction blocks are also unsupported, so count their serialized contents
+    as text while generation keeps the actual checkpoint blocks unchanged.
     """
     count_messages, referenced_tool_names = _messages_for_vertex_token_count(request_kwargs.get("messages"))
     count_tools, has_native_search = _tools_for_vertex_token_count(
@@ -222,10 +205,29 @@ def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dic
 
 
 @dataclass
-class MindroomVertexAIClaude(VertexAIClaude):
+class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
     """Vertex Claude model with Mindroom-specific provider compatibility fixes."""
 
     context_window: int | None = None
+    client: AnthropicVertex | None = None
+    async_client: AsyncAnthropicVertex | None = None
+
+    def native_compaction_endpoint(self) -> str:
+        """Keep Vertex checkpoint replay inside its project and endpoint."""
+        clients = [client for client in (self.async_client, self.client) if client is not None]
+        if clients:
+            return common_native_endpoint(
+                [f"{str(client.base_url).rstrip('/')}|{client.project_id}|{client.region}" for client in clients],
+            )
+        params = self._get_client_params()
+        project, region = params["project_id"], params["region"]
+        default_endpoint = {
+            "global": "https://aiplatform.googleapis.com/v1",
+            "us": "https://aiplatform.us.rep.googleapis.com/v1",
+            "eu": "https://aiplatform.eu.rep.googleapis.com/v1",
+        }.get(region, f"https://{region}-aiplatform.googleapis.com/v1")
+        endpoint = str(params["base_url"] or default_endpoint)
+        return f"{endpoint.rstrip('/')}|{project}|{region}"
 
     def _request_input_kwargs(
         self,
@@ -236,6 +238,7 @@ class MindroomVertexAIClaude(VertexAIClaude):
         compress_tool_results: bool,
     ) -> dict[str, Any]:
         """Build the provider-shaped payload used for input token counting."""
+        messages = self.native_replay_messages(messages)
         anthropic_messages, system_prompt = format_messages(
             messages,
             compress_tool_results=compress_tool_results,
@@ -250,11 +253,11 @@ class MindroomVertexAIClaude(VertexAIClaude):
         system = self._build_system(system_prompt)
         if system:
             request_kwargs["system"] = system
-        sanitized_tools = _strip_vertex_claude_tool_strict(tools)
-        if sanitized_tools:
-            request_kwargs["tools"] = format_tools_for_model(sanitized_tools)
-        if self.thinking:
-            request_kwargs["thinking"] = self.thinking
+        formatted_tools = format_tools_for_vertex_claude(tools)
+        if formatted_tools:
+            request_kwargs["tools"] = formatted_tools
+        if thinking := self.effective_thinking():
+            request_kwargs["thinking"] = thinking
         return prepare_claude_request_kwargs(self, request_kwargs)
 
     def _estimate_request_input_tokens(
@@ -291,7 +294,7 @@ class MindroomVertexAIClaude(VertexAIClaude):
         response_format: dict[str, Any] | type[Any] | None,
         compress_tool_results: bool,
     ) -> int:
-        """Count the provider-shaped payload using Vertex's exact tokenizer."""
+        """Count the supported payload representation with Vertex's tokenizer."""
         request_kwargs = await asyncio.to_thread(
             self._request_input_kwargs,
             messages,
@@ -300,7 +303,8 @@ class MindroomVertexAIClaude(VertexAIClaude):
             compress_tool_results=compress_tool_results,
         )
         count_kwargs, tool_search_reserve = _request_for_vertex_token_count(request_kwargs)
-        response = await self.get_async_client().messages.count_tokens(**count_kwargs)
+        client = self.get_async_client()
+        response = await client.messages.count_tokens(**count_kwargs)
         return response.input_tokens + tool_search_reserve + count_schema_tokens(response_format, self.id)
 
     @staticmethod
@@ -331,6 +335,8 @@ class MindroomVertexAIClaude(VertexAIClaude):
         compress_tool_results: bool,
     ) -> list[Message]:
         """Drop the oldest replay turns until the exact request fits."""
+        canonical_messages = messages
+        messages = _messages_with_replay_safe_reasoning(self.native_replay_messages(messages))
         if self.context_window is None:
             return messages
         output_reserve = self.max_tokens or 0
@@ -361,11 +367,18 @@ class MindroomVertexAIClaude(VertexAIClaude):
         if original_tokens <= input_budget:
             return messages
 
-        replay_cuts = self._replay_trim_candidates(messages)
-        if not replay_cuts:
-            msg = f"Vertex Claude request uses {original_tokens} input tokens; limit is {input_budget}."
-            raise ContextWindowExceededError(message=msg, model_name=self.name, model_id=self.id)
+        if self.native_compaction is not None:
+            # A native checkpoint represents the entire replaced prefix. The
+            # canonical guard owns any destructive request-local trimming.
+            self.configure_native_compaction(threshold=None)
+            return await self._fit_request_messages(
+                canonical_messages,
+                tools=tools,
+                response_format=response_format,
+                compress_tool_results=compress_tool_results,
+            )
 
+        replay_cuts = self._replay_trim_candidates(messages)
         best_messages: list[Message] | None = None
         best_tokens: int | None = None
         low = 0
@@ -449,56 +462,6 @@ class MindroomVertexAIClaude(VertexAIClaude):
         ):
             yield response
 
-    def _raise_for_safeguard_refusal(self, provider_response: object) -> None:
-        """Raise when Vertex Claude explicitly ends generation for safeguards."""
-        if isinstance(provider_response, (MessageStopEvent, ParsedMessageStopEvent, ParsedBetaMessageStopEvent)):
-            stop_reason = provider_response.message.stop_reason
-        elif isinstance(provider_response, (AnthropicMessage, BetaMessage)):
-            stop_reason = provider_response.stop_reason
-        else:
-            return
-        if stop_reason != _CLAUDE_SAFEGUARD_STOP_REASON:
-            return
-        logger.warning(
-            "vertex_claude_safeguard_refusal",
-            model_id=self.id,
-            stop_reason=stop_reason,
-        )
-        raise ModelSafeguardRefusalError(
-            message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
-            model_name=self.name,
-            model_id=self.id,
-        )
-
-    def _parse_provider_response(
-        self,
-        response: AnthropicMessage | BetaMessage,
-        response_format: dict[str, Any] | type[Any] | None = None,
-        **kwargs: object,
-    ) -> ModelResponse:
-        """Preserve Vertex Claude's non-streaming safeguard signal."""
-        self._raise_for_safeguard_refusal(response)
-        return super()._parse_provider_response(response, response_format=response_format, **kwargs)
-
-    def _parse_provider_response_delta(
-        self,
-        response: object,
-        response_format: dict[str, Any] | type[Any] | None = None,
-    ) -> ModelResponse:
-        """Preserve Vertex Claude's final streaming safeguard signal."""
-        self._raise_for_safeguard_refusal(response)
-        return super()._parse_provider_response_delta(cast("Any", response), response_format=response_format)
-
-    def _handle_api_error(self, e: Exception) -> NoReturn:
-        """Keep typed safeguard refusals intact for MindRoom's user error path."""
-        if isinstance(e, ModelSafeguardRefusalError):
-            raise e
-        return super()._handle_api_error(e)
-
-    def _is_retryable_error(self, error: ModelProviderError) -> bool:
-        """Exclude deterministic safeguard refusals from Agno's configured retries."""
-        return not isinstance(error, ModelSafeguardRefusalError) and super()._is_retryable_error(error)
-
     def _prepare_request_kwargs(
         self,
         system_message: str,
@@ -508,7 +471,7 @@ class MindroomVertexAIClaude(VertexAIClaude):
     ) -> dict[str, Any]:
         return super()._prepare_request_kwargs(
             system_message=system_message,
-            tools=_strip_vertex_claude_tool_strict(tools),
+            tools=strip_vertex_claude_tool_strict(tools),
             response_format=response_format,
             messages=messages,
         )
@@ -520,5 +483,5 @@ class MindroomVertexAIClaude(VertexAIClaude):
     ) -> bool:
         return super()._has_beta_features(
             response_format=response_format,
-            tools=_strip_vertex_claude_tool_strict(tools),
+            tools=strip_vertex_claude_tool_strict(tools),
         )

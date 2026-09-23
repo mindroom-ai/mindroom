@@ -98,6 +98,13 @@ spec:
                   name: {{ $server.smtp.existingSecret }}
                   key: AGENT_VAULT_SMTP_FROM
             {{- end }}
+            {{- with $server.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with $server.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: api
               containerPort: {{ $server.apiPort }}

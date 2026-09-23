@@ -14,13 +14,31 @@ helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
   --create-namespace
 ```
 
-The default values render a self-contained Deployment, Service, ConfigMap, runtime PVC, and PostgreSQL event-cache StatefulSet.
+The default values render a self-contained Deployment, Service, ConfigMap, runtime PVC, and PostgreSQL event-journal StatefulSet.
 A real deployment should provide a useful config and Matrix settings.
 
-## Event Cache
+## Rollout Progress Deadline
 
-The runtime chart defaults to PostgreSQL for MindRoom's Matrix event cache, because Kubernetes deployments need a restart-safe cache backend.
-The chart can either create a small PostgreSQL StatefulSet for this cache or wire the runtime to an externally managed database.
+Set `progressDeadlineSeconds` to a positive integer to customize the MindRoom Deployment's rollout progress budget, including scheduling, image initialization, and startup probes.
+The chart rejects invalid values and values above Kubernetes' int32 limit of `2147483647` seconds.
+Leaving it unset or `null` preserves the Kubernetes default.
+This controls when Kubernetes reports a stalled rollout; it does not change probe settings or Helm's wait timeout.
+
+```yaml
+progressDeadlineSeconds: 1800
+```
+
+## Event Journal
+
+The runtime chart defaults to PostgreSQL for MindRoom's Matrix event journal, because Kubernetes deployments need a durable database for it.
+The chart can either create a small PostgreSQL StatefulSet for the journal or wire the runtime to an externally managed database.
+
+This database is not a cache.
+It is the single durable owner of admitted Matrix events, turn records, the response outbox, and history debt, so losing it loses the record of which messages have already been answered rather than merely costing a rebuild.
+Size and back it up accordingly.
+
+The chart's values and resource names still say `eventCache`, and they keep that name so existing deployments do not have to be renamed.
+Wherever this document says event journal, the value to set is `eventCache`.
 
 Use the chart-managed database for a simple cluster deployment:
 
@@ -32,6 +50,8 @@ eventCache:
     persistence:
       size: 20Gi
 ```
+
+For the chart-managed database, `eventCache.postgres.service.port` configures the PostgreSQL listener, health probes, headless Service, NetworkPolicy, and generated connection URL together (default: `5432`).
 
 For GitOps or `helm template` workflows, set `eventCache.postgres.auth.password` or provide existing Secrets so renders do not rotate generated credentials.
 When adopting an existing PostgreSQL StatefulSet, keep the service name and password source stable:
@@ -73,8 +93,9 @@ eventCache:
   backend: sqlite
 ```
 
-When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `cache` section follows `eventCache`.
-When using `config.existingConfigMap` or custom `config.data`, keep that config's cache settings aligned with the chart values.
+When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `event_journal` section follows `eventCache`.
+When using `config.existingConfigMap` or custom `config.data`, keep that config's `event_journal` settings aligned with the chart values.
+The runtime config rejects unknown top-level keys, so a `cache` section makes MindRoom refuse to start.
 
 ## Config Sources
 
@@ -101,12 +122,14 @@ config:
 
 ## Runtime State Storage
 
-MindRoom stores Matrix encryption keys and sync-token checkpoints under `MINDROOM_STORAGE_PATH`.
+MindRoom stores Matrix encryption keys and crash-atomic sync continuity records under `MINDROOM_STORAGE_PATH`.
 Hosted installs can keep those restart-critical directories on a dedicated PVC while normal workspace data stays on `storage`.
 The chart mounts the same state PVC at `stateStorage.mountPath` and overlays the configured subpaths where MindRoom already reads and writes those directories.
 The optional init container creates the state directories and applies the configured ownership before the runtime starts.
 `initPermissions.runAsUser` and `initPermissions.fsGroup` are the ownership targets used by the init container.
 By default, the init container runs as UID 0 because it performs `chown` and `chmod`, while the main runtime container keeps its own security context.
+Upgrades from chart versions that used `stateStorage.syncTokens` must rename that values block to `stateStorage.syncContinuity` and use the `sync_continuity` subpath.
+The old sync-token data is intentionally not migrated, so the first upgraded start performs a cold sync while the history fence prevents duplicate replies.
 
 Use an existing PVC when another platform layer owns durable storage:
 
@@ -124,10 +147,10 @@ stateStorage:
     enabled: true
     mountPath: /app/agent_data/encryption_keys
     subPath: encryption_keys
-  syncTokens:
+  syncContinuity:
     enabled: true
-    mountPath: /app/agent_data/sync_tokens
-    subPath: sync_tokens
+    mountPath: /app/agent_data/sync_continuity
+    subPath: sync_continuity
   initPermissions:
     enabled: true
     runAsUser: 1000
@@ -184,6 +207,46 @@ The init container removes the target path before copying unless `overwrite: fal
 `seed.command` runs after the copy and should point at a short script or executable supplied by the bundle instead of embedding deployment-specific shell in Helm values.
 The script runs in the same bundle image, with MindRoom storage mounted at `storage.mountPath`.
 Raw `initContainers`, `extraVolumes`, and `extraVolumeMounts` still work for deployments that need lower-level Kubernetes wiring.
+
+For a writable configuration tree, transport the candidate to one directory and let the runtime initialize a separate active directory:
+
+```yaml
+contentBundles:
+  - name: config-source
+    image: registry.example.org/team/config@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    targetPath: /app/agent_data/config-source
+
+config:
+  source: file
+  path: /app/agent_data/active-config/config.yaml
+  bootstrapBundlePath: /app/agent_data/config-source
+  bootstrapBundleRevision: deploy-2
+
+workers:
+  backend: kubernetes
+```
+
+`config.bootstrapBundlePath` is optional and disabled by default.
+It adds `--bootstrap-config-bundle` to `mindroom run`.
+`config.bootstrapBundleRevision` is optional and requires `bootstrapBundlePath`.
+It adds `--bootstrap-config-bundle-revision` to the runtime command.
+A matching stored revision preserves the active tree across restarts, including later hot updates and guarded rollbacks.
+A changed revision validates and installs the candidate under the native installer's non-force drift rules.
+The revision is an opaque, nonblank string of at most 128 UTF-8 bytes with no control characters.
+Native installation and validation run in the main runtime container, with its image, mounts, and environment, before runtime startup.
+The target directory and filename come from `config.path`; the source must contain that filename at its root.
+The target must be its own directory below `storage.mountPath`, not the storage root or a ConfigMap mount.
+The chart rejects a normalized bootstrap source that equals, contains, or lies inside the target config directory.
+
+Initialization preserves any existing active directory, including authored edits, across restarts and content image changes.
+Bundle transport can refresh the separate source directory normally.
+To activate a changed revision explicitly, run `mindroom config install-bundle SOURCE --target TARGET --json` in the runtime container and confirm the returned fingerprint using `mindroom config check-applied`.
+Restore `TARGET.previous` using the same install command with its recorded `--expected-digest` if application fails.
+See the [CLI reference](../../../docs/cli.md#config-install-bundle) for drift protection, rollback, and filesystem limits.
+Content images need no MindRoom binary.
+
+Bootstrap cannot be combined with `workers.backend: static_runner`: its sidecar starts concurrently and could capture the environment before installation.
+The chart rejects this combination until startup ordering is guaranteed.
 
 Reference copied plugins from `config.yaml` with absolute paths:
 
@@ -261,7 +324,7 @@ networkPolicy:
 The API port follows `runtime.apiPort`, so the policy stays aligned with the Deployment without a separate port value.
 When `apiIngressFrom` is empty, the policy allows the API port from all sources while still denying other ingress to the pod.
 Use `networkPolicy.extraIngress` and `networkPolicy.extraEgress` for raw Kubernetes rules beyond the API rule.
-Setting any `extraEgress` entry adds `Egress` to `policyTypes`, so those rules must then cover every egress flow the runtime needs, such as DNS, the Matrix homeserver, model APIs, the event cache, workers, and the Kubernetes API server when `workers.backend` is `kubernetes`.
+Setting any `extraEgress` entry adds `Egress` to `policyTypes`, so those rules must then cover every egress flow the runtime needs, such as DNS, the Matrix homeserver, model APIs, the event journal database, workers, and the Kubernetes API server when `workers.backend` is `kubernetes`.
 
 ## Worker Egress Proxy
 
@@ -326,8 +389,57 @@ approvedEgress:
 
 With this setup, workers mint Agent Vault tokens through the API port (`14321`), workers proxy tool egress to the approved egress Service, Squid enforces allowlists and dynamic grants using the real worker IP, and Squid forwards requests carrying `Proxy-Authorization` to Agent Vault (`login=PASSTHRU`) for credential injection.
 Tokenless traffic egresses directly from Squid after the normal policy check.
+For signed URLs or other destinations that must skip parent-proxy credential injection, set `approvedEgress.parentProxy.bypassDomains`:
+
+```yaml
+approvedEgress:
+  parentProxy:
+    enabled: true
+    bypassDomains:
+      - downloads.example.test
+      - .objects.example.test
+```
+
+This list defaults to empty and applies only when chart-managed approved egress and its parent proxy are enabled.
+An entry without a leading dot matches that exact hostname; a leading dot matches the domain and its subdomains, following [Squid domain ACL syntax](https://www.squid-cache.org/Doc/config/acl/).
+Use ASCII domain names (Punycode for internationalized names), without URL schemes, ports, paths, `*` wildcards, or whitespace; invalid entries fail chart rendering.
+Matching uses the request hostname without reverse DNS lookups.
+Bypass destinations still require the normal allowlist or dynamic grant and remain subject to the proxy's destination and port restrictions.
+Other token-bearing requests continue through the configured parent.
+Changing the list changes the chart's Squid config checksum and rolls the proxy Deployment automatically.
+
 When `agentVault.accessTool.enabled` is set, self-service vault grants also keep `agentVault.ownerEmail` as an admin on each worker vault; the Kubernetes worker init container uses that owner account to mint and attach the proxy-role agent token.
 The chart rejects the unsafe default combination of chart-managed approved egress plus Agent Vault without `approvedEgress.parentProxy`, because that would be vault-first and break dynamic grants.
+
+### Agent Vault Server Environment
+
+Use `workers.kubernetes.agentVault.server.extraEnv` for raw Kubernetes `EnvVar` entries, including `valueFrom` Secret references.
+Use `server.envFrom` to import variables from existing Secrets or ConfigMaps.
+Both lists default to empty and apply only to the chart-managed Agent Vault server.
+Keep sensitive values in Secrets and avoid duplicate environment variable names; use the dedicated master-password and SMTP settings for chart-managed variables.
+The chart rejects `extraEnv` entries that repeat the master-password variable or any SMTP variable emitted when `server.smtp.enabled` is true.
+
+```yaml
+workers:
+  kubernetes:
+    agentVault:
+      server:
+        enabled: true
+        image: registry.example.com/agent-vault@sha256:1111111111111111111111111111111111111111111111111111111111111111
+        extraEnv:
+          - name: AGENT_VAULT_ADDR
+            value: https://vault.example.com
+          - name: AGENT_VAULT_OAUTH_GITHUB_CLIENT_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: vault-oauth
+                key: client-secret
+        envFrom:
+          - secretRef:
+              name: vault-extra-env
+          - configMapRef:
+              name: vault-settings
+```
 
 ### Agent Vault Access Grants
 
@@ -507,7 +619,7 @@ workers:
 
 - The chart does not create ingress or a Matrix homeserver.
 - Set `networkPolicy.create: true` to restrict control-plane API ingress to known client pods.
-- The chart can create PostgreSQL for MindRoom's event cache, or use an external PostgreSQL URL from an existing Secret.
+- The chart can create PostgreSQL for MindRoom's event journal, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
 - Use `providerCredentials` to feed model-provider API keys from existing Kubernetes Secrets into the runtime's credential service.
 - Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime and static runner sidecar receive the same Secret-backed key.
@@ -518,6 +630,7 @@ workers:
   The chart can create the worker-manager RBAC and a worker NetworkPolicy.
 - With `workers.kubernetes.reconcilePodTemplates` (default `true`), each cleanup pass recreates scaled-down worker Deployments whose pod template (image, env, resources) drifted from the configured spec, so existing workers do not need manual recycling after upgrades.
   Running workers are recreated on their next provisioning after they scale down.
+- `workers.kubernetes.runtimeClassName` optionally applies one RuntimeClass to the entire generated worker pool, including background-script workers. Verify the RuntimeClass handler on every eligible node and validate that it supports the worker storage driver and access mode before enabling it. Changing the value can recreate existing workers when they are next ensured, so finish active work first.
 - If workers run in a different namespace, provide storage, service accounts, and network policy behavior that are valid for that namespace.
   Kubernetes owner references are only set by default for same-namespace workers.
   The sandbox proxy token secret is only needed by the primary runtime; dedicated worker pods receive per-worker derived runner tokens.

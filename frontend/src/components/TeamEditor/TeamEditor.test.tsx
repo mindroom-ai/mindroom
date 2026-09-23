@@ -78,8 +78,8 @@ describe("TeamEditor", () => {
   const mockConfig: Partial<Config> = {
     models: {
       default: { provider: "ollama", id: "llama2" },
-      gpt4: { provider: "openai", id: "gpt-4" },
-      claude: { provider: "anthropic", id: "claude-3" },
+      gpt4: { provider: "openai", id: "gpt-6-astra" },
+      claude: { provider: "anthropic", id: "claude-sonnet-5" },
     },
     defaults: {
       markdown: true,
@@ -260,7 +260,9 @@ describe("TeamEditor", () => {
     const modeSelect = screen.getByLabelText("Collaboration Mode");
     fireEvent.click(modeSelect);
 
-    const collaborateOption = await screen.findByText(/Collaborate \(Parallel/);
+    const collaborateOption = await screen.findByText(
+      /Collaborate \(All members/,
+    );
     fireEvent.click(collaborateOption);
 
     expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {

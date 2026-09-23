@@ -35,21 +35,18 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import (
-    MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+    DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     MINDROOM_COMPACTION_METADATA_KEY,
     RuntimePaths,
     resolve_runtime_paths,
 )
 from mindroom.error_handling import ModelSafeguardRefusalError
-from mindroom.history.compaction import (
-    _build_summary_input,
-    _generate_compaction_summary_with_retry,
-    compact_scope_history,
-)
+from mindroom.history.compaction import SummaryModel, _generate_compaction_summary_with_retry, compact_scope_history
 from mindroom.history.storage import (
     compacted_run_ids_with,
     prune_reintroduced_runs,
     read_scope_state,
+    record_compaction_chunk,
     remove_runs_by_id,
     update_scope_state_on_latest,
     write_scope_state,
@@ -61,9 +58,10 @@ from mindroom.history.summary_call import (
     SummaryRetryPolicy,
     _CompactionSummaryEmptyResultError,
     build_summary_request_messages,
-    configure_summary_model,
     generate_compaction_summary,
 )
+from mindroom.history.summary_input import build_summary_input
+from mindroom.history.summary_provider_compat import configure_summary_model, effective_summary_timeout_seconds
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
     HistoryPolicy,
@@ -74,7 +72,7 @@ from mindroom.history.types import (
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.token_budget import estimate_compaction_input_tokens
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
-from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test
+from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test, seed_session
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 _HISTORY_SETTINGS = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
@@ -167,6 +165,7 @@ def _make_config(
     tmp_path: Path,
     *,
     compaction: CompactionConfig | None = None,
+    context_window: int = 64_000,
 ) -> tuple[Config, RuntimePaths]:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -186,7 +185,7 @@ def _make_config(
             },
             defaults=DefaultsConfig(tools=[], compaction=compaction or CompactionConfig()),
             models={
-                "default": ModelConfig(provider="openai", id="test-model", context_window=64_000),
+                "default": ModelConfig(provider="openai", id="test-model", context_window=context_window),
             },
         ),
         runtime_paths,
@@ -248,7 +247,7 @@ async def test_prepare_history_for_run_prunes_reintroduced_compacted_runs(tmp_pa
             compacted_run_ids=("run-1",),
         ),
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
         agent=_agent(db=storage),
@@ -278,17 +277,21 @@ def test_prune_reintroduced_runs_removes_tombstoned_runs_and_descendants() -> No
         ],
     )
     state = HistoryScopeState(compacted_run_ids=("compacted",))
+    storage = MagicMock()
 
-    assert prune_reintroduced_runs(session, state) is True
+    assert prune_reintroduced_runs(storage, session, state) is True
     assert [run.run_id for run in session.runs or []] == ["kept"]
+    storage.delete_runs.assert_called_once_with(["compacted", "child"])
 
 
 def test_prune_reintroduced_runs_is_a_no_op_without_resurrected_runs() -> None:
     session = _session([_completed_run("kept")])
+    storage = MagicMock()
 
-    assert prune_reintroduced_runs(session, HistoryScopeState(compacted_run_ids=("gone",))) is False
-    assert prune_reintroduced_runs(session, HistoryScopeState()) is False
+    assert prune_reintroduced_runs(storage, session, HistoryScopeState(compacted_run_ids=("gone",))) is False
+    assert prune_reintroduced_runs(storage, session, HistoryScopeState()) is False
     assert [run.run_id for run in session.runs or []] == ["kept"]
+    storage.delete_runs.assert_not_called()
 
 
 def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: Path) -> None:
@@ -297,14 +300,14 @@ def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: P
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     stale_session = _session([_completed_run("run-1")])
     write_scope_state(stale_session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(stale_session)
+    seed_session(storage, stale_session)
 
     concurrent_session = get_agent_session(storage, "session-1")
     assert concurrent_session is not None
     concurrent_state = HistoryScopeState(force_compact_before_next_run=True, compacted_run_ids=("older-run",))
     write_scope_state(concurrent_session, _SCOPE, concurrent_state)
     concurrent_session.runs = [*(concurrent_session.runs or []), _completed_run("run-2")]
-    storage.upsert_session(concurrent_session)
+    seed_session(storage, concurrent_session)
 
     seen_states: list[HistoryScopeState] = []
 
@@ -330,12 +333,12 @@ def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(tmp_pat
     stale_session = _session([_completed_run("run-1")])
     persisted_state = HistoryScopeState(compacted_run_ids=("older-run",))
     write_scope_state(stale_session, _SCOPE, persisted_state)
-    storage.upsert_session(stale_session)
+    seed_session(storage, stale_session)
 
     concurrent_session = get_agent_session(storage, "session-1")
     assert concurrent_session is not None
     concurrent_session.runs = [*(concurrent_session.runs or []), _completed_run("run-2")]
-    storage.upsert_session(concurrent_session)
+    seed_session(storage, concurrent_session)
 
     with patch.object(storage, "upsert_session", wraps=storage.upsert_session) as upsert_spy:
         returned_state = update_scope_state_on_latest(storage, stale_session, _SCOPE, lambda latest: latest)
@@ -408,7 +411,7 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
         ],
     )
     write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     first_pass_inputs: list[str] = []
 
     async def interrupted_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
@@ -432,12 +435,11 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
             state=read_scope_state(session, _SCOPE),
             history_settings=_HISTORY_SETTINGS,
             available_history_budget=None,
-            summary_input_budget=10_000,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
+            summary_model=SummaryModel(FakeModel(id="summary-model", provider="fake"), "summary-model", 10_000),
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     interrupted = get_agent_session(storage, "session-1")
@@ -453,7 +455,7 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
     # A stale writer resurrects the already-compacted run before the restart.
     stale_session = deepcopy(interrupted)
     stale_session.runs = [_completed_run("run-1", marker="RUN1-MARKER", padding=16_000), *(interrupted.runs or [])]
-    storage.upsert_session(stale_session)
+    seed_session(storage, stale_session)
 
     restart_inputs: list[str] = []
 
@@ -512,15 +514,15 @@ def test_configure_summary_model_tunes_claude_in_one_place() -> None:
         client_params={"max_retries": 2, "custom": "keep"},
     )
 
-    configured = configure_summary_model(model)
+    configured = configure_summary_model(model, timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS)
 
     assert configured is model
     assert model.cache_system_prompt is False
     assert model.extended_cache_time is False
     assert model.thinking is None
     assert model.max_tokens == 64_000
-    assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
-    assert model.client_params == {"max_retries": 0, "custom": "keep"}
+    assert model.timeout == DEFAULT_COMPACTION_TIMEOUT_SECONDS
+    assert model.client_params == {"max_retries": 0, "custom": "keep", "timeout": httpx.Timeout(600.0)}
 
 
 def test_configure_summary_model_tunes_vertexai_claude() -> None:
@@ -531,23 +533,43 @@ def test_configure_summary_model_tunes_vertexai_claude() -> None:
         cache_system_prompt=True,
         extended_cache_time=True,
         max_tokens=8192,
-        timeout=300.0,
+        timeout=900.0,
     )
 
-    configure_summary_model(model)
+    configure_summary_model(model, timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS)
 
     assert model.cache_system_prompt is False
     assert model.extended_cache_time is False
     assert model.thinking is None
     assert model.max_tokens == 8192
-    assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
-    assert model.client_params == {"max_retries": 0}
+    assert model.timeout == DEFAULT_COMPACTION_TIMEOUT_SECONDS
+    assert model.client_params == {"max_retries": 0, "timeout": httpx.Timeout(600.0)}
+
+
+def test_effective_summary_timeout_resolves_every_provider_timeout_shape() -> None:
+    without_authored_timeout = Claude(id="claude-sonnet-5")
+    shorter_authored_timeout = Claude(id="claude-sonnet-5", timeout=300.0)
+    longer_authored_timeout = Claude(id="claude-sonnet-5", timeout=900.0)
+    non_claude_model = FakeModel(id="test-model", provider="fake")
+
+    assert effective_summary_timeout_seconds(without_authored_timeout, timeout_seconds=480.0) == 480.0
+    assert effective_summary_timeout_seconds(shorter_authored_timeout, timeout_seconds=480.0) == 300.0
+    assert effective_summary_timeout_seconds(longer_authored_timeout, timeout_seconds=480.0) == 480.0
+    assert effective_summary_timeout_seconds(non_claude_model, timeout_seconds=480.0) == 480.0
+
+
+def test_configure_summary_model_applies_the_resolved_compaction_timeout() -> None:
+    model = Claude(id="claude-sonnet-5")
+
+    configure_summary_model(model, timeout_seconds=480.0)
+
+    assert model.timeout == 480.0
 
 
 def test_configure_summary_model_preserves_authored_output_cap() -> None:
     model = Claude(id="claude-sonnet-5", max_tokens=1024, timeout=30.0)
 
-    configure_summary_model(model)
+    configure_summary_model(model, timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS)
 
     assert model.max_tokens == 1024
     assert model.timeout == 30.0
@@ -556,7 +578,7 @@ def test_configure_summary_model_preserves_authored_output_cap() -> None:
 def test_configure_summary_model_leaves_unknown_providers_untouched() -> None:
     model = FakeModel(id="test-model", provider="fake")
 
-    configured = configure_summary_model(model)
+    configured = configure_summary_model(model, timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS)
 
     assert configured is model
     assert model == FakeModel(id="test-model", provider="fake")
@@ -577,6 +599,7 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
         model=model,
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert summary.summary == "recorded summary"
@@ -584,8 +607,8 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
     assert model.extended_cache_time is False
     assert model.thinking is None
     assert model.max_tokens == 64_000
-    assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
-    assert model.client_params == {"max_retries": 0}
+    assert model.timeout == DEFAULT_COMPACTION_TIMEOUT_SECONDS
+    assert model.client_params == {"max_retries": 0, "timeout": httpx.Timeout(600.0)}
     assert [(message.role, message.content) for message in model.seen_messages] == [
         ("system", "Summarize the conversation."),
         ("user", "conversation payload"),
@@ -606,6 +629,7 @@ async def test_generate_compaction_summary_rejects_output_cap_truncation() -> No
             ),
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
@@ -620,6 +644,7 @@ async def test_generate_compaction_summary_uses_configured_output_cap() -> None:
             ),
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
@@ -636,6 +661,7 @@ async def test_generate_compaction_summary_allows_claude_summary_below_output_ca
         ),
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert summary.summary == "durable summary ended cleanly."
@@ -654,6 +680,7 @@ async def test_generate_compaction_summary_allows_full_history_summary_above_fou
         ),
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert summary.summary == "durable full-history summary ended cleanly."
@@ -674,6 +701,7 @@ async def test_generate_compaction_summary_uses_claude_default_output_cap() -> N
             model=model,
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
@@ -687,6 +715,7 @@ async def test_generate_compaction_summary_allows_unknown_provider_without_outpu
         model=_UncappedSummaryModel(id="summary-model", provider="fake"),
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert summary.summary == "durable summary ended cleanly."
@@ -1056,7 +1085,7 @@ def test_retry_policy_preserves_context_error_fragment_matches() -> None:
             attempt=1,
             budget=16_000,
             input_tokens=16_000,
-            error=RuntimeError(f"compaction summary timed out after {MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS}s"),
+            error=RuntimeError(f"compaction summary timed out after {DEFAULT_COMPACTION_TIMEOUT_SECONDS}s"),
         )
         == 8_000
     )
@@ -1131,6 +1160,7 @@ def test_retry_schedule_halves_deterministically() -> None:
 async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_smaller() -> None:
     """A defensive estimate guard prevents a shrink retry from resending equal-size input."""
     run = _completed_run("run-1")
+    initial_input = "original request " * 1_000
     original_error = CompactionSummaryOutputLimitError("renamed owned output-limit signal")
     generate_summary = AsyncMock(side_effect=original_error)
 
@@ -1140,28 +1170,26 @@ async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_
             new=generate_summary,
         ),
         patch(
-            "mindroom.history.compaction._build_summary_input",
-            return_value=("rebuilt request with the same estimate", [run]),
-        ),
+            "mindroom.history.compaction.build_summary_input",
+            return_value=(initial_input, [run]),
+        ) as rebuild_input,
         pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
         await _generate_compaction_summary_with_retry(
-            model=FakeModel(id="summary-model", provider="fake"),
-            model_name="summary-model",
+            summary_model=SummaryModel(FakeModel(id="summary-model", provider="fake"), "summary-model", 4_000),
             previous_summary=None,
             compactable_runs=[run],
-            initial_summary_input="original request",
+            initial_summary_input=initial_input,
             initial_included_runs=[run],
-            summary_input_budget=4_000,
             session_id="session-1",
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=lambda _value: 2_000,
-            estimate_kind="o200k_base_tokens",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert raised.value is original_error
+    rebuild_input.assert_called_once()
     generate_summary.assert_awaited_once()
 
 
@@ -1186,19 +1214,16 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
     ):
         generated = await _generate_compaction_summary_with_retry(
-            model=FakeModel(id="summary-model", provider="fake"),
-            model_name="summary-model",
+            summary_model=SummaryModel(FakeModel(id="summary-model", provider="fake"), "summary-model", 4_000),
             previous_summary=None,
             compactable_runs=[run],
             initial_summary_input="original request",
             initial_included_runs=[run],
-            summary_input_budget=4_000,
             session_id="session-1",
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=lambda _value: COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
-            estimate_kind="o200k_base_tokens",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert generated.summary is recovered_summary
@@ -1223,7 +1248,7 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
     previous_summary = "s" * 24_000
     runs = [_completed_run(f"run-{index}", padding=2_000) for index in range(3)]
     summary_input_budget = 10_000
-    initial_input, initial_runs = _build_summary_input(
+    initial_input, initial_runs = build_summary_input(
         previous_summary=previous_summary,
         compacted_runs=runs,
         history_settings=_HISTORY_SETTINGS,
@@ -1241,19 +1266,20 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
 
     with patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary):
         generated = await _generate_compaction_summary_with_retry(
-            model=FakeModel(id="summary-model", provider="fake"),
-            model_name="summary-model",
+            summary_model=SummaryModel(
+                FakeModel(id="summary-model", provider="fake"),
+                "summary-model",
+                summary_input_budget,
+            ),
             previous_summary=previous_summary,
             compactable_runs=runs,
             initial_summary_input=initial_input,
             initial_included_runs=initial_runs,
-            summary_input_budget=summary_input_budget,
             session_id="session-1",
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=_chars_per_token_estimator,
-            estimate_kind="o200k_base_tokens",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert generated.summary is recovered_summary
@@ -1271,7 +1297,7 @@ async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exis
     previous_summary = "s" * 24_000
     runs = [_completed_run("run-1", padding=2_000)]
     summary_input_budget = 6_100
-    initial_input, initial_runs = _build_summary_input(
+    initial_input, initial_runs = build_summary_input(
         previous_summary=previous_summary,
         compacted_runs=runs,
         history_settings=_HISTORY_SETTINGS,
@@ -1284,22 +1310,24 @@ async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exis
 
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        patch("mindroom.history.compaction._compaction_sizing", return_value=(_chars_per_token_estimator, "chars")),
         pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
         await _generate_compaction_summary_with_retry(
-            model=FakeModel(id="summary-model", provider="fake"),
-            model_name="summary-model",
+            summary_model=SummaryModel(
+                FakeModel(id="summary-model", provider="fake"),
+                "summary-model",
+                summary_input_budget,
+            ),
             previous_summary=previous_summary,
             compactable_runs=runs,
             initial_summary_input=initial_input,
             initial_included_runs=initial_runs,
-            summary_input_budget=summary_input_budget,
             session_id="session-1",
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=_chars_per_token_estimator,
-            estimate_kind="o200k_base_tokens",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert raised.value is original_error
@@ -1322,6 +1350,7 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
             ),
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
@@ -1390,7 +1419,7 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
         runs.append(run)
     session = _session(runs)
     write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     summary_inputs: list[str] = []
 
     async def record_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
@@ -1409,12 +1438,11 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
             state=read_scope_state(session, _SCOPE),
             history_settings=_HISTORY_SETTINGS,
             available_history_budget=None,
-            summary_input_budget=summary_input_limit,
-            summary_model=_RecordingClaude(id="claude-sonnet-5"),
-            summary_model_name="summary-model",
+            summary_model=SummaryModel(_RecordingClaude(id="claude-sonnet-5"), "summary-model", summary_input_limit),
             replay_window_tokens=200_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1443,7 +1471,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
         ],
     )
     write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     attempts: list[str] = []
 
@@ -1465,12 +1493,11 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
             state=read_scope_state(session, _SCOPE),
             history_settings=_HISTORY_SETTINGS,
             available_history_budget=None,
-            summary_input_budget=10_000,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
+            summary_model=SummaryModel(FakeModel(id="summary-model", provider="fake"), "summary-model", 10_000),
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1504,27 +1531,23 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
         patch("mindroom.history.compaction.logger", logger_mock),
     ):
         generated = await _generate_compaction_summary_with_retry(
-            model=primary,
-            model_name="summary-model",
+            summary_model=SummaryModel(primary, "summary-model", 4_000),
             previous_summary=None,
             compactable_runs=[run],
             initial_summary_input="original request",
             initial_included_runs=[run],
-            summary_input_budget=4_000,
             session_id="session-1",
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=lambda _value: 2_000,
-            estimate_kind="o200k_base_tokens",
-            fallback_model=fallback,
-            fallback_model_name="fallback-model",
+            timeout_seconds=420.0,
+            fallback_model=SummaryModel(fallback, "fallback-model", 4_000),
         )
 
     assert generated.summary is recovered_summary
     assert generated.included_runs == [run]
-    assert generated.model is fallback
-    assert generated.model_name == "fallback-model"
+    assert generated.served_by.model is fallback
+    assert generated.served_by.name == "fallback-model"
     assert generate_summary.await_count == 2
     assert [call.kwargs["model"] for call in generate_summary.await_args_list] == [primary, fallback]
     assert [call.kwargs["summary_input"] for call in generate_summary.await_args_list] == [
@@ -1535,6 +1558,7 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
         COMPACTION_SUMMARY_PROMPT,
         COMPACTION_SUMMARY_PROMPT,
     ]
+    assert [call.kwargs["timeout_seconds"] for call in generate_summary.await_args_list] == [420.0, 420.0]
     retry_sleep.assert_not_awaited()
     # Structured request/failure/completion logs identify the actual serving model.
     assert [
@@ -1542,6 +1566,11 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
         for call in logger_mock.info.call_args_list
         if call.args[0] == "Compaction summary chunk request"
     ] == ["summary-model", "fallback-model"]
+    assert [
+        call.kwargs["timeout_seconds"]
+        for call in logger_mock.info.call_args_list
+        if call.args[0] == "Compaction summary chunk request"
+    ] == [420.0, 420.0]
     assert [
         call.kwargs["model_name"]
         for call in logger_mock.warning.call_args_list
@@ -1552,6 +1581,40 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
         for call in logger_mock.info.call_args_list
         if call.args[0] == "Compaction summary chunk completed"
     ] == ["fallback-model"]
+
+
+@pytest.mark.asyncio
+async def test_retry_helper_logs_requested_and_effective_claude_timeouts() -> None:
+    run = _completed_run("run-1")
+    model = _RecordingClaude(id="claude-sonnet-5", timeout=300.0)
+    generate_summary = AsyncMock(
+        return_value=SessionSummary(summary="summary", updated_at=datetime.now(UTC)),
+    )
+    logger_mock = MagicMock()
+
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        patch("mindroom.history.compaction.logger", logger_mock),
+    ):
+        await _generate_compaction_summary_with_retry(
+            summary_model=SummaryModel(model, "summary-model", 4_000),
+            previous_summary=None,
+            compactable_runs=[run],
+            initial_summary_input="original request",
+            initial_included_runs=[run],
+            session_id="session-1",
+            scope=_SCOPE,
+            history_settings=_HISTORY_SETTINGS,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=480.0,
+        )
+
+    request_log = next(
+        call for call in logger_mock.info.call_args_list if call.args[0] == "Compaction summary chunk request"
+    )
+    assert request_log.kwargs["timeout_seconds"] == 480.0
+    assert request_log.kwargs["effective_timeout_seconds"] == 300.0
+    assert generate_summary.await_args.kwargs["timeout_seconds"] == 480.0
 
 
 @pytest.mark.asyncio
@@ -1576,21 +1639,17 @@ async def test_retry_helper_propagates_fallback_refusal_or_failure(fallback_erro
         pytest.raises(type(fallback_error)) as raised,
     ):
         await _generate_compaction_summary_with_retry(
-            model=primary,
-            model_name="summary-model",
+            summary_model=SummaryModel(primary, "summary-model", 4_000),
             previous_summary=None,
             compactable_runs=[run],
             initial_summary_input="original request",
             initial_included_runs=[run],
-            summary_input_budget=4_000,
             session_id="session-1",
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=lambda _value: 2_000,
-            estimate_kind="o200k_base_tokens",
-            fallback_model=fallback,
-            fallback_model_name="fallback-model",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            fallback_model=SummaryModel(fallback, "fallback-model", 4_000),
         )
 
     assert raised.value is fallback_error
@@ -1619,21 +1678,17 @@ async def test_retry_helper_refusal_after_transient_retry_propagates_within_atte
         pytest.raises(ModelSafeguardRefusalError) as raised,
     ):
         await _generate_compaction_summary_with_retry(
-            model=primary,
-            model_name="summary-model",
+            summary_model=SummaryModel(primary, "summary-model", 4_000),
             previous_summary=None,
             compactable_runs=[run],
             initial_summary_input="original request",
             initial_included_runs=[run],
-            summary_input_budget=4_000,
             session_id="session-1",
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            token_estimator=lambda _value: 2_000,
-            estimate_kind="o200k_base_tokens",
-            fallback_model=fallback,
-            fallback_model_name="fallback-model",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            fallback_model=SummaryModel(fallback, "fallback-model", 4_000),
         )
 
     assert raised.value is refusal
@@ -1654,7 +1709,7 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
         ],
     )
     write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     primary = FakeModel(id="summary-model", provider="fake")
     fallback = FakeModel(id="fallback-model-id", provider="fake")
     attempts: list[tuple[str, str]] = []
@@ -1677,21 +1732,22 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
             state=read_scope_state(session, _SCOPE),
             history_settings=_HISTORY_SETTINGS,
             available_history_budget=None,
-            summary_input_budget=10_000,
-            summary_model=primary,
-            summary_model_name="summary-model",
+            summary_model=SummaryModel(primary, "summary-model", 100_000),
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            fallback_summary_model=fallback,
-            fallback_summary_model_name="fallback-model",
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+            fallback_summary_model=SummaryModel(fallback, "fallback-model", 10_000),
         )
 
     assert outcome is not None
-    # Chunk 1 refuses on the primary and resends the unchanged prompt and
-    # input to the fallback; chunk 2 goes straight to the fallback.
+    # The primary sees both runs. Its smaller-context fallback rebuilds the
+    # refused chunk with run 1, then keeps its own budget for run 2.
     assert [model_id for model_id, _ in attempts] == ["summary-model", "fallback-model-id", "fallback-model-id"]
-    assert attempts[1][1] == attempts[0][1]
+    assert "RUN1-MARKER" in attempts[0][1]
+    assert "RUN2-MARKER" in attempts[0][1]
+    assert "RUN1-MARKER" in attempts[1][1]
+    assert "RUN2-MARKER" not in attempts[1][1]
     assert "RUN2-MARKER" in attempts[2][1]
     assert outcome.summary_model == "fallback-model"
     persisted = get_agent_session(storage, "session-1")
@@ -1711,7 +1767,7 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER")])
     write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     attempts: list[str] = []
 
     async def refuse_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
@@ -1733,12 +1789,11 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
             state=read_scope_state(session, _SCOPE),
             history_settings=_HISTORY_SETTINGS,
             available_history_budget=None,
-            summary_input_budget=10_000,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
+            summary_model=SummaryModel(FakeModel(id="summary-model", provider="fake"), "summary-model", 10_000),
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert len(attempts) == 1
@@ -1758,7 +1813,7 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=4_000)])
     write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     summary_input_budget = 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1
     attempts: list[str] = []
 
@@ -1775,8 +1830,8 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
             new=AsyncMock(side_effect=flaky_summary),
         ),
         patch(
-            "mindroom.history.compaction._build_summary_input",
-            wraps=_build_summary_input,
+            "mindroom.history.compaction.build_summary_input",
+            wraps=build_summary_input,
         ) as build_summary_input_spy,
     ):
         outcome = await compact_scope_history(
@@ -1786,12 +1841,15 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
             state=read_scope_state(session, _SCOPE),
             history_settings=_HISTORY_SETTINGS,
             available_history_budget=None,
-            summary_input_budget=summary_input_budget,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
+            summary_model=SummaryModel(
+                FakeModel(id="summary-model", provider="fake"),
+                "summary-model",
+                summary_input_budget,
+            ),
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1814,14 +1872,14 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     summary_input_budget = COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1
     config, runtime_paths = _make_config(
         tmp_path,
-        compaction=CompactionConfig(replay_window_tokens=summary_input_budget),
+        context_window=10_000,
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     previous_summary = ("word " * 975) + "TAIL-FACT-MUST-SURVIVE"
     session = _session([_completed_run("run-1", marker="RUN1-MARKER")])
     session.summary = SessionSummary(summary=previous_summary, updated_at=datetime.now(UTC))
     write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     generate_summary = AsyncMock()
 
     with patch(
@@ -1835,12 +1893,11 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
             state=read_scope_state(session, _SCOPE),
             history_settings=_HISTORY_SETTINGS,
             available_history_budget=None,
-            summary_input_budget=summary_input_budget,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="default",
+            summary_model=SummaryModel(FakeModel(id="summary-model", provider="fake"), "default", summary_input_budget),
             replay_window_tokens=summary_input_budget,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is None
@@ -1897,7 +1954,7 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=16_000)])
     write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     attempts: list[str] = []
 
     async def time_out_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
@@ -1955,7 +2012,7 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=4_000)])
     write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     attempts: list[str] = []
 
@@ -1980,12 +2037,11 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
             state=read_scope_state(session, _SCOPE),
             history_settings=_HISTORY_SETTINGS,
             available_history_budget=None,
-            summary_input_budget=10_000,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
+            summary_model=SummaryModel(FakeModel(id="summary-model", provider="fake"), "summary-model", 10_000),
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1998,3 +2054,35 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
     assert persisted.summary is not None
     assert persisted.summary.summary == "recovered summary"
     storage.close()
+
+
+def test_compaction_chunk_interrupted_after_tombstones_is_repaired_by_the_next_prune(tmp_path: Path) -> None:
+    """Tombstones land before the run deletes; if the deletes never happen, the next run prunes instead of replaying."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = seed_session(storage, _session([_completed_run("old"), _completed_run("kept")]))
+    working_session = deepcopy(session)
+    working_session.runs = [_completed_run("kept")]
+
+    with (
+        patch.object(storage, "delete_runs", side_effect=RuntimeError("process stopped")),
+        pytest.raises(RuntimeError, match="process stopped"),
+    ):
+        record_compaction_chunk(
+            storage=storage,
+            persisted_session=session,
+            working_session=working_session,
+            scope=_SCOPE,
+            compacted_run_ids=("old",),
+        )
+
+    reloaded = get_agent_session(storage, "session-1")
+    assert reloaded is not None
+    assert [run.run_id for run in reloaded.runs or []] == ["old", "kept"]
+    assert read_scope_state(reloaded, _SCOPE).compacted_run_ids == ("old",)
+
+    assert prune_reintroduced_runs(storage, reloaded, read_scope_state(reloaded, _SCOPE)) is True
+    repaired = get_agent_session(storage, "session-1")
+    storage.close()
+    assert repaired is not None
+    assert [run.run_id for run in repaired.runs or []] == ["kept"]

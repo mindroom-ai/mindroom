@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="slack",
+    requires_primary_runtime=True,
     display_name="Slack",
     description="Send messages and manage channels",
     category=ToolCategory.COMMUNICATION,
@@ -27,6 +28,14 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             default=None,
+        ),
+        ConfigField(
+            name="user_token",
+            label="User Token",
+            type="password",
+            required=False,
+            default=None,
+            description="User token (xoxp-) used for search_messages, which bot tokens cannot call",
         ),
         ConfigField(
             name="markdown",
@@ -159,7 +168,6 @@ if TYPE_CHECKING:
     docs_url="https://docs.agno.com/tools/toolkits/social/slack",
     function_names=(
         "download_file",
-        "download_file_bytes",
         "get_channel_history",
         "get_channel_info",
         "get_thread",

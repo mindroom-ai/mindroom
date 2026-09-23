@@ -35,7 +35,6 @@ from mindroom.history.interrupted_replay import (
     _render_interrupted_replay_content,
 )
 from mindroom.matrix.client import ResolvedVisibleMessage
-from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.client_visible_messages import _stream_status_from_content
 from mindroom.message_target import MessageTarget
 from mindroom.prompt_message_tags import render_msg_tag
@@ -49,7 +48,6 @@ from mindroom.streaming import (
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
-    make_event_cache_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -63,7 +61,7 @@ def _make_config() -> Config:
     config = Config.model_validate(
         {
             "agents": {"helper": {"display_name": "Helper", "role": "test"}},
-            "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         },
     )
     return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
@@ -255,6 +253,30 @@ class TestClassifyPartialReply:
                 active_event_ids=set(),
             )
             is None
+        )
+
+    @pytest.mark.parametrize("body", ["Finished text [cancelled]", "Finished text [error]"])
+    @pytest.mark.parametrize(
+        ("stream_status", "expected"),
+        [
+            (STREAM_STATUS_COMPLETED, None),
+            (STREAM_STATUS_PENDING, _PartialReplyKind.IN_PROGRESS),
+            (STREAM_STATUS_STREAMING, _PartialReplyKind.IN_PROGRESS),
+        ],
+    )
+    def test_recognized_stream_status_wins_over_legacy_terminal_suffix(
+        self,
+        body: str,
+        stream_status: str,
+        expected: _PartialReplyKind | None,
+    ) -> None:
+        """Honor current metadata when an old terminal suffix contradicts it."""
+        assert (
+            _classify_partial_reply(
+                _make_visible_message(event_id="e_active", body=body, stream_status=stream_status),
+                active_event_ids={"e_active"},
+            )
+            is expected
         )
 
     def test_trailing_marker_without_metadata_is_not_partial(self) -> None:
@@ -681,70 +703,6 @@ class TestThreadHistoryStreamStatus:
         assert _stream_status_from_content(None) is None
         assert _stream_status_from_content({}) is None
         assert _stream_status_from_content({"unrelated": "key"}) is None
-
-    @pytest.mark.asyncio
-    async def test_fetch_thread_history_includes_status_from_latest_edit(self) -> None:
-        """Apply the latest edit body and stream status to the synthesized history entry."""
-        client = AsyncMock()
-
-        root_event = _make_text_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="Question",
-            server_timestamp=1000,
-            source_content={"body": "Question"},
-        )
-        partial_event = _make_text_event(
-            event_id="$agent_msg",
-            sender="@agent:localhost",
-            body="Partial answer",
-            server_timestamp=2000,
-            source_content={
-                "body": "Partial answer",
-                STREAM_STATUS_KEY: STREAM_STATUS_PENDING,
-                "m.relates_to": {
-                    "rel_type": "m.thread",
-                    "event_id": "$thread_root",
-                },
-            },
-        )
-        edit_event = _make_text_event(
-            event_id="$edit1",
-            sender="@agent:localhost",
-            body="* Final answer",
-            server_timestamp=3000,
-            source_content={
-                "body": "* Final answer",
-                "m.new_content": {
-                    "body": "Final answer",
-                    STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$thread_root",
-                    },
-                },
-                "m.relates_to": {
-                    "rel_type": "m.replace",
-                    "event_id": "$agent_msg",
-                },
-            },
-        )
-
-        response = MagicMock(spec=nio.RoomMessagesResponse)
-        response.chunk = [edit_event, partial_event, root_event]
-        response.end = None
-        client.room_messages.return_value = response
-
-        history = await fetch_thread_history(
-            client,
-            "!room:localhost",
-            "$thread_root",
-            event_cache=make_event_cache_mock(),
-        )
-
-        assert history[1].body == "Final answer"
-        assert history[1].stream_status == "completed"
-        assert history[1].content[STREAM_STATUS_KEY] == "completed"
 
 
 class TestStreamingFinalizeStatuses:

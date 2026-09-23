@@ -18,7 +18,7 @@ from mindroom.attachments import (
     resolve_thread_attachment_ids,
 )
 from mindroom.constants import SOURCE_KIND_KEY
-from mindroom.dispatch_handoff import MediaDispatchEvent, PreparedTextEvent
+from mindroom.dispatch_handoff import MediaDispatchEvent, PreparedIngress
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import resolve_visible_event_source
@@ -33,7 +33,7 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.media_inputs import MediaInputs
-from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
 from mindroom.timing import emit_elapsed_timing
 from mindroom.voice_handler import prepare_raw_voice_fallback_message, prepare_voice_message
 
@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 class TextNormalizationRequest:
     """One inbound text-like event to normalize."""
 
-    event: nio.RoomMessageText | PreparedTextEvent
+    event: nio.RoomMessageFormatted | PreparedIngress
 
 
 @dataclass(frozen=True)
@@ -68,7 +68,7 @@ class VoiceNormalizationRequest:
 class _VoiceNormalizationResult:
     """Normalized text event for one audio turn."""
 
-    event: PreparedTextEvent
+    event: PreparedIngress
 
 
 @dataclass(frozen=True)
@@ -118,7 +118,7 @@ class DispatchPayloadWithAttachmentsRequest:
 class InboundTurnNormalizerDeps:
     """Explicit collaborators for inbound normalization."""
 
-    runtime: SupportsClientConfig
+    runtime: SupportsClientConfigMemberships
     logger: structlog.stdlib.BoundLogger
     storage_path: Path
     runtime_paths: RuntimePaths
@@ -137,10 +137,10 @@ class InboundTurnNormalizer:
             raise RuntimeError(msg)
         return client
 
-    async def resolve_text_event(self, request: TextNormalizationRequest) -> PreparedTextEvent:
+    async def resolve_text_event(self, request: TextNormalizationRequest) -> PreparedIngress:
         """Return one canonical text event for hooks, routing, and command handling."""
         event = request.event
-        if isinstance(event, PreparedTextEvent):
+        if isinstance(event, PreparedIngress):
             return event
 
         resolved_source, body = await resolve_visible_event_source(
@@ -150,7 +150,7 @@ class InboundTurnNormalizer:
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
         )
-        return PreparedTextEvent(
+        return PreparedIngress(
             sender=event.sender,
             event_id=event.event_id,
             body=body,
@@ -171,12 +171,13 @@ class InboundTurnNormalizer:
                 self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
                 thread_id=effective_thread_id,
+                membership_index=self.deps.runtime.agent_reply_memberships,
             )
             if prepared_voice is None:
                 return None
 
             return _VoiceNormalizationResult(
-                event=PreparedTextEvent(
+                event=PreparedIngress(
                     sender=request.event.sender,
                     event_id=request.event.event_id,
                     body=prepared_voice.text,
@@ -207,7 +208,7 @@ class InboundTurnNormalizer:
                 thread_id=effective_thread_id,
             )
             return _VoiceNormalizationResult(
-                event=PreparedTextEvent(
+                event=PreparedIngress(
                     sender=request.event.sender,
                     event_id=request.event.event_id,
                     body=prepared_voice.text,
@@ -228,7 +229,7 @@ class InboundTurnNormalizer:
     async def prepare_file_sidecar_text_event(
         self,
         event: FileMessageEvent,
-    ) -> PreparedTextEvent | None:
+    ) -> PreparedIngress | None:
         """Return a prepared text event when a file event is really a long-text preview."""
         if not is_v2_sidecar_text_preview(event.source):
             return None
@@ -240,7 +241,7 @@ class InboundTurnNormalizer:
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
         )
-        return PreparedTextEvent(
+        return PreparedIngress(
             sender=event.sender,
             event_id=event.event_id,
             body=body,
@@ -253,7 +254,7 @@ class InboundTurnNormalizer:
         *,
         room_id: str,
         thread_id: str | None,
-        event: nio.RoomMessageText | PreparedTextEvent | MediaDispatchEvent,
+        event: nio.RoomMessageFormatted | PreparedIngress | MediaDispatchEvent,
     ) -> str | None:
         """Register a routed media event and return its attachment ID when available."""
         if not is_matrix_media_dispatch_event(event):

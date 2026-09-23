@@ -25,7 +25,8 @@ If the effective backend is `none`, MindRoom does not attach the `memory` tool t
 Use [Memory System](../memory.md) for the canonical docs on backend selection, automatic extraction, file-backed memory, Agno Learning, and storage layout.
 `mem0` and `zep` are separate upstream Agno toolkits that talk to external memory providers directly.
 Enabling `mem0` or `zep` does not change MindRoom's own memory backend, automatic memory extraction, or the behavior of the `memory` tool.
-`mem0` can work with a hosted Mem0 API key or with local/default upstream Mem0 configuration.
+`mem0` can work with a hosted Mem0 API key or upstream defaults.
+The upstream local config object is not currently expressible through MindRoom's authored YAML schema.
 `zep` requires a Zep API key, either through stored credentials or the `ZEP_API_KEY` environment variable.
 If optional dependencies for these tools are missing, MindRoom can auto-install them at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 This page does not document conversation-scoped file attachments even though they are storage-like.
@@ -41,12 +42,19 @@ Use [Matrix & Attachments](matrix-and-attachments.md) and [Attachments](../attac
 It complements MindRoom's automatic post-response memory extraction by letting the agent deliberately remember or inspect something on demand.
 The tool always uses the current agent's configured MindRoom memory backend, so the same calls work whether that agent uses built-in `mem0` storage or file-backed memory.
 Agents with `memory_backend: none` do not receive this tool.
-Search and list results include memory IDs, and those IDs are then used with `get_memory()`, `update_memory()`, and `delete_memory()`.
+Search and list results include identifiers or locators.
+Persisted memory IDs and file-backed `file:<path>:<line>` IDs can be used with `get_memory()`, `update_memory()`, and `delete_memory()`.
+Semantic file-memory matches use `semantic:<source_file>:<rank>` read-only locators that cannot be passed to the CRUD functions.
 The tool is bound to the current agent's MindRoom scope and can reach any agent or team memories that MindRoom makes visible to that agent.
 For file-backed memory, `search_memories()` follows `memory.search.mode`.
-Keyword mode scans markdown files directly.
-Semantic mode searches the agent's file-memory scope through a lazy embedding index and falls back to keyword search when embeddings are unavailable.
+Keyword mode searches structured entries with persisted IDs in `MEMORY.md` and both structured entries and eligible plain-text snippets in `memory/**/*.md`.
+Ordinary `MEMORY.md` prose is preloaded into the prompt instead of searched as keyword snippets.
+For prose omitted by the preload limit, read the file directly or use semantic search with `include_entrypoint: true` and a ready index.
+Semantic mode searches the agent's configured include patterns through a lazy embedding index and falls back to those keyword entries and snippets when embeddings are unavailable.
 Result metadata includes `search_mode` so callers can tell which path produced the result.
+File memory is already searchable on demand through `search_memories()`.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+That knowledge surface is semantic-only and does not provide keyword fallback, team-visible memory, or memory IDs.
 
 ### Configuration
 
@@ -89,15 +97,14 @@ delete_memory("abc123")
 `mem0` exposes `add_memory()`, `search_memory()`, `get_all_memories()`, and `delete_all_memories()`.
 It uses the upstream `mem0ai` client directly rather than MindRoom's built-in memory API.
 If `api_key` is set, or `MEM0_API_KEY` is present in the environment, the toolkit connects to Mem0's hosted platform client.
-If no API key is present but `config` is supplied, the toolkit initializes upstream Mem0 from that local config object.
-If neither `api_key` nor `config` is supplied, the toolkit falls back to upstream Mem0 defaults.
+If no API key is present, the toolkit falls back to upstream Mem0 defaults.
 Operations need a `user_id`, either from tool config or from the run context, and they return an error string when no user ID can be resolved.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `config` | `text` | `no` | `null` | Advanced upstream Mem0 config passed through to `Memory.from_config()`, typically used for local or self-managed setups. |
+| `config` | mapping | unsupported | — | Upstream local Mem0 config object; MindRoom's authored YAML schema does not currently expose mapping-valued fields. |
 | `api_key` | `password` | `no` | `null` | Optional Mem0 Platform API key, also read from `MEM0_API_KEY`. |
 | `user_id` | `text` | `no` | `null` | Fixed user scope for all calls when you do not want to rely on runtime user context. |
 | `org_id` | `text` | `no` | `null` | Optional Mem0 organization ID for platform usage, also read from `MEM0_ORG_ID`. |
@@ -129,7 +136,7 @@ delete_all_memories()
 
 ### Notes
 
-- `api_key` is optional because the toolkit can use local/default upstream Mem0 initialization instead of the hosted Mem0 platform.
+- `api_key` is optional because the toolkit can use upstream defaults instead of the hosted Mem0 platform.
 - This toolkit is separate from MindRoom's `memory.backend: mem0` setting, so enabling `mem0` here does not configure or replace MindRoom's built-in memory backend.
 - If you want MindRoom's automatic memory extraction and built-in memory retrieval to use Mem0, configure that in [Memory System](../memory.md) instead of relying on this toolkit alone.
 - Store API keys outside authored YAML even when the current metadata marks them as optional.
