@@ -89,7 +89,12 @@ def _capped_entity(kind: Literal["agent", "team"], model: SyntheticModel, execut
     )
 
 
-async def _run(entity: Agent | Team, *, stream: bool, prompt: str = "Do the task") -> tuple[RunOutput | TeamRunOutput, bool]:
+async def _run(
+    entity: Agent | Team,
+    *,
+    stream: bool,
+    prompt: str = "Do the task",
+) -> tuple[RunOutput | TeamRunOutput, bool]:
     """Run once and return the final output plus whether a streamed run emitted its completion event."""
     if not stream:
         output = await entity.arun(prompt)
