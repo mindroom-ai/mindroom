@@ -17,8 +17,9 @@ from agno.exceptions import ModelProviderError
 from agno.media import Image
 from agno.models.message import Message
 from agno.models.openai import OpenAIResponses
-from agno.run.agent import RunCompletedEvent, RunErrorEvent
+from agno.run.agent import RunCompletedEvent, RunContentEvent, RunErrorEvent, RunOutput
 from agno.run.base import RunStatus
+from agno.run.cancel import acancel_run
 from agno.session.agent import AgentSession
 from openai import AsyncOpenAI, OpenAI
 
@@ -438,10 +439,8 @@ async def test_terminal_usage_survives_stream_failure(
         storage.close()
 
 
-async def test_received_request_usage_survives_task_cancellation(tmp_path: Path) -> None:
-    """Cancellation while awaiting EOF persists already-received request counters."""
-    waiting = asyncio.Event()
-    completed = _response("resp_cancelled", "completed")
+def _metered_completion(response_id: str) -> dict[str, object]:
+    completed = _response(response_id, "completed")
     completed["usage"] = {
         "input_tokens": 1000,
         "input_tokens_details": {"cached_tokens": 800},
@@ -449,13 +448,56 @@ async def test_received_request_usage_survives_task_cancellation(tmp_path: Path)
         "output_tokens_details": {"reasoning_tokens": 60},
         "total_tokens": 1100,
     }
+    return completed
 
-    class WaitingStream(httpx.AsyncByteStream):
-        async def __aiter__(self) -> AsyncIterator[bytes]:
-            yield (_created() + _text() + _event("response.completed", response=completed)).encode()
-            waiting.set()
-            await asyncio.Future()
 
+class _HeldStream(httpx.AsyncByteStream):
+    """Deliver one metered completion, then keep the response open before EOF."""
+
+    def __init__(self, response_id: str) -> None:
+        self.completed = _metered_completion(response_id)
+        self.sent = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield (_created() + _text() + _event("response.completed", response=self.completed)).encode()
+        self.sent.set()
+        await asyncio.Future()
+
+    async def aclose(self) -> None:
+        self.closed.set()
+
+    def response(self) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=self)
+
+
+def _assert_reported_usage(
+    storage: SqliteDb,
+    *,
+    total: int,
+    requests: list[tuple[int, int]],
+    status: RunStatus = RunStatus.cancelled,
+) -> None:
+    """The stopped run, session totals, and durable request details agree on reported usage."""
+    session = storage.get_session("session", session_type=SessionType.AGENT)
+    assert isinstance(session, AgentSession)
+    run = session.runs[-1]
+    assert run.status == status
+    assert run.metrics is not None
+    assert run.metrics.total_tokens == total
+    assert session.session_data["session_metrics"]["total_tokens"] == total
+    with sqlite3.connect(storage.db_file) as connection:
+        rows = connection.execute("SELECT usage_data FROM status_sessions_usage").fetchall()
+    assert len(rows) == 1
+    usage = json.loads(rows[0][0])
+    assert usage["metrics"]["total_tokens"] == total
+    assert [
+        (request["metrics"]["total_tokens"], request["metrics"]["cache_read_tokens"]) for request in usage["requests"]
+    ] == requests
+
+
+async def test_received_request_usage_survives_task_cancellation(tmp_path: Path) -> None:
+    """Cancellation while awaiting EOF persists already-received request counters."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     config = Config(agents={"status": AgentConfig(display_name="Status")})
     storage = create_state_storage(
@@ -464,9 +506,9 @@ async def test_received_request_usage_survives_task_cancellation(tmp_path: Path)
         subdir="sessions",
         session_table="status_sessions",
     )
-    response = httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=WaitingStream())
+    held = _HeldStream("resp_cancelled")
     try:
-        async with _model(response) as model:
+        async with _model(held.response()) as model:
             agent = Agent(id="status", model=model, db=storage, telemetry=False)
 
             async def run() -> None:
@@ -478,7 +520,7 @@ async def test_received_request_usage_survives_task_cancellation(tmp_path: Path)
             task = asyncio.create_task(run())
             try:
                 async with asyncio.timeout(5):
-                    await waiting.wait()
+                    await held.sent.wait()
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
@@ -494,6 +536,89 @@ async def test_received_request_usage_survives_task_cancellation(tmp_path: Path)
         assert report.request_breakdown[0].totals.total_tokens == 1100
         assert report.request_breakdown[0].totals.cache_read_tokens == 800
         assert report.request_coverage.unavailable_sources == 0
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize(
+    ("stop", "status"),
+    [("close", RunStatus.cancelled), ("throw", RunStatus.error)],
+    ids=["closed", "failed"],
+)
+async def test_received_request_usage_survives_abandoned_stream(
+    tmp_path: Path,
+    *,
+    stop: str,
+    status: RunStatus,
+) -> None:
+    """Stopping the run stream at the terminal chunk still records its reported usage."""
+    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    assert isinstance(storage, SqliteDb)
+    held = _HeldStream("resp_closed")
+    try:
+        async with _model(held.response()) as model:
+            agent = Agent(id="status", model=model, db=storage, telemetry=False)
+            async with asyncio.timeout(5):
+                async with drain_agent_cancellation(agent, "run") as bind:
+                    with bind():
+                        events = agent.arun("Check status", run_id="run", session_id="session", stream=True)
+                    while True:
+                        with bind():
+                            event = await anext(events)
+                        # The provider's completion reaches the consumer before the stream ends.
+                        if isinstance(event, RunContentEvent) and (event.model_provider_data or {}).get("response_id"):
+                            break
+                    with bind():
+                        if stop == "throw":
+                            assert isinstance(await events.athrow(RuntimeError("Consumer failed")), RunErrorEvent)
+                        await events.aclose()
+                # Garbage collection finalizes the abandoned model stream after persistence.
+                await held.closed.wait()
+        _assert_reported_usage(storage, total=1100, requests=[(1100, 800)], status=status)
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("retried", [False, True], ids=["first-attempt", "retried"])
+async def test_received_request_usage_survives_cancel_request(tmp_path: Path, *, retried: bool) -> None:
+    """A cancellation checked at the terminal chunk counts reported usage once."""
+    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    assert isinstance(storage, SqliteDb)
+    held = _HeldStream("resp_cancel_requested")
+    failed = {
+        **_metered_completion("resp_failed"),
+        "status": "failed",
+        "error": {"code": "server_error", "message": "Generation failed"},
+    }
+    streams = [_created("resp_failed") + _event("response.failed", response=failed)] if retried else []
+    run_output: RunOutput | None = None
+    try:
+        async with _model(*streams, held.response()) as model:
+            model.retries = 1
+            model.delay_between_retries = 0
+            agent = Agent(id="status", model=model, db=storage, telemetry=False)
+            async with asyncio.timeout(5):
+                async for event in agent.arun(
+                    "Check status",
+                    run_id="run",
+                    session_id="session",
+                    stream=True,
+                    yield_run_output=True,
+                ):
+                    if isinstance(event, RunContentEvent) and event.content:
+                        # Agno checks this request when the next chunk, the completion, arrives.
+                        assert await acancel_run("run")
+                    if isinstance(event, RunOutput):
+                        run_output = event
+                # Late finalization of the abandoned model stream must not count it again.
+                await held.closed.wait()
+        total = 2200 if retried else 1100
+        assert run_output is not None
+        assert run_output.status == RunStatus.cancelled
+        assert run_output.metrics is not None
+        assert run_output.metrics.total_tokens == total
+        # Counters combined across attempts stay aggregate-only.
+        _assert_reported_usage(storage, total=total, requests=[] if retried else [(1100, 800)])
     finally:
         storage.close()
 

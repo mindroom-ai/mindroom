@@ -6486,7 +6486,7 @@ expose = ["OpenAIChatProviderCompat"]
 
 [[modules]]
 path = "mindroom.agno_compat_openai_responses"
-depends_on = ["mindroom.error_handling"]
+depends_on = ["mindroom.error_handling", "mindroom.usage_storage"]
 visibility = ["mindroom.openai_models"]
 
 [[interfaces]]
@@ -6605,7 +6605,7 @@ expose = ["clear_stale_singleton_locks"]
 [[modules]]
 path = "mindroom.usage_storage"
 depends_on = []
-visibility = ["mindroom.agent_storage", "mindroom.agno_compat_run_messages", "mindroom.agno_compat_sqlite", "mindroom.legacy_usage_storage", "mindroom.usage_stats_storage"]
+visibility = ["mindroom.agent_storage", "mindroom.agno_compat_openai_responses", "mindroom.agno_compat_run_messages", "mindroom.agno_compat_sqlite", "mindroom.legacy_usage_storage", "mindroom.usage_stats_storage"]
 
 [[modules]]
 path = "mindroom.legacy_usage_storage"

@@ -20,6 +20,7 @@ from openai.types.responses import (
 )
 
 from mindroom.error_handling import IncompleteResponsesStreamError
+from mindroom.usage_storage import has_token_usage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -120,10 +121,6 @@ def _stream_error_types(error: BaseException) -> str:
     return " caused by ".join(names)
 
 
-def _has_token_usage(metrics: MessageMetrics) -> bool:
-    return any(value for key, value in metrics.to_dict().items() if key.endswith("_tokens"))
-
-
 class OpenAIResponsesProviderCompat:
     """Enforce complete stream lifecycle while preserving subclass callbacks."""
 
@@ -173,7 +170,7 @@ class OpenAIResponsesProviderCompat:
         """Keep failed attempts' counters while identifying combined retry usage."""
         if usage is None:
             return
-        if _has_token_usage(assistant_message.metrics):
+        if has_token_usage(assistant_message.metrics.to_dict()):
             assistant_message.provider_data = {
                 **(assistant_message.provider_data or {}),
                 "mindroom_aggregate_usage": True,
@@ -359,7 +356,7 @@ class OpenAIResponsesProviderCompat:
     ) -> None:
         """Retain earlier failed-attempt counters when a later attempt completes."""
         prior = assistant_message.metrics
-        if _has_token_usage(prior):
+        if has_token_usage(prior.to_dict()):
             stream_data.response_provider_data = {
                 **(stream_data.response_provider_data or {}),
                 "mindroom_aggregate_usage": True,

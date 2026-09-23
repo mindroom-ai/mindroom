@@ -46,6 +46,7 @@ def test_terminal_snapshot_keeps_requests_after_checkpoint(
     current: str,
 ) -> None:
     """A stale checkpoint must not hide later requests or persist transient messages."""
+    # Creating owned storage installs the repair, as it does in production.
     storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
     first = Message(role="assistant", content="Checking", metrics=MessageMetrics(input_tokens=10))
     second = Message(role="assistant", content="Checked", metrics=MessageMetrics(input_tokens=20))
@@ -77,12 +78,14 @@ def test_terminal_snapshot_keeps_requests_after_checkpoint(
 
 
 def test_installation_preserves_existing_stream_wrappers() -> None:
-    """Deferred installation must retain wrappers installed after module import."""
+    """Installation keeps later wrappers in the chain and repeated calls wrap nothing twice."""
     code = """
 import asyncio
 
 from agno.agent import Agent
+from agno.agent import _run as agent_run
 from agno.models.base import Model
+from agno.team import _run as team_run
 from mindroom import agno_compat_run_messages as patch
 from tests.history_helpers import RecordingModel
 
@@ -101,10 +104,22 @@ async def existing_astream(*args, **kwargs):
         yield event
     events.append("async-after")
 
+def installed():
+    return (
+        Model.process_response_stream,
+        Model.aprocess_response_stream,
+        agent_run.flush_in_flight_messages_on_error,
+        team_run.flush_in_flight_messages_on_error_team,
+        agent_run._handle_run_cancellation,
+        team_run._handle_team_run_cancellation,
+    )
+
 Model.process_response_stream = existing_stream
 Model.aprocess_response_stream = existing_astream
 patch.install_patch()
+first = installed()
 patch.install_patch()
+assert all(current is original for current, original in zip(installed(), first, strict=True))
 
 agent = Agent(model=RecordingModel(id="test-model", provider="test-provider"), telemetry=False)
 assert "".join(event.content or "" for event in agent.run("Hello", stream=True)) == "ok"
