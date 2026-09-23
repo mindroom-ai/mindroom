@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -21,7 +20,12 @@ from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.hooks import MessageEnvelope
 from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.control import current_human_message_signal, job_owns_execution
-from mindroom.tool_jobs.runtime import READY_STATUSES, get_background_runtime
+from mindroom.tool_jobs.runtime import (
+    READY_STATUSES,
+    completion_event_id,
+    get_background_runtime,
+    parse_completion_event_id,
+)
 from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
@@ -34,7 +38,6 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob, JobWait, ToolJobRuntime
 
 
-_COMPLETION_EVENT_ID = re.compile(r"tool-job:(?P<job_id>[^:]+):(?P<generation>0|[1-9][0-9]*)")
 # The source kind of a completion whose job started outside any admitted turn.
 _UNSOURCED_COMPLETION_SOURCE_KIND = "tool_job_completion"
 _WAIT_NOTICE: ContextVar[Callable[[StreamingPresentation, str | None], Awaitable[None]] | None] = ContextVar(
@@ -80,17 +83,6 @@ def background_wait_edit(
             STREAM_WARMUP_SUFFIX_KEY: notice or "",
         },
     )
-
-
-def completion_event_id(job: BackgroundJob) -> str:
-    """Name the internal source that delivers one job generation's outcome, stable across worker and process retries."""
-    return f"tool-job:{job.job_id}:{job.generation}"
-
-
-def parse_completion_event_id(event_id: str) -> tuple[str, int] | None:
-    """Return the job ID and generation an internal completion source names, or None for any other event."""
-    match = _COMPLETION_EVENT_ID.fullmatch(event_id)
-    return None if match is None else (match["job_id"], int(match["generation"]))
 
 
 def completion_prompt(jobs: Sequence[BackgroundJob]) -> str:
@@ -148,15 +140,16 @@ def completion_envelope(job: BackgroundJob, *, sender_id: str) -> MessageEnvelop
     )
 
 
-async def admit_job_completion(source_event_id: str, runtime_paths: RuntimePaths) -> bool:
+async def admit_job_completion(envelope: MessageEnvelope, runtime_paths: RuntimePaths) -> bool:
     """Under the conversation lock, admit an internal completion only while the runtime still offers its generation.
 
     A completion envelope is built from that same job's immutable owner, so its current outcome is the only recheck.
-    Every other source is admitted.
+    Every other turn is admitted, whatever its source event ID looks like.
     """
-    completion = parse_completion_event_id(source_event_id)
-    if completion is None:
+    if envelope.origin.intent is not TurnIntent.TOOL_JOB_COMPLETION:
         return True
+    completion = parse_completion_event_id(envelope.source_event_id)
+    assert completion is not None, "A completion envelope names its job generation"
     runtime = get_background_runtime(runtime_paths)
     if runtime is None:
         msg = "Tool job runtime is not ready for completion admission"
@@ -191,7 +184,7 @@ async def join_conversation_jobs(
 
     async def pending() -> list[BackgroundJob]:
         jobs = await runtime.conversation_jobs(
-            transport_agent_name=context.transport_agent_name or context.agent_name,
+            transport_agent_name=context.recipient,
             room_id=context.room_id,
             thread_id=context.resolved_thread_id,
             requester_id=context.requester_id,

@@ -76,6 +76,9 @@ class ToolJobRuntimeCoordinator:
     # membership row and wakes the dispatcher, so every retry pass would repeat it until the job is consumed.
     _admitted: set[tuple[str, int]] = field(default_factory=set, init=False)
     _journal: EventJournalStore | None = field(default=None, init=False)
+    # Recovered jobs a Stop saved while the runtime was away could still change, by recipient, until that recipient's
+    # bot exists to read its journal; no completion is delivered to a recipient still listed here.
+    _unrestored_stops: dict[str, list[BackgroundJob]] = field(default_factory=dict, init=False)
 
     async def initialize(self, journal: EventJournalStore | None = None) -> None:
         """Pin execution mode, then claim job storage or index parked ownership, before dispatch can start."""
@@ -239,18 +242,30 @@ class ToolJobRuntimeCoordinator:
                 if error is not None:
                     logger.error("Tool job completion worker stopped; restarting", error=str(error))
             await runtime.recover()
+            self._unrestored_stops = {}
             if self._journal is not None:
-                for entity_name in (*config.agents, *config.teams):
-                    bot = self.bot_provider(entity_name)
-                    if bot is not None:
-                        await restore_user_stops(
-                            runtime,
-                            bot.journal_principal(),
-                            self._journal.turn_records(entity_name),
-                        )
+                for job in await runtime.stoppable_jobs():
+                    self._unrestored_stops.setdefault(job.owner.recipient, []).append(job)
+            await self._restore_user_stops()
             register_background_runtime(self.runtime_paths, runtime)
             self._task = asyncio.create_task(self._run(), name="tool_job_completion_worker")
+        else:
+            await self._restore_user_stops()
         runtime.changed.set()
+
+    async def _restore_user_stops(self) -> None:
+        """Apply saved Stops to recovered jobs, for each recipient once its bot exists; a failed one retries next pass."""
+        journal = self._journal
+        for recipient, jobs in tuple(self._unrestored_stops.items()):
+            bot = self.bot_provider(recipient)
+            if journal is None or bot is None:
+                continue
+            try:
+                await restore_user_stops(self.runtime, bot.journal_principal(), journal.turn_records(recipient), jobs)
+            except Exception:
+                logger.exception("Saved user Stop restoration failed; retrying", recipient=recipient)
+                continue
+            self._unrestored_stops.pop(recipient, None)
 
     async def quiesce(self) -> None:
         """Stop wakeups and execution while live response owners finish their receipts."""
@@ -275,6 +290,7 @@ class ToolJobRuntimeCoordinator:
             self._instance = self._runtime = self._journal = None
             self._initialized = False
             self._admitted.clear()
+            self._unrestored_stops.clear()
 
     async def _run(self) -> None:
         next_retention = 0.0
@@ -293,6 +309,7 @@ class ToolJobRuntimeCoordinator:
     async def deliver_pending(self) -> None:
         """Retry pending outcomes until the durable journal owns each generation."""
         await self.runtime.cancel_revoked()
+        await self._restore_user_stops()
         pending = await self.runtime.pending_outcomes()
         self._admitted.intersection_update((job.job_id, job.generation) for job in pending)
         for job in pending:
@@ -339,7 +356,7 @@ class ToolJobRuntimeCoordinator:
 
     async def _deliver(self, job: BackgroundJob) -> None:
         generation = (job.job_id, job.generation)
-        if generation in self._admitted:
+        if generation in self._admitted or job.owner.recipient in self._unrestored_stops:
             return
         bot = self.bot_provider(job.owner.recipient)
         if (

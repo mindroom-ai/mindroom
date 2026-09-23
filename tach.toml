@@ -7963,7 +7963,6 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.response_turn",
     "mindroom.teams",
-    "mindroom.tool_jobs.user_stop",
 ]
 
 
@@ -8199,8 +8198,6 @@ visibility = ["mindroom.orchestrator"]
 path = "mindroom.tool_jobs.user_stop"
 depends_on = [
     "mindroom.event_journal",
-    "mindroom.handled_turns",
-    "mindroom.tool_jobs.completion",
     "mindroom.tool_jobs.runtime",
 ]
 visibility = ["mindroom.response_runner", "mindroom.orchestration.tool_job_runtime"]

@@ -126,7 +126,7 @@ class JobTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return self._owner
-        transport = context.transport_agent_name or context.agent_name
+        transport = context.recipient
         if transport == self._owner.recipient:
             transport = self._owner.transport_agent_name
         return replace(

@@ -532,6 +532,12 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
         '{"schema_version": 4, "job_id": "retired"}',
         '{"schema_version": 6, "job_id": "trunc',
         '{"schema_version": 6, "job_id": "another"}',
+        pytest.param(
+            json.dumps(
+                {"schema_version": 6, **asdict(replace(_job(), job_id="retired")), "source_event_id": ["$saved"]},
+            ),
+            id="non-string-source",
+        ),
     ],
 )
 async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unreadable: str) -> None:

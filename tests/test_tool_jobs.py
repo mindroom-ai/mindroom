@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context, job_checkpoint
@@ -663,12 +664,21 @@ async def test_source_and_conversation_lookups_follow_admission_recovery_and_exp
         waited = await runtime.wait("a", owner=owner, depth=0)
         await runtime.acknowledge_wait("a", waited.claim)
         _age(runtime, "a", datetime.now(UTC) - timedelta(days=31))
+        # The conversation lookup skips consumed jobs, so only the index itself shows that expiry removed one.
+        conversation = ("parent", "!room:test", "$root", "@alice:test")
+        assert [entry.job.job_id for entry in runtime._by_conversation.get(conversation)] == [
+            "a",
+            "b",
+            "c",
+            "unsourced",
+        ]
 
         async def source_finished(_job: runtime_module.BackgroundJob) -> bool:
             return True
 
         await runtime.expire_consumed(before=datetime.now(UTC) - timedelta(days=30), source_finished=source_finished)
         assert await lookups(runtime) == (["b"], ["b", "c", "unsourced"])
+        assert [entry.job.job_id for entry in runtime._by_conversation.get(conversation)] == ["b", "c", "unsourced"]
     finally:
         await runtime.shutdown()
     restored = tool_job_runtime(tmp_path)
@@ -2071,4 +2081,90 @@ async def test_repeated_waiter_cancellation_still_releases_its_claim(tmp_path: P
         finish.set()
         waiter.cancel()
         await asyncio.gather(waiter, return_exceptions=True)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["stop", "revoke"])
+async def test_one_failed_cancellation_request_does_not_block_the_others(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    """Stop and revocation still reach later jobs when one job's save fails, and report which job failed."""
+    revoked = False
+    runtime = tool_job_runtime(tmp_path, authorize=lambda _job: not revoked)
+    writer = runtime_module.write_json_file_durable
+    failing = False
+
+    def failing_writer(path: Path, payload: object, *, strict_atomic_replace: bool) -> None:
+        if failing and path.name == "first.json":
+            msg = "injected durable write failure"
+            raise OSError(msg)
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def every_job(_job: runtime_module.BackgroundJob) -> bool:
+        return True
+
+    monkeypatch.setattr(runtime_module, "write_json_file_durable", failing_writer)
+    try:
+        for job_id in ("first", "second"):
+            await start_job(runtime, job_id, tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
+        failing = revoked = True
+        request = (
+            runtime.stop_jobs(receipt_order=1, matches=every_job) if action == "stop" else runtime.cancel_revoked()
+        )
+        with capture_logs() as logs, pytest.raises(ExceptionGroup) as raised:
+            await request
+        failing = revoked = False
+        assert [str(error) for error in raised.value.exceptions] == ["injected durable write failure"]
+        assert [entry["job_id"] for entry in logs if entry["log_level"] == "error"] == ["first"]
+        settled = await runtime.wait("second", owner=_owner(), depth=0)
+        await runtime.release_wait("second", settled.claim)
+        assert settled.job.status == "cancelled"
+        assert (await runtime.lookup("first", owner=_owner(), depth=0)).status == "running"
+    finally:
+        failing = revoked = False
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_failed_detached_drain_reports_its_job(tmp_path: Path) -> None:
+    """A drain Stop leaves running reports its failure with the job it could not settle, which stays requested."""
+    release = asyncio.Event()
+    blocked = True
+
+    async def cleanup(_job: runtime_module.BackgroundJob) -> None:
+        await release.wait()
+        if blocked:
+            msg = "child still running"
+            raise runtime_module.JobRecoveryBlockedError(msg)
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def every_job(_job: runtime_module.BackgroundJob) -> bool:
+        return True
+
+    runtime = tool_job_runtime(tmp_path, cancel=cleanup)
+    try:
+        await start_job(runtime, "held", tool_name="tool", depth=0, adapter={}, owner=_owner(), operation=operation)
+        await runtime.stop_jobs(receipt_order=1, matches=every_job)
+        drain = runtime._entries["held"].drain
+        assert drain is not None
+        with capture_logs() as logs:
+            release.set()
+            await asyncio.gather(drain, return_exceptions=True)
+        assert [(entry["event"], entry["job_id"]) for entry in logs if entry["log_level"] == "error"] == [
+            ("Tool job cancellation drain failed", "held"),
+        ]
+        assert (await runtime.lookup("held", owner=_owner(), depth=0)).status == "cancel_requested"
+    finally:
+        release.set()
+        blocked = False
         await runtime.shutdown()

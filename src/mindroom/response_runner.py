@@ -145,10 +145,9 @@ from mindroom.tool_jobs.completion import (
     background_wait_notice,
     completion_envelope,
     completion_prompt,
-    parse_completion_event_id,
 )
 from mindroom.tool_jobs.control import HumanMessageSignal
-from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.runtime import get_background_runtime, parse_completion_event_id
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_jobs.user_stop import response_was_stopped, stop_conversation_jobs
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -3011,7 +3010,7 @@ class ResponseRunner:
             source_event_id,
             self.deps.runtime_paths,
             self.deps.agent_name,
-        ) or not await admit_job_completion(source_event_id, self.deps.runtime_paths):
+        ) or not await admit_job_completion(request.response_envelope, self.deps.runtime_paths):
             if request.on_no_response_handled is not None:
 
                 async def settle() -> None:

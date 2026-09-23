@@ -58,6 +58,7 @@ Job metadata stays in memory, while each generation's payload is a separate file
 A payload file is written before the metadata that references it, so a crash in between leaves the job running for recovery to interrupt.
 Consumed results remain for 30 days after the last acknowledged read, longer while response or approval ownership requires them.
 Expiry then deletes the job's files; its originating turn has finished, so the call cannot run again.
+A job stays while jobs started by a turn that delivered its outcome remain, so Stop can trace them through it to their human turn.
 Constructor identity is a digest, not a retained settings blob.
 
 Snapshots carry one schema version.

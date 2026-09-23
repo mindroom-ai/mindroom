@@ -9,6 +9,7 @@ import re
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 from weakref import WeakValueDictionary
@@ -34,7 +35,7 @@ from mindroom.tool_jobs.wait_timeout import validate_wait_timeout
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Iterable, Mapping
     from pathlib import Path
 
     from agno.tools.function import Function
@@ -60,6 +61,8 @@ _UNAVAILABLE = "Tool job is not available in this conversation."
 _JOB_SUMMARY_MAX_CHARS = 500
 _SNAPSHOT_SCHEMA_VERSION = 6
 _JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+# The internal source that delivers one job generation's outcome; parsing accepts exactly what the builder emits.
+_COMPLETION_EVENT_ID = re.compile(rf"tool-job:(?P<job_id>{_JOB_ID.pattern}):(?P<generation>0|[1-9][0-9]*)")
 _PAYLOAD_SUFFIX = ".result.json"
 # Consumed jobs are deleted this long after their last change, once their originating turn has finished.
 CONSUMED_RESULT_RETENTION = timedelta(days=30)
@@ -145,6 +148,21 @@ class JobClaim:
     nonce: str
 
 
+def _completion_source(job_id: str, generation: int) -> str:
+    return f"tool-job:{job_id}:{generation}"
+
+
+def completion_event_id(job: BackgroundJob) -> str:
+    """Name the internal source that delivers one job generation's outcome, stable across worker and process retries."""
+    return _completion_source(job.job_id, job.generation)
+
+
+def parse_completion_event_id(event_id: str) -> tuple[str, int] | None:
+    """Return the job ID and generation an internal completion source names, or None for any other event."""
+    match = _COMPLETION_EVENT_ID.fullmatch(event_id)
+    return None if match is None else (match["job_id"], int(match["generation"]))
+
+
 def _updated(job: BackgroundJob, **changes: object) -> BackgroundJob:
     """Return the next state of a job, stamped with its transition time."""
     return replace(job, **changes, updated_at=datetime.now(UTC).isoformat())
@@ -186,7 +204,9 @@ def read_job_snapshot(path: Path) -> BackgroundJob:
     if version != _SNAPSHOT_SCHEMA_VERSION:
         msg = f"Unsupported tool job snapshot {path} (schema_version={version}); remove it to continue."
         raise UnsupportedToolJobSnapshotError(msg)
-    if payload["job_id"] != path.stem:
+    if payload["job_id"] != path.stem or not all(
+        isinstance(payload.get(key), str | None) for key in ("source_event_id", "source_kind")
+    ):
         msg = "Invalid tool job snapshot."
         raise ValueError(msg)
     payload["owner"] = parse_tool_execution_identity_payload(payload["owner"], strict=True)
@@ -231,7 +251,8 @@ class _Entry:
     # That unsaved outcome's payload, kept only until a retried save writes its file.
     unsaved_payload: EncodedResultPayload | None = None
     stopped_outcome: BackgroundOutcome | None = None
-    # The one in-flight cancellation drain; every concurrent canceller awaits it.
+    # The one in-flight cancellation drain: `cancel` and `cancel_owned` await it, while Stop and revocation leave it
+    # running and only its logged failure reports it.
     drain: asyncio.Task[BackgroundJob] | None = None
 
     def notify_changed(self) -> None:
@@ -285,6 +306,12 @@ class _EntryIndex[Key]:
 
     def get(self, key: Key) -> list[_Entry]:
         return list(self.groups.get(key, {}).values())
+
+
+def _report_failed_drain(job_id: str, drain: asyncio.Task[BackgroundJob]) -> None:
+    """Log a drain no caller may await; its job stays for a later canceller, recovery, or shutdown to settle."""
+    if not drain.cancelled() and (error := drain.exception()) is not None:
+        logger.error("Tool job cancellation drain failed", job_id=job_id, exc_info=error)
 
 
 def get_background_runtime(runtime_paths: RuntimePaths) -> ToolJobRuntime | None:
@@ -816,16 +843,69 @@ class ToolJobRuntime:
         receipt_order: int,
         matches: Callable[[BackgroundJob], Awaitable[bool]],
     ) -> None:
-        """Persist explicit Stop independently of result consumption, then request owned cleanup."""
-        async with self._lock:
-            self._ensure_accepting()
-            for entry in self._entries.values():
-                if not await matches(await self._snapshot(entry, include_result=False)):
-                    continue
-                order = max(entry.job.user_stop_receipt_order or 0, receipt_order)
-                await self._publish(entry, _updated(entry.job, user_stop_receipt_order=order))
-                if entry.job.status not in TERMINAL_STATUSES:
-                    await self._request_cancel(entry)
+        """Persist explicit Stop independently of result consumption, then request owned cleanup.
+
+        `matches` may read the journal, so it judges snapshots outside the runtime lock.
+        A job whose generation changed while it was judged is judged again.
+        A job this Stop or a later one already marked is not rewritten.
+        During shutdown the mark is still saved, while shutdown itself settles execution; a closed runtime saves nothing.
+        One job's failure does not keep the others from stopping; the failures are raised together at the end.
+        """
+        pending: list[_Entry] | None = None
+        failures: list[Exception] = []
+        while pending is None or pending:
+            async with self._lock:
+                if self._closed:
+                    break
+                candidates = [
+                    (entry, await self._snapshot(entry, include_result=False))
+                    for entry in (self._entries.values() if pending is None else pending)
+                    if self._entries.get(entry.job.job_id) is entry and self._stop_applies(entry.job, receipt_order)
+                ]
+            selected = [(entry, job) for entry, job in candidates if await matches(job)]
+            async with self._lock:
+                if self._closed:
+                    break
+                current = [(entry, job) for entry, job in selected if self._entries.get(job.job_id) is entry]
+                pending = [entry for entry, job in current if entry.job.generation != job.generation]
+                failures += await self._isolated(
+                    (entry for entry, job in current if entry.job.generation == job.generation),
+                    partial(self._mark_stopped, receipt_order=receipt_order),
+                    "Tool job Stop failed",
+                )
+        if failures:
+            msg = "Tool job Stop failed"
+            raise ExceptionGroup(msg, failures)
+
+    @staticmethod
+    def _stop_applies(job: BackgroundJob, receipt_order: int) -> bool:
+        """Whether a Stop still changes a job: it has no mark this recent, or its execution has not ended."""
+        marked = job.user_stop_receipt_order
+        return marked is None or marked < receipt_order or job.status not in TERMINAL_STATUSES
+
+    async def _mark_stopped(self, entry: _Entry, *, receipt_order: int) -> None:
+        """Save a newer Stop mark, then request cleanup unless shutdown is already settling execution."""
+        marked = entry.job.user_stop_receipt_order
+        if marked is None or marked < receipt_order:
+            await self._publish(entry, _updated(entry.job, user_stop_receipt_order=receipt_order))
+        if self._shutdown_task is None and entry.job.status not in TERMINAL_STATUSES:
+            await self._request_cancel(entry)
+
+    @staticmethod
+    async def _isolated(
+        entries: Iterable[_Entry],
+        action: Callable[[_Entry], Awaitable[object]],
+        failure: str,
+    ) -> list[Exception]:
+        """Apply an action to each job, logging and returning failures so one job cannot block the rest."""
+        failures = []
+        for entry in entries:
+            try:
+                await action(entry)
+            except Exception as error:
+                logger.exception(failure, job_id=entry.job.job_id)
+                failures.append(error)
+        return failures
 
     async def is_user_stopped(self, job_id: str) -> bool:
         """Check suppression without confusing a read receipt with explicit user intent."""
@@ -858,7 +938,7 @@ class ToolJobRuntime:
         return await wait_for_future_until_complete(drain)
 
     async def cancel_revoked(self) -> None:
-        """Withdraw execution when current grants disappear, retaining owned cleanup."""
+        """Withdraw execution when current grants disappear, retaining owned cleanup; one failure blocks no other job."""
         async with self._lock:
             self._ensure_accepting()
             revoked = [
@@ -866,8 +946,10 @@ class ToolJobRuntime:
                 for entry in self._entries.values()
                 if entry.job.status not in TERMINAL_STATUSES and not self._authorize(entry.job)
             ]
-            for entry in revoked:
-                await self._request_cancel(entry)
+            failures = await self._isolated(revoked, self._request_cancel, "Tool job revocation failed")
+        if failures:
+            msg = "Tool job revocation failed"
+            raise ExceptionGroup(msg, failures)
 
     async def _request_cancel(self, entry: _Entry) -> asyncio.Task[BackgroundJob]:
         """Durably request cancellation and return its one drain; the caller holds the runtime lock."""
@@ -884,6 +966,7 @@ class ToolJobRuntime:
                     entry.task.cancel()
             if entry.drain is None:
                 entry.drain = asyncio.create_task(self._drain_cancel(entry), name=f"tool-job-cancel:{entry.job.job_id}")
+                entry.drain.add_done_callback(partial(_report_failed_drain, entry.job.job_id))
             return entry.drain
 
         # A cancelled caller cannot separate a durable request from stopping execution and starting its drain.
@@ -994,6 +1077,18 @@ class ToolJobRuntime:
                 if entry.job.status in READY_STATUSES and self._unconsumed(entry)
             ]
 
+    async def stoppable_jobs(self) -> list[BackgroundJob]:
+        """Return jobs a saved Stop could still change: live ones, and unconsumed outcomes no Stop has marked."""
+        async with self._lock:
+            if self._closed:
+                return []
+            return [
+                await self._snapshot(entry, include_result=False)
+                for entry in self._entries.values()
+                if entry.job.status not in TERMINAL_STATUSES
+                or (not entry.job.consumed and entry.job.user_stop_receipt_order is None)
+            ]
+
     async def outcome(self, job_id: str, generation: int) -> BackgroundJob | None:
         """Revalidate one unconsumed generation at its serialized response boundary."""
         async with self._lock:
@@ -1067,6 +1162,8 @@ class ToolJobRuntime:
         A claim is acknowledged only after the parent run saved a non-`None` result for the exact tool call.
         Agno executes a tool call again only when its saved result is `None`.
         `source_finished` refuses while an approval continuation is open for the job's session.
+        A job also stays while jobs started by a turn that delivered its outcome remain.
+        Stop traces those jobs through it to their human turn.
         """
         async with self._lock:
             if self._closed or self._shutdown_task is not None:
@@ -1074,11 +1171,7 @@ class ToolJobRuntime:
             candidates = [
                 await self._snapshot(entry, include_result=False)
                 for entry in self._entries.values()
-                if entry.job.status in TERMINAL_STATUSES
-                and entry.job.consumed
-                and entry.live_claim is None
-                and entry.saved
-                and datetime.fromisoformat(entry.job.updated_at) < before
+                if self._expirable(entry, before)
             ]
         for job in candidates:
             if not await source_finished(job):
@@ -1087,12 +1180,7 @@ class ToolJobRuntime:
                 if self._closed or self._shutdown_task is not None:
                     return
                 entry = self._entries.get(job.job_id)
-                if (
-                    entry is None
-                    or entry.live_claim is not None
-                    or entry.job.updated_at != job.updated_at
-                    or not entry.saved
-                ):
+                if entry is None or entry.job.updated_at != job.updated_at or not self._expirable(entry, before):
                     continue
                 files = [self._path(job.job_id)]
                 if entry.job.has_result_payload:
@@ -1100,6 +1188,20 @@ class ToolJobRuntime:
                 self._remove_entry(job.job_id)
                 # Metadata goes first, so a crash can leave only a payload, which recovery deletes.
                 await run_blocking_until_complete(_unlink_in_order, files)
+
+    def _expirable(self, entry: _Entry, before: datetime) -> bool:
+        job = entry.job
+        return (
+            job.status in TERMINAL_STATUSES
+            and job.consumed
+            and entry.live_claim is None
+            and entry.saved
+            and datetime.fromisoformat(job.updated_at) < before
+            and not any(
+                (job.owner.recipient, _completion_source(job.job_id, generation)) in self._by_source.groups
+                for generation in range(job.generation + 1)
+            )
+        )
 
     async def quiesce(self) -> None:
         """Drain owned execution while response finalizers retain result receipt access."""

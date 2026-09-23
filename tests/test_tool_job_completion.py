@@ -31,15 +31,15 @@ from mindroom.event_journal import (
     PrincipalStore,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.tool_jobs.completion import (
-    admit_job_completion,
-    completion_envelope,
-    completion_event,
+from mindroom.tool_jobs.completion import admit_job_completion, completion_envelope, completion_event
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.runtime import (
+    BackgroundJob,
+    BackgroundOutcome,
     completion_event_id,
     parse_completion_event_id,
+    register_background_runtime,
 )
-from mindroom.tool_jobs.instances import pin_background_tool_jobs
-from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
 from tests.response_runner_helpers import _target
@@ -88,7 +88,18 @@ def test_completion_event_id_names_exactly_one_job_generation() -> None:
     owner = ToolExecutionIdentity("matrix", "general", "@human:localhost", "!room:localhost", None, None, "session")
     job = BackgroundJob(job_id="job-1", owner=owner, tool_name="tool", depth=0, generation=3)
     assert parse_completion_event_id(completion_event_id(job)) == ("job-1", 3)
-    for event_id in ("$event:localhost", "tool-job:job-1", "tool-job:job-1:03", "tool-job:job-1:-1", "tool-job:a:b:1"):
+    for event_id in (
+        "$event:localhost",
+        "tool-job:job-1",
+        "tool-job:job-1:03",
+        "tool-job:job-1:-1",
+        "tool-job:a:b:1",
+        # Job IDs follow the runtime's grammar exactly, so these name no job.
+        "tool-job:$event:0",
+        "tool-job:-job:0",
+        "tool-job:job.1:0",
+        f"tool-job:{'a' * 129}:0",
+    ):
         assert parse_completion_event_id(event_id) is None
 
 
@@ -118,13 +129,31 @@ async def test_completion_requires_current_unconsumed_exact_claim(tmp_path: Path
         waited = await runtime.wait("job", owner=owner, depth=0)
         await runtime.release_wait("job", waited.claim)
         envelope = completion_envelope(waited.job, sender_id="@mindroom_general:localhost")
-        assert await admit_job_completion(envelope.source_event_id, paths)
-        assert not await admit_job_completion(completion_event_id(replace(waited.job, generation=999)), paths)
+        assert await admit_job_completion(envelope, paths)
+        stale = completion_envelope(replace(waited.job, generation=999), sender_id="@mindroom_general:localhost")
+        assert not await admit_job_completion(stale, paths)
         waited = await runtime.wait("job", owner=owner, depth=0)
         await runtime.acknowledge_wait("job", waited.claim)
-        assert not await admit_job_completion(envelope.source_event_id, paths)
+        assert not await admit_job_completion(envelope, paths)
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_human_turn_with_a_completion_shaped_source_is_admitted(tmp_path: Path, *, enabled: bool) -> None:
+    """Only a completion turn waits on its job; a human source ID that merely looks like one is admitted either way."""
+    paths = test_runtime_paths(tmp_path)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="tool-job:job:0")
+    runtime = tool_job_runtime(tmp_path) if enabled else None
+    pin_background_tool_jobs(Config(), paths)
+    if runtime is not None:
+        register_background_runtime(paths, runtime)
+    try:
+        assert await admit_job_completion(request.response_envelope, paths)
+    finally:
+        if runtime is not None:
+            await runtime.shutdown()
 
 
 @pytest.mark.asyncio

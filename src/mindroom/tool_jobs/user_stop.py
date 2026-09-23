@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 from mindroom.event_journal import EventKind
-from mindroom.handled_turns import TurnRecordCodec
-from mindroom.tool_jobs.completion import completion_event_id, parse_completion_event_id
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, get_background_runtime
+from mindroom.tool_jobs.runtime import (
+    TERMINAL_STATUSES,
+    completion_event_id,
+    get_background_runtime,
+    parse_completion_event_id,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import JournalEvent, PrincipalStore, TurnRecordStore
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
@@ -40,19 +44,25 @@ async def _reply_receipt_order(store: PrincipalStore, stopped: TurnRecord, stop_
     return max(orders) if orders else None
 
 
-async def _original_event(runtime: ToolJobRuntime, store: PrincipalStore, source: str) -> JournalEvent | None:
-    """Follow internal completion ancestry to its originating admitted turn."""
-    event = await store.load_event(source)
+async def _source_ancestry(runtime: ToolJobRuntime, store: PrincipalStore, source: str) -> list[JournalEvent]:
+    """Load a job's admitted source, then through each internal completion the turn that started the delivered job.
+
+    The last event is the originating human turn, unless the ancestry is broken and it is still a completion.
+    """
+    ancestry: list[JournalEvent] = []
     seen = {source}
-    while event is not None and event.kind is EventKind.TOOL_JOB_COMPLETION:
+    while (event := await store.load_event(source)) is not None:
+        ancestry.append(event)
+        if event.kind is not EventKind.TOOL_JOB_COMPLETION:
+            break
         # A settled event keeps no payload, so its identity is the only durable record of the job it delivered.
         completion = parse_completion_event_id(event.event_id)
         parent_source = runtime.source_event_id(completion[0]) if completion is not None else None
         if parent_source is None or parent_source in seen:
-            return None
+            break
         seen.add(parent_source)
-        event = await store.load_event(parent_source)
-    return event
+        source = parent_source
+    return ancestry
 
 
 async def stop_conversation_jobs(
@@ -82,12 +92,12 @@ async def stop_conversation_jobs(
             or job.source_event_id is None
         ):
             return False
-        event = await _original_event(runtime, store, job.source_event_id)
-        if event is None or event.receipt_order > cutoff:
+        ancestry = await _source_ancestry(runtime, store, job.source_event_id)
+        if not ancestry or ancestry[-1].kind is EventKind.TOOL_JOB_COMPLETION or ancestry[-1].receipt_order > cutoff:
             return False
         # Consumption can precede completion of the reply or its approval continuation.
         if job.consumed and job.status in TERMINAL_STATUSES:
-            for owned_source in (event.event_id, completion_event_id(job)):
+            for owned_source in (ancestry[-1].event_id, completion_event_id(job)):
                 if (
                     await store.is_pending(owned_source)
                     or await store.approval_continuation_for_source(owned_source) is not None
@@ -110,11 +120,23 @@ async def response_was_stopped(source_event_id: str, runtime_paths: RuntimePaths
     return completion is not None and await runtime.is_user_stopped(completion[0])
 
 
-async def restore_user_stops(runtime: ToolJobRuntime, store: PrincipalStore, turns: TurnRecordStore) -> None:
-    """Close a crash between the durable Stop intent and any individual job marker."""
-    for index, anchor, encoded in await turns.load_all():
-        if index != anchor:
+async def restore_user_stops(
+    runtime: ToolJobRuntime,
+    store: PrincipalStore,
+    turns: TurnRecordStore,
+    jobs: Sequence[BackgroundJob],
+) -> None:
+    """Apply Stops saved while the runtime could not receive them, reading only the turns that own these jobs.
+
+    Those are each job's source and, through completions, the turns behind it, so the cost follows the jobs.
+    """
+    stopped: dict[tuple[str, ...], tuple[TurnRecord, int]] = {}
+    for job in jobs:
+        if job.source_event_id is None:
             continue
-        stopped = TurnRecordCodec._from_ledger_record(index, json.loads(encoded))
-        if stopped is not None and stopped.user_stop_receipt_order is not None:
-            await stop_conversation_jobs(runtime, store, stopped, stop_receipt_order=stopped.user_stop_receipt_order)
+        for event in await _source_ancestry(runtime, store, job.source_event_id):
+            record = await turns.load(event.event_id)
+            if record is not None and record.user_stop_receipt_order is not None:
+                stopped.setdefault(record.source_event_ids, (record, record.user_stop_receipt_order))
+    for record, stop_receipt_order in stopped.values():
+        await stop_conversation_jobs(runtime, store, record, stop_receipt_order=stop_receipt_order)
