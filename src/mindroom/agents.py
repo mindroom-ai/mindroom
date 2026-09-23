@@ -1954,6 +1954,7 @@ def create_agent(
         store_history_messages=False,
         compress_tool_results=compress_tool_results,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
+        tool_call_limit=entity_view.max_tool_calls_per_turn,
         telemetry=False,
     )
     if history_policy.mode == "all":

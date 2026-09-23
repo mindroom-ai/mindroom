@@ -245,6 +245,7 @@ export interface Agent {
   num_history_messages?: number | null; // Max messages from history (mutually exclusive with num_history_runs)
   compress_tool_results?: boolean; // Compress tool results in history
   max_tool_calls_from_history?: number | null; // Max tool call messages replayed from history
+  max_tool_calls_per_turn?: number | null; // Max tool calls one turn may execute
   allow_self_config?: boolean; // Allow agent to modify its own configuration via a tool
 }
 
@@ -261,6 +262,7 @@ export interface Team {
   num_history_runs?: number | null; // Number of prior scoped runs to include as team history
   num_history_messages?: number | null; // Max team-scoped history messages (mutually exclusive with num_history_runs)
   max_tool_calls_from_history?: number | null; // Max tool call messages replayed from team history
+  max_tool_calls_per_turn?: number | null; // Max tool calls one turn may execute
 }
 
 export type TeamConfig = Omit<Team, "id" | "rooms"> & {
@@ -334,6 +336,7 @@ export interface Config {
     num_history_messages?: number | null;
     compress_tool_results?: boolean;
     max_tool_calls_from_history?: number | null;
+    max_tool_calls_per_turn?: number; // Default per-turn tool-call budget (500)
     allow_self_config?: boolean;
   };
   router: {

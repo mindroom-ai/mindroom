@@ -239,3 +239,42 @@ def test_unknown_entity_raises_on_field_access() -> None:
         _ = view.has_authored_compaction_config
     with pytest.raises(ValueError, match="Unknown entity: missing"):
         _ = view.model_name
+
+
+def test_max_tool_calls_per_turn_resolution() -> None:
+    config = Config(
+        agents={
+            "capped_agent": AgentConfig(display_name="Capped Agent", max_tool_calls_per_turn=40),
+            "inheriting_agent": AgentConfig(display_name="Inheriting Agent"),
+        },
+        teams={
+            "capped_team": TeamConfig(
+                display_name="Capped Team",
+                role="Team with a tool budget",
+                agents=["capped_agent"],
+                max_tool_calls_per_turn=12,
+            ),
+            "inheriting_team": TeamConfig(
+                display_name="Inheriting Team",
+                role="Team without a tool budget",
+                agents=["inheriting_agent"],
+            ),
+        },
+        defaults=DefaultsConfig(tools=[], max_tool_calls_per_turn=90),
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+
+    assert config.resolve_entity("capped_agent").max_tool_calls_per_turn == 40
+    assert config.resolve_entity("capped_team").max_tool_calls_per_turn == 12
+    for inheriting_scope in ("inheriting_agent", "inheriting_team", None):
+        assert config.resolve_entity(inheriting_scope).max_tool_calls_per_turn == 90
+    with pytest.raises(ValueError, match="Unknown entity: missing"):
+        _ = config.resolve_entity("missing").max_tool_calls_per_turn
+
+
+def test_max_tool_calls_per_turn_defaults_and_validation() -> None:
+    assert DefaultsConfig(tools=[]).max_tool_calls_per_turn == 500
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        DefaultsConfig(tools=[], max_tool_calls_per_turn=0)
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        AgentConfig(display_name="Broken", max_tool_calls_per_turn=0)

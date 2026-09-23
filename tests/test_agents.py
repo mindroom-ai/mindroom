@@ -5027,3 +5027,18 @@ def test_team_member_matches_solo_agent_construction() -> None:
         ]
     finally:
         close_team_runtime_state_dbs(agents=[solo, member], team_db=None)
+
+
+def test_create_agent_passes_resolved_tool_call_budget_to_agno() -> None:
+    """Every constructed agent is bounded by its resolved per-turn tool-call budget."""
+    from tests.conftest import runtime_paths_for  # noqa: PLC0415
+
+    config = _test_config()
+    runtime_paths = runtime_paths_for(config)
+    config.agents["calculator"].max_tool_calls_per_turn = 7
+
+    capped = create_agent("calculator", config, runtime_paths, execution_identity=None)
+    inheriting = create_agent("general", config, runtime_paths, execution_identity=None)
+
+    assert capped.tool_call_limit == 7
+    assert inheriting.tool_call_limit == config.defaults.max_tool_calls_per_turn == 500

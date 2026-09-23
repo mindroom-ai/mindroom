@@ -1688,6 +1688,7 @@ teams:
     num_history_runs: 8            # Optional: Team-scoped replay policy
     num_history_messages: null     # Optional: Mutually exclusive with num_history_runs
     max_tool_calls_from_history: 6 # Optional: Limit replayed tool call messages
+    max_tool_calls_per_turn: 200   # Optional: Tool calls one team turn may execute (default: defaults.max_tool_calls_per_turn)
     compaction:                    # Optional: Team-scoped required-compaction overrides
       # Soft thresholds do not compact by themselves while history still fits.
       enabled: true
@@ -1715,6 +1716,7 @@ defaults:
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files
+  max_tool_calls_per_turn: 500     # Default: 500 (tool calls one agent or team turn may execute; later calls return a tool error)
   tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
   show_stop_button: true           # Default: true (global only, cannot be overridden per-agent)
   auto_resume_after_restart: true # Default: true (resume eligible interrupted threads after startup or replacement)
@@ -2441,6 +2443,7 @@ agents:
     num_history_messages: null
     compress_tool_results: false
     max_tool_calls_from_history: null
+    max_tool_calls_per_turn: null
 
     # Required compaction is enabled by default.
     # Eligible models and history policies use native compaction at the threshold.
@@ -2489,6 +2492,7 @@ agents:
 | `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `false`). On Anthropic and Vertex Claude models, setting this to `true` can mutate replayed tool messages and invalidate prompt-cache prefixes |
 | `compaction` | object | `defaults.compaction` | Per-agent required-compaction overrides |
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
+| `max_tool_calls_per_turn` | int | `null` | Tool calls one turn may execute before further calls return a tool error (`null` = `defaults.max_tool_calls_per_turn`, 500) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Routed tools may still show generic worker warmup text such as `Preparing isolated worker...`, but that copy never includes tool identifiers or tool-trace metadata. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
 | `worker_scope` | string | `null` | How sandbox runtimes are shared for non-private agents. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` already defines the requester partition for that agent |
@@ -3129,6 +3133,7 @@ defaults:
     reserve_tokens: 16384
     timeout_seconds: 600
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
+  max_tool_calls_per_turn: 500         # Tool calls one agent or team turn may execute
   show_tool_calls: true                 # Show tool-call markers and trace metadata; hidden mode still allows generic worker warmup copy
   worker_tools: null                     # Tool names to route through workers (null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null                     # Worker runtime reuse for proxied tools (shared, user, user_agent)
@@ -3838,6 +3843,7 @@ teams:
     num_history_runs: 8
     num_history_messages: null
     max_tool_calls_from_history: 6
+    max_tool_calls_per_turn: 200
 
     # Team-scoped required-compaction overrides (optional)
     # Soft thresholds do not compact by themselves while history still fits.
@@ -3863,6 +3869,7 @@ teams:
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
 | `num_history_messages` | No | `defaults.num_history_messages` | Max messages from team-scoped history replayed into the next run |
 | `max_tool_calls_from_history` | No | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history |
+| `max_tool_calls_per_turn` | No | `defaults.max_tool_calls_per_turn` | Tool calls one team turn may execute before further calls return a tool error |
 | `compaction` | No | `defaults.compaction` | Team-scoped required-compaction overrides |
 
 Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.

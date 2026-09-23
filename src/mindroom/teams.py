@@ -2280,9 +2280,10 @@ def _create_team_instance(
         model,
         notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
     )
-    history_settings = config.resolve_entity(
+    team_scope = config.resolve_entity(
         configured_team_name if configured_team_name is not None and configured_team_name in config.teams else None,
-    ).history_settings
+    )
+    history_settings = team_scope.history_settings
     team_id = _resolve_team_instance_id(
         agents=agents,
         config=config,
@@ -2312,6 +2313,7 @@ def _create_team_instance(
         num_history_runs=history_settings.policy.num_history_runs,
         num_history_messages=history_settings.policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
+        tool_call_limit=team_scope.max_tool_calls_per_turn,
         store_history_messages=False,
         show_members_responses=True,
         additional_context=render_date_context(

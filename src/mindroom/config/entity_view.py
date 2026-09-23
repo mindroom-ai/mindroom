@@ -56,6 +56,13 @@ class ResolvedEntityView:
         return self._config._has_authored_entity_compaction_config(self.name)
 
     @property
+    def max_tool_calls_per_turn(self) -> int:
+        """Effective per-turn tool-call budget for this scope."""
+        if self.name is None:
+            return self._config.defaults.max_tool_calls_per_turn
+        return self._config._entity_max_tool_calls_per_turn(self.name)
+
+    @property
     def memory_backend(self) -> MemoryBackend:
         """Effective memory backend; every non-agent scope (team, router, defaults) inherits the global backend."""
         if self.name is None:

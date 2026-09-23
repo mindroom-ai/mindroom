@@ -374,6 +374,7 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
                     role="Test team",
                     agents=["alpha", "zeta"],
                     num_history_messages=2,
+                    max_tool_calls_per_turn=3,
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
@@ -420,6 +421,7 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
     assert team.num_history_messages == 2
     assert team.store_history_messages is False
     assert team.store_member_responses is False
+    assert team.tool_call_limit == 3
 
 
 def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None:
