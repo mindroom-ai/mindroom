@@ -1383,6 +1383,7 @@ def _load_agent_skills(
 
 @timed("system_prompt_assembly.agent_create.agent_init")
 def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
+    output_file_policy = cast("ToolOutputFilePolicy | None", agent_kwargs.pop("tool_output_file_policy", None))
     knowledge_sources = cast(
         "tuple[KnowledgeSourceDescription, ...]",
         agent_kwargs.pop("knowledge_sources", ()),
@@ -1395,6 +1396,7 @@ def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
     agent = Agent(**agent_kwargs)
     agent.knowledge_sources = knowledge_sources
     agent.tool_function_filter = tool_function_filter
+    agent.tool_output_file_policy = output_file_policy
     return agent
 
 
@@ -1558,6 +1560,11 @@ def _assemble_agent_toolkits(
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
         depth=delegation_depth,
         enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
+        output_file_policy=_agent_tool_output_file_policy(
+            agent_runtime,
+            runtime_paths,
+            config.defaults.tool_output_auto_save_threshold_bytes,
+        ),
     )
     return _AgentToolAssembly(
         tools=tools,
@@ -1977,6 +1984,11 @@ def create_agent(
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
+        tool_output_file_policy=_agent_tool_output_file_policy(
+            agent_runtime,
+            runtime_paths,
+            config.defaults.tool_output_auto_save_threshold_bytes,
+        ),
         tool_function_filter=tool_function_filter,
         search_knowledge=knowledge_enabled,
         add_history_to_context=persist_runtime_state,

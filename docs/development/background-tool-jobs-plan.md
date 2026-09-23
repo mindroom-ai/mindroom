@@ -969,3 +969,42 @@ The Agno boundary is documented alongside the existing compatibility inventory.
 
 The correction batch also removes redundant cleanup deduplication keys and explains native adapter identity sharing.
 Regression tests, repository hooks, and both reviewers' verification of the correction commit must pass before this review round is complete.
+
+### Output policy and explicit Stop (2026-09-21)
+
+User-approved contract: sending a follow-up releases tool waits while work continues.
+Pressing Stop cancels the visible reply and requests cancellation of this agent's outstanding managed work in the same conversation, including earlier turns.
+For a team response, this includes work owned by its member agents through that team transport.
+Other requesters, conversations, and newer response attempts remain unaffected.
+Stopped work must not later produce an automatic completion reply, including after restart.
+Cancellation remains truthful: synchronous threads and remote side effects can outlive the request and remain pending until execution and cleanup settle.
+The disabled feature keeps the existing response-only Stop behavior.
+
+The output changes reuse the existing workspace policy and its configurable 50 KiB default automatic-save threshold.
+Apply that policy to the reserved job tool and generated knowledge-search function, including native delegation result retrieval.
+Keep 500-character inspection summaries, the existing durable result limit, and compact expiry receipts.
+Keep shell excluded from generic waiting by default.
+
+Implementation checklist:
+
+- [x] Reproduce missing job redirection and oversized knowledge results through actual SDK dispatch.
+- [x] Add failing integration coverage for explicit and automatic output files, Unicode completeness, invalid destinations, native delegation retrieval, and the disabled knowledge path.
+- [x] Apply the shared policy at tool construction and native result retrieval; retain original callable identity through wrappers.
+- [x] Persist explicit Stop separately from durable result consumption and reuse existing cancellation ownership.
+- [x] Bound Stop to the clicked response's existing journal order so delayed or replayed reactions cannot cancel newer work.
+- [x] Reconcile durable Stop intent before restart completion delivery, including approval-owned continuations.
+- [x] Verify follow-ups, active waits, prior-turn jobs, completion races, newer turns, requester isolation, native approvals, restart, and unkillable synchronous work.
+- [x] Run live Matrix/model checks, repository hooks, and independent review of the final changes.
+
+Design review: the bounded Claude consultation returned no answer within 300 seconds; code inspection and independent native review established the implementation.
+The runtime retains cancellation ownership and a separate Stop receipt on each selected job.
+Existing journal receipts determine the source cutoff; internal completion work follows the originating job's source, so it does not masquerade as a newer human turn.
+The response owner cancels already-running completion replies and reconciles jobs again after the clicked reply drains.
+Startup applies saved Stop intents before registering completion delivery.
+
+Validation found and fixed gaps for streaming replies whose delivery attempt was not yet bound, completion replies already executing, work created by those completions, deleted placeholders, and approval/recovery responses attached to an older human source.
+Real-model Matrix checks with `codex/gpt-6-astra` verified byte-exact 26,000-byte job redirection, 130,000-byte automatic output saving, follow-up continuity, Stop during streaming, cancellation of both earlier and current jobs, restart without replay or later replies, and Stop during a blocking wait while preserving existing prose.
+Separate independent reviews approved the output-policy and Stop changes after the findings were fixed.
+Validation passed 735 focused tests and a further 128 shell/Stop regression cases, all applicable repository hooks, ten live output/Stop assertions, and six repeated live Stop assertions after the final lifecycle change.
+The shell checks retain full output-file capture and explicit tails; its default exclusion still rejects generic `wait_timeout` before execution.
+Unknown IDs remain unavailable; expired results already retain a distinct compact receipt, so no new retirement state is needed.

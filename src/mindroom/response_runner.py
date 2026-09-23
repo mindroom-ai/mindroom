@@ -141,6 +141,7 @@ from mindroom.tool_jobs.completion import (
 from mindroom.tool_jobs.control import HumanMessageSignal
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
+from mindroom.tool_jobs.user_stop import response_was_stopped, stop_conversation_jobs
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
@@ -2446,6 +2447,31 @@ class ResponseRunner:
             return False
         return True if await self._approval_responses.settle_failure(failing, "cancelled_by_user") else None
 
+    async def stop_user_jobs(self, stopped: TurnRecord, stop_receipt_order: int) -> None:
+        """Apply the saved human intent even when the visible Stop has already settled."""
+        if not background_tool_jobs_enabled(self.deps.runtime.config, self.deps.runtime_paths):
+            return
+        runtime = get_background_runtime(self.deps.runtime_paths)
+        if runtime is not None:
+            await stop_conversation_jobs(
+                runtime,
+                self.deps.approval_store,
+                stopped,
+                stop_receipt_order=stop_receipt_order,
+            )
+            for task, ownership in tuple(self._inbox_response_tasks.items()):
+                if task.done() or task.cancelling():
+                    continue
+                for source in ownership.source_event_ids:
+                    if await response_was_stopped(
+                        source,
+                        self.deps.approval_store,
+                        self.deps.runtime_paths,
+                        self.deps.agent_name,
+                    ):
+                        self.deps.stop_manager.request_task_stop(task)
+                        break
+
     async def finalize_user_stop(
         self,
         message_id: str,
@@ -2686,6 +2712,18 @@ class ResponseRunner:
             if owned is None or owned.state != "ready":
                 return event_id
         while True:
+            if await response_was_stopped(
+                request.response_envelope.source_event_id,
+                self.deps.approval_store,
+                self.deps.runtime_paths,
+                self.deps.agent_name,
+            ):
+                settled = await self._settle_user_stopped_approval(
+                    response_event_id=owned.response_event_id or "",
+                    source_event_id=request.response_envelope.source_event_id,
+                    target=target,
+                )
+                return owned.response_event_id if settled else None
             self.deps.logger.info(
                 "response_source_owned_by_approval_continuation",
                 source_event_id=request.response_envelope.source_event_id,
@@ -2737,7 +2775,12 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
         """Admit internal outcomes and bind wait progress to the ordinary response owner."""
-        if not await admit_job_completion(
+        if await response_was_stopped(
+            request.response_envelope.source_event_id,
+            self.deps.approval_store,
+            self.deps.runtime_paths,
+            self.deps.agent_name,
+        ) or not await admit_job_completion(
             request.response_envelope,
             target=target,
             runtime_paths=self.deps.runtime_paths,

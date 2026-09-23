@@ -1406,6 +1406,24 @@ class PrincipalStore:
             ),
         )
 
+    async def response_receipt_order_before_stop(
+        self,
+        *,
+        room_id: str,
+        response_event_id: str,
+        stop_receipt_order: int,
+    ) -> int | None:
+        """Resolve the clicked reply's source cutoff without stopping newer replies."""
+        return await self._backend.read(
+            lambda transaction: response_attempts.response_receipt_order_before_stop(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                response_event_id=response_event_id,
+                stop_receipt_order=stop_receipt_order,
+            ),
+        )
+
     async def edited_approval_sources_for_user_stop(
         self,
         *,

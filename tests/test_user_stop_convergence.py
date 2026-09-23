@@ -50,6 +50,9 @@ class _SerializingRunner:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     cancel_requests: int = 0
 
+    async def stop_user_jobs(self, stopped: TurnRecord, stop_receipt_order: int) -> None:
+        """These response-only convergence tests have no job runtime."""
+
     async def finalize_user_stop(
         self,
         message_id: str,

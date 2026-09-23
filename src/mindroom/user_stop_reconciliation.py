@@ -76,6 +76,8 @@ class UserStopReconciler:
     ) -> bool:
         async with self.deps.delivery_gateway.user_stop_scope(response_event_id) as deleted_turn_id:
             stopped = await self._record(response_event_id, stop_receipt_order, deleted_turn_id=deleted_turn_id)
+            # Cancellation has drained the reply; include any admission that raced the first pass.
+            await self.deps.response_runner.stop_user_jobs(stopped, stop_receipt_order)
             newer_edit_exists = (stopped.latest_edit_receipt_order or 0) > stop_receipt_order
             if not self._is_settled(stopped, stop_receipt_order):
                 if (
@@ -115,6 +117,7 @@ class UserStopReconciler:
             msg = f"User-stopped response {response_event_id!r} has no durable conversation target"
             raise RuntimeError(msg)
         source_event_id = stopped_turn.indexed_event_ids[0]
+        await self.deps.response_runner.stop_user_jobs(stopped_turn, stop_receipt_order)
         stopped = await self.deps.response_runner.finalize_user_stop(
             response_event_id,
             source_event_id,

@@ -874,7 +874,20 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
             model = args.get("model") if tool.tool_name == "run_subagent" else None
             previous_child = None
             background_job = None
+            retrieval_output = None
             if tool.tool_name == "job":
+                prepared_retrieval = _prepare_delegation_output(
+                    caller,
+                    config,
+                    runtime_paths,
+                    caller_identity,
+                    args.get(OUTPUT_PATH_ARGUMENT),
+                    tool_name="job",
+                )
+                if isinstance(prepared_retrieval, dict):
+                    resolve_result(json.dumps(prepared_retrieval))
+                    continue
+                retrieval_output = prepared_retrieval
                 job_id = args.get("job_id")
                 if background is None or not isinstance(job_id, str):
                     resolve_result("Cannot wait: a managed Matrix job and string job_id are required.")
@@ -1167,7 +1180,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 subagent_id=child.subagent_id,
                                 delivery_queued=waited.delivery_queued,
                             )
-                            result = resolve_result(result, output_request=None)
+                            result = resolve_result(result, output_request=retrieval_output)
                             state.children = [
                                 item for item in state.children if item.delegation_id != child.delegation_id
                             ]

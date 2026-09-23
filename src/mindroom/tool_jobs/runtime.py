@@ -101,6 +101,7 @@ class BackgroundJob:
     generation: int = 0
     wait_acknowledged: bool = False
     result_expired: bool = False
+    user_stop_receipt_order: int | None = None
 
 
 def read_job_snapshot(path: Path) -> BackgroundJob:
@@ -250,6 +251,12 @@ class ToolJobRuntime:
     def has_job(self, job_id: str) -> bool:
         """Recognize accepted ownership; access still requires an authorized lookup."""
         return job_id in self._entries
+
+    def source_event_id(self, job_id: str) -> str | None:
+        """Read accepted provenance for internal Stop ancestry without acquiring the admission lock."""
+        entry = self._entries.get(job_id)
+        source = entry.job.adapter.get("source_event_id") if entry is not None else None
+        return source if isinstance(source, str) else None
 
     def _entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> _Entry:
         self._ensure_open()
@@ -487,7 +494,7 @@ class ToolJobRuntime:
             return await self._snapshot(entry)
 
     def _index_consumption(self, entry: _Entry) -> None:
-        if entry.job.wait_acknowledged:
+        if entry.job.wait_acknowledged or entry.job.user_stop_receipt_order is not None:
             self._unacknowledged.discard(entry.job.job_id)
         else:
             self._unacknowledged.add(entry.job.job_id)
@@ -636,6 +643,10 @@ class ToolJobRuntime:
             task = self._cancellation_task(entry)
         if await_completion:
             return await wait_for_future_until_complete(task)
+        return await self._cancel_admitted(entry, task)
+
+    async def _cancel_admitted(self, entry: _Entry, task: asyncio.Task[BackgroundJob]) -> BackgroundJob:
+        """Wait for durable admission without waiting for uncooperative execution to drain."""
         admitted = asyncio.create_task(entry.cancel_ready.wait())
         try:
             await asyncio.wait({task, admitted}, return_when=asyncio.FIRST_COMPLETED)
@@ -646,6 +657,47 @@ class ToolJobRuntime:
         finally:
             admitted.cancel()
             await asyncio.gather(admitted, return_exceptions=True)
+
+    async def stop_jobs(
+        self,
+        *,
+        receipt_order: int,
+        matches: Callable[[BackgroundJob], Awaitable[bool]],
+    ) -> None:
+        """Persist explicit Stop independently of result consumption, then request owned cleanup."""
+        cancellations = []
+        async with self._lock:
+            self._ensure_open()
+            for entry in self._entries.values():
+                if not await matches(await self._snapshot(entry, include_result=False)):
+                    continue
+                if entry.cold:
+                    entry.job = await self._snapshot(entry)
+                    entry.cold = False
+                entry.job.user_stop_receipt_order = max(entry.job.user_stop_receipt_order or 0, receipt_order)
+                await self._persist(entry)
+                if entry.job.status not in _TERMINAL:
+                    cancellations.append((entry, self._cancellation_task(entry)))
+                else:
+                    self._cool(entry)
+        for entry, task in cancellations:
+            await self._cancel_admitted(entry, task)
+
+    async def is_user_stopped(self, job_id: str) -> bool:
+        """Check suppression without confusing a read receipt with explicit user intent."""
+        async with self._lock:
+            entry = self._entries.get(job_id)
+            return entry is not None and entry.job.user_stop_receipt_order is not None
+
+    async def is_source_user_stopped(self, source_event_id: str, transport_agent_name: str) -> bool:
+        """Recognize a stopped original response, including foreground approval recovery."""
+        async with self._lock:
+            return any(
+                entry.job.user_stop_receipt_order is not None
+                and entry.job.adapter.get("source_event_id") == source_event_id
+                and (entry.job.owner.transport_agent_name or entry.job.owner.agent_name) == transport_agent_name
+                for entry in self._entries.values()
+            )
 
     async def cancel_owned(
         self,
@@ -761,7 +813,7 @@ class ToolJobRuntime:
         """Continue the same job after its native approval has been resolved."""
         async with self._lock:
             entry = self._entry(job_id, owner, depth)
-            if entry.job.status != "awaiting_approval" or self._closed:
+            if entry.job.status != "awaiting_approval" or entry.job.user_stop_receipt_order is not None or self._closed:
                 msg = "Tool job is not awaiting approval continuation."
                 raise ValueError(msg)
             previous = deepcopy(entry.job)
@@ -782,7 +834,12 @@ class ToolJobRuntime:
             return await self._snapshot(entry)
 
     def _unconsumed(self, entry: _Entry) -> bool:
-        return not entry.job.wait_acknowledged and entry.wait_token is None and self._allowed(entry.job)
+        return (
+            not entry.job.wait_acknowledged
+            and entry.job.user_stop_receipt_order is None
+            and entry.wait_token is None
+            and self._allowed(entry.job)
+        )
 
     async def pending_outcomes(self) -> list[BackgroundJob]:
         """Return authorized ready generations that have no durable consumer receipt."""

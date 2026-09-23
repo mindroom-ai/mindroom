@@ -157,6 +157,7 @@ depends_on = [
     "mindroom.turn_record",
 ]
 visibility = [
+    "mindroom.tool_jobs.user_stop",
     "mindroom.event_journal.legacy_response_attempts",
     "mindroom.approval_recovery",
     "mindroom.agent_reply_membership_sync",
@@ -533,7 +534,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.agent_knowledge_descriptions"
-depends_on = ["mindroom.knowledge_source_descriptions"]
+depends_on = ["mindroom.knowledge_source_descriptions", "mindroom.tool_system.output_files"]
 visibility = ["mindroom.agents"]
 
 [[modules]]
@@ -2203,6 +2204,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.tool_jobs.user_stop",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
     "mindroom.ai_runtime",
@@ -6745,6 +6747,7 @@ depends_on = [
     "mindroom.tool_jobs.resources",
 ]
 visibility = [
+    "mindroom.tool_jobs.user_stop",
     "mindroom.delegation.background",
     "mindroom.delegation.recovery",
     "mindroom.response_runner",
@@ -6775,6 +6778,7 @@ visibility = [
 [[modules]]
 path = "mindroom.orchestration.tool_job_runtime"
 depends_on = [
+    "mindroom.tool_jobs.user_stop",
     "mindroom.delegation.storage",
     "mindroom.tool_jobs.provenance",
     "mindroom.tool_jobs.runtime",
@@ -6913,7 +6917,7 @@ visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.read_worker"
 
 [[modules]]
 path = "mindroom.custom_tools.job"
-depends_on = ["mindroom.tool_jobs.consumption", "mindroom.tool_system.runtime_context", "mindroom.tool_jobs.runtime"]
+depends_on = ["mindroom.tool_jobs.consumption", "mindroom.tool_system.runtime_context", "mindroom.tool_jobs.runtime", "mindroom.tool_system.declarations", "mindroom.tool_system.output_files"]
 
 visibility = [
     "mindroom.agents",
@@ -6949,6 +6953,7 @@ depends_on = [
 ]
 
 visibility = [
+    "mindroom.tool_jobs.user_stop",
     "mindroom.ai",
     "mindroom.approval_execution",
     "mindroom.teams",
@@ -7088,3 +7093,13 @@ visibility = ["mindroom.tools.moviepy_video_tools"]
 [[interfaces]]
 from = ["mindroom.custom_tools.agno_compat_moviepy"]
 expose = ["MindRoomMoviePyVideoTools"]
+
+[[modules]]
+path = "mindroom.tool_jobs.user_stop"
+depends_on = [
+    "mindroom.event_journal",
+    "mindroom.handled_turns",
+    "mindroom.tool_jobs.completion",
+    "mindroom.tool_jobs.runtime",
+]
+visibility = ["mindroom.response_runner", "mindroom.orchestration.tool_job_runtime"]

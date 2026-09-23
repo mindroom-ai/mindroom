@@ -11698,7 +11698,14 @@ Negative, nonnumeric, boolean, and nonfinite waiting budgets are rejected before
 A human follow-up releases the foreground wait without pausing or cancelling the accepted work.
 The same execution continues across subsequent parent turns, and its result remains discoverable if compaction loses the handle.
 
-The automatically added `job(action, job_id=None, limit=20, offset=0, wait_timeout=None)` function manages ordinary tools and native delegation.
+Pressing **Stop** cancels the reply and requests cancellation of this agent's outstanding managed jobs in the same conversation, including jobs from earlier follow-ups.
+It also stops automatic replies and further managed work originating from those jobs; a restart does not resume them.
+Jobs belonging to other requesters, conversations, agents, or newer human turns remain unaffected.
+An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
+Saved results remain available for explicit inspection or retrieval.
+Toolkits excluded from managed jobs, including shell by default, retain their own cancellation controls.
+
+The automatically added `job(action, job_id=None, limit=20, offset=0, wait_timeout=None, mindroom_output_path=None)` function manages ordinary tools and native delegation.
 The management function never backgrounds itself.
 Enabling background jobs reserves the function name `job`; custom and plugin tools must use another function name.
 
@@ -11722,6 +11729,9 @@ Native delegation also rechecks the saved caller and child storage bindings; cha
 Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.
 The accepted output path survives approval recovery and is revalidated before resumed execution; retrieving a completed result only reads its saved receipt.
 Run IDs do not define ownership, so `job(action="list")` can rediscover handles after compaction, later turns, and runtime restart.
+For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result, while `inspect` saves its bounded summary.
+Large supported results use the same configured automatic file-saving policy as other tools; this also covers SDK-generated knowledge search.
+Redirecting a stored result does not rerun the original tool or change its saved output.
 A team must route management through the member that started the job; a leader cannot read another member's jobs directly.
 Still-authorized deferred tools remain discoverable without loading them or connecting to remote services.
 Removing a toolkit, changing its execution scope or provenance, or excluding a function revokes access.

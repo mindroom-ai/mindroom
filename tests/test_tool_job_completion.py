@@ -114,7 +114,12 @@ async def test_completion_requires_current_unconsumed_exact_claim(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_consumed_completion_resumes_its_owned_approval_continuation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("user_stopped", [False, True])
+async def test_consumed_completion_resumes_its_owned_approval_continuation(  # noqa: PLR0915
+    tmp_path: Path,
+    *,
+    user_stopped: bool,
+) -> None:
     """A consumed job notice still dispatches the ready continuation that owns it."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -201,8 +206,19 @@ async def test_consumed_completion_resumes_its_owned_approval_continuation(tmp_p
         )
         duplicate_response = AsyncMock(return_value="$duplicate")
         resume_continuation = AsyncMock(return_value="$waiting")
+        stop_approval = AsyncMock(return_value=True)
 
-        with patch.object(runner, "_run_owned_approval_continuation", new=resume_continuation):
+        if user_stopped:
+
+            async def selected(_job: object) -> bool:
+                return True
+
+            await runtime.stop_jobs(receipt_order=10, matches=selected)
+
+        with (
+            patch.object(runner, "_run_owned_approval_continuation", new=resume_continuation),
+            patch.object(runner, "_settle_user_stopped_approval", new=stop_approval),
+        ):
             event_id = await runner._run_locked_response_lifecycle(
                 request,
                 response_kind="test",
@@ -212,6 +228,10 @@ async def test_consumed_completion_resumes_its_owned_approval_continuation(tmp_p
 
         assert event_id == "$waiting"
         duplicate_response.assert_not_awaited()
+        if user_stopped:
+            resume_continuation.assert_not_awaited()
+            stop_approval.assert_awaited_once()
+            return
         resume_continuation.assert_awaited_once()
         claimed = resume_continuation.await_args.args[0]
         assert claimed.state == "claimed"

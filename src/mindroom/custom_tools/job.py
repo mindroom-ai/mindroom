@@ -11,6 +11,8 @@ from agno.tools import Toolkit
 
 from mindroom.tool_jobs.consumption import consume_tool_job
 from mindroom.tool_jobs.runtime import JOB_SUMMARY_MAX_CHARS, JobAccessError, get_background_runtime
+from mindroom.tool_system.declarations import tool_schema_source
+from mindroom.tool_system.output_files import wrap_toolkit_for_output_files
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -18,17 +20,25 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_jobs.runtime import BackgroundJob
+    from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+def _job_toolkit(function: Function) -> JobTools | None:
+    """Resolve the reserved owner through SDK and MindRoom output wrappers."""
+    entrypoint = tool_schema_source(inspect.unwrap(function.entrypoint)) if function.entrypoint is not None else None
+    if (
+        inspect.ismethod(entrypoint)
+        and isinstance(entrypoint.__self__, JobTools)
+        and entrypoint.__func__ is JobTools.job
+    ):
+        return entrypoint.__self__
+    return None
 
 
 def is_job_function(function: Function) -> bool:
     """Recognize the reserved implementation, never an unrelated same-named plugin."""
-    entrypoint = inspect.unwrap(function.entrypoint) if function.entrypoint is not None else None
-    return (
-        inspect.ismethod(entrypoint)
-        and isinstance(entrypoint.__self__, JobTools)
-        and entrypoint.__func__ is JobTools.job
-    )
+    return _job_toolkit(function) is not None
 
 
 def _summary(job: BackgroundJob) -> dict[str, Any]:
@@ -68,6 +78,7 @@ class JobTools(Toolkit):
         *,
         depth: int,
         enabled: bool,
+        output_file_policy: ToolOutputFilePolicy | None = None,
     ) -> None:
         """Install the reserved function once after rejecting authored collisions."""
         if owner is None or owner.channel != "matrix" or get_background_runtime(runtime_paths) is None:
@@ -76,7 +87,7 @@ class JobTools(Toolkit):
             msg = "Tool function name job is reserved for managed job controls"
             raise ValueError(msg)
         if enabled:
-            tools.append(JobTools(runtime_paths, owner, depth=depth))
+            tools.append(wrap_toolkit_for_output_files(JobTools(runtime_paths, owner, depth=depth), output_file_policy))
 
     def caller_identity(self) -> ToolExecutionIdentity:
         """Keep the original execution owner with the current conversation session."""
@@ -157,16 +168,14 @@ class JobTools(Toolkit):
 
 async def project_native_job_wait(call: FunctionCall, *, depth: int) -> None:
     """Project only the reserved native wait into the persisted approval driver."""
-    if not is_job_function(call.function) or (call.arguments or {}).get("action") != "wait":
+    toolkit = _job_toolkit(call.function)
+    if toolkit is None or (call.arguments or {}).get("action") != "wait":
         return
     context = get_tool_runtime_context()
     runtime = get_background_runtime(context.runtime_paths) if context is not None else None
     job_id = (call.arguments or {}).get("job_id")
     if runtime is None or not isinstance(job_id, str):
         return
-    assert call.function.entrypoint is not None
-    entrypoint = inspect.unwrap(call.function.entrypoint)
-    toolkit = entrypoint.__self__
     try:
         job = await runtime.lookup(job_id, owner=toolkit.caller_identity(), depth=depth)
     except JobAccessError:

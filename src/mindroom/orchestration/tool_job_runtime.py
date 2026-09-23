@@ -30,6 +30,7 @@ from mindroom.tool_jobs.runtime import (
     register_background_runtime,
 )
 from mindroom.tool_jobs.settings import pin_background_tool_jobs, release_background_tool_jobs
+from mindroom.tool_jobs.user_stop import restore_user_stops
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -229,6 +230,15 @@ class ToolJobRuntimeCoordinator:
                 if error is not None:
                     logger.error("Tool job completion worker stopped; restarting", error=str(error))
             await self.runtime.recover()
+            if self._journal is not None:
+                for entity_name in (*config.agents, *config.teams):
+                    bot = self.bot_provider(entity_name)
+                    if bot is not None:
+                        await restore_user_stops(
+                            self.runtime,
+                            self._journal.principal(bot._journal_principal_id),
+                            self._journal.turn_records(entity_name),
+                        )
             register_background_runtime(self.runtime_paths, self.runtime)
             set_execution_authorizer(self.runtime_paths, self._authorize_execution)
             self._task = asyncio.create_task(self._run(), name="tool_job_completion_worker")
