@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from fastapi import HTTPException
 from jsonschema import Draft202012Validator
@@ -21,7 +23,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
-from mindroom.logging_config import get_logger
+from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.mcp_gateway.execution import ExecutionLease, execution_scope
 from mindroom.mcp_gateway.types import (
     GATEWAY_AGENT_NAME_LIMIT,
@@ -286,11 +288,26 @@ class GatewayServer:
         return request, (principal, type(context.request_id), context.request_id)
 
     async def _handle_call_request(self, request: types.CallToolRequest) -> types.ServerResult:
-        result = await self._call_tool(request.params.name, request.params.arguments or {})
-        identity = self._request_identity()
-        if not result.isError and self._record_activity is not None and identity is not None:
-            await self._record_activity(identity[0])
-        return types.ServerResult(result)
+        started = time.monotonic()
+        name = request.params.name
+        # Client-controlled names, arguments, IDs, and error messages are not log fields.
+        operation = name if name in {"search_tools", "get_tool", "invoke_tool"} else "unknown"
+        with bound_log_context(operation=operation):
+            result = await self._call_tool(name, request.params.arguments or {})
+            error = (result.structuredContent or {}).get("error")
+            code = error.get("code") if isinstance(error, dict) else None
+            error_code = code if isinstance(code, str) and code in GatewayErrorCode else "unknown"
+            log = logger.warning if result.isError else logger.info
+            log(
+                "mcp_gateway_call_completed",
+                outcome="error" if result.isError else "success",
+                error_code=error_code if result.isError else None,
+                duration_ms=round((time.monotonic() - started) * 1000, 2),
+            )
+            identity = self._request_identity()
+            if not result.isError and self._record_activity is not None and identity is not None:
+                await self._record_activity(identity[0])
+            return types.ServerResult(result)
 
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:  # noqa: PLR0911
         if name not in {"search_tools", "get_tool", "invoke_tool"}:
@@ -364,6 +381,30 @@ class GatewayServer:
         return Response(status_code=202)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Correlate transport and dispatch diagnostics without trusting client IDs."""
+        started = time.monotonic()
+        status_code: int | None = None
+
+        async def observed_send(message: Message) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+            await send(message)
+
+        with bound_log_context(request_id=uuid4().hex):
+            try:
+                await self._handle_http_request(scope, receive, observed_send)
+            finally:
+                principal = scope.get(_PRINCIPAL_SCOPE_KEY)
+                log = logger.warning if status_code is None or status_code >= 400 else logger.info
+                log(
+                    "mcp_gateway_http_completed",
+                    status_code=status_code,
+                    requester_id=principal.requester_id if isinstance(principal, GatewayPrincipal) else None,
+                    duration_ms=round((time.monotonic() - started) * 1000, 2),
+                )
+
+    async def _handle_http_request(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Validate each request before it enters the SDK's stateless transport."""
         request = Request(scope, receive)
 
@@ -409,4 +450,5 @@ class GatewayServer:
         except TimeoutError:
             await JSONResponse({"error": "request_timeout"}, status_code=408)(scope, receive, private_send)
             return
-        await self._manager.handle_request(scope, replay_gateway_body(body, receive), private_send)
+        with bound_log_context(requester_id=principal.requester_id):
+            await self._manager.handle_request(scope, replay_gateway_body(body, receive), private_send)
