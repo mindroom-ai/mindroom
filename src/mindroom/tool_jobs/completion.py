@@ -156,7 +156,8 @@ async def admit_job_completion(envelope: MessageEnvelope, runtime_paths: Runtime
     if runtime is None:
         msg = "Tool job runtime is not ready for completion admission"
         raise RuntimeError(msg)
-    return await runtime.outcome(*completion) is not None
+    job_id, generation = completion
+    return await runtime.outcome(job_id, generation, source_event_id=envelope.source_event_id) is not None
 
 
 @dataclass(frozen=True)

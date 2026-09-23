@@ -332,22 +332,23 @@ class ToolJobRuntimeCoordinator:
 
         async def source_finished(job: BackgroundJob) -> bool:
             entity = job.owner.recipient
-            source = job.source_event_id
-            if source is None or (entity, job.owner.session_id) in protected_sessions:
+            if job.source_event_id is None or (entity, job.owner.session_id) in protected_sessions:
                 return False
-            key = (entity, source)
-            if key not in finished:
-                record = await journal.turn_records(entity).load(source)
-                if record is not None:
-                    finished[key] = record.completed
-                elif (bot := self.bot_provider(entity)) is not None:
-                    principal = bot.journal_principal()
-                    finished[key] = await principal.load_event(source) is not None and not await principal.is_pending(
-                        source,
-                    )
-                else:
-                    finished[key] = False
-            return finished[key]
+            # The reply that consumed the outcome may still need it to recover, like the turn that started the job.
+            sources = {source for source in (job.source_event_id, job.consuming_source) if source is not None}
+            for source in sources:
+                key = (entity, source)
+                if key not in finished:
+                    record = await journal.turn_records(entity).load(source)
+                    if record is not None:
+                        finished[key] = record.completed
+                    elif (bot := self.bot_provider(entity)) is not None:
+                        principal = bot.journal_principal()
+                        admitted = await principal.load_event(source)
+                        finished[key] = admitted is not None and not await principal.is_pending(source)
+                    else:
+                        finished[key] = False
+            return all(finished[(entity, source)] for source in sources)
 
         await self.runtime.expire_consumed(
             before=datetime.now(UTC) - CONSUMED_RESULT_RETENTION,

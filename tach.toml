@@ -7691,6 +7691,7 @@ depends_on = [
     "mindroom.agent_storage",
     "mindroom.tool_jobs.agno_compat_functions",
     "mindroom.tool_jobs.results",
+    "mindroom.tool_system.runtime_context",
 ]
 visibility = [
     "mindroom.approval_execution",

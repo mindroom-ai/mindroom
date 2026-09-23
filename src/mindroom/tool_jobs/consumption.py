@@ -17,6 +17,7 @@ from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.agno_compat_functions import function_actor, function_agent, function_run_context
 from mindroom.tool_jobs.results import read_result_payload
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -39,6 +40,8 @@ class _Consumption:
     run_id: str
     team: bool
     call_id: str
+    # The admitted turn whose reply consumes the result; recovery of that unfinished reply may still read it.
+    source_event_id: str | None
 
     def saved(self, storage: BaseDb) -> bool:
         """Find the exact tool call, finished with a result, in the saved parent run of the calling agent or team."""
@@ -66,7 +69,9 @@ class ConsumptionOwner:
             msg = "Tool result consumption requires a concrete agent or team"
             raise ValueError(msg)
         team = function_agent(call.function) is None
-        self._claims.append(_Consumption(runtime, job_id, claim, context.run_id, team, call.call_id))
+        tool_context = get_tool_runtime_context()
+        source = tool_context.membership_turn_id if tool_context is not None else None
+        self._claims.append(_Consumption(runtime, job_id, claim, context.run_id, team, call.call_id, source))
 
     async def finalize(self) -> None:
         """Acknowledge exact saved rows; release missing, failed, or unsaved evidence."""
@@ -78,7 +83,11 @@ class ConsumptionOwner:
                     consumption.saved,
                 )
                 if saved:
-                    await consumption.runtime.acknowledge_wait(consumption.job_id, consumption.claim)
+                    await consumption.runtime.acknowledge_wait(
+                        consumption.job_id,
+                        consumption.claim,
+                        source_event_id=consumption.source_event_id,
+                    )
             except Exception:
                 logger.warning(
                     "Tool result persistence was not confirmed",

@@ -120,8 +120,9 @@ class BackgroundJob:
     payload_generation: int | None = None
     approval_state: dict[str, Any] = field(default_factory=dict)
     generation: int = 0
-    # The generation whose outcome a parent run saved as its tool result.
+    # The generation whose outcome a parent run saved as its tool result, and the admitted turn that first saved it.
     consumed_generation: int | None = None
+    consumed_by_source: str | None = None
     user_stop_receipt_order: int | None = None
 
     @property
@@ -133,6 +134,11 @@ class BackgroundJob:
     def consumed(self) -> bool:
         """Whether a parent run saved the current generation's outcome; a newer generation starts unconsumed."""
         return self.consumed_generation == self.generation
+
+    @property
+    def consuming_source(self) -> str | None:
+        """The admitted turn whose saved run first consumed the current generation's outcome."""
+        return self.consumed_by_source if self.consumed else None
 
 
 @dataclass(frozen=True)
@@ -695,7 +701,9 @@ class ToolJobRuntime:
 
         await run_coroutine_until_complete(release())
 
-    async def acknowledge_wait(self, job_id: str, claim: JobClaim | None) -> None:
+    async def acknowledge_wait(
+        self, job_id: str, claim: JobClaim | None, *, source_event_id: str | None = None
+    ) -> None:
         """Mark the claimed generation consumed, only after the exact parent tool result has been durably saved."""
         async with self._lock:
             self._ensure_open()
@@ -703,7 +711,12 @@ class ToolJobRuntime:
             if claim is None or entry.live_claim != claim:
                 msg = "Tool job wait claim no longer belongs to this waiter."
                 raise ValueError(msg)
-            await self._publish(entry, _updated(entry.job, consumed_generation=claim.generation))
+            # A reread keeps the first consumer, whose unfinished reply still owns recovering this outcome.
+            source = entry.job.consumed_by_source if entry.job.consumed else source_event_id
+            await self._publish(
+                entry,
+                _updated(entry.job, consumed_generation=claim.generation, consumed_by_source=source),
+            )
             entry.claim = None
 
     async def cancel(self, job_id: str, *, owner: ToolExecutionIdentity, depth: int) -> BackgroundJob:
@@ -887,16 +900,18 @@ class ToolJobRuntime:
             await run_coroutine_until_complete(self._admit(entry, job, operation))
             return await self._snapshot(entry)
 
-    def _unconsumed(self, entry: _Entry) -> bool:
+    def _unconsumed(self, entry: _Entry, source_event_id: str | None = None) -> bool:
+        """Whether no parent run consumed this generation, or only the reply of `source_event_id` did."""
+        job = entry.job
         return (
-            not entry.job.consumed
-            and entry.job.user_stop_receipt_order is None
+            (not job.consumed or (source_event_id is not None and job.consuming_source == source_event_id))
+            and job.user_stop_receipt_order is None
             and entry.live_claim is None
             and self._authorize(entry.job)
         )
 
-    def _pending(self, entry: _Entry) -> bool:
-        return entry.job.status in READY_STATUSES and self._unconsumed(entry)
+    def _pending(self, entry: _Entry, source_event_id: str | None = None) -> bool:
+        return entry.job.status in READY_STATUSES and self._unconsumed(entry, source_event_id)
 
     async def _find(
         self,
@@ -923,11 +938,18 @@ class ToolJobRuntime:
             ),
         )
 
-    async def outcome(self, job_id: str, generation: int) -> BackgroundJob | None:
-        """Revalidate one unconsumed generation at its serialized response boundary."""
+    async def outcome(
+        self, job_id: str, generation: int, *, source_event_id: str | None = None
+    ) -> BackgroundJob | None:
+        """Revalidate an unread generation, or one the reply of `source_event_id` already consumed, at its boundary."""
         async with self._lock:
             entry = self._entries.get(job_id)
-            if self._closed or entry is None or entry.job.generation != generation or not self._pending(entry):
+            if (
+                self._closed
+                or entry is None
+                or entry.job.generation != generation
+                or not self._pending(entry, source_event_id)
+            ):
                 return None
             return await self._snapshot(entry, include_result=False)
 
@@ -941,11 +963,13 @@ class ToolJobRuntime:
         session_id: str,
         requester_id: str,
     ) -> list[BackgroundJob]:
-        """Recognize accepted source ownership even after result access is revoked, so recovery never replays it."""
-        session = ((transport_agent_name, room_id, thread_id, requester_id), session_id)
+        """Recognize work a source started or consumed, even after result access is revoked, so recovery never replays it."""
         return await self._find(
-            partial(self._by_source.get, (transport_agent_name, source_event_id)),
-            lambda entry: (_conversation_key(entry.job.owner), entry.job.owner.session_id) == session,
+            partial(self._by_conversation.get, (transport_agent_name, room_id, thread_id, requester_id)),
+            lambda entry: (
+                entry.job.owner.session_id == session_id
+                and source_event_id in {entry.job.source_event_id, entry.job.consuming_source}
+            ),
         )
 
     async def conversation_jobs(
