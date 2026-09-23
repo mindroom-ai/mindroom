@@ -20,6 +20,8 @@ from mindroom.config.matrix import MatrixSpaceConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.self_config import _SELF_CONFIG_BLOCKED_TOOLS, SelfConfigTools
+from mindroom.entity_resolution import entity_identity_registry
+from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
@@ -47,6 +49,7 @@ def _make_config(
     knowledge_bases: dict[str, KnowledgeBaseConfig] | None = None,
     defaults: DefaultsConfig | None = None,
     models: dict[str, ModelConfig] | None = None,
+    mcp_servers: dict[str, MCPServerConfig] | None = None,
 ) -> tuple[Config, Path]:
     """Create a Config, write it to a temp file, and return both."""
     config = Config(
@@ -54,6 +57,7 @@ def _make_config(
         knowledge_bases=knowledge_bases or {},
         defaults=defaults or DefaultsConfig(),
         models=models if models is not None else _DEFAULT_MODELS,
+        mcp_servers=mcp_servers or {},
         administrators=[_ADMIN_USER_ID],
     )
     config_dir = Path(tempfile.mkdtemp(prefix="mindroom-self-config-"))
@@ -423,6 +427,27 @@ class TestUpdateOwnConfig:
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].tool_names == ["shell", "calculator"]
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_tools_blocks_configured_mcp_servers(self) -> None:
+        """An MCP server exposes an unclassifiable remote surface and is never self-grantable."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=[])},
+            mcp_servers={
+                "files": MCPServerConfig(transport="stdio", command="uvx", args=["mcp-server-filesystem"]),
+            },
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool):
+                result = tool.update_own_config(tools=["mcp_files"])
+            assert "Error" in result
+            assert "privileged tools" in result
+            assert "mcp_files" in result
+
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].tool_names == []
         finally:
             config_path.unlink(missing_ok=True)
 
@@ -805,6 +830,26 @@ class TestUpdateOwnConfigAuthorization:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_internal_agent_requester_cannot_change_config(self) -> None:
+        """No internal MindRoom identity may authorize a self-config write."""
+        config, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code")},
+        )
+        original = config_path.read_text(encoding="utf-8")
+        try:
+            agent_user_id = entity_identity_registry(
+                config,
+                _runtime_paths_for(config, config_path),
+            ).current_id("coder")
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool, requester_id=agent_user_id.full_id):
+                result = tool.update_own_config(role="Owned")
+
+            assert "platform administrator" in result
+            assert config_path.read_text(encoding="utf-8") == original
+        finally:
+            config_path.unlink(missing_ok=True)
+
     def test_update_own_config_always_requires_human_confirmation(self) -> None:
         """The tool authors its own approval boundary, independent of tool_approval rules."""
         _, config_path = _make_config(
@@ -818,6 +863,24 @@ class TestUpdateOwnConfigAuthorization:
             assert tool.functions["get_own_config"].requires_confirmation is not True
         finally:
             config_path.unlink(missing_ok=True)
+
+    @patch("mindroom.agent_storage._ConversationSqliteDb")
+    def test_built_agent_keeps_the_confirmation_boundary(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
+        """Toolkit wrapping and approval policy must not clear the authored confirmation."""
+        config, _ = _make_config(
+            agents={"writer": AgentConfig(display_name="Writer", role="Write", allow_self_config=True)},
+        )
+        agent = create_agent(
+            "writer",
+            config=config,
+            runtime_paths=_runtime_paths_for(config),
+            execution_identity=None,
+            supports_native_tool_approval=True,
+        )
+        toolkit = next(t for t in agent.tools if getattr(t, "name", None) == "self_config")
+
+        assert toolkit.functions["update_own_config"].requires_confirmation is True
+        assert toolkit.functions["update_own_config"].approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE
 
 
 class TestAgentCreationInjection:
