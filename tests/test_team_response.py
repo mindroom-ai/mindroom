@@ -99,6 +99,7 @@ from mindroom.teams import (
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
+    FakeModel,
     bind_runtime_paths,
     make_turn_context,
     make_visible_message,
@@ -4503,7 +4504,7 @@ def test_materialized_private_ad_hoc_team_uses_opened_scope_id() -> None:
             config=config,
             execution_identity=identity,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=_TEST_MODEL),
+        patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")),
     ):
         assert scope_context is not None
         team = build_materialized_team_instance(
@@ -4551,7 +4552,7 @@ async def test_private_ad_hoc_team_second_turn_replays_first_scoped_run() -> Non
             execution_identity=identity,
             create_session_if_missing=True,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=_TEST_MODEL),
+        patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")),
     ):
         assert scope_context is not None
         assert scope_context.session is not None
@@ -4591,7 +4592,7 @@ async def test_private_ad_hoc_team_second_turn_replays_first_scoped_run() -> Non
             config=config,
             execution_identity=identity,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=_TEST_MODEL),
+        patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")),
     ):
         assert scope_context is not None
         second_team = build_materialized_team_instance(

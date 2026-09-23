@@ -629,6 +629,7 @@ teams:
     num_history_runs: 8            # Optional: Team-scoped replay policy
     num_history_messages: null     # Optional: Mutually exclusive with num_history_runs
     max_tool_calls_from_history: 6 # Optional: Limit replayed tool call messages
+    max_tool_calls_per_turn: 200   # Optional: Coordinator tool calls per team turn, delegations included; members keep their own budgets (default: defaults.max_tool_calls_per_turn)
     compaction:                    # Optional: Team-scoped required-compaction overrides
       # Soft thresholds do not compact by themselves while history still fits.
       enabled: true
@@ -656,6 +657,7 @@ defaults:
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files
+  max_tool_calls_per_turn: 1000    # Default: 1000 (tool calls one agent or team turn may execute; later calls return a tool error, and the turn ends with its text so far after this many plus two model requests)
   tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
   show_stop_button: true           # Default: true (global only, cannot be overridden per-agent)
   auto_resume_after_restart: true # Default: true (resume eligible interrupted threads after startup or replacement)

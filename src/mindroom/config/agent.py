@@ -330,6 +330,11 @@ class AgentConfig(BaseModel):
         ge=0,
         description="Max tool call messages replayed from history (per-agent override)",
     )
+    max_tool_calls_per_turn: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum tool calls one turn may execute (per-agent override)",
+    )
     show_tool_calls: bool | None = Field(
         default=None,
         description="Whether to show tool call details inline in responses (per-agent override)",
@@ -488,6 +493,11 @@ class TeamConfig(BaseModel):
         default=None,
         ge=0,
         description="Max tool call messages replayed from team history",
+    )
+    max_tool_calls_per_turn: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum tool calls the team coordinator may execute in one turn, delegations included (per-team override)",
     )
 
     @field_validator("agents")

@@ -124,6 +124,7 @@ agents:
     num_history_messages: null
     compress_tool_results: false
     max_tool_calls_from_history: null
+    max_tool_calls_per_turn: null
 
     # Required compaction is enabled by default.
     # Eligible models and history policies use native compaction at the threshold.
@@ -172,6 +173,7 @@ agents:
 | `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `false`). On Anthropic and Vertex Claude models, setting this to `true` can mutate replayed tool messages and invalidate prompt-cache prefixes |
 | `compaction` | object | `defaults.compaction` | Per-agent required-compaction overrides |
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
+| `max_tool_calls_per_turn` | int | `null` | Tool calls one turn may execute. Further calls return a tool error, and a turn that has made this many plus two model requests ends with the text produced so far, including loops of calls to unknown tools or with unparseable arguments (`null` = `defaults.max_tool_calls_per_turn`, 500) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Routed tools may still show generic worker warmup text such as `Preparing isolated worker...`, but that copy never includes tool identifiers or tool-trace metadata. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](../deployment/sandbox-proxy.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
 | `worker_scope` | string | `null` | How sandbox runtimes are shared for non-private agents. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` already defines the requester partition for that agent |
@@ -812,6 +814,7 @@ defaults:
     reserve_tokens: 16384
     timeout_seconds: 600
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
+  max_tool_calls_per_turn: 1000        # Tool calls one agent or team turn may execute
   show_tool_calls: true                 # Show tool-call markers and trace metadata; hidden mode still allows generic worker warmup copy
   worker_tools: null                     # Tool names to route through workers (null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null                     # Worker runtime reuse for proxied tools (shared, user, user_agent)

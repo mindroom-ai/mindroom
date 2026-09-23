@@ -1211,15 +1211,18 @@ class Config(BaseModel):
             system_message_role="system",
         )
 
+    def _configured_entity(self, entity_name: str) -> AgentConfig | TeamConfig:
+        """Return the authored config for one configured agent or team."""
+        if entity_name in self.agents:
+            return self.get_agent(entity_name)
+        if entity_name in self.teams:
+            return self.teams[entity_name]
+        msg = f"Unknown entity: {entity_name}"
+        raise ValueError(msg)
+
     def _entity_history_settings(self, entity_name: str) -> ResolvedHistorySettings:
         """Return effective replay settings for one configured agent or team."""
-        if entity_name in self.agents:
-            entity = self.get_agent(entity_name)
-        elif entity_name in self.teams:
-            entity = self.teams[entity_name]
-        else:
-            msg = f"Unknown entity: {entity_name}"
-            raise ValueError(msg)
+        entity = self._configured_entity(entity_name)
 
         num_history_runs = entity.num_history_runs
         num_history_messages = entity.num_history_messages
@@ -1241,6 +1244,11 @@ class Config(BaseModel):
             system_message_role="system",
         )
 
+    def _entity_max_tool_calls_per_turn(self, entity_name: str) -> int:
+        """Return the effective per-turn tool-call budget for one configured agent or team."""
+        override = self._configured_entity(entity_name).max_tool_calls_per_turn
+        return override if override is not None else self.defaults.max_tool_calls_per_turn
+
     def _default_compaction_config(self) -> CompactionConfig:
         """Return the effective destructive compaction config for defaults-only scope."""
         base = self.defaults.compaction
@@ -1256,13 +1264,7 @@ class Config(BaseModel):
         base = self.defaults.compaction
         defaults_enabled = base.enabled if base is not None else False
         merged = base.model_dump() if base is not None else {}
-        if entity_name in self.agents:
-            override = self.get_agent(entity_name).compaction
-        elif entity_name in self.teams:
-            override = self.teams[entity_name].compaction
-        else:
-            msg = f"Unknown entity: {entity_name}"
-            raise ValueError(msg)
+        override = self._configured_entity(entity_name).compaction
         if override is not None:
             authored_override = override.model_dump(exclude_unset=True)
             explicit_enabled = authored_override.pop(
@@ -1288,13 +1290,7 @@ class Config(BaseModel):
 
     def _has_authored_entity_compaction_config(self, entity_name: str) -> bool:
         """Return whether destructive compaction was explicitly configured for one configured entity."""
-        if entity_name in self.agents:
-            override = self.get_agent(entity_name).compaction
-        elif entity_name in self.teams:
-            override = self.teams[entity_name].compaction
-        else:
-            msg = f"Unknown entity: {entity_name}"
-            raise ValueError(msg)
+        override = self._configured_entity(entity_name).compaction
         return self.defaults.compaction is not None or override is not None
 
     def resolve_entity(self, entity_name: str | None) -> ResolvedEntityView:

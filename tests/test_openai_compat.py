@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tests.conftest import seed_session
+from tests.conftest import FakeModel, seed_session
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -4951,7 +4951,10 @@ class TestTeamCompletion:
 
         with (
             patch("mindroom.teams.create_agent", return_value=member),
-            patch("mindroom.model_loading.get_model_instance", return_value="openai:test-model"),
+            patch(
+                "mindroom.model_loading.get_model_instance",
+                return_value=FakeModel(id="test-model", provider="fake"),
+            ),
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 

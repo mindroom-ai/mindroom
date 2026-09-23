@@ -74,6 +74,7 @@ from mindroom.runtime_resolution import (
     resolve_agent_workspace_from_state_path as resolve_workspace,
 )
 from mindroom.teams import materialize_exact_team_members
+from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -5027,3 +5028,24 @@ def test_team_member_matches_solo_agent_construction() -> None:
         ]
     finally:
         close_team_runtime_state_dbs(agents=[solo, member], team_db=None)
+
+
+def test_create_agent_passes_resolved_tool_call_budget_to_agno() -> None:
+    """Every constructed agent is bounded by its resolved per-turn tool-call budget."""
+    from tests.conftest import runtime_paths_for  # noqa: PLC0415
+
+    config = _test_config()
+    runtime_paths = runtime_paths_for(config)
+    config.agents["calculator"].max_tool_calls_per_turn = 7
+
+    with patch("mindroom.agents.install_model_call_cap", wraps=install_model_call_cap) as install_cap:
+        capped = create_agent("calculator", config, runtime_paths, execution_identity=None)
+        inheriting = create_agent("general", config, runtime_paths, execution_identity=None)
+
+    assert capped.tool_call_limit == 7
+    assert inheriting.tool_call_limit == config.defaults.max_tool_calls_per_turn == 1000
+    # The budget must end runaway runs, not only refuse their calls.
+    assert [(call.args, call.kwargs) for call in install_cap.call_args_list] == [
+        ((capped.model,), {"entity_name": "calculator"}),
+        ((inheriting.model,), {"entity_name": "general"}),
+    ]
