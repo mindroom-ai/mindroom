@@ -18,6 +18,7 @@ from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.agno_compat_functions import function_actor, function_agent, function_run_context
 from mindroom.tool_jobs.results import decode_tool_result
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -47,6 +48,7 @@ class _Consumption:
     tool_name: str
     arguments: dict[str, Any] | None
     receipt: dict[str, Any]
+    source_event_id: str | None
 
     def saved(self, storage: BaseDb) -> bool:  # noqa: PLR0911 - Reject each independent evidence mismatch.
         run = storage.get_run(self.run_id)
@@ -94,6 +96,7 @@ class ConsumptionOwner:
             msg = "Tool result consumption requires a concrete agent or team"
             raise ValueError(msg)
         agent = function_agent(call.function)
+        tool_context = get_tool_runtime_context()
         receipt = {"job_id": job.job_id, "generation": job.generation, "token": token, "run_id": context.run_id}
         context.session_state.setdefault(_RECEIPTS, {})[f"{context.run_id}:{call.call_id}"] = receipt
         self._claims.append(
@@ -111,6 +114,7 @@ class ConsumptionOwner:
                 call.function.name,
                 deepcopy(call.arguments),
                 receipt,
+                tool_context.membership_turn_id if tool_context is not None else None,
             ),
         )
 
@@ -124,7 +128,11 @@ class ConsumptionOwner:
                     claim.saved,
                 )
                 if saved:
-                    await claim.runtime.acknowledge_wait(claim.job_id, claim.token)
+                    await claim.runtime.acknowledge_wait(
+                        claim.job_id,
+                        claim.token,
+                        source_event_id=claim.source_event_id,
+                    )
             except Exception:
                 logger.warning(
                     "Tool result persistence was not confirmed",

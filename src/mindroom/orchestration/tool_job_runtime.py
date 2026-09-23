@@ -315,24 +315,28 @@ class ToolJobRuntimeCoordinator:
 
         async def source_finished(job: BackgroundJob) -> bool:
             entity = job.owner.transport_agent_name or job.owner.agent_name
-            source = job.adapter.get("source_event_id")
             if (entity, job.owner.session_id) in protected_sessions:
                 return False
-            if not isinstance(source, str):
+            sources = {
+                source
+                for source in (job.adapter.get("source_event_id"), job.consumed_by_source)
+                if isinstance(source, str)
+            }
+            if not sources:
                 return job.legacy_source_untracked
-            key = (entity, source)
-            if key not in finished:
-                record = await journal.turn_records(entity).load(source)
-                if record is not None:
-                    finished[key] = record.completed
-                elif (bot := self.bot_provider(entity)) is not None:
-                    principal = journal.principal(bot._journal_principal_id)
-                    finished[key] = await principal.load_event(source) is not None and not await principal.is_pending(
-                        source,
-                    )
-                else:
-                    finished[key] = False
-            return finished[key]
+            for source in sources:
+                key = (entity, source)
+                if key not in finished:
+                    record = await journal.turn_records(entity).load(source)
+                    if record is not None:
+                        finished[key] = record.completed
+                    elif (bot := self.bot_provider(entity)) is not None:
+                        principal = journal.principal(bot._journal_principal_id)
+                        admitted = await principal.load_event(source)
+                        finished[key] = admitted is not None and not await principal.is_pending(source)
+                    else:
+                        finished[key] = False
+            return all(finished[(entity, source)] for source in sources)
 
         await self.runtime.expire_consumed(
             before=datetime.now(UTC) - timedelta(days=30),

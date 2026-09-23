@@ -159,7 +159,11 @@ async def admit_job_completion(
     if runtime is None:
         msg = "Tool job runtime is not ready for completion admission"
         raise RuntimeError(msg)
-    job = await runtime.outcome(reference.job_id, reference.generation)
+    job = await runtime.outcome(
+        reference.job_id,
+        reference.generation,
+        source_event_id=envelope.source_event_id,
+    )
     if job is None:
         return False
     owner = job.owner

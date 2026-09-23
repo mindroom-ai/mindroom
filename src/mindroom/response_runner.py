@@ -2903,11 +2903,13 @@ class ResponseRunner:
     async def _resume_tool_job_completion(self, event: JournalEvent, job_id: str, generation: int) -> None:
         """Let all admitted human turns finish before considering an idle continuation."""
         await self._lifecycle_coordinator.wait_for_thread_idle(event.room_id, event.thread_id)
+        if not await self.deps.approval_store.is_pending(event.event_id):
+            return
         runtime = get_background_runtime(self.deps.runtime_paths)
         if runtime is None:
             msg = "Tool job runtime is not ready for completion recovery"
             raise RuntimeError(msg)
-        job = await runtime.outcome(job_id, generation)
+        job = await runtime.outcome(job_id, generation, source_event_id=event.event_id)
         if job is None:
             await self.deps.approval_store.settle(event.event_id)
             return
@@ -2930,11 +2932,17 @@ class ResponseRunner:
                 # The original source still owns recovery or turn recording.
                 # Keep this wake pending until it settles; it may leave the job unconsumed.
                 return
+        initial = await self.deps.approval_store.load_matrix_delivery(
+            delivery_id=event.event_id,
+            stage=DeliveryStage.INITIAL,
+        )
         request = ResponseRequest(
             thread_history=(),
             prompt=envelope.body,
             response_envelope=envelope,
             sources=ResponseSources((event.event_id,), (event.event_id,)),
+            existing_event_id=initial.acknowledged_event_id if initial is not None else None,
+            existing_event_is_placeholder=True,
             user_id=envelope.requester_id,
             on_no_response_handled=lambda: self.deps.approval_store.settle(event.event_id),
         )

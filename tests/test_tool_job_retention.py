@@ -92,12 +92,16 @@ async def test_released_consumed_result_expires_without_source_history(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("source_completed", "approval"), [(False, False), (True, True), (True, False)])
+@pytest.mark.parametrize(
+    ("source_completed", "approval", "consumer_pending"),
+    [(False, False, False), (True, True, False), (True, False, False), (True, False, True)],
+)
 @pytest.mark.parametrize("source_pruned", [False, True])
 async def test_retention_preserves_pending_turns_and_conversation_approvals(
     tmp_path: Path,
     source_completed: bool,
     approval: bool,
+    consumer_pending: bool,
     source_pruned: bool,
 ) -> None:
     """An old acknowledged value remains available to an unfinished or paused SDK run."""
@@ -119,7 +123,11 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
         operation=operation,
     )
     waited = await runtime.wait("old", owner=owner, depth=0)
-    await runtime.acknowledge_wait("old", waited.token)
+    await runtime.acknowledge_wait(
+        "old",
+        waited.token,
+        source_event_id="$completion" if consumer_pending else "$original",
+    )
     runtime._entries["old"].job.updated_at = (datetime.now(UTC) - timedelta(days=31)).isoformat()
     record = TurnRecord.create(("$original",), anchor_event_id="$original", completed=source_completed)
     principal = bot.journal_principal()
@@ -138,6 +146,19 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     )
     if source_completed:
         await principal.settle("$original")
+    if consumer_pending:
+        await principal.admit(
+            InboundEvent(
+                "$completion",
+                "!room:localhost",
+                "$thread",
+                EventKind.TOOL_JOB_COMPLETION,
+                EventClass.ACTIONABLE,
+                bot.matrix_id.full_id,
+                2,
+                {"job_id": "old", "generation": 0},
+            ),
+        )
     await bot._journal_store.turn_records("general").upsert(
         index_event_ids=record.indexed_event_ids,
         anchor_event_id="$original",
@@ -178,7 +199,7 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     try:
         await coordinator._expire_consumed_results()
         saved = await runtime.lookup("old", owner=owner, depth=0)
-        assert saved.result_expired is (source_completed and not approval)
+        assert saved.result_expired is (source_completed and not approval and not consumer_pending)
         if not saved.result_expired:
             assert saved.result_payload == {"value": "saved result"}
     finally:

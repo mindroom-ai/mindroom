@@ -6862,6 +6862,7 @@ visibility = [
 path = "mindroom.tool_jobs.consumption"
 depends_on = [
     "mindroom.agent_storage",
+    "mindroom.tool_system.runtime_context",
     "mindroom.tool_jobs.results",
     "mindroom.custom_tools.job",
     "mindroom.tool_jobs.agno_compat_functions",

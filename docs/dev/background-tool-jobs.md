@@ -37,6 +37,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
 
 Execution lifetime is independent of a caller's wait.
 Each outcome generation has one active result claim; only persisted consumption acknowledges it.
+The consumption receipt retains its first response source, so an unfinished reply can recover after the model reads the result without waking unrelated replies.
 Approval continuations bind both job ID and generation, so stale cards cannot mutate newer work.
 Cancellation publishes its generation before cleanup and stays pending until owned work settles.
 Permission revocation uses internal ownership to stop execution, even though public discovery and control are no longer authorized.

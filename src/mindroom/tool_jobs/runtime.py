@@ -110,6 +110,7 @@ class BackgroundJob:
     approval_state: dict[str, Any] = field(default_factory=dict)
     generation: int = 0
     wait_acknowledged: bool = False
+    consumed_by_source: str | None = None
     result_expired: bool = False
     user_stop_receipt_order: int | None = None
     legacy_source_untracked: bool = False
@@ -628,7 +629,7 @@ class ToolJobRuntime:
                 entry.wait_token = None
                 self.changed.set()
 
-    async def acknowledge_wait(self, job_id: str, token: str | None) -> None:
+    async def acknowledge_wait(self, job_id: str, token: str | None, *, source_event_id: str | None = None) -> None:
         """Acknowledge only after the exact parent tool result has been durably saved."""
         async with self._lock:
             self._ensure_open()
@@ -639,6 +640,8 @@ class ToolJobRuntime:
             if entry.cold:
                 entry.job = await self._snapshot(entry)
                 entry.cold = False
+            if not entry.job.wait_acknowledged:
+                entry.job.consumed_by_source = source_event_id
             entry.job.wait_acknowledged = True
             await self._persist(entry)
             entry.wait_token = None
@@ -767,6 +770,7 @@ class ToolJobRuntime:
             if entry.job.status == "awaiting_approval":
                 entry.job.generation += 1
                 entry.job.wait_acknowledged = False
+                entry.job.consumed_by_source = None
                 entry.wait_token = None
             entry.job.status = "cancel_requested"
             try:
@@ -864,6 +868,7 @@ class ToolJobRuntime:
             entry.job.status = "running"
             entry.job.generation += 1
             entry.job.wait_acknowledged = False
+            entry.job.consumed_by_source = None
             entry.wait_token = None
             if entry.human_signal is None:
                 entry.human_signal = current_human_message_signal()
@@ -874,9 +879,12 @@ class ToolJobRuntime:
             )
             return await self._snapshot(entry)
 
-    def _unconsumed(self, entry: _Entry) -> bool:
+    def _available_for_response(self, entry: _Entry, source_event_id: str | None = None) -> bool:
         return (
-            not entry.job.wait_acknowledged
+            (
+                not entry.job.wait_acknowledged
+                or (source_event_id is not None and entry.job.consumed_by_source == source_event_id)
+            )
             and entry.job.legacy_notified_generation != entry.job.generation
             and entry.job.user_stop_receipt_order is None
             and entry.wait_token is None
@@ -891,11 +899,17 @@ class ToolJobRuntime:
             return [
                 await self._snapshot(entry, include_result=False)
                 for job_id in tuple(self._unacknowledged)
-                if (entry := self._entries[job_id]).job.status in _READY and self._unconsumed(entry)
+                if (entry := self._entries[job_id]).job.status in _READY and self._available_for_response(entry)
             ]
 
-    async def outcome(self, job_id: str, generation: int) -> BackgroundJob | None:
-        """Revalidate one unconsumed generation at its serialized response boundary."""
+    async def outcome(
+        self,
+        job_id: str,
+        generation: int,
+        *,
+        source_event_id: str | None = None,
+    ) -> BackgroundJob | None:
+        """Revalidate an unread outcome or the exact response that already consumed it."""
         async with self._lock:
             entry = self._entries.get(job_id)
             if (
@@ -903,7 +917,7 @@ class ToolJobRuntime:
                 or entry is None
                 or entry.job.generation != generation
                 or entry.job.status not in _READY
-                or not self._unconsumed(entry)
+                or not self._available_for_response(entry, source_event_id)
             ):
                 return None
             return await self._snapshot(entry, include_result=False)
@@ -929,7 +943,7 @@ class ToolJobRuntime:
             return [
                 await self._snapshot(entry, include_result=False)
                 for entry in self._entries.values()
-                if entry.job.adapter.get("source_event_id") == source_event_id
+                if source_event_id in {entry.job.adapter.get("source_event_id"), entry.job.consumed_by_source}
                 and (entry.job.owner.transport_agent_name or entry.job.owner.agent_name) == transport_agent_name
                 and entry.job.owner.room_id == room_id
                 and entry.job.owner.resolved_thread_id == thread_id
@@ -959,7 +973,7 @@ class ToolJobRuntime:
                 and entry.job.owner.requester_id == requester_id
                 and (entry.job.adapter.get("source_kind") == SILENT_SCHEDULE_SOURCE_KIND)
                 == (source_kind == SILENT_SCHEDULE_SOURCE_KIND)
-                and self._unconsumed(entry)
+                and self._available_for_response(entry)
             ]
 
     async def expire_consumed(
