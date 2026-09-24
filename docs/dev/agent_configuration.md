@@ -178,7 +178,7 @@ agents:
 - **knowledge_bases**: List of configured knowledge base IDs assigned to this agent
 - **context_files**: File paths relative to the agent's canonical workspace root (`<storage_root>/agents/<name>/workspace/`) loaded into each agent instance; edits take effect on the next reply without restarting
 - **model**: (Optional) Specific model to use for this agent, overrides the default model
-- **allow_self_config**: (Optional) When `true`, gives the agent a scoped tool to read and modify its own configuration at runtime (default: inherits from `defaults.allow_self_config`, which defaults to `false`); writes still require an `administrators` requester and a human approval, and cannot self-grant privileged tools
+- **allow_self_config**: (Optional) When `true`, gives the agent a scoped tool to read and modify its own configuration at runtime (default: inherits from `defaults.allow_self_config`, which defaults to `false`)
 - **thread_mode**: Conversation threading mode: `thread` (default) creates Matrix threads per conversation, `room` uses a single continuous conversation per room (ideal for bridges/mobile)
 - **room_thread_modes**: Per-room thread mode overrides keyed by room alias/name or Matrix room ID
 - **num_history_runs**: Number of prior Agno runs to include as history context (per-agent override)

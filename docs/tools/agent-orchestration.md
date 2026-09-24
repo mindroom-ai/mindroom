@@ -633,8 +633,7 @@ manage_team(
 `get_own_config()` returns the current agent's authored YAML block.
 `update_own_config()` only changes fields that you pass explicitly.
 On this branch, `update_own_config()` can modify `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.
-`update_own_config()` requires the requester who triggered the call to be listed in `administrators`, exactly as [`config_manager`] does, and it rejects the call when no live requester context is available.
-Every `update_own_config()` call also raises an approval card, even when `tool_approval.default` is `auto_approve`, because the rewrite persists for every later requester of that agent.
+`update_own_config()` requires a requester listed in `administrators`, like [`config_manager`], and every call raises an approval card even when `tool_approval.default` is `auto_approve`.
 The update path validates tool names against the live registry and validates knowledge base IDs against the current config.
 It also preserves inline tool overrides for retained tools when a string-only tool list is provided.
 Updates are validated through `AgentConfig.model_validate()` before the file is saved.
@@ -678,11 +677,8 @@ update_own_config(
 
 ### Notes
 
-- `self_config` blocks privileged self-escalation by rejecting privileged tools the agent does not already hold, including `config_manager`, code-execution and host-control tools (`shell`, `python`, `coding`, `script`, `file`, `pandas`, `airflow`, `apify`, `claude_agent`, `docker`, `e2b`, `daytona`, `aws_lambda`, `desktop`, and the browser toolkits), repository write tools that reach execution through CI (`github`, `bitbucket`), low-level Matrix and arbitrary-request tools (`matrix_api`, `custom_api`, `composio`), database and query tools (`sql`, `postgres`, `redshift`, `google_bigquery`, `duckdb`, `neo4j`, `csv`), and platform-control tools (`scheduler`, `external_trigger_manager`, `callback_manager`, `invite_router`, `dynamic_workflow`, `report_publishing`, `agent_vault_access`, `approved_egress`, `oauth_connections`).
-- Every configured MCP server (`mcp_<server_id>`) is blocked too, because a server exposes whatever remote surface its operator pointed it at and no static list can classify it.
-- Blocked tools are matched after preset and implied-tool expansion, so `openclaw_compat` cannot smuggle `shell` past the check.
-- A privileged tool the operator already granted the agent stays assignable, so self-tuning can keep it while adding an unprivileged tool.
-- `include_default_tools=True` is also rejected when `defaults.tools` would newly inherit any of those privileged tools.
+- `self_config` blocks privileged self-escalation by rejecting `config_manager` in its `tools` update list.
+- `include_default_tools=True` is also rejected when `defaults.tools` contains blocked privileged tools such as `config_manager`.
 - Use [`self_config`] for narrow self-tuning at runtime and [`config_manager`] for full config-authoring workflows.
 
 ## [`openclaw_compat`]

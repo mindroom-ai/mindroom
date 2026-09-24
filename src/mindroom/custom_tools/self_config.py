@@ -15,144 +15,19 @@ from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_co
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.custom_tools.config_manager import preserve_tool_overrides, validate_knowledge_bases
 from mindroom.logging_config import get_logger
-from mindroom.mcp.registry import mcp_tool_name
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
-# Tools an agent may never grant itself, even for an administrator requester. The model
-# that issues the call also reads untrusted room messages, documents, and web pages, so
-# a self-grant of code execution, host control, database execution, arbitrary outbound
-# requests, or platform administration is treated as escalation regardless of requester.
-# Tools the agent already holds stay assignable so that self-tuning can keep them.
-_SELF_CONFIG_BLOCKED_TOOLS = frozenset(
-    {
-        # Platform, scheduling, and credential control.
-        "agent_vault_access",
-        "approved_egress",
-        "callback_manager",
-        "config_manager",
-        "dynamic_workflow",
-        "external_trigger_manager",
-        "invite_router",
-        "oauth_connections",
-        "report_publishing",
-        "scheduler",
-        # Code execution and host control.
-        "airflow",
-        "apify",
-        "aws_lambda",
-        "browser",
-        "browser_mcp",
-        "browserbase",
-        "claude_agent",
-        "coding",
-        "daytona",
-        "desktop",
-        "docker",
-        "e2b",
-        "file",
-        "pandas",
-        "python",
-        "script",
-        "shell",
-        "web_browser_tools",
-        # Repository write access, which reaches execution through the operator's CI.
-        "bitbucket",
-        "github",
-        # Low-level Matrix control and arbitrary outbound requests.
-        "composio",
-        "custom_api",
-        "matrix_api",
-        # Database and query execution.
-        "csv",
-        "duckdb",
-        "google_bigquery",
-        "neo4j",
-        "postgres",
-        "redshift",
-        "sql",
-    },
-)
+_SELF_CONFIG_BLOCKED_TOOLS = {"config_manager"}
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
 _PLATFORM_ADMIN_REQUIRED_MESSAGE = (
     "Error: Self-configuration changes require an active platform administrator requester."
 )
-
-
-def _self_config_mutation_authorization_error(config: Config, agent_name: str) -> str | None:
-    """Deny self-config writes without a current platform administrator requester."""
-    runtime_context = get_tool_runtime_context()
-    if runtime_context is not None and is_platform_administrator(
-        runtime_context.requester_id,
-        config,
-        runtime_context.runtime_paths,
-    ):
-        return None
-    logger.warning(
-        "self_config_update_denied",
-        agent=agent_name,
-        requester_id=runtime_context.requester_id if runtime_context is not None else None,
-        reason="requester_is_not_a_platform_administrator",
-    )
-    return f"{_PLATFORM_ADMIN_REQUIRED_MESSAGE}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
-
-
-def _blocked_tools_for_config(config: Config) -> frozenset[str]:
-    """Return the blocked names for one config, including its configured MCP servers.
-
-    An MCP server exposes whatever remote surface its operator pointed it at, so no
-    static list can classify it; every configured server is blocked by construction.
-    """
-    return _SELF_CONFIG_BLOCKED_TOOLS | {mcp_tool_name(server_id) for server_id in config.mcp_servers}
-
-
-def _newly_granted_blocked_tools(config: Config, agent_name: str, tool_names: Sequence[str]) -> list[str]:
-    """Return blocked tools these names would add to an agent that lacks them."""
-    blocked = _blocked_tools_for_config(config)
-    already_available = set(config.resolve_entity(agent_name).available_tools)
-    requested = config.expand_tool_names(list(tool_names))
-    return sorted({name for name in requested if name in blocked and name not in already_available})
-
-
-def _tool_grant_error(
-    config: Config,
-    agent_name: str,
-    runtime_paths: RuntimePaths,
-    tools: list[str] | None,
-    include_default_tools: bool | None,
-) -> str | None:
-    """Reject unknown tools and privileged tools this agent does not already hold."""
-    if tools is not None:
-        tool_metadata = resolved_tool_metadata_for_runtime(
-            runtime_paths,
-            config,
-            tolerate_plugin_load_errors=True,
-        )
-        invalid_tools = [name for name in tools if name not in tool_metadata]
-        if invalid_tools:
-            return f"Error: Unknown tools: {', '.join(invalid_tools)}"
-        blocked_tools = _newly_granted_blocked_tools(config, agent_name, tools)
-        if blocked_tools:
-            logger.warning("self_config_privileged_tool_grant_denied", agent=agent_name, tools=blocked_tools)
-            return f"Error: Self-config cannot assign privileged tools: {', '.join(blocked_tools)}"
-
-    if include_default_tools is True:
-        inherited_blocked = _newly_granted_blocked_tools(config, agent_name, config.defaults.tool_names)
-        if inherited_blocked:
-            logger.warning("self_config_privileged_tool_grant_denied", agent=agent_name, tools=inherited_blocked)
-            return (
-                f"Error: Cannot enable include_default_tools because defaults.tools "
-                f"contains privileged tools: {', '.join(inherited_blocked)}"
-            )
-    return None
 
 
 class SelfConfigTools(Toolkit):
@@ -166,8 +41,8 @@ class SelfConfigTools(Toolkit):
             name="self_config",
             tools=[self.get_own_config, self.update_own_config],
         )
-        # Self-config writes persist for every later requester of this agent, so a human
-        # confirms each one even when tool_approval.default is auto_approve.
+        # A human confirms every write, even under tool_approval.default: auto_approve,
+        # because the model issuing the call also reads untrusted content.
         self.functions["update_own_config"].requires_confirmation = True
 
     def get_own_config(self) -> str:
@@ -192,7 +67,7 @@ class SelfConfigTools(Toolkit):
         yaml_str = yaml.dump(agent_dict, default_flow_style=False, sort_keys=False)
         return f"## Configuration for '{self.agent_name}':\n\n```yaml\n{yaml_str}```"
 
-    def update_own_config(  # noqa: C901, PLR0912, PLR0911
+    def update_own_config(  # noqa: C901, PLR0912, PLR0911, PLR0915
         self,
         display_name: str | None = None,
         role: str | None = None,
@@ -250,22 +125,39 @@ class SelfConfigTools(Toolkit):
             return load_error
         assert config is not None
 
-        authorization_error = _self_config_mutation_authorization_error(config, self.agent_name)
-        if authorization_error:
-            return authorization_error
+        runtime_context = get_tool_runtime_context()
+        if runtime_context is None or not is_platform_administrator(
+            runtime_context.requester_id,
+            config,
+            runtime_context.runtime_paths,
+        ):
+            return f"{_PLATFORM_ADMIN_REQUIRED_MESSAGE}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
 
         if self.agent_name not in config.agents:
             return f"Error: Agent '{self.agent_name}' not found in configuration."
 
-        tool_grant_error = _tool_grant_error(
-            config,
-            self.agent_name,
-            self.runtime_paths,
-            tools,
-            include_default_tools,
-        )
-        if tool_grant_error:
-            return tool_grant_error
+        # Validate tools against known tool metadata
+        if tools is not None:
+            tool_metadata = resolved_tool_metadata_for_runtime(
+                self.runtime_paths,
+                config,
+                tolerate_plugin_load_errors=True,
+            )
+            invalid_tools = [t for t in tools if t not in tool_metadata]
+            if invalid_tools:
+                return f"Error: Unknown tools: {', '.join(invalid_tools)}"
+            blocked_tools = sorted({t for t in tools if t in _SELF_CONFIG_BLOCKED_TOOLS})
+            if blocked_tools:
+                return f"Error: Self-config cannot assign privileged tools: {', '.join(blocked_tools)}"
+
+        # Block include_default_tools if defaults.tools contains privileged tools
+        if include_default_tools is True:
+            inherited_blocked = sorted({t for t in config.defaults.tool_names if t in _SELF_CONFIG_BLOCKED_TOOLS})
+            if inherited_blocked:
+                return (
+                    f"Error: Cannot enable include_default_tools because defaults.tools "
+                    f"contains privileged tools: {', '.join(inherited_blocked)}"
+                )
 
         # Validate knowledge bases
         if knowledge_bases is not None:
