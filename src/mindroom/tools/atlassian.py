@@ -38,7 +38,10 @@ if TYPE_CHECKING:
             required=False,
             default=None,
             placeholder="https://example.atlassian.net",
-            description="Atlassian Cloud site to use; needed when the connected account can reach several sites.",
+            description=(
+                "Atlassian Cloud site to use, as its atlassian.net URL even when it has a custom domain; "
+                "needed when the connected account can reach several sites."
+            ),
         ),
         ConfigField(
             name="cloud_id",
@@ -46,7 +49,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default=None,
-            description="Atlassian cloud ID of the site; takes precedence over the site URL.",
+            description="Atlassian cloud ID of the site; when the site URL is also set, both must name the same site.",
         ),
     ],
     managed_init_args=(

@@ -102,13 +102,17 @@ agents:
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `site_url` | `url` | `null` | Atlassian Cloud site to use, such as `https://example.atlassian.net`; any path such as `/wiki` is ignored. |
-| `cloud_id` | `text` | `null` | Atlassian cloud ID of the site; it takes precedence over `site_url` when both are set. |
+| `site_url` | `url` | `null` | Atlassian Cloud site to use, as its `https://<name>.atlassian.net` URL such as `https://example.atlassian.net`; any path such as `/wiki` is ignored. |
+| `cloud_id` | `text` | `null` | Atlassian cloud ID of the site; when `site_url` is also set, both must name the same site. |
 
 Both options are optional and can also be set once for every agent through `defaults.tools` or the tool's dashboard settings.
 When neither is set and the connected account can reach exactly one Jira or Confluence site, the tool uses that site.
 When the account can reach several sites, the tool returns `site_selection_required` with the available sites instead of choosing one.
 When a configured site is not reachable with the connected account, the tool returns `site_not_found` and never falls back to a different site.
+Atlassian reports every site by its `https://<name>.atlassian.net` URL, even when the site is served under a custom domain, so a custom-domain `site_url` never matches.
+Use the site's atlassian.net URL or its `cloud_id` instead.
+The `available_sites` in a `site_not_found` result list the URLs and cloud IDs that Atlassian reports.
+When both `site_url` and `cloud_id` are set, the site must match both, and a mismatch returns `site_not_found`.
 Site URLs must use HTTPS, and cloud IDs must be UUIDs, so a misconfigured value keeps the tool from loading and logs a warning.
 
 ## Connect An Account
@@ -181,8 +185,8 @@ agents:
 | --- | --- | --- |
 | `name` | required | Lowercase letters, digits, and underscores, starting with a letter, at most 16 characters. |
 | `display_name` | required | Name shown on connect links and the Integrations page. |
-| `site_url` | `null` | HTTPS site URL; only its origin is kept. |
-| `cloud_id` | `null` | Cloud ID of the site; it takes precedence over `site_url`. |
+| `site_url` | `null` | The site's `https://<name>.atlassian.net` URL, not a custom domain; only its origin is kept. |
+| `cloud_id` | `null` | Cloud ID of the site; when `site_url` is also set, both must name the same site. |
 | `products` | `("jira", "confluence")` | Products whose functions and scopes this connection enables. |
 | `write` | `True` | Set to `False` to register only read functions and request only read scopes. |
 | `client_config_service` | `<name>_atlassian_oauth_client` | Credential service holding the connection's app client ID and secret. |

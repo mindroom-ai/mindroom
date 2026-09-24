@@ -106,7 +106,7 @@ class AtlassianSite:
 
 @dataclass(frozen=True, slots=True)
 class AtlassianSitePin:
-    """Configured site restriction; the cloud ID is authoritative when both are set."""
+    """Configured site restriction; a site must match every value that is set."""
 
     site_url: str | None = None
     cloud_id: str | None = None
@@ -306,12 +306,12 @@ def select_site(
 ) -> AtlassianSite:
     """Pick the pinned site for one product, never falling back to a different site."""
     candidates = [site for site in sites if site.scopes.intersection(product_scopes)]
-    if pin.cloud_id is not None:
-        matches = [site for site in candidates if site.cloud_id == pin.cloud_id]
-    elif pin.site_url is not None:
-        matches = [site for site in candidates if site.url == pin.site_url]
-    else:
-        matches = candidates
+    matches = [
+        site
+        for site in candidates
+        if (pin.cloud_id is None or site.cloud_id == pin.cloud_id)
+        and (pin.site_url is None or site.url == pin.site_url)
+    ]
     if len(matches) == 1:
         return matches[0]
     available = [site.summary() for site in candidates]
@@ -330,10 +330,18 @@ def select_site(
             "Reconnect with an account that has access.",
             product=product,
         )
+    message = f"The configured {product} site is not available to the connected account. "
+    if pin.site_url is not None:
+        # Accessible resources name each site by its atlassian.net URL, even when it is served under a custom domain.
+        message += (
+            "The configured site_url must be the site's https://<name>.atlassian.net URL as Atlassian reports it, "
+            "not a custom domain. "
+        )
+        if pin.cloud_id is not None:
+            message += "With cloud_id also set, both must name the same site. "
     raise AtlassianError(
         code="site_not_found",
-        message=f"The configured {product} site is not available to the connected account. "
-        "Reconnect with an account that can access it, or correct the site setting.",
+        message=f"{message}Reconnect with an account that can access the site, or correct the site setting.",
         product=product,
         configured_site_url=pin.site_url,
         configured_cloud_id=pin.cloud_id,

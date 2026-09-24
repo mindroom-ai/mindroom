@@ -678,7 +678,10 @@ async def test_site_pins_select_one_site_and_never_fall_back(tmp_path: Path, mon
     unpinned = json.loads(await _tool(paths, manager).jira_get_issue(issue_key="PROJ-1"))
     by_url = json.loads(await _tool(paths, manager, site_url=OTHER_SITE_URL).jira_get_issue(issue_key="PROJ-1"))
     by_cloud_id = json.loads(
-        await _tool(paths, manager, site_url=SITE_URL, cloud_id=OTHER_CLOUD_ID.upper()).jira_get_issue(
+        await _tool(paths, manager, cloud_id=OTHER_CLOUD_ID.upper()).jira_get_issue(issue_key="PROJ-1"),
+    )
+    by_both = json.loads(
+        await _tool(paths, manager, site_url=OTHER_SITE_URL, cloud_id=OTHER_CLOUD_ID).jira_get_issue(
             issue_key="PROJ-1",
         ),
     )
@@ -690,13 +693,50 @@ async def test_site_pins_select_one_site_and_never_fall_back(tmp_path: Path, mon
     assert {entry["cloud_id"] for entry in unpinned["available_sites"]} == {CLOUD_ID, OTHER_CLOUD_ID}
     assert by_url["site"]["cloud_id"] == OTHER_CLOUD_ID
     assert by_cloud_id["site"]["cloud_id"] == OTHER_CLOUD_ID
+    assert by_both["site"]["cloud_id"] == OTHER_CLOUD_ID
     assert no_confluence["code"] == "site_not_found"
     assert no_confluence["configured_cloud_id"] == OTHER_CLOUD_ID
+    assert "site_url" not in no_confluence["message"]
     assert [entry["cloud_id"] for entry in no_confluence["available_sites"]] == [CLOUD_ID]
     assert [str(request.url.copy_with(query=None)) for request in gateway.product_requests()] == [
         gateway_url("jira", "/rest/api/3/issue/PROJ-1", OTHER_CLOUD_ID),
-        gateway_url("jira", "/rest/api/3/issue/PROJ-1", OTHER_CLOUD_ID),
-    ]
+    ] * 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("site_url", "cloud_id", "same_site_hint"),
+    [
+        (SITE_URL, OTHER_CLOUD_ID, True),
+        ("https://wiki.example.com", None, False),
+        ("https://wiki.example.com", CLOUD_ID, True),
+    ],
+)
+async def test_every_configured_site_value_must_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    site_url: str,
+    cloud_id: str | None,
+    same_site_hint: bool,
+) -> None:
+    """A site URL and cloud ID naming different sites, or a custom-domain URL, select nothing."""
+    paths = runtime_paths(tmp_path)
+    manager = save_client_config(paths)
+    publish_grant(atlassian_oauth_provider(), manager, TOKEN)
+    gateway = FakeGateway(
+        sites_by_token={TOKEN: [site(), site(OTHER_CLOUD_ID, OTHER_SITE_URL, name="acme")]},
+    ).install(monkeypatch)
+
+    result = json.loads(
+        await _tool(paths, manager, site_url=site_url, cloud_id=cloud_id).jira_get_issue(issue_key="PROJ-1"),
+    )
+
+    assert result["code"] == "site_not_found"
+    assert (result["configured_site_url"], result["configured_cloud_id"]) == (site_url, cloud_id)
+    assert "https://<name>.atlassian.net URL as Atlassian reports it" in result["message"]
+    assert ("both must name the same site" in result["message"]) is same_site_hint
+    assert {entry["url"] for entry in result["available_sites"]} == {SITE_URL, OTHER_SITE_URL}
+    assert gateway.product_requests() == []
 
 
 @pytest.mark.asyncio
