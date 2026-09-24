@@ -2,28 +2,36 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constructor annotations.
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from agno.tools.file import FileTools as AgnoFileTools
 from agno.utils.log import log_debug, log_error
 
+from mindroom.path_confinement import is_git_metadata_path
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
+    ToolFileAccess,
+    ToolManagedInitArg,
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.path_safety import (
     blocked_file_action_message,
+    blocked_git_metadata_message,
     format_path_for_output,
     is_within_base_dir,
     resolve_base_dir_path,
     split_search_pattern,
 )
+
+if TYPE_CHECKING:
+    from mindroom.config.models import FileAccess
 
 
 class _MindRoomFileTools(AgnoFileTools):
@@ -46,10 +54,10 @@ class _MindRoomFileTools(AgnoFileTools):
         line_separator: str = "\n",
         exclude_patterns: list[str] | None = None,
         all: bool = False,  # noqa: A002
-        restrict_to_base_dir: bool = True,
+        file_access: FileAccess = "workspace",
         **kwargs: object,
     ) -> None:
-        self.restrict_to_base_dir = restrict_to_base_dir
+        self.restrict_to_base_dir = file_access == "workspace"
         super().__init__(
             base_dir=base_dir,
             enable_save_file=enable_save_file,
@@ -88,6 +96,9 @@ class _MindRoomFileTools(AgnoFileTools):
             if not safe:
                 log_error(f"Attempted to save file: {file_name}")
                 return blocked_file_action_message("saving file", file_name, self.base_dir)
+            if is_git_metadata_path(file_path):
+                log_error(f"Attempted to save Git metadata: {file_name}")
+                return blocked_git_metadata_message("saving file", file_name)
             log_debug(f"Saving contents to {file_path}")
             if not file_path.parent.exists():
                 file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,6 +176,9 @@ class _MindRoomFileTools(AgnoFileTools):
         """Delete a file or empty directory with clear blocked-path errors."""
         safe, path = self._check_path(file_name, self.base_dir)
         try:
+            if safe and is_git_metadata_path(path):
+                log_error(f"Attempted to remove Git metadata: {file_name}")
+                return blocked_git_metadata_message("removing file", file_name)
             if safe:
                 if path.is_dir():
                     path.rmdir()
@@ -231,18 +245,42 @@ class _MindRoomFileTools(AgnoFileTools):
             return error_msg
 
     def search_content(self, query: str, directory: str | None = None, limit: int = 10) -> str:
-        """Search file contents inside ``base_dir`` only.
+        """Search file contents, reaching outside ``base_dir`` only with unrestricted file access.
 
         Agno's implementation relativizes every hit and every exclusion check
-        against ``base_dir``, so it is only correct there. Directories outside
-        it are refused even when ``restrict_to_base_dir`` is off; the other
-        file operations still honor that flag.
+        against ``base_dir``, so an outside directory is searched by a copy
+        rooted there and its hits are reported as absolute paths.
         """
-        if directory:
-            safe, search_dir = self._check_path(directory, self.base_dir)
-            if not safe or not is_within_base_dir(search_dir, self.base_dir):
-                return f"Error: search_content only searches inside the base directory ({self.base_dir}): {directory}"
-        return super().search_content(query, directory, limit)
+        if not directory:
+            return super().search_content(query, directory, limit)
+        safe, search_dir = self._check_path(directory, self.base_dir)
+        if not safe:
+            return blocked_file_action_message("searching content", directory, self.base_dir)
+        if is_within_base_dir(search_dir, self.base_dir):
+            return super().search_content(query, directory, limit)
+        if not search_dir.is_dir():
+            return f"Error: '{directory}' is not a directory"
+        # AGNO_COMPAT: FileTools.search_content cannot search outside base_dir.
+        # Reason: Agno 3.0.9 relativizes every hit and exclusion check against
+        # self.base_dir, so unrestricted agents cannot search other directories.
+        # Searching a shallow copy rooted at the target relies on that method
+        # deriving all state from self.base_dir.
+        # Upstream issue: Tracking gap; no matching issue for a search root
+        # independent of base_dir has been identified.
+        # Upstream PR: None identified.
+        # Remove when: Agno accepts an absolute search directory outside base_dir
+        # and reports absolute hit paths; keep the workspace-mode refusal and
+        # exclusion matching relative to the searched directory.
+        # Coverage: tests/test_coding_tools.py::TestFileToolFileAccess::test_file_tool_search_content_searches_outside_directories_when_unrestricted.
+        rooted = copy.copy(self)
+        rooted.base_dir = search_dir
+        result = AgnoFileTools.search_content(rooted, query, None, limit)
+        if result.startswith("Error"):
+            return result
+        payload = json.loads(result)
+        for match in payload["files"]:
+            match["file"] = str(search_dir / match["file"])
+        return json.dumps(payload, indent=2)
 
 
 @register_tool_with_metadata(
@@ -250,6 +288,8 @@ class _MindRoomFileTools(AgnoFileTools):
     display_name="File Tools",
     description="Read, write, list, and search files in the agent workspace",
     category=ToolCategory.DEVELOPMENT,
+    file_access=ToolFileAccess.AGENT,
+    managed_init_args=(ToolManagedInitArg.FILE_ACCESS,),
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,
@@ -264,14 +304,6 @@ class _MindRoomFileTools(AgnoFileTools):
             required=False,
             default=None,
             authored_override=False,
-        ),
-        ConfigField(
-            name="restrict_to_base_dir",
-            label="Restrict To Base Dir",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Whether file access must stay under base_dir. Relative paths still resolve from base_dir.",
         ),
         ConfigField(
             name="enable_save_file",

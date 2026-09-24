@@ -12,6 +12,7 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -292,6 +293,7 @@ __all__ = [
 
 @register_tool_with_metadata(
     name="openclaw_compat",
+    file_access=ToolFileAccess.NONE,
     display_name="OpenClaw Compat",
     description="Convenience bundle that implies shell, coding, browser, and other common tools",
     category=ToolCategory.DEVELOPMENT,
@@ -308,6 +310,7 @@ def _openclaw_compat_tools() -> type[Toolkit]:
 
 @register_tool_with_metadata(
     name="homeassistant",
+    file_access=ToolFileAccess.NONE,
     display_name="Home Assistant",
     description="Control and monitor smart home devices",
     category=ToolCategory.SMART_HOME,
@@ -371,6 +374,7 @@ def _homeassistant_tools() -> type[Toolkit]:
 
 @register_tool_with_metadata(
     name="agent_vault_access",
+    file_access=ToolFileAccess.NONE,
     requires_primary_runtime=True,
     display_name="Agent Vault Access",
     description="Get a link to manage this agent's passwords and API keys in Agent Vault",

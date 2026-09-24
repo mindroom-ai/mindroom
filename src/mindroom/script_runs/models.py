@@ -6,6 +6,9 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from uuid import UUID
+
+from mindroom.workers.models import process_worker_key
 
 
 class ScriptRunState(StrEnum):
@@ -116,11 +119,7 @@ def script_worker_key_for_run(base_worker_key: str, run_id: str) -> str:
     if _SCRIPT_RUN_ID_RE.fullmatch(run_id) is None:
         msg = "Script run ID must be script- followed by 32 lowercase hexadecimal characters."
         raise ValueError(msg)
-    parts = base_worker_key.split(":")
-    if len(parts) < 5 or parts[0] != "v1" or parts[2] != "user_agent" or not parts[-1]:
-        msg = "Background scripts require a resolved user-agent worker key."
-        raise ValueError(msg)
-    return ":".join((*parts[:-1], run_id, parts[-1]))
+    return process_worker_key(base_worker_key, purpose="script", process_id=UUID(hex=run_id.removeprefix("script-")))
 
 
 def script_worker_key_belongs_to_run(worker_key: str, run_id: str) -> bool:

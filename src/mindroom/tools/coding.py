@@ -9,6 +9,8 @@ from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
+    ToolFileAccess,
+    ToolManagedInitArg,
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -22,6 +24,8 @@ if TYPE_CHECKING:
     display_name="Coding Tools",
     description="Find code, search across files, and make precise edits",
     category=ToolCategory.DEVELOPMENT,
+    file_access=ToolFileAccess.AGENT,
+    managed_init_args=(ToolManagedInitArg.FILE_ACCESS,),
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,
@@ -37,14 +41,6 @@ if TYPE_CHECKING:
             default=None,
             description="Working directory for file operations. Defaults to current directory.",
             authored_override=False,
-        ),
-        ConfigField(
-            name="restrict_to_base_dir",
-            label="Restrict To Base Dir",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Whether file access must stay under base_dir. Relative paths still resolve from base_dir.",
         ),
     ],
     dependencies=[],
