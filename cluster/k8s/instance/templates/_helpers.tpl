@@ -22,6 +22,18 @@
 {{- end -}}
 {{- end }}
 
+{{- /*
+"true" when the chart generates MINDROOM_API_KEY for the primary.
+The static runner sidecar shares the pod network, so the primary API must not be left open when neither Supabase nor trusted-upstream auth protects it.
+*/ -}}
+{{- define "mindroom.generatesApiKey" -}}
+{{- $trustedUpstreamAuth := .trustedUpstreamAuth | default (dict) -}}
+{{- $trustedUpstreamAuthEnabled := has (lower (toString ($trustedUpstreamAuth.enabled | default false))) (list "1" "true" "yes" "on") -}}
+{{- if and (eq (.workerBackend | default "static_runner") "static_runner") (not .allowUnauthenticatedPrimary) (not (and .supabaseUrl .supabaseAnonKey)) (not $trustedUpstreamAuthEnabled) -}}
+true
+{{- end -}}
+{{- end }}
+
 {{- define "mindroom.workerBackendEnv" -}}
 {{- $workerBackend := .workerBackend -}}
 {{- $instanceNamespace := .instanceNamespace -}}

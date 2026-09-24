@@ -169,6 +169,27 @@ The static runner sidecar mounts it read-only, matching the config subtree dedic
 {{- end -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.apiKeySecretName" -}}
+{{- printf "%s-api-key" (include "mindroom-runtime.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- /*
+"true" when the chart generates MINDROOM_API_KEY for the primary.
+The static runner sidecar shares the primary's network namespace, so an unauthenticated primary API would be open to tool code.
+env.extra entries that configure primary API authentication turn the generated key off.
+*/ -}}
+{{- define "mindroom-runtime.generatesApiKey" -}}
+{{- if and (eq .Values.workers.backend "static_runner") (not .Values.apiAuth.allowUnauthenticatedPrimary) -}}
+{{- $configured := false -}}
+{{- range .Values.env.extra -}}
+{{- if has (default "" .name) (list "MINDROOM_API_KEY" "SUPABASE_URL" "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED") -}}
+{{- $configured = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not $configured -}}true{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.workerConfigMapName" -}}
 {{- if eq (include "mindroom-runtime.configSource" .) "file" -}}
 {{- else -}}

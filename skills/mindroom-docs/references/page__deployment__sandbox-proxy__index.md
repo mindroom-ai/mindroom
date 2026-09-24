@@ -125,6 +125,7 @@ It never receives the credentials-encryption key.
 The primary leases each proxied tool's saved settings to the sidecar per call, as described in [Credential leases](#credential-leases).
 A `prepare-sandbox-runner-storage` init container creates the three storage directories as the runtime user before the containers start.
 The runtime chart rejects a file-sourced config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
+A file-sourced config directly in the storage root is mounted as a single read-only file, so it must exist before the pod starts; the init container fails otherwise.
 
 Upgrading an existing release keeps agent data in place because the sidecar mounts the same PVC directories.
 Files that earlier sidecar versions wrote elsewhere on the PVC, such as worker virtualenvs under `workers/` and caches in the storage root used as `HOME`, remain on disk but are no longer visible to the sidecar, which recreates worker virtualenvs on first use.
@@ -133,6 +134,8 @@ Files that earlier sidecar versions wrote elsewhere on the PVC, such as worker v
 > The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
 > All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, learning data, and memory.
 > The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication with `requireJwt`.
+> When no primary API authentication is configured, both charts generate a `MINDROOM_API_KEY` Secret for the primary so tool code cannot use the API over `localhost`.
+> Header-only trusted-upstream authentication is still forgeable from the sidecar.
 > Use dedicated Kubernetes workers when per-agent filesystem and credential isolation are required.
 
 ### Kubernetes dedicated workers (`workerBackend: kubernetes`)

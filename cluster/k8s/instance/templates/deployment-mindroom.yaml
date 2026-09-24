@@ -164,6 +164,14 @@ spec:
             secretKeyRef:
               name: {{ $instanceSecretName }}
               key: credentials_encryption_key
+        {{- if include "mindroom.generatesApiKey" .Values }}
+        # The sandbox-runner sidecar shares this pod's network, so the otherwise unauthenticated API requires a key.
+        - name: MINDROOM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mindroom-primary-api-key-{{ .Values.customer }}
+              key: MINDROOM_API_KEY
+        {{- end }}
         - name: MINDROOM_SANDBOX_EXECUTION_MODE
           value: "selective"
         - name: MINDROOM_SANDBOX_PROXY_TOOLS

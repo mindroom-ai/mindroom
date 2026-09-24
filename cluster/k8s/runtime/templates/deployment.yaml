@@ -153,11 +153,17 @@ spec:
           image: {{ include "mindroom-runtime.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
-            - mkdir
-            - -p
-            - {{ printf "%s/sandbox-runner" $storageRoot | quote }}
-            - {{ printf "%s/agents" $storageRoot | quote }}
-            - {{ printf "%s/private_instances" $storageRoot | quote }}
+            - sh
+            - -ec
+            - |
+              mkdir -p {{ printf "%s/sandbox-runner" $storageRoot | quote }} {{ printf "%s/agents" $storageRoot | quote }} {{ printf "%s/private_instances" $storageRoot | quote }}
+              {{- if eq (printf "%s/%s" $storageRoot $fileConfigStorageSubpath) (clean .Values.config.path) }}
+              # A missing single-file subPath would make kubelet create a directory where the primary expects its config.
+              if [ ! -f {{ $configPath | quote }} ]; then
+                echo {{ printf "config.path %s must exist as a file before the sandbox-runner sidecar mounts it" $configPath | quote }} >&2
+                exit 1
+              fi
+              {{- end }}
           {{- with .Values.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
@@ -429,9 +435,16 @@ spec:
             {{- with .Values.env.extra }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- with .Values.env.envFrom }}
+          {{- if or (include "mindroom-runtime.generatesApiKey" .) .Values.env.envFrom }}
           envFrom:
+            {{- if include "mindroom-runtime.generatesApiKey" . }}
+            # Listed first so MINDROOM_API_KEY from env.extra or env.envFrom takes precedence.
+            - secretRef:
+                name: {{ include "mindroom-runtime.apiKeySecretName" . }}
+            {{- end }}
+            {{- with .Values.env.envFrom }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           {{- if .Values.probes.startup.enabled }}
           startupProbe:

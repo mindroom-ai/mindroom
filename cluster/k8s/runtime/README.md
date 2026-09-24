@@ -108,6 +108,7 @@ Dedicated Kubernetes workers receive the same config file path and do not receiv
 Dedicated Kubernetes workers and the `static_runner` sidecar also mount the storage subtree containing the config file read-only so content-bundle files under that subtree are visible without broad worker state access.
 That subtree is the first path component below `storage.mountPath`, and tool code can read all of it, so keep the config in its own directory away from credentials and Matrix state.
 With `workers.backend: static_runner`, the chart rejects a config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
+A config directly in `storage.mountPath` is mounted into the sidecar as a single file, so it must exist before the pod starts, and the sidecar's storage init container fails if it does not.
 
 Use a content bundle as the source of truth for the runtime config:
 
@@ -629,7 +630,12 @@ workers:
   The sidecar never receives the credentials encryption key, and saved settings for each proxied tool reach it as per-call leases from the primary.
   From the storage PVC it mounts only the `agents` and `private_instances` directories read-write over its own `sandbox-runner` directory, plus the read-only config subtree in file mode, so agent workspaces persist while the credential store and Matrix state stay out of reach.
   An init container creates those directories as the runtime user.
-  The sidecar shares the pod network namespace, so configure API authentication that tool code cannot forge, such as `MINDROOM_API_KEY` or trusted-upstream authentication with `requireJwt`.
+  The sidecar shares the pod network namespace, so tool code could call an unauthenticated primary API on `localhost`.
+  Unless `env.extra` sets `MINDROOM_API_KEY`, `SUPABASE_URL`, or `MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED`, the chart generates a `<fullname>-api-key` Secret, reuses it across upgrades, and passes it to the primary as `MINDROOM_API_KEY`.
+  The dashboard and API then require that key, including on existing installs that previously ran without authentication; the chart's install notes show the `kubectl` command that reads it.
+  A `MINDROOM_API_KEY` from `env.extra` or `env.envFrom` takes precedence, and one in the config directory's `.env` file does not, so supply your own key through `env.extra` from an existing Secret for GitOps or `helm template` workflows, where the generated key would change on every render.
+  Header-only trusted-upstream authentication remains forgeable from the sidecar, so enable `requireJwt` with it.
+  `apiAuth.allowUnauthenticatedPrimary: true` skips the generated key and is unsafe unless other primary API authentication is configured.
 - `workers.backend: kubernetes` lets the runtime create dedicated worker Deployments and Services on demand.
   In the release namespace, the chart stores derived worker tokens and optional credential-encryption keys as entries in one chart-created worker-auth Secret and grants only `get` and `patch` on that Secret.
   When `workers.kubernetes.namespace` points at a separate worker namespace, the chart uses per-worker auth Secrets and grants Secret CRUD only in that namespace.

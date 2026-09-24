@@ -252,6 +252,15 @@ env:
   # Raw Kubernetes EnvFromSource entries appended to the MindRoom container.
   envFrom: []
 
+apiAuth:
+  # With workers.backend=static_runner, tool code in the sandbox-runner sidecar shares the pod network
+  # and can call the primary API on localhost, so the chart generates a MINDROOM_API_KEY Secret for the primary
+  # unless env.extra sets MINDROOM_API_KEY, SUPABASE_URL, or MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED.
+  # A MINDROOM_API_KEY from env.extra or env.envFrom takes precedence over the generated one.
+  # Unsafe with static_runner: true skips the generated key and leaves the primary API open to tool code
+  # unless other authentication is configured.
+  allowUnauthenticatedPrimary: false
+
 matrix:
   homeserverUrl: ""
   serverName: ""
