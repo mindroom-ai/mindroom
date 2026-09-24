@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryBackend, MemorySearchConfig
-    from mindroom.config.models import CompactionConfig, EffectiveToolConfig
+    from mindroom.config.models import CompactionConfig, EffectiveToolConfig, FileAccess
     from mindroom.history.types import ResolvedHistorySettings
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -61,6 +61,13 @@ class ResolvedEntityView:
         if self.name is None:
             return self._config.defaults.max_tool_calls_per_turn
         return self._config._entity_max_tool_calls_per_turn(self.name)
+
+    @property
+    def file_access(self) -> FileAccess:
+        """Effective file access for in-process path tools; every non-agent scope inherits the default."""
+        if self.name is None:
+            return self._config.defaults.file_access
+        return self._config._agent_file_access(self.name)
 
     @property
     def memory_backend(self) -> MemoryBackend:

@@ -15,6 +15,7 @@ from uuid import uuid4
 import uvicorn
 
 from mindroom import constants
+from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_reply_membership_policy_changed
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.agents import ensure_default_agent_workspaces
@@ -125,9 +126,13 @@ from .logging_config import get_logger, setup_logging
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import build_config_update_plan, configured_entity_names
+from .orchestration.config_warnings import warn_about_config_risks
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
 from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
-from .orchestration.rooms import get_room_user_ids_to_invite, get_root_space_user_ids_to_invite
+from .orchestration.rooms import (
+    get_room_user_ids_to_invite,
+    get_root_space_user_ids_to_invite,
+)
 from .orchestration.runtime import (
     STARTUP_RETRY_INITIAL_DELAY_SECONDS,
     STARTUP_RETRY_MAX_DELAY_SECONDS,
@@ -411,6 +416,7 @@ class _MultiAgentOrchestrator:
     _mcp_catalog_change_task_owner: object = field(default_factory=object, init=False, repr=False)
     _pending_replacement_recovery_room_ids: dict[str, set[str]] = field(default_factory=dict, init=False)
     plugin_watch: PluginWatchState = field(init=False)
+    agent_cli_registry: TurnToolRegistry = field(default_factory=TurnToolRegistry, init=False)
     _knowledge_refresh_scheduler: KnowledgeRefreshScheduler = field(init=False)
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
     _hook_registry_state: HookRegistryState = field(
@@ -1381,6 +1387,7 @@ class _MultiAgentOrchestrator:
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
         self.config = config
+        warn_about_config_risks(config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
         self._activate_hook_registry(hook_registry)
@@ -1788,6 +1795,7 @@ class _MultiAgentOrchestrator:
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
         await self._prepare_entity_accounts(new_config, entity_names)
         self.config = new_config
+        warn_about_config_risks(new_config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(new_config, reason="initial_config_reload")
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(new_config)
@@ -2131,6 +2139,7 @@ class _MultiAgentOrchestrator:
                 "updating_config_authorization",
                 platform_administrator_ids=new_config.administrators,
             )
+            warn_about_config_risks(new_config, self.runtime_paths)
             self._computer_runtime.unbind()
             await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
             if changed_runtime_mcp_servers:
@@ -2485,6 +2494,7 @@ class _MultiAgentOrchestrator:
         self._runtime_ready_event.clear()
         for bot in self.agent_bots.values():
             bot.begin_process_shutdown()
+        self.agent_cli_registry.close()
         self.hook_registry = HookRegistry.empty()
         set_scheduling_hook_registry(self.hook_registry)
         if self._runtime_shutdown_event is not None:
@@ -2711,12 +2721,15 @@ async def _run_api_server(
     response_admission_gate: ResponseAdmissionGate | None = None,
     config_reload_status: Callable[[], ConfigReloadStatus] | None = None,
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
+    agent_cli_registry: TurnToolRegistry | None = None,
 ) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api import main as api_main  # noqa: PLC0415
+    from mindroom.api.agent_cli import bind_agent_cli_registry  # noqa: PLC0415
 
     api_server = _EmbeddedApiServerContext(host=host, port=port)
     api_main.initialize_api_app(api_main.app, runtime_paths)
+    bind_agent_cli_registry(api_main.app, agent_cli_registry)
     api_state = api_main.config_lifecycle.app_state(api_main.app)
     api_state.thread_export_runner = thread_export_runner
     api_state.leave_matrix_room = leave_matrix_room
@@ -2753,6 +2766,7 @@ async def _run_api_server(
         except SystemExit as exc:
             _raise_embedded_api_server_exit(api_server, reason="server.serve() raised SystemExit", cause=exc)
     finally:
+        bind_agent_cli_registry(api_main.app, None)
         api_state.thread_export_runner = None
         api_state.leave_matrix_room = None
         api_state.response_admission_gate = None
@@ -3121,6 +3135,7 @@ async def main(
                     response_admission_gate=orchestrator._response_admission_gate,
                     config_reload_status=lambda: orchestrator.config_reload.status,
                     agent_reply_memberships=orchestrator.agent_reply_memberships,
+                    agent_cli_registry=orchestrator.agent_cli_registry,
                 ),
                 name="api_server",
             )

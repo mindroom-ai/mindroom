@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -29,6 +29,7 @@ def _parse_string_mapping(value: dict[str, str] | str | None, *, field_name: str
 
 @register_tool_with_metadata(
     name="daytona",
+    file_access=ToolFileAccess.NONE,
     requires_primary_runtime=True,
     display_name="Daytona",
     description="Execute code in secure, remote sandbox environments",

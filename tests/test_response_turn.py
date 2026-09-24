@@ -1033,7 +1033,8 @@ def test_blocking_continuation_advances_and_resets_turn_state() -> None:
     assert recorder.completed_calls[-1]["completed_tools"] == [first_trace, _trace("sleep")]
 
 
-def test_blocking_after_toolcall_switch_selects_new_continuation_model() -> None:
+@pytest.mark.parametrize("hidden", [False, True])
+def test_blocking_after_toolcall_switch_selects_new_continuation_model(hidden: bool) -> None:
     """Dropping the requested alias during continuation would rebuild the old model."""
     log = _AdapterLog()
     active_models: list[str | None] = []
@@ -1046,7 +1047,8 @@ def test_blocking_after_toolcall_switch_selects_new_continuation_model() -> None
         if len(active_models) == 1:
             return CompletedAttempt(
                 attempt_run_id="run-1",
-                tool_executions=(_model_switch_execution("after-toolcall"),),
+                tool_executions=() if hidden else (_model_switch_execution("after-toolcall"),),
+                control_executions=(_model_switch_execution("after-toolcall"),) if hidden else (),
             )
         return CompletedAttempt(response_text="final", replayable_text="final", has_visible_content=True)
 
@@ -1063,7 +1065,8 @@ def test_blocking_after_toolcall_switch_selects_new_continuation_model() -> None
     assert active_models == [None, "large"]
 
 
-def test_blocking_next_turn_switch_keeps_current_model_for_continuation() -> None:
+@pytest.mark.parametrize("hidden", [False, True])
+def test_blocking_next_turn_switch_keeps_current_model_for_continuation(hidden: bool) -> None:
     """Re-reading the persisted override would apply a next-turn switch too early."""
     log = _AdapterLog()
     active_models: list[str | None] = []
@@ -1077,7 +1080,8 @@ def test_blocking_next_turn_switch_keeps_current_model_for_continuation() -> Non
             return CompletedAttempt(
                 attempt_run_id="run-1",
                 runtime_model_name="default",
-                tool_executions=(_model_switch_execution("next-turn"),),
+                tool_executions=() if hidden else (_model_switch_execution("next-turn"),),
+                control_executions=(_model_switch_execution("next-turn"),) if hidden else (),
             )
         return CompletedAttempt(response_text="final", replayable_text="final", has_visible_content=True)
 
@@ -1595,7 +1599,8 @@ def test_streaming_no_report_empty_run_completes_without_retry_or_notice() -> No
     ]
 
 
-def test_streaming_continuation_advances_then_finishes() -> None:
+@pytest.mark.parametrize("hidden", [False, True])
+def test_streaming_continuation_advances_then_finishes(hidden: bool) -> None:
     """A streamed dynamic-tool attempt continues the turn and streams the second attempt."""
     log = _AdapterLog()
     prompts: list[str] = []
@@ -1608,7 +1613,11 @@ def test_streaming_continuation_advances_then_finishes() -> None:
         if len(prompts) == 1:
             yield "loading tool"
             yield AttemptResolved(
-                CompletedAttempt(attempt_run_id="run-1", tool_executions=(_dynamic_tool_execution(),)),
+                CompletedAttempt(
+                    attempt_run_id="run-1",
+                    tool_executions=() if hidden else (_dynamic_tool_execution(),),
+                    control_executions=(_dynamic_tool_execution(),) if hidden else (),
+                ),
             )
             return
         yield "final answer"

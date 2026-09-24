@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     display_name="Attachments",
     description="Find files attached to a conversation and make workspace files available as attachments",
     category=ToolCategory.PRODUCTIVITY,
+    file_access=ToolFileAccess.AGENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     requires_primary_runtime=True,
@@ -34,6 +36,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
         ToolManagedInitArg.WORKER_TOOLS_OVERRIDE,
+        ToolManagedInitArg.FILE_ACCESS,
     ),
     function_names=("get_attachment", "list_attachments", "register_attachment", "view_file"),
 )

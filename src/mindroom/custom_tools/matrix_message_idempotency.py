@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.custom_tools.attachment_helpers import requester_joined_target_room
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, prepare_message_content, send_message_outcome
@@ -236,7 +237,7 @@ async def _claim_matrix_message_send(
             context.config,
             context.runtime_paths,
             context.require_agent_reply_memberships(),
-        ):
+        ) or not await requester_joined_target_room(context, room_id):
             msg = "Not authorized to send to the target room."
             raise MatrixMessageIdempotencyError(msg)
         state = await run_blocking_until_complete(_read, path, scope)

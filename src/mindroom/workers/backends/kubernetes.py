@@ -530,6 +530,9 @@ class KubernetesWorkerBackend:
                 deployment_apply: resources.DeploymentApplyResult | None = None
                 auth_secret_applied = False
                 try:
+                    # kubelet resolves the read-only mirror subPath when the pod starts, so the
+                    # primary validates and creates the worker's credential directories first.
+                    get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key)
                     self._resources.apply_auth_secret(worker_key=worker_key, worker_id=worker_id)
                     auth_secret_applied = True
                     deployment_apply = self._resources.apply_deployment(

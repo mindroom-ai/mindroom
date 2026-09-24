@@ -180,6 +180,7 @@ class ApprovalContinuation:
     failure_reason: str | None = None
     generation: int = 0
     prepared_edit_record: TurnRecord | None = None
+    cli_call: dict[str, object] | None = None
     continuation_count: int = 0
 
     @property
@@ -191,6 +192,7 @@ class ApprovalContinuation:
 def _context(continuation: ApprovalContinuation) -> dict[str, object]:
     """Return the opaque response snapshot stored beside normalized routing facts."""
     return {
+        "cli_call": continuation.cli_call,
         "run_id": continuation.run_id,
         "continuation_count": continuation.continuation_count,
         "session_id": continuation.session_id,
@@ -314,6 +316,7 @@ def _from_rows(
         for call in call_rows
     )
     return ApprovalContinuation(
+        cli_call=cast("dict[str, object] | None", stored.get("cli_call")),
         approval_id=str(row["approval_id"]),
         run_id=cast("str", stored["run_id"]),
         continuation_count=int(stored.get("continuation_count", 0)),
@@ -675,6 +678,7 @@ def advance(
     response_tool_trace: tuple[dict[str, object], ...] | None = None,
     response_presentation_state: dict[str, object] | None = None,
     delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
+    cli_call: dict[str, object] | None = None,
     continuation_count: int | None = None,
 ) -> ApprovalContinuation | None:
     """Replace one claimed generation with the next exact Agno pause."""
@@ -706,6 +710,7 @@ def advance(
         runtime_generation=publication_owner,
         failure_reason=None,
         generation=next_generation,
+        cli_call=cli_call,
     )
     updated = transaction.fetchone(
         """

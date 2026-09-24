@@ -89,7 +89,7 @@ It controls the returned tool output, not where the Matrix message is delivered.
 `read` returns message event IDs; thread reads also include edit options for editable messages.
 Room-timeline reads decrypt encrypted messages with the agent's available keys and omit messages they cannot decrypt.
 The room read limit counts fetched events, so edits and unreadable messages can leave fewer visible messages than `limit`.
-Room access checks apply before cross-room operations.
+Room access checks apply before cross-room operations, and a room other than the current one also requires the requester to be joined to it.
 Calls are rate limited to 12 actions per 30 seconds per agent, room, and requester; each file costs one additional action.
 
 ## Durable send retries
@@ -138,7 +138,9 @@ Oversized existing files fail closed before JSON parsing and are never discarded
 ## Attachments
 
 Each `attachments` entry is a context-scoped `att_*` ID or a local file path.
-Relative paths resolve from the agent workspace when configured.
+With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With [`file_access`](../architecture/security-posture.md#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
+With `workspace` file access and no configured workspace, only `att_*` IDs are accepted.
 Use `./att_filename` for a local filename that starts with `att_`.
 All references are resolved before any message is sent.
 Files retain their input order.
