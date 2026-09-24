@@ -22,6 +22,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Router | `configuration/router.md` | `configuration/router/index.md` | `page__configuration__router__index.md` |
 | Overview | `tools/index.md` | `tools/index.md` | `page__tools__index.md` |
 | Dynamic Tools | `tools/dynamic-tools.md` | `tools/dynamic-tools/index.md` | `page__tools__dynamic-tools__index.md` |
+| Minimal Agent Mode | `tools/agent-cli.md` | `tools/agent-cli/index.md` | `page__tools__agent-cli__index.md` |
 | Execution & Coding | `tools/execution-and-coding.md` | `tools/execution-and-coding/index.md` | `page__tools__execution-and-coding__index.md` |
 | Data & Databases | `tools/data-and-databases.md` | `tools/data-and-databases/index.md` | `page__tools__data-and-databases__index.md` |
 | Web Search | `tools/web-search.md` | `tools/web-search/index.md` | `page__tools__web-search__index.md` |
@@ -69,6 +70,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Agent Orchestration | `architecture/orchestration.md` | `architecture/orchestration/index.md` | `page__architecture__orchestration__index.md` |
 | Migration Boundaries | `architecture/migrations.md` | `architecture/migrations/index.md` | `page__architecture__migrations__index.md` |
 | Agno Compatibility | `architecture/agno-compatibility.md` | `architecture/agno-compatibility/index.md` | `page__architecture__agno-compatibility__index.md` |
+| Security Posture | `architecture/security-posture.md` | `architecture/security-posture/index.md` | `page__architecture__security-posture__index.md` |
 | History Compaction | `architecture/compaction.md` | `architecture/compaction/index.md` | `page__architecture__compaction__index.md` |
 | Overview | `deployment/index.md` | `deployment/index.md` | `page__deployment__index.md` |
 | Nio 1.0 Upgrade | `deployment/nio-upgrade.md` | `deployment/nio-upgrade/index.md` | `page__deployment__nio-upgrade__index.md` |

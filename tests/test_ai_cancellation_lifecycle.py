@@ -16,6 +16,7 @@ from agno.run.base import RunStatus
 from openai import AsyncOpenAI
 
 from mindroom import agno_compat_session_persistence as persistence
+from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_storage import get_agent_session
 from mindroom.ai import stream_agent_response
 from mindroom.openai_models import MindRoomOpenAIChat
@@ -107,6 +108,7 @@ async def test_ai_stream_can_finish_in_another_task(  # noqa: PLR0915
             assert isinstance(first, RunContentEvent)
             assert first.content == "Visible answer"
             owner_after_parent_pull = persistence._CANCELLATION_OWNER.get()
+            assert current_cli_lifetime() is None
 
             async def finish_in_child() -> object:
                 if finish == "close":
@@ -125,6 +127,7 @@ async def test_ai_stream_can_finish_in_another_task(  # noqa: PLR0915
                 result = (await asyncio.gather(child, return_exceptions=True))[0]
             drained_at_child_return = all(task.done() for task in background)
             owner_after_child = persistence._CANCELLATION_OWNER.get()
+            assert current_cli_lifetime() is None
 
         assert owner_after_parent_pull is None, "Cancellation owner leaked into the parent at a public yield"
         assert owner_after_child is None

@@ -161,6 +161,13 @@ resource "helm_release" "mindroom_platform" {
   values = [
     yamlencode(local.platform_values)
   ]
+
+  lifecycle {
+    precondition {
+      condition     = var.stripe_secret_key == "" || var.stripe_webhook_secret != ""
+      error_message = "stripe_webhook_secret is required when stripe_secret_key is set."
+    }
+  }
 }
 
 # ===========================================

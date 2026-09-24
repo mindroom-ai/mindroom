@@ -448,6 +448,7 @@ desktop = [
   "pyobjc-framework-screencapturekit>=12.2.1; sys_platform=='darwin'",
 ]
 [project.scripts]
+mindroom-agent = "mindroom.agent_cli.main:main"
 mindroom = "mindroom.cli.main:main"
 [project.urls]
 documentation = "https://github.com/mindroom-ai/mindroom"

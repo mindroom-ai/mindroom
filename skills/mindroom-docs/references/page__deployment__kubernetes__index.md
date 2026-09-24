@@ -87,6 +87,7 @@ Restrict access to both the instance Secret and every retained Helm release Secr
 Deleting the local file or changing future values does not remove credentials from older Helm release revisions.
 The chart passes the same token to the runtime and sandbox runner; the default file and shell tools need it to acquire the static runner.
 The provisioner supplies this token automatically, while a direct install must provide it.
+Browser dashboard login through the platform also needs `platformSsoSecret` set to the key the platform derives for that instance; without it the instance accepts only Supabase bearer tokens.
 
 ```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
