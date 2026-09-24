@@ -14,6 +14,8 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from starlette.applications import Starlette
 from starlette.routing import Route
+from structlog.contextvars import merge_contextvars
+from structlog.testing import capture_logs
 
 from mindroom.mcp_gateway.execution import retain_execution_task
 from mindroom.mcp_gateway.server import GatewayServer
@@ -91,6 +93,129 @@ def _call(
 
 def _cancel(request_id: int | str) -> dict[str, object]:
     return {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": request_id}}
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    ["success", "returned_error", "unknown_error", "non_string_error", "exception", "timeout", "invalid", "unknown"],
+)
+async def test_inbound_call_diagnostics_are_correlated_and_private(outcome: str) -> None:
+    """HTTP 200 failures remain visible without copying client or provider data into logs."""
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        if outcome == "exception":
+            message = "private-exception-marker"
+            raise RuntimeError(message)
+        if outcome == "timeout":
+            await asyncio.Event().wait()
+        if outcome == "returned_error":
+            return {"error": {"code": "tool_not_found", "message": "private-error-marker"}}
+        if outcome in {"unknown_error", "non_string_error"}:
+            code = "private-error-code-marker" if outcome == "unknown_error" else {"private-error-code-marker": True}
+            return {"error": {"code": code, "message": "private-error-marker"}}
+        return {"result": "private-result-marker"}
+
+    arguments = {"agent": "private-agent-marker", "query": "private-query-marker"}
+    if outcome == "invalid":
+        arguments["unexpected"] = "private-argument-marker"
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        async with _client(dispatch, deadline_seconds=0.02) as client:
+            response = await client.post(
+                "/mcp",
+                json=_call(
+                    "private-request-id-marker",
+                    name="private-operation-marker" if outcome == "unknown" else "search_tools",
+                    arguments=arguments,
+                ),
+            )
+    assert response.status_code == 200
+    if outcome in {"unknown_error", "non_string_error"}:
+        assert response.json()["result"]["structuredContent"]["error"] == {
+            "code": "private-error-code-marker" if outcome == "unknown_error" else {"private-error-code-marker": True},
+            "message": "private-error-marker",
+        }
+    calls = [entry for entry in logs if entry["event"] == "mcp_gateway_call_completed"]
+    assert len(calls) == 1
+    call = calls[0]
+    expected_code = {
+        "success": None,
+        "returned_error": "tool_not_found",
+        "unknown_error": "unknown",
+        "non_string_error": "unknown",
+        "exception": "tool_unavailable",
+        "timeout": "timeout",
+        "invalid": "invalid_arguments",
+        "unknown": "tool_not_found",
+    }[outcome]
+    assert call["error_code"] == expected_code
+    assert call["outcome"] == ("success" if outcome == "success" else "error")
+    assert call["operation"] == ("unknown" if outcome == "unknown" else "search_tools")
+    assert call["requester_id"] == "alice"
+    assert call["duration_ms"] >= 0
+    http = next(entry for entry in logs if entry["event"] == "mcp_gateway_http_completed")
+    assert http["request_id"] == call["request_id"]
+    assert len(call["request_id"]) == 32
+    if outcome == "exception":
+        failure = next(entry for entry in logs if entry["event"] == "mcp_gateway_call_failed")
+        assert failure["error_type"] == "RuntimeError"
+        assert failure["request_id"] == call["request_id"]
+    serialized = json.dumps(logs)
+    assert "private-" not in serialized
+    assert "Bearer" not in serialized
+    assert "grant-alice" not in serialized
+
+
+async def test_authentication_rejection_has_safe_http_diagnostics() -> None:
+    """Failed authentication is observable without attributing an unverified identity."""
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        pytest.fail("Unauthenticated request reached dispatch")
+
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        async with _client(dispatch) as client:
+            response = await client.post("/mcp", json=_call(), headers={"Authorization": "Bearer private-token-marker"})
+    assert response.status_code == 401
+    http = next(entry for entry in logs if entry["event"] == "mcp_gateway_http_completed")
+    assert http["status_code"] == 401
+    assert http["requester_id"] is None
+    assert "private-token-marker" not in json.dumps(logs)
+
+
+async def test_concurrent_call_diagnostics_keep_request_ownership() -> None:
+    """Duplicate IDs, capacity failures, and cancellation retain distinct correlated outcomes."""
+    started = asyncio.Event()
+
+    async def dispatch(request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        if request.headers["authorization"] == "Bearer alice":
+            started.set()
+            await asyncio.Event().wait()
+        return {}
+
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        async with _client(dispatch, max_user_calls=1) as client:
+            first = asyncio.create_task(client.post("/mcp", json=_call(7)))
+            await asyncio.wait_for(started.wait(), 2)
+            await client.post("/mcp", json=_call(7))
+            await client.post("/mcp", json=_call(8))
+            await client.post("/mcp", json=_call(7), headers={"Authorization": "Bearer bob"})
+            await client.post("/mcp", json=_cancel(7))
+            await asyncio.wait_for(first, 2)
+    calls = [entry for entry in logs if entry["event"] == "mcp_gateway_call_completed"]
+    assert len(calls) == 4
+    assert len({entry["request_id"] for entry in calls}) == 4
+    assert {(entry["requester_id"], entry["error_code"]) for entry in calls} == {
+        ("alice", "duplicate_request"),
+        ("alice", "busy"),
+        ("alice", "cancelled"),
+        ("bob", None),
+    }
+    for call in calls:
+        transport = next(
+            entry
+            for entry in logs
+            if entry["event"] == "mcp_gateway_http_completed" and entry["request_id"] == call["request_id"]
+        )
+        assert transport["requester_id"] == call["requester_id"]
 
 
 async def test_activity_records_successful_discovery_and_calls_only() -> None:

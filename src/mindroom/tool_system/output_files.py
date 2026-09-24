@@ -18,9 +18,9 @@ from agno.tools.function import Function, ToolResult
 from pydantic import BaseModel
 
 from mindroom.atomic_file import atomic_write_bytes_at
-from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import open_directory_within_root
+from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
 from mindroom.tool_system.agno_compat_function_schema import install_schema_postprocessor, uses_schema_postprocessor
 from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
@@ -40,7 +40,6 @@ _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
     "Use this for large output you plan to inspect later with file, coding, python, or shell tools."
 )
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
-_DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 _AUTO_SAVE_PREVIEW_BYTES = 8192
 _WRAPPED_ATTR = "__mindroom_output_file_wrapped__"
 _DEFAULT_PARAMETERS = {"type": "object", "properties": {}, "required": []}
@@ -55,7 +54,7 @@ class ToolOutputFilePolicy:
     """Resolved policy for one toolkit's model-requested output files."""
 
     workspace_root: Path
-    max_bytes: int = _DEFAULT_MAX_BYTES
+    max_bytes: int = DEFAULT_TOOL_OUTPUT_MAX_BYTES
     auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 
     @classmethod
@@ -127,7 +126,7 @@ def _output_redirect_max_bytes(runtime_paths: RuntimePaths) -> int:
     return _positive_int_runtime_setting(
         runtime_paths,
         _MAX_BYTES_ENV,
-        default=_DEFAULT_MAX_BYTES,
+        default=DEFAULT_TOOL_OUTPUT_MAX_BYTES,
         log_key="invalid_tool_output_redirect_max_bytes",
     )
 
@@ -277,6 +276,18 @@ def _path_has_environment_expansion(raw_path: str) -> bool:
     return raw_path.startswith("~") or "$" in raw_path or "%" in raw_path
 
 
+def _relative_output_path_error(relative_path: Path) -> str | None:
+    if relative_path.is_absolute():
+        return "mindroom_output_path must be relative to the workspace."
+    if relative_path == Path():
+        return "mindroom_output_path must name a file, not the workspace root."
+    if any(part == ".." for part in relative_path.parts):
+        return "mindroom_output_path must stay inside the workspace."
+    if is_git_metadata_path(relative_path):
+        return "mindroom_output_path must not target Git metadata ('.git')."
+    return None
+
+
 def _validate_raw_output_path(raw_path: object) -> tuple[str, Path] | str:
     error: str | None = None
     relative_path: Path | None = None
@@ -294,12 +305,7 @@ def _validate_raw_output_path(raw_path: object) -> tuple[str, Path] | str:
         )
     else:
         relative_path = Path(raw_path)
-        if relative_path.is_absolute():
-            error = "mindroom_output_path must be relative to the workspace."
-        elif relative_path == Path():
-            error = "mindroom_output_path must name a file, not the workspace root."
-        elif any(part == ".." for part in relative_path.parts):
-            error = "mindroom_output_path must stay inside the workspace."
+        error = _relative_output_path_error(relative_path)
 
     if error is not None:
         return error

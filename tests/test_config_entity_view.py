@@ -239,3 +239,84 @@ def test_unknown_entity_raises_on_field_access() -> None:
         _ = view.has_authored_compaction_config
     with pytest.raises(ValueError, match="Unknown entity: missing"):
         _ = view.model_name
+
+
+def test_max_tool_calls_per_turn_resolution() -> None:
+    config = Config(
+        agents={
+            "capped_agent": AgentConfig(display_name="Capped Agent", max_tool_calls_per_turn=40),
+            "inheriting_agent": AgentConfig(display_name="Inheriting Agent"),
+        },
+        teams={
+            "capped_team": TeamConfig(
+                display_name="Capped Team",
+                role="Team with a tool budget",
+                agents=["capped_agent"],
+                max_tool_calls_per_turn=12,
+            ),
+            "inheriting_team": TeamConfig(
+                display_name="Inheriting Team",
+                role="Team without a tool budget",
+                agents=["inheriting_agent"],
+            ),
+        },
+        defaults=DefaultsConfig(tools=[], max_tool_calls_per_turn=90),
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+
+    assert config.resolve_entity("capped_agent").max_tool_calls_per_turn == 40
+    assert config.resolve_entity("capped_team").max_tool_calls_per_turn == 12
+    for inheriting_scope in ("inheriting_agent", "inheriting_team", None):
+        assert config.resolve_entity(inheriting_scope).max_tool_calls_per_turn == 90
+    with pytest.raises(ValueError, match="Unknown entity: missing"):
+        _ = config.resolve_entity("missing").max_tool_calls_per_turn
+
+
+def test_max_tool_calls_per_turn_defaults_and_validation() -> None:
+    assert DefaultsConfig(tools=[]).max_tool_calls_per_turn == 1000
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        DefaultsConfig(tools=[], max_tool_calls_per_turn=0)
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        AgentConfig(display_name="Broken", max_tool_calls_per_turn=0)
+
+
+def test_file_access_defaults_to_workspace_and_agent_overrides_it() -> None:
+    config = Config.model_validate(
+        {
+            "agents": {
+                "plain": {"display_name": "Plain"},
+                "admin": {"display_name": "Admin", "file_access": "unrestricted"},
+            },
+            "teams": {"crew": {"display_name": "Crew", "role": "r", "agents": ["plain"], "mode": "coordinate"}},
+        },
+    )
+    assert config.resolve_entity(None).file_access == "workspace"
+    assert config.resolve_entity("plain").file_access == "workspace"
+    assert config.resolve_entity("admin").file_access == "unrestricted"
+    assert config.resolve_entity("crew").file_access == "workspace"
+
+
+def test_file_access_global_default_is_inherited() -> None:
+    config = Config.model_validate(
+        {
+            "defaults": {"file_access": "unrestricted"},
+            "agents": {
+                "plain": {"display_name": "Plain"},
+                "boxed": {"display_name": "Boxed", "file_access": "workspace"},
+            },
+        },
+    )
+    assert config.resolve_entity("plain").file_access == "unrestricted"
+    assert config.resolve_entity("boxed").file_access == "workspace"
+
+
+def test_file_access_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError, match="file_access"):
+        Config.model_validate({"defaults": {"file_access": "readonly"}})
+
+
+def test_file_access_unknown_entity_names_inherit_the_default() -> None:
+    config = Config.model_validate(
+        {"defaults": {"file_access": "unrestricted"}, "agents": {"plain": {"display_name": "Plain"}}},
+    )
+    assert config.resolve_entity("not-configured").file_access == "unrestricted"

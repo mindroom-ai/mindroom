@@ -199,6 +199,7 @@ Manual `compact_context` remains available when a compaction model and context w
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place; otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
 Compaction rewrites the live session so compacted history moves into `session.summary` while only recent raw runs remain in `session.runs`
 - **max_tool_calls_from_history**: Max tool call messages replayed from history (per-agent override)
+- **max_tool_calls_per_turn**: Max tool calls one turn may execute (per-agent override of `defaults.max_tool_calls_per_turn`, 1000); later calls return a tool error, and the turn ends with its text so far after this many plus two model requests
 - **show_tool_calls**: Whether to show tool call details inline in responses (per-agent override). When disabled, routed tools may still show generic worker warmup copy, but it never includes tool identifiers or tool-trace metadata
 - **worker_tools**: Tool names to route through scoped workers (overrides defaults; `null` uses the built-in default routing policy)
 - **worker_scope**: Worker runtime reuse mode for routed tools: `shared`, `user`, or `user_agent`
@@ -229,6 +230,7 @@ teams:
     num_history_runs: 8  # Optional team-scoped replay policy
     num_history_messages: null  # Optional; mutually exclusive with num_history_runs
     max_tool_calls_from_history: 6  # Optional replay trimming for tool calls
+    max_tool_calls_per_turn: 200  # Optional coordinator tool-call budget per turn, delegations included
     compaction:  # Optional team-scoped required-compaction overrides
       # Soft thresholds do not compact by themselves while history still fits.
       enabled: true
@@ -244,6 +246,7 @@ teams:
 - **accept_invites**: Accept every direct Matrix room invite with `true`, none with `false` or `[]`, or exact and wildcard inviter Matrix user IDs from a list
 - **num_history_runs / num_history_messages**: Optional team-owned replay policy for named teams
 - **max_tool_calls_from_history**: Optional cap on replayed tool call messages for the shared team scope
+- **max_tool_calls_per_turn**: Optional cap on the coordinator's own tool calls per turn, delegations included; members keep their own budgets
 - **compaction**: Optional team-owned required-compaction overrides for the shared team scope
 
 Named teams use these explicit team settings for replay and compaction when provided.
@@ -379,6 +382,7 @@ defaults:
   # num_history_runs: null  # Default: all
   # num_history_messages: null  # Mutually exclusive with num_history_runs
   # max_tool_calls_from_history: null  # Default: no limit
+  # max_tool_calls_per_turn: 1000  # Default: 1000 tool calls per agent or team turn
   # worker_tools: null  # Default: use built-in routing policy
   # worker_scope: null  # Default: no worker scoping
 ```

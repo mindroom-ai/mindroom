@@ -330,6 +330,19 @@ class GatewayRuntime:
         require_current_access = self._access_guard(request, user, require_authority)
 
         agent = arguments.get("agent")
+        # Report membership checks, never arbitrary client-supplied agent names.
+        agent_name = agent if isinstance(agent, str) else None
+        logger.info(
+            "mcp_gateway_agent_selection",
+            agent_provided=agent is not None,
+            agent_eligible=agent_name in user.agent_names,
+            agent_saved=agent_name in saved,
+            agent_selected=agent_name in selected,
+            agent_case_match=agent_name is not None
+            and any(agent_name.casefold() == candidate.casefold() for candidate in user.agent_names),
+            eligible_agent_count=len(user.agent_names),
+            selected_agent_count=len(selected),
+        )
         if name == "search_tools" and agent is None and "toolkit" not in arguments:
             return await self._search_selection(user, selected, arguments, require_current_access)
         if not isinstance(agent, str) or agent not in selected:

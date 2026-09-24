@@ -82,7 +82,8 @@ _MEGOLM_MAX_MESSAGE_INDEX_VARINT_BYTES = 5
 _MEGOLM_BASE64_KEY_LENGTH = 43
 _UNREPRESENTABLE_MESSAGE_ERROR = "Large message cannot fit within the Matrix event limit after sidecar preparation"
 _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS = 5.0
-_oversized_nonterminal_streaming_edit_sent_at: dict[tuple[str, str], float] = {}
+_OVERSIZED_NONTERMINAL_STREAMING_EDIT_BYTES_PER_SECOND = 4096
+_oversized_nonterminal_streaming_edit_next_allowed_at: dict[tuple[str, str], float] = {}
 
 
 class MatrixEventTooLargeError(ValueError):
@@ -290,11 +291,11 @@ def _is_nonterminal_stream_content(content: dict[str, Any]) -> bool:
 def _prune_expired_oversized_nonterminal_streaming_edit_rate_limits(now: float) -> None:
     expired_keys = [
         key
-        for key, sent_at in _oversized_nonterminal_streaming_edit_sent_at.items()
-        if now - sent_at >= _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS
+        for key, next_allowed_at in _oversized_nonterminal_streaming_edit_next_allowed_at.items()
+        if now >= next_allowed_at
     ]
     for key in expired_keys:
-        _oversized_nonterminal_streaming_edit_sent_at.pop(key, None)
+        _oversized_nonterminal_streaming_edit_next_allowed_at.pop(key, None)
 
 
 def should_send_oversized_nonterminal_streaming_edit(
@@ -303,23 +304,30 @@ def should_send_oversized_nonterminal_streaming_edit(
     original_event_id: str,
     edit_content: dict[str, Any],
 ) -> bool:
-    """Return whether one oversized non-terminal streaming edit may be sent now."""
+    """Return whether one oversized non-terminal streaming edit may be sent now, at a size-proportional cadence."""
     if not original_event_id or not is_edit_message(edit_content):
         return True
 
     source_content = edit_content.get("m.new_content")
     if not isinstance(source_content, dict) or not _is_nonterminal_stream_content(source_content):
         return True
-    if calculate_event_size(edit_content) <= _EDIT_MESSAGE_LIMIT:
+
+    event_size = calculate_event_size(edit_content)
+    if event_size <= _EDIT_MESSAGE_LIMIT:
         return True
 
     key = (room_id, original_event_id)
     now = monotonic()
     _prune_expired_oversized_nonterminal_streaming_edit_rate_limits(now)
-    last_sent_at = _oversized_nonterminal_streaming_edit_sent_at.get(key)
-    if last_sent_at is not None and now - last_sent_at < _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS:
+    if key in _oversized_nonterminal_streaming_edit_next_allowed_at:
         return False
-    _oversized_nonterminal_streaming_edit_sent_at[key] = now
+    # Each allowed oversized edit uploads a fresh full-content sidecar, so the
+    # wait grows with its size and bounds the average upload rate per stream.
+    min_interval = max(
+        _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS,
+        event_size / _OVERSIZED_NONTERMINAL_STREAMING_EDIT_BYTES_PER_SECOND,
+    )
+    _oversized_nonterminal_streaming_edit_next_allowed_at[key] = now + min_interval
     return True
 
 

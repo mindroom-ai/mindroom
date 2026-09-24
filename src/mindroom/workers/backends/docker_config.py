@@ -225,6 +225,15 @@ class _DockerWorkerBackendConfig:
             msg = f"{WORKER_COMPUTER_ENABLED_ENV}=true requires a non-root {_USER_ENV}; got {self.user!r}."
             raise WorkerBackendError(msg)
 
+    def validate_cli_profile(self) -> None:
+        """Reject unsupported CLI settings before saving a mode or starting a worker."""
+        if self.extra_env:
+            msg = "CLI workers do not support Docker extra env."
+            raise WorkerBackendError(msg)
+        if not self.user or re.fullmatch(r"root|[+-]?0+", self.user.partition(":")[0]):
+            msg = "CLI workers require an explicit non-root Docker user."
+            raise WorkerBackendError(msg)
+
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> _DockerWorkerBackendConfig:
         env = runtime_env_values(runtime_paths)

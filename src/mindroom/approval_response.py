@@ -386,6 +386,7 @@ class ApprovalResponseCoordinator:
             response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
             response_presentation_state=paused.response_presentation_state,
             delegation_storage_bindings=paused.delegation_storage_bindings,
+            cli_call=paused.cli_call,
         )
         if publishing is None:
             msg = "Could not persist the chained approval pause"

@@ -39,8 +39,9 @@ from mindroom.history.interrupted_replay import (
 )
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_sent_at
+from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
@@ -90,7 +91,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator
 
     from mindroom.bot import AgentBot
 
@@ -263,14 +264,6 @@ def mock_calculator_agent() -> AgentMatrixUser:
         display_name="CalculatorAgent",
         user_id="@mindroom_calculator:localhost",
     )
-
-
-@pytest.fixture
-def reset_oversized_nonterminal_rate_limit() -> Iterator[None]:
-    """Reset oversized nonterminal sidecar edit rate-limit state around a test."""
-    _oversized_nonterminal_streaming_edit_sent_at.clear()
-    yield
-    _oversized_nonterminal_streaming_edit_sent_at.clear()
 
 
 class TestStreamingBehavior:
@@ -603,10 +596,7 @@ class TestStreamingBehavior:
         assert content["m.relates_to"]["event_id"] == "$stream_123"
 
     @pytest.mark.asyncio
-    async def test_oversized_nonterminal_sidecar_edits_are_rate_limited(
-        self,
-        reset_oversized_nonterminal_rate_limit: None,  # noqa: ARG002
-    ) -> None:
+    async def test_oversized_nonterminal_sidecar_edits_are_rate_limited(self) -> None:
         """Oversized in-progress edits should not burst sidecar uploads while final still sends."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
@@ -617,34 +607,41 @@ class TestStreamingBehavior:
         streaming.event_id = "$stream_123"
         streaming.accumulated_text = "x" * 40000
 
-        monotonic_values = iter([100.0, 101.0, 106.0])
+        now = {"value": 100.0}
+        delivered_edits: list[dict[str, object]] = []
 
         async def delivered_edit(
             _client: nio.AsyncClient,
             _room_id: str,
-            _event_id: str,
+            event_id: str,
             new_content: dict[str, object],
-            _new_text: str,
+            new_text: str,
             *,
             retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
+            delivered_edits.append(
+                build_edit_event_content(event_id=event_id, new_content=new_content, new_text=new_text),
+            )
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
         with (
-            patch(
-                "mindroom.matrix.large_messages.monotonic",
-                side_effect=lambda: next(monotonic_values),
-            ),
+            patch("mindroom.matrix.large_messages.monotonic", side_effect=lambda: now["value"]),
             patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=delivered_edit)) as mock_edit,
         ):
             assert await streaming._send_or_edit_message(mock_client)
             assert mock_edit.await_count == 1
+            # Every oversized edit exceeds 27 KB, so its size-proportional
+            # interval always outlasts the 5 s floor.
+            interval = calculate_event_size(delivered_edits[0]) / 4096
+            assert interval > 5.0
 
+            now["value"] = 100.0 + interval - 1.0
             streaming.accumulated_text += "y"
             streaming._mark_nonadditive_text_mutation()
             assert await streaming._send_or_edit_message(mock_client)
             assert mock_edit.await_count == 1
 
+            now["value"] = 100.0 + interval
             streaming.accumulated_text += "z"
             streaming._mark_nonadditive_text_mutation()
             assert await streaming._send_or_edit_message(mock_client)
@@ -659,10 +656,7 @@ class TestStreamingBehavior:
             assert mock_edit.await_count == 3
 
     @pytest.mark.asyncio
-    async def test_rate_limited_oversized_nonterminal_edit_resolves_capture_completion(
-        self,
-        reset_oversized_nonterminal_rate_limit: None,  # noqa: ARG002
-    ) -> None:
+    async def test_rate_limited_oversized_nonterminal_edit_resolves_capture_completion(self) -> None:
         """Skipping an oversized in-progress edit should still unblock capture waiters."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(

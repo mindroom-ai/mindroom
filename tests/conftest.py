@@ -112,6 +112,7 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_next_allowed_at
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
@@ -2844,6 +2845,14 @@ def _reset_model_media_capabilities() -> Generator[None, None, None]:
     reset_model_media_capability_cache()
     yield
     reset_model_media_capability_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_oversized_nonterminal_streaming_edit_rate_limit() -> Generator[None, None, None]:
+    """Keep the process-global oversized streaming-edit cadence isolated per test, even when one fails."""
+    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
+    yield
+    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
 
 
 _LEDGER_LOADING_TEST_MODULES = frozenset(

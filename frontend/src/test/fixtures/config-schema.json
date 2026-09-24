@@ -51,6 +51,15 @@
           "title": "Instructions",
           "type": "array"
         },
+        "minimal_instructions": {
+          "default": [],
+          "description": "Always-present minimal mode instructions",
+          "items": {
+            "type": "string"
+          },
+          "title": "Minimal Instructions",
+          "type": "array"
+        },
         "rooms": {
           "default": [],
           "description": "List of room IDs or names to auto-join",
@@ -341,6 +350,20 @@
           "description": "Max tool call messages replayed from history (per-agent override)",
           "title": "Max Tool Calls From History"
         },
+        "max_tool_calls_per_turn": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum tool calls one turn may execute (per-agent override)",
+          "title": "Max Tool Calls Per Turn"
+        },
         "show_tool_calls": {
           "anyOf": [
             {
@@ -387,6 +410,23 @@
           "default": null,
           "description": "Worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
           "title": "Worker Scope"
+        },
+        "file_access": {
+          "anyOf": [
+            {
+              "enum": [
+                "workspace",
+                "unrestricted"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent override of defaults.file_access (None = inherit the default)",
+          "title": "File Access"
         },
         "allow_self_config": {
           "anyOf": [
@@ -1239,11 +1279,28 @@
           "description": "Max tool call messages replayed from history (None = no limit)",
           "title": "Max Tool Calls From History"
         },
+        "max_tool_calls_per_turn": {
+          "default": 1000,
+          "description": "Maximum tool calls one agent or team turn may execute; further calls return a tool error, and the turn ends with its text so far after this many plus two model requests",
+          "minimum": 1,
+          "title": "Max Tool Calls Per Turn",
+          "type": "integer"
+        },
         "show_tool_calls": {
           "default": true,
           "description": "Whether to show tool call details inline in responses",
           "title": "Show Tool Calls",
           "type": "boolean"
+        },
+        "file_access": {
+          "default": "workspace",
+          "description": "Where in-process path-taking tools (file, coding, attachments, matrix_message, gmail, google_drive, browser) may read and write files: workspace confines them to the agent workspace and its attachments, unrestricted allows any path their process can reach. Code-execution tools such as shell and python are always unrestricted; isolate them with worker_tools",
+          "enum": [
+            "workspace",
+            "unrestricted"
+          ],
+          "title": "File Access",
+          "type": "string"
         },
         "worker_tools": {
           "anyOf": [
@@ -3539,6 +3596,20 @@
           "default": null,
           "description": "Max tool call messages replayed from team history",
           "title": "Max Tool Calls From History"
+        },
+        "max_tool_calls_per_turn": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum tool calls the team coordinator may execute in one turn, delegations included (per-team override)",
+          "title": "Max Tool Calls Per Turn"
         }
       },
       "required": [
@@ -4075,7 +4146,9 @@
         "num_history_messages": null,
         "compress_tool_results": false,
         "max_tool_calls_from_history": null,
+        "max_tool_calls_per_turn": 1000,
         "show_tool_calls": true,
+        "file_access": "workspace",
         "worker_tools": null,
         "worker_scope": null,
         "worker_grantable_credentials": null,
