@@ -166,8 +166,10 @@ For dedicated Kubernetes workers, the exposed environment contains only that wor
 This leaves same-worker token exposure as a local containment risk, while per-worker credentials and NetworkPolicy limit cross-worker blast radius.
 
 Tool code can write the sandbox-runner startup manifest, because it lives in the worker's read-write state root.
-The primary therefore publishes the manifest's SHA-256 through `MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256` in the container or pod environment, which tool code cannot change, and republishes the manifest before every worker start.
-A runner whose manifest fails that digest, or whose manifest contradicts the dedicated-worker identity and policy fixed in the container environment, refuses to start rather than boot from a file the worker could have rewritten.
+The primary therefore pins the manifest's SHA-256 as `MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256` in the container or pod spec, which tool code cannot change.
+The runner reads and verifies the manifest once at startup, refuses to start when it does not match, and keeps the verified values in memory, so later rewrites of the file never change a running worker.
+A tampered manifest keeps the worker down until the primary republishes it, which the Docker backend does before every container start and the Kubernetes backend does whenever it applies the worker Deployment.
+A worker whose container spec predates the digest starts with a warning, and the next ensure from a current primary recreates it with the digest pinned.
 
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/).
 

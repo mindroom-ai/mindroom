@@ -2601,10 +2601,7 @@ async def test_proxy_shell_path_prepend_survives_sandbox_runner_rebuild(
     assert result.endswith("/usr/local/bin:/usr/bin:/bin")
 
 
-def test_dedicated_worker_runtime_config_resolves_include_tags(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_dedicated_worker_runtime_config_resolves_include_tags(tmp_path: Path) -> None:
     """Dedicated workers must load configs split across !include files."""
     (tmp_path / "models.yaml").write_text(
         "default:\n  provider: openai\n  id: gpt-6-astra\n",
@@ -2620,13 +2617,10 @@ def test_dedicated_worker_runtime_config_resolves_include_tags(
         storage_path=config_path.parent / "storage",
         process_env={},
     )
-    monkeypatch.setattr(
-        sandbox_runner_module,
-        "_upstream_tool_validation_snapshot",
-        lambda _runtime_paths: {"shell": object()},
+    config = sandbox_runner_module._dedicated_worker_runtime_config_or_empty(
+        runtime_paths,
+        {"shell": ToolValidationInfo(name="shell")},
     )
-
-    config = sandbox_runner_module._dedicated_worker_runtime_config_or_empty(runtime_paths)
 
     assert config.models["default"].id == "gpt-6-astra"
 

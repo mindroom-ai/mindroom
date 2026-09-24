@@ -232,6 +232,7 @@ Additional small compatibility branches stay with current readers.
 [`execution_preparation.py`][execution-preparation] classifies structured stream status first and uses the old `[cancelled]` and `[error]` body suffixes (each preceded by one space) owned by [`legacy_streaming.py`][legacy-streaming] only through the streaming reader fallback.
 Interrupted visible replies are excluded; eligible in-progress text is cleaned before it is included in model context.
 [`external_triggers/replay_store.py`][replay-store] supplies an empty `threads` map for replay stores written before thread keys existed.
+[`api/sandbox_runner.py`][sandbox-runner] starts from a startup manifest whose container spec pins no digest, with a warning, because only a primary that predates the digest creates such a container and a current primary recreates it on its next ensure.
 
 A journal replacement must coordinate its generation binding with the next Nio baseline.
 Agno sessions may still contain current handled-turn recovery facts and historical run blobs, while Matrix keeps visible messages and state independently of local storage.
@@ -314,6 +315,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [replay-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/replay_store.py
 [report-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/report_publishing/store.py
 [restart-retry]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/sync_restart_retry.py
+[sandbox-runner]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/api/sandbox_runner.py
 [saas-migrations]: https://github.com/mindroom-ai/mindroom/tree/main/saas-platform/supabase/migrations
 [scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduled_run_records.py
 [scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling.py

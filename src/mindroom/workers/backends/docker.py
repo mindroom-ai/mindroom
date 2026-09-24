@@ -1253,9 +1253,8 @@ class DockerWorkerBackend:
                 **security_kwargs,
             )
         elif not self._container_is_running(container):
-            # A stopped container restarts from whatever is on disk, and the
-            # worker could have rewritten the manifest before it stopped, so the
-            # primary republishes it on every start, not only on creation.
+            # Tool code may have rewritten the manifest before the container
+            # stopped; republish it so the restart boots from the primary's copy.
             self._write_startup_manifest(paths, worker_key=metadata.worker_key)
             try:
                 container.start()
@@ -1434,31 +1433,36 @@ class DockerWorkerBackend:
             env["MINDROOM_CONFIG_PATH"] = self.config.config_path
         # ensure_worker's CLI profile validation guarantees CLI workers have no extra env.
         env.update(self.config.extra_env)
-        if self._tool_validation_snapshot is not None or cli_worker:
-            env[SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(
-                Path(self.config.storage_mount_path) / ".runtime" / "startup_manifest.json",
-            )
-            # The manifest itself lives in the worker's read-write bind mount, so
-            # the runner only trusts it against this digest, which is fixed in the
-            # container spec and therefore out of reach of tool code.
+        tool_validation_snapshot = self._startup_manifest_tool_validation_snapshot(worker_key)
+        if tool_validation_snapshot is not None:
+            env[SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(sandbox_startup_manifest_path(dedicated_root))
+            # The manifest lives in the worker's read-write bind mount, so the
+            # runner only trusts it against this digest, which the container spec
+            # fixes out of reach of tool code.
             env[SANDBOX_STARTUP_MANIFEST_SHA256_ENV] = startup_manifest_sha256(
                 startup_runtime_paths,
-                tool_validation_snapshot=self._tool_validation_snapshot,
+                tool_validation_snapshot=tool_validation_snapshot,
                 public_runtime=True,
             )
         return env
 
+    def _startup_manifest_tool_validation_snapshot(self, worker_key: str) -> dict[str, dict[str, object]] | None:
+        """Return the snapshot one worker's startup manifest carries, or None when it gets no manifest."""
+        if is_cli_worker_key(worker_key):
+            return {}
+        return self._tool_validation_snapshot
+
     def _write_startup_manifest(self, paths: _DockerWorkerPaths, *, worker_key: str) -> None:
         """Persist primary validation state before starting one Docker worker."""
-        cli_worker = is_cli_worker_key(worker_key)
-        if self._tool_validation_snapshot is None and not cli_worker:
+        tool_validation_snapshot = self._startup_manifest_tool_validation_snapshot(worker_key)
+        if tool_validation_snapshot is None:
             sandbox_startup_manifest_path(paths.state.root).unlink(missing_ok=True)
             return
         dedicated_root = Path(self.config.storage_mount_path)
         write_startup_manifest(
             paths.state.root,
             self._worker_runtime_paths(worker_key=worker_key, dedicated_root=dedicated_root),
-            tool_validation_snapshot={} if cli_worker else self._tool_validation_snapshot,
+            tool_validation_snapshot=tool_validation_snapshot,
             public_runtime=True,
         )
 

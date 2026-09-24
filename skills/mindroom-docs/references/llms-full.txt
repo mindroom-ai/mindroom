@@ -20452,6 +20452,7 @@ Additional small compatibility branches stay with current readers.
 [`execution_preparation.py`][execution-preparation] classifies structured stream status first and uses the old `[cancelled]` and `[error]` body suffixes (each preceded by one space) owned by [`legacy_streaming.py`][legacy-streaming] only through the streaming reader fallback.
 Interrupted visible replies are excluded; eligible in-progress text is cleaned before it is included in model context.
 [`external_triggers/replay_store.py`][replay-store] supplies an empty `threads` map for replay stores written before thread keys existed.
+[`api/sandbox_runner.py`][sandbox-runner] starts from a startup manifest whose container spec pins no digest, with a warning, because only a primary that predates the digest creates such a container and a current primary recreates it on its next ensure.
 
 A journal replacement must coordinate its generation binding with the next Nio baseline.
 Agno sessions may still contain current handled-turn recovery facts and historical run blobs, while Matrix keeps visible messages and state independently of local storage.
@@ -20534,6 +20535,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [replay-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/replay_store.py
 [report-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/report_publishing/store.py
 [restart-retry]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/sync_restart_retry.py
+[sandbox-runner]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/api/sandbox_runner.py
 [saas-migrations]: https://github.com/mindroom-ai/mindroom/tree/main/saas-platform/supabase/migrations
 [scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduled_run_records.py
 [scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling.py
@@ -22744,8 +22746,10 @@ For dedicated Kubernetes workers, the exposed environment contains only that wor
 This leaves same-worker token exposure as a local containment risk, while per-worker credentials and NetworkPolicy limit cross-worker blast radius.
 
 Tool code can write the sandbox-runner startup manifest, because it lives in the worker's read-write state root.
-The primary therefore publishes the manifest's SHA-256 through `MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256` in the container or pod environment, which tool code cannot change, and republishes the manifest before every worker start.
-A runner whose manifest fails that digest, or whose manifest contradicts the dedicated-worker identity and policy fixed in the container environment, refuses to start rather than boot from a file the worker could have rewritten.
+The primary therefore pins the manifest's SHA-256 as `MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256` in the container or pod spec, which tool code cannot change.
+The runner reads and verifies the manifest once at startup, refuses to start when it does not match, and keeps the verified values in memory, so later rewrites of the file never change a running worker.
+A tampered manifest keeps the worker down until the primary republishes it, which the Docker backend does before every container start and the Kubernetes backend does whenever it applies the worker Deployment.
+A worker whose container spec predates the digest starts with a warning, and the next ensure from a current primary recreates it with the digest pinned.
 
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/).
 

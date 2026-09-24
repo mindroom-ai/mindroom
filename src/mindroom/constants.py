@@ -450,32 +450,6 @@ def write_startup_manifest(
     return manifest_path
 
 
-def read_verified_startup_manifest(manifest_path: Path, *, expected_sha256: str) -> dict[str, object]:
-    """Return one startup manifest payload proven to come from the primary.
-
-    The manifest lives in the worker's read-write state root, so tool code
-    executing inside the worker can replace it. Only the primary knows the
-    digest it published through the immutable container/pod environment, so a
-    mismatch means the file is not the one the primary wrote.
-    """
-    expected_digest = expected_sha256.strip().lower()
-    if not expected_digest:
-        msg = "A published startup manifest digest is required before reading sandbox-runner startup state."
-        raise RuntimeError(msg)
-    raw_manifest = manifest_path.read_bytes()
-    if hashlib.sha256(raw_manifest).hexdigest() != expected_digest:
-        msg = (
-            f"Sandbox startup manifest at {manifest_path} does not match the digest published by the "
-            "primary; refusing to start from a manifest the worker could have rewritten."
-        )
-        raise RuntimeError(msg)
-    payload = json.loads(raw_manifest.decode("utf-8"))
-    if not _is_json_object(payload):
-        msg = "Serialized startup manifest must be a JSON object"
-        raise TypeError(msg)
-    return payload
-
-
 def _write_manifest_without_following_symlinks(manifest_path: Path, payload: str) -> None:
     """Atomically replace the manifest without following symlinks planted in the worker's own root.
 

@@ -7,8 +7,8 @@ cd /app/workspace 2>/dev/null || true
 
 if [[ -z "${MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH:-}" ]]; then
   # No primary published a manifest for this runner, so derive one from the
-  # immutable container env on every boot and publish its digest alongside it:
-  # the runner refuses to boot from a manifest it cannot prove.
+  # immutable container env on every boot and pin its digest the way a primary
+  # does, so the runner can verify it.
   startup_manifest_state="$(
     /app/.venv/bin/python - <<'PY'
 import os

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import base64
 import hashlib
 import io
@@ -21,6 +22,7 @@ import pytest
 from agno.tools import Toolkit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 import mindroom.api.sandbox_env_assembly as sandbox_env_assembly_module
 import mindroom.api.sandbox_exec as sandbox_exec_module
@@ -204,7 +206,7 @@ def test_worker_tool_validation_snapshot_reads_from_startup_manifest(monkeypatch
     manifest_path = _write_startup_manifest(runtime_paths=runtime_paths, tool_validation_snapshot=snapshot)
     _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
 
-    loaded_snapshot = sandbox_runner_module._upstream_tool_validation_snapshot(runtime_paths)
+    _startup_runtime, loaded_snapshot = sandbox_runner_module._startup_runtime_payload_from_env()
 
     assert "agentspace_slack_search" in loaded_snapshot
     assert loaded_snapshot["agentspace_slack_search"].runtime_loadable is True
@@ -216,6 +218,17 @@ def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config]:
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
     config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
     sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runtime_paths, config=config)
+    return runtime_paths, config
+
+
+def _initialize_runner_app_from_startup_runtime() -> tuple[RuntimePaths, Config]:
+    runtime_paths, config = sandbox_runner_module.load_config_from_startup_runtime()
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        sandbox_runner_app,
+        runtime_paths,
+        config=config,
+        runner_token=SANDBOX_TOKEN,
+    )
     return runtime_paths, config
 
 
@@ -378,7 +391,7 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
 
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    startup_runtime, _startup_config = sandbox_runner_module.load_config_from_startup_runtime()
     sandbox_runner_module.initialize_sandbox_runner_app(
         sandbox_runner_app,
         startup_runtime,
@@ -389,7 +402,7 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     assert sandbox_runner_module.app_runner_token(sandbox_runner_app) == "from-env"
 
 
-def _dedicated_worker_manifest_runtime(tmp_path: Path, *, worker_key: str = "worker-1") -> RuntimePaths:
+def _dedicated_worker_manifest_runtime(tmp_path: Path) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
@@ -401,111 +414,109 @@ def _dedicated_worker_manifest_runtime(tmp_path: Path, *, worker_key: str = "wor
         config_path=config_path,
         storage_path=worker_root,
         process_env={
-            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1",
             "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(worker_root),
+            "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
         },
     )
 
 
-def test_startup_manifest_rewritten_by_worker_is_rejected(
+def _point_manifest_at_worker_config(manifest_path: Path, tmp_path: Path) -> None:
+    """Rewrite the manifest the way tool code inside the worker can, to load a config it controls."""
+    worker_config = tmp_path / "worker" / "evil" / "config.yaml"
+    worker_config.parent.mkdir(parents=True, exist_ok=True)
+    worker_config.write_text("agents: {}\nplugins:\n  - ./evil-plugin\n", encoding="utf-8")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["runtime_paths"]["config_path"] = str(worker_config)
+    manifest["runtime_paths"]["process_env"]["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] = "inprocess"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_startup_manifest_tampered_before_restart_refuses_to_start(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Tool code owns the manifest file, so a payload that fails the digest must not boot."""
+    """A restarted runner must not boot from a manifest tool code rewrote after the primary pinned its digest."""
+    manifest_path = _write_startup_manifest(runtime_paths=_dedicated_worker_manifest_runtime(tmp_path))
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
+    _point_manifest_at_worker_config(manifest_path, tmp_path)
+
+    with pytest.raises(RuntimeError, match="does not match MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256"):
+        sandbox_runner_module.load_config_from_startup_runtime()
+
+
+def test_startup_manifest_matching_pinned_digest_starts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The primary's own manifest boots the runner with exactly the values it wrote."""
     payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
     manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
     _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
 
-    attacker_config = tmp_path / "evil" / "config.yaml"
-    attacker_config.parent.mkdir(parents=True, exist_ok=True)
-    attacker_config.write_text("plugins:\n  - ./evil-plugin\n", encoding="utf-8")
-    tampered = json.loads(manifest_path.read_text(encoding="utf-8"))
-    tampered["runtime_paths"]["config_path"] = str(attacker_config)
-    manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
+    runtime_paths, _config = sandbox_runner_module.load_config_from_startup_runtime()
 
-    with pytest.raises(RuntimeError, match="does not match the digest published by the primary"):
-        sandbox_runner_module._startup_runtime_paths_from_env()
+    assert runtime_paths.config_path == payload_runtime.config_path
+    assert sandbox_exec_module.runner_uses_subprocess(runtime_paths)
 
 
-def test_startup_manifest_without_published_digest_is_rejected(
+def test_startup_manifest_rewritten_after_startup_changes_nothing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A manifest path with no out-of-band digest proves nothing, so startup fails closed."""
+    """Only startup reads the manifest, so a later rewrite neither reroutes the runner nor fails its requests.
+
+    Tool code can rewrite the file at any time, and a Kubernetes primary rewrites it for a replacement
+    pod before the old pod stops serving.
+    """
+    payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
+    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime, public_runtime=True)
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
+    app = FastAPI(lifespan=sandbox_runner_app_module._lifespan)
+    with TestClient(app):
+        startup_config = sandbox_runner_module.app_runtime_config(app)
+
+    _point_manifest_at_worker_config(manifest_path, tmp_path)
+    runtime_paths = sandbox_runner_module.app_runtime_paths(app)
+    response = asyncio.run(
+        sandbox_runner_module._execute_request_inprocess(
+            sandbox_runner_module.SandboxRunnerExecuteRequest(
+                tool_name="shell",
+                function_name="run_shell_command",
+                args=[["bash", "-lc", "printf ok"]],
+                kwargs={},
+            ),
+            runtime_paths,
+            sandbox_runner_module.app_runtime_config(app),
+            runner_token=SANDBOX_TOKEN,
+        ),
+    )
+
+    assert response.ok is True
+    assert response.result == "ok"
+    assert runtime_paths.config_path == payload_runtime.config_path
+    assert sandbox_exec_module.runner_uses_subprocess(runtime_paths)
+    assert sandbox_runner_module.app_runtime_config(app) is startup_config
+
+
+def test_startup_manifest_without_pinned_digest_starts_unverified(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A container created by a primary that predates the digest still starts, with a warning."""
     payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
     manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
     monkeypatch.setenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", str(manifest_path))
     monkeypatch.delenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256", raising=False)
 
-    with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256 must be set"):
-        sandbox_runner_module._startup_runtime_paths_from_env()
+    with capture_logs() as logs:
+        runtime_paths, _config = sandbox_runner_module.load_config_from_startup_runtime()
 
-
-def test_startup_manifest_dropping_dedicated_worker_pin_is_rejected(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Dedicated worker identity comes from the container spec, not from the writable manifest."""
-    payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
-    unpinned_process_env = {
-        name: value
-        for name, value in payload_runtime.process_env.items()
-        if name != "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
-    }
-    manifest_path = _write_startup_manifest(
-        runtime_paths=constants_module.RuntimePaths(
-            config_path=payload_runtime.config_path,
-            config_dir=payload_runtime.config_dir,
-            env_path=payload_runtime.env_path,
-            storage_root=payload_runtime.storage_root,
-            process_env=unpinned_process_env,
-            env_file_values=payload_runtime.env_file_values,
-        ),
-    )
-    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
-    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-1")
-    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(payload_runtime.storage_root))
-
-    with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"):
-        sandbox_runner_module._startup_runtime_paths_from_env()
-
-
-def test_startup_manifest_redirecting_storage_root_is_rejected(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A manifest may restate the pod-fixed storage root, never redirect it."""
-    payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
-    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
-    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
-    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-1")
-    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "operator-root"))
-
-    with pytest.raises(RuntimeError, match="MINDROOM_STORAGE_PATH"):
-        sandbox_runner_module._startup_runtime_paths_from_env()
-
-
-def test_unverified_startup_manifest_cannot_relax_tool_validation(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A manifest the primary never published must not seed the worker's validation snapshot."""
-    payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
-    _write_startup_manifest(
-        runtime_paths=payload_runtime,
-        tool_validation_snapshot={
-            "agentspace_slack_search": {
-                "config_fields": [],
-                "agent_override_fields": [],
-                "authored_override_validator": "default",
-                "runtime_loadable": True,
-            },
-        },
-    )
-    monkeypatch.delenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", raising=False)
-    monkeypatch.delenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256", raising=False)
-
-    assert sandbox_runner_module._upstream_tool_validation_snapshot(payload_runtime) == {}
+    assert runtime_paths.config_path == payload_runtime.config_path
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == [
+        "sandbox_startup_manifest_digest_missing",
+    ]
 
 
 def test_startup_runtime_accepts_runtime_paths_json_without_manifest(
@@ -530,7 +541,7 @@ def test_startup_runtime_accepts_runtime_paths_json_without_manifest(
     monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(serialize_runtime_paths(payload_runtime)))
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
 
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    startup_runtime, _startup_config = sandbox_runner_module.load_config_from_startup_runtime()
 
     assert startup_runtime.config_path == payload_runtime.config_path
     assert startup_runtime.storage_root == payload_runtime.storage_root
@@ -803,7 +814,7 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     credentials_encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     monkeypatch.setenv(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV, credentials_encryption_key)
 
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    startup_runtime, _startup_config = sandbox_runner_module.load_config_from_startup_runtime()
     execution_env = sandbox_exec_module.request_execution_env(
         "shell",
         None,
@@ -848,7 +859,7 @@ def test_static_runner_credentials_encryption_key_is_removed_from_proc_environ(t
     script = (
         "import os\n"
         "from mindroom.api import sandbox_runner as m\n"
-        "runtime_paths = m._startup_runtime_paths_from_env()\n"
+        "runtime_paths, _config = m.load_config_from_startup_runtime()\n"
         "raw_environ = open('/proc/self/environ', 'rb').read()\n"
         f"print(runtime_paths.env_value({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r}))\n"
         f"print({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r} in os.environ)\n"
@@ -899,7 +910,7 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
     monkeypatch.setenv("OPENAI_BASE_URL", "http://runner-env.example/v1")
     monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
 
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    startup_runtime, _startup_config = sandbox_runner_module.load_config_from_startup_runtime()
     execution_env = sandbox_exec_module.request_execution_env("shell", None, startup_runtime)
     effective_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(startup_runtime, execution_env)
 
@@ -951,7 +962,7 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     monkeypatch.setenv(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV, encryption_key)
 
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    startup_runtime, _startup_config = sandbox_runner_module.load_config_from_startup_runtime()
     execution_env = sandbox_exec_module.request_execution_env(
         "shell",
         None,
@@ -1001,7 +1012,7 @@ def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_enviro
     script = (
         "import os\n"
         "from mindroom.api import sandbox_runner as m\n"
-        "runtime_paths = m._startup_runtime_paths_from_env()\n"
+        "runtime_paths, _config = m.load_config_from_startup_runtime()\n"
         "raw_environ = open('/proc/self/environ', 'rb').read()\n"
         f"print(runtime_paths.env_value({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r}))\n"
         f"print({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r} in os.environ)\n"
@@ -1049,7 +1060,7 @@ async def test_dedicated_worker_inprocess_shell_does_not_see_runner_local_env(
     monkeypatch.setenv("OPENAI_BASE_URL", "http://runner-env.example/v1")
     monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
 
-    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    startup_runtime, _startup_config = sandbox_runner_module.load_config_from_startup_runtime()
     response = await sandbox_runner_module._execute_request_inprocess(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
             tool_name="shell",
@@ -2732,9 +2743,9 @@ def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
     _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
-    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
 
-    runtime_paths, config = _refresh_runner_app_from_env()
+    runtime_paths, config = _initialize_runner_app_from_startup_runtime()
 
     assert runtime_paths.config_path.exists()
     assert config.plugins == []
@@ -2771,7 +2782,7 @@ def test_sandbox_runner_shared_startup_still_rejects_missing_plugins(
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
 
     with pytest.raises(ConfigRuntimeValidationError, match="Configured plugin path does not exist"):
-        _refresh_runner_app_from_env()
+        _initialize_runner_app_from_startup_runtime()
 
 
 def test_sandbox_runner_defers_unavailable_authored_tools_for_worker_runtime(
@@ -2784,9 +2795,9 @@ def test_sandbox_runner_defers_unavailable_authored_tools_for_worker_runtime(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
     _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
-    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
 
-    runtime_paths, config = _refresh_runner_app_from_env()
+    runtime_paths, config = _initialize_runner_app_from_startup_runtime()
 
     assert runtime_paths.config_path.exists()
     assert config.plugins == []

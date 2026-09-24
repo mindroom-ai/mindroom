@@ -1612,6 +1612,61 @@ def test_docker_backend_publishes_startup_manifest_digest_in_container_env(
     assert env["MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
 
 
+def test_docker_cli_worker_pins_digest_of_its_own_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """CLI workers get an empty validation snapshot, so their digest must cover that manifest, not the primary's."""
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot={"shell": {"name": "shell", "config_fields": []}},
+    )
+    backend.config = replace(backend.config, extra_env={})
+    base = "v1:default:user_agent:alice:code"
+
+    handle = backend.ensure_worker(
+        WorkerSpec(
+            process_worker_key(base, purpose="agent-turn", process_id=UUID(int=1)),
+            private_agent_names=frozenset(),
+            mirrored_credential_services=frozenset(),
+            state_scope_worker_key=base,
+        ),
+    )
+
+    manifest_path = Path(handle.debug_metadata["state_root"]) / ".runtime" / "startup_manifest.json"
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["tool_validation_snapshot"] == {}
+    env = fake_client.containers.run_calls[0]["environment"]
+    assert isinstance(env, dict)
+    assert env["MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+
+
+def test_docker_backend_recreates_stopped_container_created_without_manifest_digest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A container from a primary that predates the digest is replaced instead of restarted unverified."""
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot={"shell": {"name": "shell", "config_fields": []}},
+    )
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    legacy_container = fake_client.containers.by_name[handle.worker_id]
+    legacy_container.attrs["Config"]["Env"] = [
+        entry
+        for entry in legacy_container.attrs["Config"]["Env"]
+        if not entry.startswith("MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256=")
+    ]
+    legacy_container.stop()
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert legacy_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
+    assert "MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256" in fake_client.containers.run_calls[1]["environment"]
+
+
 def test_docker_backend_republishes_startup_manifest_before_restarting_container(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
