@@ -142,6 +142,81 @@ def _template_pid(completed: subprocess.CompletedProcess[str]) -> int:
     return int(completed.stdout.split("|")[0])
 
 
+_SYS_PATH_TEMPLATE = '''\
+"""Forkserver template that reports the import path each fork child runs with."""
+
+import json
+import os
+import sys
+
+from mindroom.api.sandbox_forkserver import serve_template
+
+
+def _run_payload(payload: str) -> tuple[int, str, str]:
+    return 0, json.dumps({"cwd": os.getcwd(), "sys_path": sys.path}), ""
+
+
+sys.exit(serve_template(sys.argv[1], _run_payload))
+'''
+
+
+@pytest.fixture
+def sys_path_manager(tmp_path: Path) -> Iterator[_SandboxForkserver]:
+    """Manager whose template reports the fork child's cwd and `sys.path`."""
+    script = tmp_path / "sys_path_template.py"
+    script.write_text(_SYS_PATH_TEMPLATE, encoding="utf-8")
+    manager = _SandboxForkserver(
+        template_command=lambda python_executable, socket_path: [python_executable, str(script), socket_path],
+    )
+    yield manager
+    manager.shutdown()
+
+
+def test_isolated_child_keeps_the_worker_cwd_off_sys_path(
+    sys_path_manager: _SandboxForkserver,
+    tmp_path: Path,
+) -> None:
+    """The secret-bearing child must not import from the worker-writable request cwd."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    isolated_env = sandbox_exec_module.isolated_template_env()
+
+    completed = sys_path_manager.execute(
+        python_executable=None,
+        template_env=isolated_env,
+        request_env=isolated_env,
+        request_cwd=str(workspace),
+        envelope="payload",
+        timeout_seconds=60.0,
+    )
+
+    reported = json.loads(completed.stdout)
+    assert reported["cwd"] == str(workspace.resolve())
+    assert str(workspace.resolve()) not in reported["sys_path"]
+
+
+def test_execution_child_still_mirrors_python_m_cwd_semantics(
+    sys_path_manager: _SandboxForkserver,
+    tmp_path: Path,
+) -> None:
+    """Non-isolated children keep the request cwd first on `sys.path`, as `python -m` would."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    template_env = sandbox_exec_module.generic_subprocess_env()
+
+    completed = sys_path_manager.execute(
+        python_executable=None,
+        template_env=template_env,
+        request_env=template_env,
+        request_cwd=str(workspace),
+        envelope="payload",
+        timeout_seconds=60.0,
+    )
+
+    reported = json.loads(completed.stdout)
+    assert reported["sys_path"][0] == str(workspace.resolve())
+
+
 def test_execute_round_trips_and_reuses_one_template(
     stub_manager: tuple[_SandboxForkserver, list[str]],
     tmp_path: Path,
@@ -365,11 +440,15 @@ def test_forkserver_mode_routes_through_subprocess_dispatch(tmp_path: Path) -> N
     assert sandbox_exec_module.runner_uses_forkserver(runtime_paths) is True
 
 
-def test_forkserver_mode_reuses_one_template_across_tool_calls(
+def test_forkserver_mode_reuses_one_template_per_launch_context(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Warm-path acceptance: repeated non-shell tool calls must not re-pay the runtime import."""
+    """Warm-path acceptance: repeated tool calls must not re-pay the runtime import.
+
+    Secret-bearing tools and the agent's own `python` runtime launch from
+    different interpreters and import paths, so they warm one template each.
+    """
     runtime_paths, config = _forkserver_runtime(tmp_path)
     spawned: list[str] = []
 
@@ -408,6 +487,7 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
         )
         assert response.ok is True
         assert (workdir / "out.txt").read_text(encoding="utf-8") == "hello forkserver"
+        assert len(spawned) == 1
 
         response = sandbox_runner_module._execute_request_subprocess_sync(
             sandbox_runner_module.SandboxRunnerExecuteRequest(
@@ -442,7 +522,7 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
     finally:
         manager.shutdown()
 
-    assert len(spawned) == 1
+    assert len(spawned) == 2
 
 
 def test_forkserver_timeout_maps_to_worker_failure(

@@ -47,6 +47,14 @@ _WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES = 128 * 1024
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
 EXECUTION_ENV_TOOL_NAMES = constants.EXECUTION_ENV_TOOL_NAMES
+_WORKER_WRITABLE_IMPORT_ENV_NAMES = frozenset({"PYTHONPYCACHEPREFIX"})
+_PROTOCOL_CHILD_ISOLATION_ENV = MappingProxyType(
+    {
+        "PYTHONSAFEPATH": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    },
+)
 
 
 def _runner_execution_mode(runtime_paths: RuntimePaths) -> str:
@@ -319,12 +327,56 @@ def worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     return env
 
 
+def child_receives_credentials_encryption_key(tool_name: str) -> bool:
+    """Return whether one tool's child is handed the credentials encryption key.
+
+    This is the single condition behind both shipping the key into a child's
+    envelope and isolating that child's interpreter from worker-writable paths;
+    the two must never drift apart.
+    """
+    return tool_name not in EXECUTION_ENV_TOOL_NAMES
+
+
+def isolated_protocol_child_env(env: dict[str, str]) -> dict[str, str]:
+    """Return `env` with every worker-writable import source removed.
+
+    `PYTHONPYCACHEPREFIX` points at the worker cache, so leaving it set lets a
+    forged `.pyc` shadow an image-provided module. The added names are the env
+    form of `-P`, `-s` and `-B`: no cwd on `sys.path`, no `$HOME/.local` user
+    site (HOME is the worker root), and no bytecode written back out.
+    """
+    isolated = {key: value for key, value in env.items() if key not in _WORKER_WRITABLE_IMPORT_ENV_NAMES}
+    isolated.update(_PROTOCOL_CHILD_ISOLATION_ENV)
+    return isolated
+
+
+def isolated_template_env() -> dict[str, str]:
+    """Return the worker-independent env that bakes an isolated template's imports."""
+    return isolated_protocol_child_env(generic_subprocess_env())
+
+
 def resolve_subprocess_worker_context(
     paths: LocalWorkerStatePaths | None,
+    *,
+    isolate_runtime: bool = False,
 ) -> tuple[str | None, dict[str, str] | None, str | None]:
-    """Return the python executable, env, and cwd for subprocess dispatch."""
+    """Return the python executable, env, and cwd for subprocess dispatch.
+
+    `isolate_runtime` selects the runner's own image interpreter and its
+    image-owned site-packages for children that parse an envelope carrying the
+    credentials encryption key or leased credentials. The worker venv is
+    created and extended by the same uid the worker's `shell`/`python` tools
+    run as, so using it as the runner protocol's runtime would let a `.pth`
+    file, a replaced interpreter or an injected package execute with those
+    secrets in reach. Isolated children still expose the venv to tool code
+    through `PATH` and `VIRTUAL_ENV`.
+    """
     if paths is None:
-        return sys.executable, generic_subprocess_env(), str(Path.cwd())
+        env = generic_subprocess_env()
+        return sys.executable, isolated_protocol_child_env(env) if isolate_runtime else env, str(Path.cwd())
+
+    if isolate_runtime:
+        return sys.executable, isolated_protocol_child_env(worker_subprocess_env(paths)), str(paths.workspace)
 
     return (
         str(paths.venv_dir / "bin" / "python"),

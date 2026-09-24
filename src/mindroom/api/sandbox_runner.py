@@ -571,6 +571,7 @@ class _PreparedSandboxSubprocessContext:
     subprocess_env: dict[str, str] | None
     subprocess_cwd: str | None
     template_env: dict[str, str] | None
+    template_key: str | None = None
 
 
 def _app_context(app: FastAPI) -> _SandboxRunnerContext:
@@ -1022,7 +1023,7 @@ def _prepare_execute_request(
         runtime_paths,
         execution_env,
         include_base_execution_env=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
-        include_credentials_encryption_key=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
+        include_credentials_encryption_key=sandbox_exec.child_receives_credentials_encryption_key(request.tool_name),
         trusted_env_overlay=trusted_env_overlay,
     )
     execution_identity = _request_execution_identity(request)
@@ -1092,10 +1093,30 @@ def _prepare_execute_request(
 def _prepare_subprocess_context(
     prepared_request: _PreparedSandboxRequestContext,
 ) -> _PreparedSandboxSubprocessContext:
-    python_executable, template_env, subprocess_cwd = sandbox_exec.resolve_subprocess_worker_context(
+    # Execution tools (`shell`, `python`) are the agent's own code-execution
+    # surface: the worker venv is their runtime by design, and they are the one
+    # request shape that never receives the credentials encryption key. Every
+    # other tool parses an envelope carrying that key plus the consumed
+    # credential lease, so its child must not start from the venv, the workspace
+    # cwd or the worker bytecode cache that those same tools can write.
+    isolate_runtime = sandbox_exec.child_receives_credentials_encryption_key(prepared_request.request.tool_name)
+    python_executable, base_env, subprocess_cwd = sandbox_exec.resolve_subprocess_worker_context(
         prepared_request.prepared_worker.paths if prepared_request.prepared_worker is not None else None,
+        isolate_runtime=isolate_runtime,
     )
-    subprocess_env = sandbox_exec.subprocess_env_for_request(template_env, prepared_request.execution_env)
+    subprocess_env = sandbox_exec.subprocess_env_for_request(base_env, prepared_request.execution_env)
+    template_env = base_env
+    template_key: str | None = None
+    if isolate_runtime:
+        # The request overlay re-adds the worker-owned runtime paths; isolation wins.
+        if subprocess_env is not None:
+            subprocess_env = sandbox_exec.isolated_protocol_child_env(subprocess_env)
+        # A warm template only bakes the import graph, which is worker-independent
+        # once the venv is out of it, so one isolated template serves every worker.
+        # It shares the runner's interpreter with unkeyed execution-tool children,
+        # so it needs its own template key to not recycle theirs.
+        template_env = sandbox_exec.isolated_template_env()
+        template_key = f"{python_executable}\nisolated"
     if workspace := prepared_request.execution_env.get("MINDROOM_AGENT_WORKSPACE"):
         workspace_path = Path(workspace).expanduser().resolve()
         if not sandbox_exec.runner_uses_dedicated_worker(prepared_request.runtime_paths):
@@ -1106,6 +1127,7 @@ def _prepare_subprocess_context(
         subprocess_env=subprocess_env,
         subprocess_cwd=subprocess_cwd,
         template_env=template_env,
+        template_key=template_key,
     )
 
 
@@ -1271,6 +1293,7 @@ def _execute_request_forkserver(
             request_cwd=subprocess_context.subprocess_cwd,
             envelope=envelope,
             timeout_seconds=timeout_seconds,
+            template_key=subprocess_context.template_key,
         )
     except sandbox_forkserver.ForkserverTimeoutError:
         return _subprocess_failure_response(request, "Sandbox subprocess timed out.", runtime_paths)

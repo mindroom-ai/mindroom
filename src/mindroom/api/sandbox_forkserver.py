@@ -190,11 +190,19 @@ class _SandboxForkserver:
         request_cwd: str | None,
         envelope: str,
         timeout_seconds: float,
+        template_key: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """Execute one prepared envelope in a fresh fork of the warm template."""
+        """Execute one prepared envelope in a fresh fork of the warm template.
+
+        `template_key` separates launch contexts that share one interpreter, so
+        the isolated protocol template and an execution-tool template of the
+        same interpreter coexist instead of recycling each other. Within one key
+        a changed fingerprint still recycles the template.
+        """
         deadline = time.monotonic() + timeout_seconds
-        key = python_executable or sys.executable
-        fingerprint = _template_fingerprint(key, template_env)
+        interpreter = python_executable or sys.executable
+        key = template_key or interpreter
+        fingerprint = _template_fingerprint(interpreter, template_env)
         key_lock = self._key_lock(key)
         remaining = deadline - time.monotonic()
         if remaining <= 0 or not key_lock.acquire(timeout=remaining):
@@ -203,6 +211,7 @@ class _SandboxForkserver:
         try:
             template = self._ready_template(
                 key=key,
+                interpreter=interpreter,
                 fingerprint=fingerprint,
                 template_env=template_env,
                 deadline=deadline,
@@ -235,13 +244,14 @@ class _SandboxForkserver:
         self,
         *,
         key: str,
+        interpreter: str,
         fingerprint: str,
         template_env: dict[str, str] | None,
         deadline: float,
     ) -> _Template:
         template = self._templates.get(key)
         if template is not None and template.process.poll() is not None:
-            logger.warning("sandbox_forkserver_template_died", python_executable=key)
+            logger.warning("sandbox_forkserver_template_died", python_executable=interpreter)
             self._discard(key, template)
             template = None
         # A pinned fingerprint must bail out before the recycle check so it
@@ -253,15 +263,19 @@ class _SandboxForkserver:
                 raise ForkserverStartupError(message)
             self._failed_fingerprints.pop(fingerprint, None)
         if template is not None and template.fingerprint != fingerprint:
-            logger.info("sandbox_forkserver_template_recycled", python_executable=key)
+            logger.info("sandbox_forkserver_template_recycled", python_executable=interpreter)
             self._discard(key, template)
             template = None
         if template is None:
-            template = self._spawn_template(key=key, fingerprint=fingerprint, template_env=template_env)
+            template = self._spawn_template(
+                interpreter=interpreter,
+                fingerprint=fingerprint,
+                template_env=template_env,
+            )
             with self._lock:
                 self._templates[key] = template
         try:
-            self._wait_template_ready(key=key, template=template, deadline=deadline)
+            self._wait_template_ready(interpreter=interpreter, template=template, deadline=deadline)
         except ForkserverStartupError as exc:
             with self._lock:
                 if self._templates.get(key) is template:
@@ -281,18 +295,18 @@ class _SandboxForkserver:
     def _spawn_template(
         self,
         *,
-        key: str,
+        interpreter: str,
         fingerprint: str,
         template_env: dict[str, str] | None,
     ) -> _Template:
         runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-fs-"))
         socket_path = str(runtime_dir / "template.sock")
         stderr_path = runtime_dir / "template.err"
-        logger.info("sandbox_forkserver_template_spawning", python_executable=key)
+        logger.info("sandbox_forkserver_template_spawning", python_executable=interpreter)
         try:
             with stderr_path.open("wb") as stderr_file:
                 process = subprocess.Popen(
-                    self._template_command(key, socket_path),
+                    self._template_command(interpreter, socket_path),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=stderr_file,
@@ -311,7 +325,7 @@ class _SandboxForkserver:
             runtime_dir=runtime_dir,
         )
 
-    def _wait_template_ready(self, *, key: str, template: _Template, deadline: float) -> None:
+    def _wait_template_ready(self, *, interpreter: str, template: _Template, deadline: float) -> None:
         if template.ready:
             return
         while True:
@@ -326,7 +340,7 @@ class _SandboxForkserver:
                 # Startup outlasting one request's budget is not a template
                 # failure: keep it importing so a later request finds it warm,
                 # and report the same timeout spawn-per-call would have hit.
-                logger.info("sandbox_forkserver_template_still_importing", python_executable=key)
+                logger.info("sandbox_forkserver_template_still_importing", python_executable=interpreter)
                 raise ForkserverTimeoutError
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
@@ -338,7 +352,7 @@ class _SandboxForkserver:
                 template.ready = True
                 logger.info(
                     "sandbox_forkserver_template_ready",
-                    python_executable=key,
+                    python_executable=interpreter,
                     template_pid=template.process.pid,
                 )
                 return
@@ -515,6 +529,16 @@ def _parse_child_request(request_line: bytes) -> _ChildRequest:
     )
 
 
+def _child_uses_safe_path() -> bool:
+    """Return whether this fork child must keep its cwd off `sys.path`.
+
+    The template's own `-P` semantics are inherited through the fork, and the
+    request env repeats `PYTHONSAFEPATH` so a child forked from a template that
+    started without it still refuses the worker-writable cwd.
+    """
+    return bool(sys.flags.safe_path or os.environ.get("PYTHONSAFEPATH"))
+
+
 def _run_child_request(
     conn: socket.socket,
     request: _ChildRequest,
@@ -530,7 +554,10 @@ def _run_child_request(
         os.chdir(request.cwd)
     # `python -m` prepends the effective cwd to sys.path; mirror that for the
     # request cwd (the runner template drops its own baked entry at startup).
-    sys.path.insert(0, str(Path.cwd()))
+    # An isolated child runs the secret-bearing runner protocol and its cwd is
+    # the worker-writable workspace, so that entry must never be added there.
+    if not _child_uses_safe_path():
+        sys.path.insert(0, str(Path.cwd()))
     returncode, stdout_text, stderr_text = run_payload(request.envelope)
     conn.settimeout(_CHILD_RESPONSE_WRITE_TIMEOUT_SECONDS)
     _send_json(conn, {"returncode": returncode, "stdout": stdout_text, "stderr": stderr_text})

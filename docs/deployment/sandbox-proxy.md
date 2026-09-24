@@ -381,6 +381,11 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md)
 Dedicated Docker and Kubernetes workers default to `forkserver`.
 If the warm template fails to start, dispatch falls back to spawn-per-call and retries the template after a cooldown.
 
+Only `shell` and `python` children run on the worker virtualenv interpreter, because that virtualenv is their runtime and they never receive credential material.
+Every other tool call carries the credentials encryption key and its consumed credential lease into the child, so that child runs on the runner's own interpreter and image-provided site-packages instead.
+Those children also start with `PYTHONSAFEPATH`, `PYTHONNOUSERSITE`, and `PYTHONDONTWRITEBYTECODE` set and without `PYTHONPYCACHEPREFIX`, so the worker workspace, the worker virtualenv, `$HOME/.local`, and the worker bytecode cache cannot contribute imports.
+The worker virtualenv stays available to tool code through `PATH` and `VIRTUAL_ENV`.
+
 ## Execution modes
 
 Environment modes apply when both the agent's `worker_tools` and `defaults.worker_tools` are null or omitted.

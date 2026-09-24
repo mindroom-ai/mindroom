@@ -2352,6 +2352,127 @@ def test_prepared_dedicated_shell_request_preserves_explicit_execution_env(tmp_p
     assert "/host/bin" in subprocess_context.subprocess_env["PATH"]
 
 
+def _worker_backed_subprocess_context(
+    tmp_path: Path,
+    *,
+    tool_name: str,
+    function_name: str,
+) -> tuple[Path, sandbox_runner_module._PreparedSandboxSubprocessContext]:
+    """Prepare one worker-backed subprocess context and return its worker paths."""
+    config_path = tmp_path / "config.yaml"
+    _write_general_agent_config(config_path)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker-root")
+    prepared_worker = sandbox_runner_module.sandbox_worker_prep.PreparedWorkerRequest(
+        handle=WorkerHandle(
+            worker_id="worker-1",
+            worker_key="v1:default:unscoped:code",
+            endpoint="http://127.0.0.1:8766",
+            auth_token=SANDBOX_TOKEN,
+            status="ready",
+            backend_name="docker",
+            last_used_at=0.0,
+            created_at=0.0,
+        ),
+        paths=worker_paths,
+        runtime_overrides={},
+    )
+    prepared_request = sandbox_runner_module._prepare_execute_request(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name=tool_name,
+            function_name=function_name,
+            worker_key="v1:default:unscoped:code",
+        ),
+        runtime_paths,
+        prepared_worker=prepared_worker,
+    )
+    return worker_paths.venv_dir, sandbox_runner_module._prepare_subprocess_context(prepared_request)
+
+
+def test_secret_bearing_child_does_not_run_from_the_worker_venv(tmp_path: Path) -> None:
+    """Non-execution children carry the encryption key, so they must not start from agent-writable paths."""
+    venv_dir, subprocess_context = _worker_backed_subprocess_context(
+        tmp_path,
+        tool_name="file",
+        function_name="read_file",
+    )
+
+    assert subprocess_context.python_executable == sys.executable
+    assert subprocess_context.subprocess_env is not None
+    assert "PYTHONPYCACHEPREFIX" not in subprocess_context.subprocess_env
+    assert subprocess_context.subprocess_env["PYTHONSAFEPATH"] == "1"
+    assert subprocess_context.subprocess_env["PYTHONNOUSERSITE"] == "1"
+    assert subprocess_context.subprocess_env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert str(venv_dir) not in subprocess_context.subprocess_env["PYTHONPATH"]
+    # The venv stays reachable from tool code, just not as the protocol runtime.
+    assert subprocess_context.subprocess_env["VIRTUAL_ENV"] == str(venv_dir)
+    assert subprocess_context.subprocess_env["PATH"].startswith(str(venv_dir / "bin"))
+    assert subprocess_context.template_env is not None
+    assert "PYTHONPYCACHEPREFIX" not in subprocess_context.template_env
+    assert subprocess_context.template_env["PYTHONSAFEPATH"] == "1"
+    assert str(venv_dir) not in subprocess_context.template_env.get("PYTHONPATH", "")
+
+
+def test_execution_child_keeps_the_worker_venv_runtime(tmp_path: Path) -> None:
+    """`shell`/`python` are the agent's own runtime and never receive the encryption key."""
+    venv_dir, subprocess_context = _worker_backed_subprocess_context(
+        tmp_path,
+        tool_name="python",
+        function_name="run_python_code",
+    )
+
+    assert subprocess_context.python_executable == str(venv_dir / "bin" / "python")
+    assert subprocess_context.subprocess_env is not None
+    assert "PYTHONSAFEPATH" not in subprocess_context.subprocess_env
+    assert subprocess_context.subprocess_env["PYTHONPYCACHEPREFIX"]
+
+
+def test_isolated_protocol_child_env_ignores_worker_writable_imports(tmp_path: Path) -> None:
+    """A planted workspace package or user-site package must stay invisible to the child."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "mindroom_shadow_probe.py").write_text("raise SystemExit(99)\n", encoding="utf-8")
+    home = tmp_path / "worker-home"
+    user_site = home / ".local" / f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+    user_site.mkdir(parents=True)
+    (user_site / "mindroom_user_site_probe.py").write_text("raise SystemExit(99)\n", encoding="utf-8")
+
+    environment = sandbox_exec_module.isolated_protocol_child_env(
+        {**sandbox_exec_module.generic_subprocess_env(), "HOME": str(home)},
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import importlib.util, json, sys;"
+            "print(json.dumps({"
+            "'safe_path': sys.flags.safe_path,"
+            "'no_user_site': sys.flags.no_user_site,"
+            "'dont_write_bytecode': sys.flags.dont_write_bytecode,"
+            "'shadow': importlib.util.find_spec('mindroom_shadow_probe') is not None,"
+            "'user_site': importlib.util.find_spec('mindroom_user_site_probe') is not None,"
+            "}))",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=str(workspace),
+        env=environment,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "safe_path": 1,
+        "no_user_site": 1,
+        "dont_write_bytecode": 1,
+        "shadow": False,
+        "user_site": False,
+    }
+
+
 def test_prepared_shell_execution_env_resolved_env_wins_over_extra_passthrough(tmp_path: Path) -> None:
     """Resolved broker env should not be shadowed by raw extra-env passthrough values."""
     runtime_paths = resolve_primary_runtime_paths(
@@ -4748,7 +4869,11 @@ def test_dedicated_worker_mode_uses_mounted_root(
         cwd = run_kwargs["cwd"]
         assert env is not None
         assert isinstance(env, dict)
-        assert cmd[0] == str(worker_root / "venv" / "bin" / "python")
+        # `file` receives the encryption key, so the child must run on the
+        # runner's own interpreter, never the worker-writable venv.
+        assert cmd[0] == sys.executable
+        assert env["PYTHONSAFEPATH"] == "1"
+        assert "PYTHONPYCACHEPREFIX" not in env
         assert isinstance(cwd, str)
         assert cwd == str(worker_root / "workspace")
         assert "MINDROOM_STORAGE_PATH" not in env
