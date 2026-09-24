@@ -15,12 +15,13 @@ from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import send_room_event_result
+from mindroom.matrix.client import room_admin_power_user, send_room_event_result
 from mindroom.matrix.thread_mutation_impact import (
     MutationThreadImpactState,
     resolve_event_thread_impact_for_client,
     resolve_redaction_thread_impact_for_client,
 )
+from mindroom.requester_identity import is_human_requester_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 logger = get_logger(__name__)
@@ -111,18 +112,25 @@ class MatrixApiTools(Toolkit):
         "put_state": 2,
         "redact": 2,
     }
-    _HARD_BLOCKED_STATE_TYPES: ClassVar[frozenset[str]] = frozenset({"m.room.create"})
+    _HARD_BLOCKED_STATE_TYPES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "m.room.create",
+            "m.room.power_levels",
+            "m.room.server_acl",
+            "m.room.tombstone",
+        },
+    )
+    # MindRoom state (scheduled tasks, pending config, thread tags) carries requester
+    # identity and is owned by dedicated tools that enforce their own authorization.
+    _HARD_BLOCKED_STATE_TYPE_PREFIXES: ClassVar[tuple[str, ...]] = ("com.mindroom.", "io.mindroom.")
     _DANGEROUS_STATE_TYPES: ClassVar[frozenset[str]] = frozenset(
         {
-            "m.room.power_levels",
             "m.room.encryption",
-            "m.room.server_acl",
             "m.room.join_rules",
             "m.room.history_visibility",
             "m.room.guest_access",
             "m.room.member",
             "m.room.canonical_alias",
-            "m.room.tombstone",
             "m.room.third_party_invite",
         },
     )
@@ -598,7 +606,7 @@ class MatrixApiTools(Toolkit):
         state_key: str,
         allow_dangerous: bool,
     ) -> tuple[str | None, bool]:
-        if event_type in cls._HARD_BLOCKED_STATE_TYPES:
+        if event_type in cls._HARD_BLOCKED_STATE_TYPES or event_type.startswith(cls._HARD_BLOCKED_STATE_TYPE_PREFIXES):
             return (
                 cls._error_payload(
                     action=action,
@@ -620,12 +628,35 @@ class MatrixApiTools(Toolkit):
                     dangerous=True,
                     message=(
                         f"State event type '{event_type}' is dangerous. "
-                        "Re-run with allow_dangerous=true only when you intentionally want to change critical room state."
+                        "Re-run with allow_dangerous=true only when you intentionally want to change critical room state; "
+                        "the requester must also be a joined room admin in the target room."
                     ),
                 ),
                 True,
             )
         return None, dangerous
+
+    @staticmethod
+    async def _requester_may_write_dangerous_state(
+        context: ToolRuntimeContext,
+        room_id: str,
+    ) -> bool:
+        """Return whether the human requester could authorize this room's critical state themselves."""
+        requester_id = context.requester_id
+        if requester_id == context.client.user_id or not is_human_requester_id(
+            requester_id,
+            context.current_config,
+            context.runtime_paths,
+        ):
+            return False
+        membership = await context.client.room_get_state_event(room_id, "m.room.member", requester_id)
+        if (
+            not isinstance(membership, nio.RoomGetStateEventResponse)
+            or not isinstance(membership.content, dict)
+            or membership.content.get("membership") != "join"
+        ):
+            return False
+        return await room_admin_power_user(context.client, room_id, (requester_id,)) is not None
 
     @classmethod
     def _send_event_policy_error(
@@ -974,6 +1005,19 @@ class MatrixApiTools(Toolkit):
         )
         if policy_error is not None:
             return policy_error
+
+        if dangerous and not await self._requester_may_write_dangerous_state(context, room_id):
+            return self._error_payload(
+                action="put_state",
+                room_id=room_id,
+                event_type=normalized_event_type,
+                state_key=resolved_state_key,
+                dangerous=True,
+                message=(
+                    f"State event type '{normalized_event_type}' requires the requester to be a joined room admin "
+                    "in the target room."
+                ),
+            )
 
         if dry_run:
             return self._payload(
@@ -1375,7 +1419,9 @@ class MatrixApiTools(Toolkit):
         `search` enforces a single-room scope via `room_id`; if `filter.rooms` is supplied it must match that room.
         `search` always uses the top-level `limit`; `filter.limit` is rejected to avoid conflicting inputs.
         `dry_run` is supported for send_event, put_state, and redact.
-        `allow_dangerous` only affects put_state for a small set of high-risk room-state event types.
+        `allow_dangerous` only affects put_state for a small set of high-risk room-state event types,
+        which also require the requester to be a joined room admin in the target room.
+        put_state never writes MindRoom-owned `com.mindroom.*` or `io.mindroom.*` state; use the dedicated tools.
         `search` rejects `dry_run` and `allow_dangerous` because it is read-only.
         """
         context = get_tool_runtime_context()
