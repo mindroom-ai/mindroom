@@ -108,8 +108,8 @@ In shell tools, that workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in wor
 
 `matrix_message` accepts one ordered `attachments` list containing context attachment IDs (`att_*`) and local file paths.
 Local files are registered in the current context before sending.
-Relative paths resolve from the agent workspace when one is available.
-Relative paths must stay inside the workspace.
+Paths resolve from the agent workspace and must stay inside it, whether they are relative, absolute, or `~`-prefixed.
+Without a configured agent workspace, only `att_*` IDs can be attached.
 Use `matrix_message(attachments=["att_example", "exports/report.csv"])` to send attachment IDs and file paths in order to the current conversation.
 
 ### Why use this tool?

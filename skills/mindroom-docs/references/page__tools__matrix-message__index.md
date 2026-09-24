@@ -138,7 +138,7 @@ Oversized existing files fail closed before JSON parsing and are never discarded
 ## Attachments
 
 Each `attachments` entry is a context-scoped `att_*` ID or a local file path.
-Relative paths resolve from the agent workspace when configured.
+Paths resolve from the agent workspace and must stay inside it, whether they are relative, absolute, or `~`-prefixed; without a configured workspace only `att_*` IDs are accepted.
 Use `./att_filename` for a local filename that starts with `att_`.
 All references are resolved before any message is sent.
 Files retain their input order.

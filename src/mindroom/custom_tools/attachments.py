@@ -291,10 +291,19 @@ def _resolve_attachment_file_path(
     *,
     workspace_root: Path | None = None,
 ) -> tuple[Path | None, str | None]:
-    """Resolve one model-requested attachment file path."""
-    requested_path = Path(file_path)
-    if requested_path.is_absolute() or workspace_root is None:
-        return Path(file_path).expanduser().resolve(), None
+    """Resolve one model-requested attachment file path inside the agent workspace.
+
+    The path is model-supplied and reaches an open in the primary process, so
+    absolute, ``~``-prefixed, and relative paths are all confined to the
+    workspace. Without a workspace root this fails closed and only already
+    authorized ``att_*`` IDs remain sendable.
+    """
+    if workspace_root is None:
+        return None, "Attaching a file path requires an agent workspace in this runtime path."
+    try:
+        requested_path = Path(file_path).expanduser()
+    except RuntimeError:
+        return None, "attachment file path could not be expanded to a home directory."
     try:
         return (
             resolve_workspace_relative_path(
@@ -771,7 +780,7 @@ class AttachmentTools(Toolkit):
     async def register_attachment(self, file_path: str) -> str:
         """Register a local file as a context attachment ID.
 
-        Relative paths resolve from the agent workspace when one is available.
+        Paths resolve from the agent workspace and must stay inside it.
         """
         context = get_tool_runtime_context()
         if context is None:
