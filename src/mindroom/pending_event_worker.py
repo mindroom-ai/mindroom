@@ -25,8 +25,6 @@ logger = get_logger(__name__)
 
 _INITIAL_RETRY_DELAY_SECONDS = 1.0
 _MAX_RETRY_DELAY_SECONDS = 30.0
-# With the delays above, about two and a half minutes of retrying one event.
-_MAX_EVENT_FAILURES = 10
 _BATCH_SIZE = 128
 _MAX_SCAN_PAGES = 16
 _DEFERRAL_SCAN_SECONDS = 30.0
@@ -49,8 +47,6 @@ class _RoomProgress:
     rewind_before: int | None = None
     admitted_through: int = 0
     deferred_count: int = 0
-    failing_receipt_order: int | None = None
-    consecutive_failures: int = 0
 
 
 @dataclass
@@ -436,10 +432,7 @@ class PendingEventWorker:
                 return False
             seen.add(event.event_id)
             progress.admitted_through = event.receipt_order
-            settles = await self.handle(event)
-            # The callback returned, so whatever failure streak it had is over.
-            progress.consecutive_failures = 0
-            if not settles:
+            if not await self.handle(event):
                 self._defer(event)
                 if not self.deferral_is_live(event):
                     self._reclaim_deferral(event)
@@ -487,58 +480,11 @@ class PendingEventWorker:
                 event_id=None if event is None else event.event_id,
                 kind=None if event is None else event.kind.value,
             )
-            return await self._failed_room_pass(room_id, progress, event, attempted=len(seen))
-
-    async def _failed_room_pass(
-        self,
-        room_id: str,
-        progress: _RoomProgress,
-        event: JournalEvent | None,
-        *,
-        attempted: int,
-    ) -> _RoomPass:
-        """Put a failed event back at the head of its room, unless it has failed too often."""
-        if event is not None:
-            self.release((event.event_id,))
-            progress.cursor = event.receipt_order - 1
-            if await self._abandon_repeated_failure(progress, event):
-                return _RoomPass(attempted, more=True)
-        self._schedule_room_retry(room_id, event)
-        return _RoomPass(attempted, failed=True)
-
-    async def _abandon_repeated_failure(self, progress: _RoomProgress, event: JournalEvent) -> bool:
-        """Settle an event whose callback keeps failing, so it stops blocking its room.
-
-        Retrying suits a callback that failed for a moment. One that fails on
-        the event itself fails the same way every time, and the lane is
-        ordered, so without a bound every later event in the room would wait
-        behind it forever, across restarts.
-        """
-        if self._stopped:
-            return False
-        if progress.failing_receipt_order != event.receipt_order:
-            progress.failing_receipt_order = event.receipt_order
-            progress.consecutive_failures = 0
-        progress.consecutive_failures += 1
-        if progress.consecutive_failures < _MAX_EVENT_FAILURES:
-            return False
-        try:
-            await self.store.settle(event.event_id)
-        except Exception:
-            logger.exception("pending_event_abandon_failed", room_id=event.room_id, event_id=event.event_id)
-            return False
-        logger.error(
-            "pending_event_abandoned",
-            room_id=event.room_id,
-            event_id=event.event_id,
-            kind=event.kind.value,
-            failures=progress.consecutive_failures,
-        )
-        progress.cursor = event.receipt_order
-        progress.failing_receipt_order = None
-        progress.consecutive_failures = 0
-        self._record_room_progress(event.room_id, event.receipt_order)
-        return True
+            if event is not None:
+                self.release((event.event_id,))
+                progress.cursor = event.receipt_order - 1
+            self._schedule_room_retry(room_id, event)
+            return _RoomPass(len(seen), failed=True)
 
     def _schedule_deferral_scan(self) -> None:
         if self._stopped or not self._deferred or (self._deferral_scan is not None and not self._deferral_scan.done()):

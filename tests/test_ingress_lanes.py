@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.coalescing_batch import PreparedTurn
     from mindroom.event_journal import EventJournalStore
     from mindroom.handled_turns import TurnRecord
@@ -578,6 +579,33 @@ def _unplaceable_event(event_id: str, msgtype: str, *, server_timestamp: int) ->
     )
 
 
+def _turn_controller_dispatcher(
+    bot: AgentBot,
+    room: nio.MatrixRoom,
+    journal_store: EventJournalStore,
+) -> JournalDispatcher:
+    """Return a journal dispatcher delivering message and media events to the bot's TurnController."""
+
+    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+        pass
+
+    return JournalDispatcher(
+        store=journal_store.principal("agent@lane"),
+        callbacks=JournalCallbacks(
+            on_message=bot._turn_controller.handle_text_event,
+            on_media=bot._turn_controller.handle_media_event,
+            on_reaction=cast("Callable", noop),
+            on_approval=cast("Callable", noop),
+            on_room_lifecycle=cast("Callable", noop),
+            on_redaction=cast("Callable", noop),
+            on_approval_continuation=AsyncMock(return_value=None),
+            source_has_live_owner=lambda _event_id: False,
+            turn_has_live_claim=bot._turn_store.has_live_turn_claim,
+        ),
+        room_for_id=lambda _room_id: room,
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("msgtype", "kind"),
@@ -603,24 +631,7 @@ async def test_unplaceable_event_settles_and_its_room_moves_on(
         msg = "Related event $fabricated:localhost is unavailable"
         raise RelatedEventUnavailableError(msg)
 
-    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
-        pass
-
-    dispatcher = JournalDispatcher(
-        store=journal_store.principal("agent@lane"),
-        callbacks=JournalCallbacks(
-            on_message=bot._turn_controller.handle_text_event,
-            on_media=bot._turn_controller.handle_media_event,
-            on_reaction=cast("Callable", noop),
-            on_approval=cast("Callable", noop),
-            on_room_lifecycle=cast("Callable", noop),
-            on_redaction=cast("Callable", noop),
-            on_approval_continuation=AsyncMock(return_value=None),
-            source_has_live_owner=lambda _event_id: False,
-            turn_has_live_claim=bot._turn_store.has_live_turn_claim,
-        ),
-        room_for_id=lambda _room_id: room,
-    )
+    dispatcher = _turn_controller_dispatcher(bot, room, journal_store)
     poison = _unplaceable_event("$poison", msgtype, server_timestamp=1_000)
     later = _unplaceable_event("$later", "m.text", server_timestamp=2_000)
 
@@ -635,6 +646,33 @@ async def test_unplaceable_event_settles_and_its_room_moves_on(
     assert resolved == ["$poison", "$later"]
     assert not await dispatcher.store.pending(room_id=room.room_id)
     assert not bot._turn_store.has_live_turn_claim("$poison")
+    dispatch_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transient_relation_lookup_failure_keeps_the_event_pending(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """A lookup that may answer next time leaves the event at the head of its lane for retry."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    dispatcher = _turn_controller_dispatcher(bot, room, journal_store)
+    event = _unplaceable_event("$message", "m.text", server_timestamp=1_000)
+
+    with (
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=ThreadMembershipLookupError("homeserver unavailable")),
+        ),
+        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as dispatch_mock,
+    ):
+        await admit_dispatch_event(dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
+        await dispatcher.drain_once()
+
+    assert [pending.event_id for pending in await dispatcher.store.pending(room_id=room.room_id)] == ["$message"]
+    assert not bot._turn_store.is_handled("$message")
     dispatch_mock.assert_not_awaited()
 
 

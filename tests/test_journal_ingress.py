@@ -48,7 +48,7 @@ from mindroom.matrix.journal_ingress import (
     ingestion_timeline_views,
     parse_journal_event,
 )
-from mindroom.pending_event_worker import _BATCH_SIZE, _MAX_EVENT_FAILURES, PendingEventWorker
+from mindroom.pending_event_worker import _BATCH_SIZE, _MAX_RETRY_DELAY_SECONDS, PendingEventWorker
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
 from tests.conftest import request_envelope
 from tests.journal_helpers import admit_dispatch_event
@@ -2644,45 +2644,43 @@ class TestRoomRetryBackoff:
         finally:
             await worker.stop()
 
-    @pytest.mark.parametrize("settle_fails_once", [False, True])
-    async def test_an_event_that_keeps_failing_is_abandoned_so_its_room_moves_on(
+    async def test_a_long_outage_retries_the_event_until_it_succeeds(
         self,
         alice: PrincipalStore,
         retry_sleeps: list[tuple[float, asyncio.Event]],
-        *,
-        settle_fails_once: bool,
     ) -> None:
-        """A failure the event itself causes repeats on every retry, and the lane is ordered.
+        """A callback failure never settles its event, however long the outage lasts.
 
-        Without a bound one such event holds up every later event in its room
-        forever, across restarts. Abandoning it is still a durable settlement,
-        so one that did not commit leaves the event owed and retried.
+        An exception says nothing about whether the event itself is at fault, so
+        an unreachable homeserver or model provider must hold the room's lane
+        rather than drop the user's message. Deterministic refusals settle
+        inside the callback instead.
         """
+        outage_failures = 25
         attempts: list[str] = []
 
         async def handle(event: JournalEvent) -> bool:
             attempts.append(event.event_id)
-            if event.event_id == "$poison":
-                msg = "relation target unavailable"
+            if event.event_id == "$message" and attempts.count("$message") <= outage_failures:
+                msg = "homeserver unavailable"
                 raise RuntimeError(msg)
             return True
 
-        await TestPendingEventWorker._admit(alice, text_event("$poison", ts=1_000))
+        await TestPendingEventWorker._admit(alice, text_event("$message", ts=1_000))
         await TestPendingEventWorker._admit(alice, text_event("$later", ts=2_000))
-        store = _FlakyReplayView(alice, fail_settle={"$poison"} if settle_fails_once else set())
-        worker = PendingEventWorker(store=cast("Any", store), handle=handle)
-        failures = _MAX_EVENT_FAILURES + (1 if settle_fails_once else 0)
+        worker = PendingEventWorker(store=alice, handle=handle)
         worker.start()
         try:
-            for index in range(failures - 1):
+            for index in range(outage_failures):
                 await _eventually(lambda index=index: len(retry_sleeps) > index)
+                assert await alice.is_pending("$message")
                 retry_sleeps[index][1].set()
             await _eventually_async(lambda: alice.pending(room_id=ROOM))
         finally:
             await worker.stop()
 
-        assert attempts == ["$poison"] * failures + ["$later"]
-        assert not await alice.is_pending("$poison")
+        assert attempts == ["$message"] * (outage_failures + 1) + ["$later"]
+        assert retry_sleeps[-1][0] == _MAX_RETRY_DELAY_SECONDS
 
     async def test_each_room_wakes_at_its_own_retry_without_new_admission(
         self,
