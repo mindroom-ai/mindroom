@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.state import resolve_room_id
-from mindroom.requester_identity import equivalent_requester_ids
+from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -38,12 +38,20 @@ async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str
     never whether they belong to one specific room, so any room other than the
     conversation room additionally requires proven current membership. A
     membership fetch that fails counts as not joined.
+
+    Only a human principal can hold that membership. A managed sender is joined
+    to every room its agent serves, so its own membership would prove nothing,
+    and an agent relaying another agent's message must stay in their shared
+    conversation.
     """
     if room_id == context.room_id:
         return True
+    config = context.current_config
+    if not is_human_requester_id(context.requester_id, config, context.runtime_paths):
+        return False
     member_ids = await get_room_members(context.client, room_id)
     return member_ids is not None and not member_ids.isdisjoint(
-        equivalent_requester_ids(context.requester_id, context.current_config, context.runtime_paths),
+        equivalent_requester_ids(context.requester_id, config, context.runtime_paths),
     )
 
 
