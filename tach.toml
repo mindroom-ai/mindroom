@@ -3963,6 +3963,7 @@ depends_on = [
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
+    "mindroom.tool_system.legacy_tool_overrides",
 ]
 
 [[modules]]
@@ -6787,3 +6788,7 @@ visibility = ["mindroom.tools.moviepy_video_tools"]
 [[interfaces]]
 from = ["mindroom.custom_tools.agno_compat_moviepy"]
 expose = ["MindRoomMoviePyVideoTools"]
+
+[[modules]]
+path = "mindroom.tool_system.legacy_tool_overrides"
+depends_on = []
