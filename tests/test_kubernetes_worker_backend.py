@@ -1054,6 +1054,7 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     }
     assert container["securityContext"] == {
         "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
         "capabilities": {"drop": ["ALL"]},
     }
     assert container["resources"]["requests"] == {"memory": "256Mi", "cpu": "100m"}
@@ -1084,6 +1085,7 @@ def test_kubernetes_worker_localhost_seccomp_applies_only_to_main_container(tmp_
     assert pod_spec["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}
     assert pod_spec["containers"][0]["securityContext"] == {
         "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
         "capabilities": {"drop": ["ALL"]},
         "seccompProfile": profile,
     }
@@ -1106,6 +1108,7 @@ def test_kubernetes_worker_runtime_class_preserves_sandbox_security_context(tmp_
     assert pod_spec["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}
     assert pod_spec["containers"][0]["securityContext"] == {
         "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
         "capabilities": {"drop": ["ALL"]},
     }
 
@@ -1883,6 +1886,7 @@ def test_kubernetes_backend_mounts_config_storage_subtree_without_configmap(
     assert not any(mount["name"] == "worker-config" for mount in container["volumeMounts"])
     assert deployment["spec"]["template"]["spec"]["volumes"] == [
         {"name": "worker-storage", "persistentVolumeClaim": {"claimName": "mindroom-storage"}},
+        {"name": "worker-tmp", "emptyDir": {}},
     ]
     assert env_by_name["MINDROOM_CONFIG_PATH"]["value"] == worker_config_path
 
@@ -2770,6 +2774,7 @@ router:
         expected_worker_root,
         f"{expected_worker_root}/.shared_credentials",
         "/app/config.yaml",
+        "/tmp",  # noqa: S108
     }
 
 
@@ -2895,7 +2900,7 @@ router:
     assert apps_api.deleted_names == [recreated["metadata"]["name"]]
     assert updated_hash != initial_hash
     volume_mounts = recreated["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
-    assert any(mount["subPath"] == "knowledge/shared-docs" for mount in volume_mounts)
+    assert any(mount.get("subPath") == "knowledge/shared-docs" for mount in volume_mounts)
 
 
 def test_kubernetes_backend_uses_custom_worker_prefix_for_storage_path() -> None:

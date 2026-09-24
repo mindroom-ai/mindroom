@@ -70,6 +70,7 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     SANDBOX_RUNNER_CONTAINER_NAME,
     WORKER_CONFIG_VOLUME_NAME,
     WORKER_STORAGE_VOLUME_NAME,
+    WORKER_TMP_VOLUME_NAME,
 )
 
 if TYPE_CHECKING:
@@ -1401,8 +1402,13 @@ class KubernetesResourceManager:
                         "requests": resource_requests,
                         "limits": resource_limits,
                     },
+                    # The image's /app tree stays writable by the runtime user for
+                    # trusted primaries, so worker pods mount the root filesystem
+                    # read-only: tool code must not replace runner code the runner
+                    # imports later. Only volumes and the /tmp emptyDir stay writable.
                     "securityContext": {
                         "allowPrivilegeEscalation": False,
+                        "readOnlyRootFilesystem": True,
                         "capabilities": {"drop": ["ALL"]},
                         **(
                             {"seccompProfile": dict(self.config.seccomp_profile)}
@@ -1686,6 +1692,7 @@ class KubernetesResourceManager:
             private_agent_names=private_agent_names,
             state_scope_worker_key=state_scope_worker_key,
         )
+        mounts.append({"name": WORKER_TMP_VOLUME_NAME, "mountPath": "/tmp"})  # noqa: S108
         if self.config.config_map_name is None:
             mounts.extend(self._file_config_storage_mounts())
         if self.config.config_map_name is not None:
@@ -1759,6 +1766,7 @@ class KubernetesResourceManager:
                 "name": WORKER_STORAGE_VOLUME_NAME,
                 "persistentVolumeClaim": {"claimName": self.config.storage_pvc_name},
             },
+            {"name": WORKER_TMP_VOLUME_NAME, "emptyDir": {}},
         ]
         if self.config.config_map_name is not None:
             volumes.append(

@@ -229,6 +229,7 @@ class _FakeContainersApi:
             "CapAdd": None,
             "CapDrop": list(kwargs.get("cap_drop", [])),
             "SecurityOpt": list(kwargs.get("security_opt", [])),
+            "ReadonlyRootfs": bool(kwargs.get("read_only", False)),
         }
         if isinstance(volumes, list):
             container.attrs["Mounts"] = [
@@ -1665,6 +1666,29 @@ def test_docker_backend_recreates_stopped_container_created_without_manifest_dig
     assert legacy_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
     assert "MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256" in fake_client.containers.run_calls[1]["environment"]
+
+
+def test_docker_workers_run_with_read_only_root_filesystem(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Tool code must not rewrite the image's /app tree, which the runner imports from and keeps across restarts."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    run_call = fake_client.containers.run_calls[0]
+    assert run_call["read_only"] is True
+    assert run_call["tmpfs"] == {"/tmp": "rw,nosuid,nodev,mode=1777"}  # noqa: S108
+    writable_container = fake_client.containers.by_name[handle.worker_id]
+    writable_container.attrs["HostConfig"]["ReadonlyRootfs"] = False
+    writable_container.stop()
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert writable_container.removed == 1
+    assert writable_container.started == 0
+    assert fake_client.containers.run_calls[1]["read_only"] is True
 
 
 def test_docker_backend_republishes_startup_manifest_before_restarting_container(
@@ -5686,7 +5710,13 @@ def test_docker_ordinary_workers_preserve_pre_computer_identity(
     metadata["launch_config_hash"] = expected_hash
     metadata_path.write_text(json.dumps(metadata))
     container.attrs["Config"]["Labels"]["mindroom.ai/launch-config-hash"] = expected_hash
-    container.attrs["HostConfig"] = {"Privileged": False, "CapAdd": None, "CapDrop": None, "SecurityOpt": None}
+    container.attrs["HostConfig"] = {
+        "Privileged": False,
+        "CapAdd": None,
+        "CapDrop": None,
+        "SecurityOpt": None,
+        "ReadonlyRootfs": True,
+    }
 
     second = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
 

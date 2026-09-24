@@ -159,6 +159,13 @@ _DEDICATED_WORKER_KEY_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]
 _DEDICATED_WORKER_ROOT_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]
 _SHARED_STORAGE_ROOT_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]
 
+# Worker containers get a read-only root filesystem. The image's /app tree stays
+# owned by the runtime user so trusted primaries can install tool extras into it,
+# but in a worker that would let tool code replace runner code the runner imports
+# later, and a stopped container keeps its writable layer across restarts. Only the
+# bind mounts and this private /tmp stay writable.
+_WORKER_TMPFS = {"/tmp": "rw,nosuid,nodev,mode=1777"}  # noqa: S108
+
 # Backend-owned control state lives beside the worker roots, never inside one.
 # Each worker root is bind-mounted read-write into its own container, so any
 # lifecycle state kept there would be rewritable by the untrusted tool code the
@@ -196,6 +203,13 @@ def _docker_seccomp_profile_matches(options: list[str]) -> bool:
         return json.loads(actual_profile_json) == json.loads(expected_profile_json)
     except (json.JSONDecodeError, TypeError):
         return False
+
+
+def _container_root_filesystem_read_only(container: _DockerContainer | None) -> bool:
+    if container is None:
+        return False
+    host_config = container.attrs.get("HostConfig")
+    return isinstance(host_config, dict) and cast("dict[str, object]", host_config).get("ReadonlyRootfs") is True
 
 
 def _docker_security_options_match(value: object) -> bool:
@@ -1145,8 +1159,8 @@ class DockerWorkerBackend:
             return False
         if self._container_launch_config_hash(container) not in compatible_launch_config_hashes:
             return False
-        if self.config.security_policy == "computer" and not self._container_runtime_security_matches(
-            container,
+        if not _container_root_filesystem_read_only(container) or (
+            self.config.security_policy == "computer" and not self._container_runtime_security_matches(container)
         ):
             return False
 
@@ -1250,6 +1264,8 @@ class DockerWorkerBackend:
                     launch_config_hash=launch_config.launch_config_hash,
                 ),
                 user=self.config.user,
+                read_only=True,
+                tmpfs=_WORKER_TMPFS,
                 **security_kwargs,
             )
         elif not self._container_is_running(container):
