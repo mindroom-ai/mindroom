@@ -6366,6 +6366,30 @@ class TestApprovalContinuations:
         await admit(store, "$source-1", ts=1_001)
         await admit(store, "$source-2", ts=1_002)
 
+    async def test_cli_payload_survives_claim_and_advance(self, alice: PrincipalStore) -> None:
+        """Hidden arguments remain exact inside the existing continuation snapshot."""
+        await self.admit_sources(alice)
+        payload = {
+            "kind": "agent_cli",
+            "toolkit": "shell",
+            "arguments": {"args": "exact\nbytes"},
+            "call_id": "call-1",
+            "parent_bash_call_id": "bash-1",
+        }
+        created = await alice.create_approval_continuation(replace(self.continuation(), cli_call=payload))
+        assert created.cli_call == payload
+        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="live")
+        assert claimed.cli_call == payload
+        advanced = await alice.advance_approval_continuation(
+            "approval-1",
+            claimant_generation=0,
+            run_id="run-2",
+            session_id="session-1",
+            calls=claimed.calls,
+            cli_call=payload | {"call_id": "call-2"},
+        )
+        assert advanced.cli_call["call_id"] == "call-2"
+
     @staticmethod
     async def remember_card(
         store: PrincipalStore,

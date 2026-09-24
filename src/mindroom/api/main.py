@@ -16,6 +16,7 @@ from mindroom import constants, file_watcher
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
+from mindroom.api.agent_cli import router as agent_cli_router
 from mindroom.api.auth import ApiAuthState, public_origin, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
 from mindroom.api.computers import active_computer_worker_keys, rebind_computer_runtime
@@ -769,6 +770,7 @@ app.include_router(report_publishing_public_router)
 app.include_router(external_triggers_router)
 app.include_router(computers_router)
 app.include_router(script_gateway_router)
+app.include_router(agent_cli_router)
 app.include_router(dynamic_workflows_router, dependencies=[Depends(verify_user)])
 
 

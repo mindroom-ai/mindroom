@@ -29,6 +29,7 @@ nav = [
   { "Tools" = [
     { "Overview" = "tools/index.md" },
     { "Dynamic Tools" = "tools/dynamic-tools.md" },
+    { "Minimal Agent Mode" = "tools/agent-cli.md" },
     { "Execution & Coding" = "tools/execution-and-coding.md" },
     { "Data & Databases" = "tools/data-and-databases.md" },
     { "Web Search" = "tools/web-search.md" },

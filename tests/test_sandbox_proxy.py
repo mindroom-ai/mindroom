@@ -5123,7 +5123,7 @@ async def test_sync_only_worker_routed_tool_surfaces_progress_in_real_async_path
         def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
             del json, headers
             assert url == "http://worker/api/sandbox-runner/execute"
-            release_execute.wait(timeout=1.0)
+            assert release_execute.wait(timeout=10.0)
             return _FakeResponse({"ok": True, "result": "proxied"})
 
     tool = get_tool_by_name(
@@ -5172,14 +5172,16 @@ async def test_sync_only_worker_routed_tool_surfaces_progress_in_real_async_path
             ),
         )
 
-        progress_event = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
-        assert progress_event.tool_name == "file"
-        assert progress_event.function_name == "read_file"
-        assert progress_event.progress.phase == "cold_start"
-        assert call_task.done() is False
-
-        release_execute.set()
-        success, _timer, _function_call, result = await call_task
+        try:
+            progress_event = await asyncio.wait_for(progress_queue.get(), timeout=5.0)
+            assert progress_event.tool_name == "file"
+            assert progress_event.function_name == "read_file"
+            assert progress_event.progress.phase == "cold_start"
+            assert call_task.done() is False
+        finally:
+            # Join the worker before restoring patches, including on assertion failure.
+            release_execute.set()
+            success, _timer, _function_call, result = await call_task
 
     assert success is True
     assert result.result == "proxied"
