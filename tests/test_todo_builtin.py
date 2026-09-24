@@ -32,6 +32,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -786,10 +787,12 @@ def test_todo_refuses_changing_work_assigned_to_agent_the_requester_cannot_addre
 
 
 @pytest.mark.usefixtures("enforce_turn_authorization")
-def test_todo_attributes_items_to_the_human_who_wrote_the_title(tmp_path: Path) -> None:
-    """Only writing a title records its human author, and non-human titles leave the item unattributed."""
+def test_todo_attributes_items_to_whoever_wrote_the_title(tmp_path: Path) -> None:
+    """Writing a title records the current requester, human or not, and other changes keep that attribution."""
     config = _restricted_config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    runtime_paths = runtime_paths_for(config)
+    tool = get_tool_by_name("todo", runtime_paths, worker_target=None)
+    agent_requester = entity_ids(config, runtime_paths)["code"].full_id
 
     with tool_runtime_context(_tool_context(config)):
         tool.plan(agent=_agent(), tasks="Planned")
@@ -809,16 +812,42 @@ def test_todo_attributes_items_to_the_human_who_wrote_the_title(tmp_path: Path) 
 
     with tool_runtime_context(_tool_context(config, requester_id="@bridge:localhost")):
         bridge_result = tool.update_todo(agent=_agent(), todo_id=planned_id, title="Bridged")
-        tool.add_todo(agent=_agent(), title="Bridge added")
-    items = _read_todos(config)["items"]
     assert bridge_result.startswith(f"Updated `{planned_id}`")
-    assert "requester_id" not in items[0]
-    assert items[-1]["title"] == "Bridge added"
-    assert "requester_id" not in items[-1]
+    assert _read_todos(config)["items"][0]["requester_id"] == "@bridge:localhost"
+
+    # Agent-to-agent turns are always allowed to address agents, so an agent may queue work for `secret`.
+    with tool_runtime_context(_tool_context(config, requester_id=agent_requester)):
+        agent_result = tool.add_todo(agent=_agent(), title="Agent handoff", assigned_agent="secret")
+    items = _read_todos(config)["items"]
+    assert "assigned to secret" in agent_result
+    assert (items[-1]["title"], items[-1]["requester_id"]) == ("Agent handoff", agent_requester)
+
+
+@pytest.mark.usefixtures("enforce_turn_authorization")
+def test_list_todos_flags_legacy_items_and_title_rewrite_adopts_them(tmp_path: Path) -> None:
+    """Items written before requester attribution are listed as never poked until a title rewrite adopts them."""
+    config = _restricted_config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
 
     with tool_runtime_context(_tool_context(config)):
-        tool.update_todo(agent=_agent(), todo_id=planned_id, priority="low")
-    assert "requester_id" not in _read_todos(config)["items"][0]
+        tool.add_todo(agent=_agent(), title="Legacy work", assigned_agent="secret")
+        tool.add_todo(agent=_agent(), title="Legacy finished")
+        tool.update_todo(agent=_agent(), todo_id=_read_todos(config)["items"][1]["id"], status="done")
+    path = _todos_path(config, room_id="!room:localhost", thread_id="$thread-root")
+    state = _read_todos(config)
+    for item in state["items"]:
+        del item["requester_id"]
+    path.write_text(json.dumps(state), encoding="utf-8")
+    legacy_id = state["items"][0]["id"]
+
+    with tool_runtime_context(_tool_context(config)):
+        flagged = tool.list_todos(agent=_agent())
+        tool.update_todo(agent=_agent(), todo_id=legacy_id, title="Legacy work")
+        adopted = tool.list_todos(agent=_agent())
+
+    assert f"Not auto-poked (no recorded requester): `{legacy_id}`." in flagged
+    assert "Not auto-poked" not in adopted
+    assert _read_todos(config)["items"][0]["requester_id"] == "@user:localhost"
 
 
 @pytest.mark.usefixtures("enforce_turn_authorization")

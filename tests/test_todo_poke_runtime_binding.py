@@ -175,20 +175,40 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("requester", ["agent", "internal-user", "bot-account"])
-async def test_send_refuses_non_human_requester(tmp_path: Path, requester: str) -> None:
-    """A non-human original sender would leave the assignee acting as its own requester."""
+async def test_send_refuses_requester_outside_access_policy_model(tmp_path: Path) -> None:
+    """A bot account is neither a human nor an internal sender, so its poke would bypass the assignee's policy."""
+    config = _restricted_config(tmp_path)
+    client = _client("!room:localhost")
+    agent_bot = _bot(client=client)
+    agent_bot._hook_send_message = AsyncMock(return_value="$event")
+    coordinator = _coordinator(runtime_paths_for(config), config, {"secret": agent_bot})
+
+    event_id = await coordinator._send_poke(
+        "secret",
+        "!room:localhost",
+        "@secret Todo work is ready.",
+        "$thread",
+        "@bridge:localhost",
+    )
+
+    assert event_id is None
+    agent_bot._hook_send_message.assert_not_awaited()
+    client.joined_rooms.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requester", ["agent", "internal-user"])
+async def test_send_pokes_internal_requesters(tmp_path: Path, requester: str) -> None:
+    """Agent-authored work keeps poking, which keeps autonomous agent-to-agent todo loops alive."""
     config = _restricted_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     requester_ids = {
         "agent": entity_ids(config, runtime_paths)["code"].full_id,
         "internal-user": mindroom_user_id(config, runtime_paths),
-        "bot-account": "@bridge:localhost",
     }
     requester_id = requester_ids[requester]
     assert requester_id is not None
-    client = _client("!room:localhost")
-    agent_bot = _bot(client=client)
+    agent_bot = _bot(client=_client("!room:localhost"))
     agent_bot._hook_send_message = AsyncMock(return_value="$event")
     coordinator = _coordinator(runtime_paths, config, {"secret": agent_bot})
 
@@ -200,9 +220,15 @@ async def test_send_refuses_non_human_requester(tmp_path: Path, requester: str) 
         requester_id,
     )
 
-    assert event_id is None
-    agent_bot._hook_send_message.assert_not_awaited()
-    client.joined_rooms.assert_not_awaited()
+    assert event_id == "$event"
+    agent_bot._hook_send_message.assert_awaited_once_with(
+        "!room:localhost",
+        "@secret Todo work is ready.",
+        "$thread",
+        "todo_poke",
+        {ORIGINAL_SENDER_KEY: requester_id},
+        trigger_dispatch=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -250,7 +276,7 @@ async def test_poke_applies_assignee_access_policy_to_recorded_requester(tmp_pat
     agent_bot._hook_send_message = hook_send_message
     coordinator = _coordinator(runtime_paths, config, {"secret": agent_bot})
     with patch("mindroom.matrix.client_delivery.send_message_result", new=send_message_result):
-        for requester_id in ("@alice:localhost", "@mallory:localhost"):
+        for requester_id in ("@alice:localhost", "@mallory:localhost", ids["code"].full_id):
             await coordinator._send_poke(
                 "secret",
                 "!room:localhost",
@@ -289,7 +315,7 @@ async def test_poke_applies_assignee_access_policy_to_recorded_requester(tmp_pat
         ),
     )
     room = nio.MatrixRoom("!room:localhost", secret_id)
-    authorized_event, unauthorized_event = (
+    authorized_event, unauthorized_event, agent_event = (
         nio.RoomMessageText.from_dict(
             {
                 "event_id": f"$poke-{index}",
@@ -301,9 +327,15 @@ async def test_poke_applies_assignee_access_policy_to_recorded_requester(tmp_pat
         for index, content in enumerate(sent_contents, start=1)
     )
 
-    assert [content[ORIGINAL_SENDER_KEY] for content in sent_contents] == ["@alice:localhost", "@mallory:localhost"]
+    assert [content[ORIGINAL_SENDER_KEY] for content in sent_contents] == [
+        "@alice:localhost",
+        "@mallory:localhost",
+        ids["code"].full_id,
+    ]
     assert await validator.precheck_event(room, authorized_event) == "@alice:localhost"
     assert await validator.precheck_event(room, unauthorized_event) is None
+    # An agent requester is never restricted by access, so the poke dispatches as the assignee's own turn.
+    assert await validator.precheck_event(room, agent_event) == secret_id
     turn_store.record_turn.assert_awaited_once_with(TurnRecord.create([unauthorized_event.event_id]))
 
 

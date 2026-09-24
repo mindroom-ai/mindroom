@@ -33,7 +33,6 @@ from mindroom.custom_tools.todo_state import (
     todos_path,
 )
 from mindroom.path_confinement import resolve_path_within_root
-from mindroom.requester_identity import is_human_requester_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -609,22 +608,6 @@ def _assignee_error(agent_name: str, configured: set[str]) -> str | None:
     return _unknown_assigned_agent_message(agent_name, configured) or _unauthorized_assignee_message(agent_name)
 
 
-def _human_requester_id() -> str | None:
-    """Return the current requester when it is a human that todo auto-pokes may act for."""
-    ctx = _runtime_context()
-    if is_human_requester_id(ctx.requester_id, ctx.current_config, ctx.runtime_paths):
-        return ctx.requester_id
-    return None
-
-
-def _record_requester(item: dict[str, Any], requester_id: str | None) -> None:
-    """Attribute an item's poke to the human who wrote its title, or to nobody."""
-    if requester_id is None:
-        item.pop("requester_id", None)
-    else:
-        item["requester_id"] = requester_id
-
-
 def _default_assignee(agent: Agent | Team, context_agent_name: str) -> str:
     configured = _configured_agent_names()
     if agent_config_key := _agent_config_key(agent, configured):
@@ -683,7 +666,7 @@ class TodoTools(Toolkit):
         assignee_error = _assignee_error(assigned_agent, _configured_agent_names())
         if assignee_error is not None:
             return assignee_error
-        requester_id = _human_requester_id()
+        requester_id = _runtime_context().requester_id
 
         def create_plan(data: dict[str, Any]) -> list[dict[str, Any]]:
             _ensure_thread_state(data, room_id, thread_id)
@@ -700,11 +683,11 @@ class TodoTools(Toolkit):
                     "priority": priority,
                     "depends_on": [],
                     "assigned_agent": assigned_agent,
+                    "requester_id": requester_id,
                     "created_at": now,
                     "updated_at": now,
                     "completed_at": None,
                 }
-                _record_requester(item, requester_id)
                 data["items"].append(item)
                 created.append(item)
             data["updated_at"] = now
@@ -741,7 +724,7 @@ class TodoTools(Toolkit):
         assignee_error = _assignee_error(resolved_agent, _configured_agent_names())
         if assignee_error is not None:
             return assignee_error
-        requester_id = _human_requester_id()
+        requester_id = _runtime_context().requester_id
 
         def create_item(data: dict[str, Any]) -> dict[str, Any] | str | NoWriteResult:
             _ensure_thread_state(data, room_id, thread_id)
@@ -760,11 +743,11 @@ class TodoTools(Toolkit):
                 "priority": priority,
                 "depends_on": dep_ids,
                 "assigned_agent": resolved_agent,
+                "requester_id": requester_id,
                 "created_at": now,
                 "updated_at": now,
                 "completed_at": None,
             }
-            _record_requester(item, requester_id)
 
             data["items"].append(item)
             data["updated_at"] = now
@@ -826,6 +809,17 @@ class TodoTools(Toolkit):
             for item in done:
                 mark = "done" if item["status"] == "done" else "cancelled"
                 result_lines.append(f"- {mark} `{item['id']}` {item['title']}")
+        # Items written before requester attribution are never auto-poked; see the LEGACY_COMPAT note in todo_poke.
+        unattributed = [
+            item["id"]
+            for item in items
+            if item["status"] == "open" and item.get("assigned_agent") and not item.get("requester_id")
+        ]
+        if unattributed:
+            result_lines.append(
+                f"\nNot auto-poked (no recorded requester): {', '.join(f'`{item_id}`' for item_id in unattributed)}. "
+                "Rewrite an item's title with update_todo to record you as its requester.",
+            )
         return "\n".join(result_lines)
 
     def update_todo(  # noqa: C901, PLR0915
@@ -856,7 +850,7 @@ class TodoTools(Toolkit):
             return "Title cannot be empty."
         if not path.exists():
             return f"Todo `{todo_id}` not found."
-        requester_id = _human_requester_id()
+        requester_id = _runtime_context().requester_id
 
         def do_update(data: dict[str, Any]) -> str | NoWriteResult:  # noqa: C901, PLR0911, PLR0912
             _ensure_thread_state(data, room_id, thread_id)
@@ -892,7 +886,9 @@ class TodoTools(Toolkit):
 
             changes: list[str] = []
             if clean_title:
+                # Writing a title makes the current requester its author, which also adopts unattributed items.
                 item["title"] = clean_title
+                item["requester_id"] = requester_id
                 changes.append(f"title='{clean_title}'")
             if priority:
                 item["priority"] = priority.lower()
@@ -911,8 +907,6 @@ class TodoTools(Toolkit):
                 return no_write("No fields to update.")
 
             item["updated_at"] = now
-            if clean_title:
-                _record_requester(item, requester_id)
             data["updated_at"] = now
             unblocked_message = ""
             if status and status.lower() in TERMINAL_STATUSES:
@@ -953,7 +947,7 @@ class TodoTools(Toolkit):
             assignee_error = _assignee_error(resolved_agent, configured_agents)
             if assignee_error is not None:
                 return assignee_error
-        requester_id = _human_requester_id()
+        requester_id = _runtime_context().requester_id
 
         def apply_template(data: dict[str, Any]) -> list[dict[str, Any]]:
             _ensure_thread_state(data, room_id, thread_id)
@@ -970,11 +964,11 @@ class TodoTools(Toolkit):
                     "priority": template_todo.get("priority", "medium"),
                     "depends_on": [],
                     "assigned_agent": template_todo.get("assigned_agent") or default_assignee,
+                    "requester_id": requester_id,
                     "created_at": now,
                     "updated_at": now,
                     "completed_at": None,
                 }
-                _record_requester(item, requester_id)
                 created.append(item)
 
             for item, template_todo in zip(created, rendered_template["todos"], strict=True):

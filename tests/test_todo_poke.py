@@ -338,8 +338,8 @@ async def test_scan_skips_duplicate_or_invalid_timestamp_items(
 
 
 @pytest.mark.asyncio
-async def test_scan_never_pokes_items_without_recorded_human_requester(tmp_path: Path) -> None:
-    """Work nobody human shaped must not wake its assignee under any identity."""
+async def test_scan_never_pokes_legacy_items_without_recorded_requester(tmp_path: Path) -> None:
+    """Items written before requester attribution cannot be safely attributed, so they never wake their assignee."""
     todo_root = tmp_path / "todo"
     _write_thread(
         todo_root,

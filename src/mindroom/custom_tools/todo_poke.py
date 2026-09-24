@@ -215,7 +215,14 @@ def _parse_item(raw_item: object) -> _TodoItemSnapshot:
         msg = "title must be a non-empty string"
         raise ValueError(msg)
 
-    # The todo tool records requester_id only when a human requester last shaped the item.
+    # LEGACY_COMPAT: Todo items without a recorded requester_id.
+    # Legacy format: Items written by the todo tool before it recorded the title author omit requester_id.
+    # Last legacy release: every stable release before requester attribution shipped (v2026.9.272 was the latest
+    # tag when written); replacement: the next release records requester_id on every title write.
+    # Handling: Parse absence as unattributed; nobody can be safely attributed after the fact, so such items are
+    # never poked, each is logged once, list_todos flags it, and rewriting its title records the new author.
+    # Coverage: tests/test_todo_poke.py::test_scan_never_pokes_legacy_items_without_recorded_requester,
+    # tests/test_todo_builtin.py::test_list_todos_flags_legacy_items_and_title_rewrite_adopts_them.
     requester_id = item_data.get("requester_id", "")
     if not isinstance(requester_id, str):
         msg = "requester_id must be a string"
@@ -396,12 +403,12 @@ def _poke_scopes(
                     assigned_agent=item.assigned_agent,
                 )
                 continue
-            # A poke acts for the human who shaped the work, so the assignee's access policy applies to them.
+            # A poke acts for whoever wrote the work, so the assignee's access policy applies to them.
             if not item.requester_id:
                 _warn_state_once(
                     "todo_poke_requester_missing",
                     snapshot.source_path,
-                    "assigned todo has no recorded human requester",
+                    f"assigned todo {item.item_id} has no recorded requester; rewrite its title to re-enable pokes",
                     seen_warning_keys,
                     item_id=item.item_id,
                     assigned_agent=item.assigned_agent,

@@ -15,6 +15,7 @@ from mindroom.custom_tools.todo_poke import (
     todo_poke_policy,
 )
 from mindroom.custom_tools.todo_state import state_root as todo_state_root
+from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.requester_identity import is_human_requester_id
@@ -150,13 +151,17 @@ class TodoPokeRuntimeCoordinator:
         thread_id: str | None,
         requester_id: str,
     ) -> str | None:
-        """Send one assigned-agent todo poke that enters normal dispatch on behalf of its human requester."""
+        """Send one assigned-agent todo poke that enters normal dispatch on behalf of the todo's requester."""
         config = self.config_provider()
         if config is None:
             raise TodoPokeDeliveryUnavailableError
-        # A non-human original sender would leave the assignee's own identity as the requester,
-        # bypassing its reply access policy and running tools without a human principal.
-        if not is_human_requester_id(requester_id, config, self.runtime_paths):
+        # A human requester becomes the poke's requester, so the assignee applies its access policy to them.
+        # Agents, teams, the router, and the internal user are always allowed to address agents, so their pokes
+        # keep the assignee as requester exactly like a direct mention would; any other sender would bypass policy.
+        if not (
+            is_human_requester_id(requester_id, config, self.runtime_paths)
+            or requester_id in current_internal_sender_ids(config, self.runtime_paths)
+        ):
             logger.warning(
                 "todo_poke_requester_rejected",
                 assigned_agent=agent_name,
