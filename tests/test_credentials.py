@@ -16,6 +16,7 @@ from mindroom.credentials import (
     CredentialsManager,
     _merge_credential_layers,
     _reset_credentials_manager_cache,
+    delete_scoped_credentials,
     get_runtime_credentials_manager,
     load_scoped_credentials,
     save_scoped_credentials,
@@ -912,6 +913,88 @@ class TestCredentialsManager:
         assert loaded_credentials is None
         assert manager.for_worker(attacker_target.worker_key).list_services() == []
         assert victim_manager.list_services() == ["openweather"]
+
+    @pytest.mark.parametrize("encrypted", [False, True])
+    def test_worker_scoped_writes_do_not_follow_linked_credentials_directory(
+        self,
+        tmp_path: Path,
+        encrypted: bool,
+    ) -> None:
+        """Worker code must not redirect scoped saves or deletes into the shared store."""
+        manager = CredentialsManager(
+            tmp_path / "credentials",
+            encryption_key=_test_encryption_key() if encrypted else None,
+        )
+        manager.save_credentials("github", {"access_token": "operator-token", "_source": "ui"})
+        worker_target = _worker_target("user", "general", _requester_identity("@alice:example.org"))
+        assert worker_target.worker_key is not None
+        worker_credentials_path = manager.for_worker(worker_target.worker_key).base_path
+        worker_credentials_path.rmdir()
+        worker_credentials_path.symlink_to(
+            os.path.relpath(manager.base_path, worker_credentials_path.parent),
+            target_is_directory=True,
+        )
+
+        for service in ("github", "openweather"):
+            with pytest.raises((OSError, ValueError)):
+                save_scoped_credentials(
+                    service,
+                    {"access_token": "attacker-token"},
+                    credentials_manager=manager,
+                    worker_target=worker_target,
+                )
+        with pytest.raises(NotADirectoryError):
+            delete_scoped_credentials("github", credentials_manager=manager, worker_target=worker_target)
+
+        assert manager.load_credentials("github") == {"access_token": "operator-token", "_source": "ui"}
+        assert manager.list_services() == ["github"]
+
+    def test_worker_scoped_save_rejects_planted_fifo_without_blocking(self, tmp_path: Path) -> None:
+        """A worker-planted FIFO must fail a scoped save instead of blocking the primary."""
+        manager = CredentialsManager(tmp_path / "credentials")
+        worker_target = _worker_target("user", "general", _requester_identity("@alice:example.org"))
+        assert worker_target.worker_key is not None
+        os.mkfifo(manager.for_worker(worker_target.worker_key).get_credentials_path("github"))
+
+        with pytest.raises(ValueError, match="regular file"):
+            save_scoped_credentials(
+                "github",
+                {"access_token": "token"},
+                credentials_manager=manager,
+                worker_target=worker_target,
+            )
+
+    def test_load_scoped_credentials_rejects_oversized_worker_override(self, tmp_path: Path) -> None:
+        """Worker-written overrides are bounded before the primary buffers them."""
+        manager = CredentialsManager(tmp_path / "credentials")
+        worker_target = _worker_target("user", "general", _requester_identity("@alice:example.org"))
+        assert worker_target.worker_key is not None
+        worker_manager = manager.for_worker(worker_target.worker_key)
+        worker_manager.save_credentials("openweather", {"api_key": "x" * (1024 * 1024)})
+
+        loaded_credentials = load_scoped_credentials(
+            "openweather",
+            credentials_manager=manager,
+            worker_target=worker_target,
+        )
+
+        assert loaded_credentials is None
+
+    def test_sync_shared_credentials_to_worker_ignores_linked_mirror_directory(self, tmp_path: Path) -> None:
+        """Stale-mirror cleanup must not delete shared credentials through a worker-planted link."""
+        manager = CredentialsManager(tmp_path / "credentials")
+        manager.save_credentials("github", {"access_token": "operator-token", "_source": "ui"})
+        mirror_path = manager.for_worker("worker-a").shared_base_path
+        mirror_path.rmdir()
+        mirror_path.symlink_to(os.path.relpath(manager.base_path, mirror_path.parent), target_is_directory=True)
+
+        sync_shared_credentials_to_worker(
+            "worker-a",
+            allowed_services=frozenset(),
+            credentials_manager=manager,
+        )
+
+        assert manager.load_credentials("github") == {"access_token": "operator-token", "_source": "ui"}
 
     def test_load_scoped_credentials_uses_worker_rooted_manager_without_nesting(
         self,

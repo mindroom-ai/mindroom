@@ -15,6 +15,7 @@ import re
 import secrets
 import threading
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -23,6 +24,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from mindroom import runtime_env_policy as _runtime_env_policy
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.credential_policy import credential_service_policy
 from mindroom.durable_write import create_directory_durable, replace_file_durable
 from mindroom.logging_config import get_logger
@@ -41,6 +43,7 @@ _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME = "private_oauth"
 _PRIMARY_RUNTIME_AGENT_SCOPED_DIRNAME = "_agents"
 _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES = frozenset({"env", "ui", None})
 _ENCRYPTED_CREDENTIALS_MAGIC = b"MINDROOM-CREDENTIALS-V1\n"
+_MAX_WORKER_CREDENTIALS_FILE_BYTES = 1024 * 1024
 _AES_GCM_NONCE_SIZE = 12
 logger = get_logger(__name__)
 
@@ -397,19 +400,45 @@ class CredentialsManager:
             return None
 
     def _read_credentials_payload(self, credentials_path: Path) -> bytes | None:
-        """Return one stored payload, or None when it is absent."""
+        """Return one stored payload, or None when it is absent.
+
+        Worker code can rewrite its own root, so worker-rooted stores read only a
+        bounded regular file physically inside that root and never follow links.
+        """
         if self.current_worker_root is None:
             return credentials_path.read_bytes() if credentials_path.exists() else None
-        # Worker code can rewrite its own root, so read only a regular file physically inside it.
         worker_root = self.base_path.parent
         try:
             with (
                 open_regular_file_within_root(worker_root, credentials_path.relative_to(worker_root)) as descriptor,
                 os.fdopen(descriptor, "rb", closefd=False) as credentials_file,
             ):
-                return credentials_file.read()
+                payload = credentials_file.read(_MAX_WORKER_CREDENTIALS_FILE_BYTES + 1)
         except FileNotFoundError:
             return None
+        if len(payload) > _MAX_WORKER_CREDENTIALS_FILE_BYTES:
+            msg = f"Credentials file exceeds {_MAX_WORKER_CREDENTIALS_FILE_BYTES} bytes"
+            raise ValueError(msg)
+        return payload
+
+    def _write_credentials_payload(self, credentials_path: Path, payload: bytes) -> None:
+        if self.current_worker_root is None:
+            _atomic_write_private_file(credentials_path, payload)
+            return
+        # Publish relative to the pinned directory so a worker-planted link cannot redirect the write.
+        with open_directory_within_root(
+            self.base_path.parent,
+            self.base_path.name,
+            create=True,
+            mode=0o700,
+        ) as directory:
+            atomic_write_bytes_at(directory, credentials_path.name, payload)
+
+    def _stored_payload_is_encrypted(self, credentials_path: Path) -> bool:
+        if self.current_worker_root is None:
+            return _has_encrypted_credentials_magic(credentials_path)
+        payload = self._read_credentials_payload(credentials_path)
+        return payload is not None and payload.startswith(_ENCRYPTED_CREDENTIALS_MAGIC)
 
     def save_credentials(self, service: str, credentials: dict[str, Any]) -> None:
         """Save credentials for a service.
@@ -434,12 +463,12 @@ class CredentialsManager:
                 msg = f"Stored credentials for {normalized_service} could not be loaded; refusing to overwrite"
                 raise ValueError(msg)
             payload = self.encode_credentials(normalized_service, credentials)
-            _atomic_write_private_file(credentials_path, payload)
+            self._write_credentials_payload(credentials_path, payload)
             return
-        if credentials_path.exists() and _has_encrypted_credentials_magic(credentials_path):
+        if credentials_path.exists() and self._stored_payload_is_encrypted(credentials_path):
             msg = f"Stored credentials for {normalized_service} are encrypted; refusing to overwrite without a key"
             raise ValueError(msg)
-        _atomic_write_private_file(credentials_path, self.encode_credentials(normalized_service, credentials))
+        self._write_credentials_payload(credentials_path, self.encode_credentials(normalized_service, credentials))
 
     def delete_credentials(self, service: str) -> None:
         """Delete credentials for a service.
@@ -449,6 +478,14 @@ class CredentialsManager:
 
         """
         credentials_path = self.get_credentials_path(service)
+        if self.current_worker_root is not None:
+            # Unlink relative to the pinned directory so a worker-planted link cannot redirect the delete.
+            with (
+                suppress(FileNotFoundError),
+                open_directory_within_root(self.base_path.parent, self.base_path.name) as directory,
+            ):
+                os.unlink(credentials_path.name, dir_fd=directory)
+            return
         if credentials_path.exists():
             credentials_path.unlink()
 
