@@ -411,6 +411,7 @@ All endpoints require bearer token (`PROVISIONER_API_KEY`).
 
 For new instances, supply the real account UUID, subscription row UUID, and matching tier, and omit `instance_id`.
 Supplying `instance_id` selects an update of an existing instance; a missing row returns `404`.
+Every request, including re-provisioning, must supply the owner's `account_id`, because it is the instance's only Supabase authorization binding; requests without one return `400`.
 The account must have an email for owner identity derivation.
 Replace the placeholders in this operator request with those database values:
 

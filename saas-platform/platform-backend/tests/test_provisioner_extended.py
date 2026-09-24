@@ -190,7 +190,7 @@ class TestProvisionerExtended:
         valid_auth: dict,
         payload: dict,
     ):
-        """An instance without an owner account would admit every Supabase user as its administrator."""
+        """Provisioning must bind every instance to its owner account before any side effects."""
         response = client.post("/system/provision", json=payload, headers=valid_auth)
 
         assert response.status_code == 400
