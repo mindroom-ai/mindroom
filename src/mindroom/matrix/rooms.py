@@ -500,17 +500,6 @@ async def ensure_all_rooms_exist(
     return room_ids
 
 
-def _flag_room_created_by_another_account(client: nio.AsyncClient, snapshot: RoomStateSnapshot) -> None:
-    """Flag a recorded managed room or Space another account created, which earlier releases adopted unverified."""
-    if snapshot.creator != client.user_id:
-        logger.error(
-            "managed_room_created_by_another_account",
-            room_id=snapshot.room_id,
-            creator=snapshot.creator,
-            hint="Its creator controls membership; remove its matrix_state.yaml entry unless you trust that account.",
-        )
-
-
 async def reconcile_managed_rooms(
     client: nio.AsyncClient,
     config: Config,
@@ -529,7 +518,6 @@ async def reconcile_managed_rooms(
                     snapshot = await read_room_state(client, room_id)
                     if snapshot is None:
                         continue
-                    _flag_room_created_by_another_account(client, snapshot)
                     membership = snapshot.events.get(("m.room.member", client.user_id), {})
                     if membership.get("membership") != "join":
                         logger.warning("Managed room is not joined; skipping policy", room_id=room_id)
@@ -623,7 +611,6 @@ async def ensure_root_space(
     snapshot = await read_room_state(client, root_space_id) if root_space_id is not None else None
     if root_space_id is None or snapshot is None:
         return None
-    _flag_room_created_by_another_account(client, snapshot)
     if not await ensure_room_name(client, root_space_id, config.matrix_space.name, snapshot=snapshot):
         logger.warning("Failed to set root space name; skipping child linking", space_id=root_space_id)
         return None

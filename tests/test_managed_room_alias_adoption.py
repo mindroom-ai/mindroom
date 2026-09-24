@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import ANY, AsyncMock
+from unittest.mock import AsyncMock
 
 import aiohttp
 import nio
 import pytest
 from nio.responses import RoomPutAliasError
-from structlog.testing import capture_logs
 
 from mindroom.access_policy import resolve_room_policy
 from mindroom.matrix import rooms as matrix_rooms
@@ -335,39 +334,6 @@ async def test_deleted_alias_of_recorded_room_is_kept_through_a_transient_read_f
     assert _recorded_lobby(config) == _OURS
     client.room_put_alias.assert_not_awaited()
     create_room.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_reconciliation_flags_recorded_room_created_by_another_account(
-    config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A recorded room adopted before verification is reported, but still reconciled."""
-    reconcile = AsyncMock()
-    monkeypatch.setattr(matrix_rooms, "_reconcile_joined_existing_room", reconcile)
-    client = _client(_lobby_alias(config), _THEIRS)
-    client.room_get_state.return_value = _room_state(_THEIRS, _lobby_alias(config), creator=_SQUATTER)
-
-    with capture_logs() as logs:
-        snapshots = await matrix_rooms.reconcile_managed_rooms(
-            client,
-            config,
-            runtime_paths_for(config),
-            {"lobby": _THEIRS},
-        )
-
-    assert _THEIRS in snapshots
-    reconcile.assert_awaited_once()
-    flagged = [log for log in logs if log["event"] == "managed_room_created_by_another_account"]
-    assert flagged == [
-        {
-            "event": "managed_room_created_by_another_account",
-            "room_id": _THEIRS,
-            "creator": _SQUATTER,
-            "hint": ANY,
-            "log_level": "error",
-        },
-    ]
 
 
 async def _ensure_space(client: AsyncMock, config: Config) -> str | None:

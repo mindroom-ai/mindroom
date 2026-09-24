@@ -57,7 +57,6 @@ An unrecorded key adopts its alias target only when the router created that room
 Otherwise the router logs `managed_alias_target_refused`, never joins that room, and creates and records a fresh room without the alias, which later passes keep using.
 If the alias lookup or a state read fails transiently, a recorded room stays in use and an unrecorded key is retried on the next pass.
 A fresh room without the alias that is lost before its record is saved, for example by a crash, stays unrecorded, and the next pass creates another.
-Reconciliation logs `managed_room_created_by_another_account` for a recorded room or Space that another account created, which earlier releases could adopt from a squatted alias.
 
 ## Threading (MSC3440)
 
