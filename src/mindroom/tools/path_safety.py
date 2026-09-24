@@ -7,7 +7,7 @@ from pathlib import Path
 
 from mindroom.path_confinement import resolve_path_within_root
 
-_BASE_DIR_ESCAPE_HINT = "Set restrict_to_base_dir=false to allow access outside base_dir."
+_BASE_DIR_ESCAPE_HINT = "Set the agent's file_access to 'unrestricted' to allow paths outside the workspace."
 
 
 def _blocked_base_dir_message(path: str, resolved: Path, base_dir: Path) -> str:
@@ -18,6 +18,11 @@ def _blocked_base_dir_message(path: str, resolved: Path, base_dir: Path) -> str:
 def blocked_file_action_message(action: str, requested_path: str, base_dir: Path) -> str:
     """Explain why a file-tool action was blocked."""
     return f"Error {action}: path '{requested_path}' is outside base_dir '{base_dir}'. {_BASE_DIR_ESCAPE_HINT}"
+
+
+def blocked_git_metadata_message(action: str, requested_path: str) -> str:
+    """Explain why a file-tool write into Git metadata was blocked."""
+    return f"Error {action}: path '{requested_path}' is inside Git metadata ('.git'), which file tools may not modify."
 
 
 def format_path_for_output(path: str | Path, base_dir: Path) -> str:

@@ -6,7 +6,13 @@ function isAllowedPlatformHost(hostname: string, platformDomain: string): boolea
   return Boolean(domain && (host === domain || host.endsWith(`.${domain}`)))
 }
 
-function isProtocolRelativeRedirect(target: string): boolean {
+function leavesPlatformOrigin(target: string): boolean {
+  // The WHATWG URL parser removes ASCII tab and newline before parsing, so "/\t/evil.example"
+  // resolves to the scheme-relative "//evil.example". Reject every C0 control character instead
+  // of replaying that removal, since no redirect target needs one.
+  if ([...target].some((character) => character < ' ')) {
+    return true
+  }
   return target.replaceAll('\\', '/').startsWith('//')
 }
 
@@ -15,7 +21,7 @@ export function sanitizePostAuthRedirect(
   target: string | null | undefined,
   platformDomain = ''
 ): string {
-  if (!target || isProtocolRelativeRedirect(target)) {
+  if (!target || leavesPlatformOrigin(target)) {
     return DEFAULT_REDIRECT
   }
 

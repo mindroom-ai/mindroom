@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import nio
 
+from mindroom.attachments import AttachmentRecord
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
 from mindroom.custom_tools.attachments import (
     resolve_send_attachments,
@@ -30,7 +30,9 @@ from mindroom.requester_identity import is_human_requester_id
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
+    from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.message_extras import MessageExtraSection
@@ -69,8 +71,14 @@ def _format_direct_text(text: str) -> str | None:
 class MatrixMessageOperations:
     """Run Matrix message operations below the model-facing tool adapter."""
 
-    def __init__(self, *, tool_output_workspace_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        tool_output_workspace_root: Path | None = None,
+        file_access: FileAccess = "workspace",
+    ) -> None:
         self._tool_output_workspace_root = tool_output_workspace_root
+        self._file_access = file_access
 
     @staticmethod
     def _result(status: Literal["ok", "error"], **kwargs: object) -> MatrixMessageOperationResult:
@@ -139,7 +147,7 @@ class MatrixMessageOperations:
         self,
         context: ToolRuntimeContext,
         state: _MessageSendState,
-        attachments: list[Path | RuntimeEncryptedMediaAttachment],
+        attachments: list[AttachmentRecord | RuntimeEncryptedMediaAttachment],
         *,
         room_mode: bool,
         needs_thread: bool,
@@ -214,7 +222,7 @@ class MatrixMessageOperations:
                 return self._result("error", action="send", room_id=room_id, message=_DIRECT_INTERACTIVE_ERROR)
 
         state = _MessageSendState(room_id=room_id, thread_id=thread_id)
-        resolved: list[Path | RuntimeEncryptedMediaAttachment] = []
+        resolved: list[AttachmentRecord | RuntimeEncryptedMediaAttachment] = []
         for reference in attachments:
             is_id = reference.startswith("att_")
             files, ids, registered_ids, error = resolve_send_attachments(
@@ -222,6 +230,7 @@ class MatrixMessageOperations:
                 attachment_ids=[reference] if is_id else [],
                 attachment_file_paths=[] if is_id else [reference],
                 workspace_root=self._tool_output_workspace_root,
+                file_access=self._file_access,
             )
             if error is not None:
                 return self._result("error", action="send", message=error, **asdict(state))
@@ -229,7 +238,11 @@ class MatrixMessageOperations:
             state.resolved_attachment_ids.extend(ids)
             state.newly_registered_attachment_ids.extend(registered_ids)
 
-        if recipient_user_id is not None and room_mode and any(not isinstance(file, Path) for file in resolved):
+        if (
+            recipient_user_id is not None
+            and room_mode
+            and any(not isinstance(file, AttachmentRecord) for file in resolved)
+        ):
             return self._result(
                 "error",
                 action="send",

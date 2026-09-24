@@ -38,6 +38,7 @@ class EffectiveToolConfig:
 
 
 AgentLearningMode = Literal["always", "agentic"]
+FileAccess = Literal["workspace", "unrestricted"]
 _LargeMessageStrategy = Literal["sidecar", "split"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
@@ -445,6 +446,15 @@ class DefaultsConfig(BaseModel):
     show_tool_calls: bool = Field(
         default=True,
         description="Whether to show tool call details inline in responses",
+    )
+    file_access: FileAccess = Field(
+        default="workspace",
+        description=(
+            "Where in-process path-taking tools (file, coding, attachments, matrix_message, gmail, google_drive, browser) "
+            "may read and write files: workspace confines them to the agent workspace and its attachments, "
+            "unrestricted allows any path their process can reach. Code-execution tools such as shell and python "
+            "are always unrestricted; isolate them with worker_tools"
+        ),
     )
     worker_tools: list[str] | None = Field(
         default=None,

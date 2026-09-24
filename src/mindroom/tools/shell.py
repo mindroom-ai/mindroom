@@ -6,8 +6,9 @@ import json
 import os
 import re
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast, runtime_checkable
 
 from agno.tools.toolkit import Toolkit
 
@@ -37,12 +38,24 @@ from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
 from mindroom.tool_system.output_files import ToolOutputFileHandled, current_tool_output_file_request
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
+
+
+@runtime_checkable
+class ShellRuntimeSettings(Protocol):
+    """Non-secret effective settings retained by the canonical shell toolkit."""
+
+    @property
+    def shell_path_prepend(self) -> str | None:
+        """Return the resolved path entries from the normal configuration merge."""
+        ...
+
 
 _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
     {
@@ -250,11 +263,24 @@ def _handle_namespace(*, runtime_paths: RuntimePaths, base_dir: Path | None) -> 
     return f"{storage_root}::{resolved_base_dir}"
 
 
+@dataclass(frozen=True, slots=True)
+class ShellWorkerBinding:
+    """Trusted isolated-worker supervisor binding, never provider tool arguments."""
+
+    socket_path: str
+    namespace: str
+    handle: str
+    gateway_url: str
+    token_path: str
+
+
 @register_tool_with_metadata(
     name="shell",
     display_name="Shell Commands",
     description="Run terminal commands and scripts in the agent workspace",
     category=ToolCategory.DEVELOPMENT,
+    file_access=ToolFileAccess.UNCONFINED,
+    executes_code=True,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,
@@ -337,6 +363,11 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
     class MindRoomShellTools(Toolkit):
         """MindRoom shell toolkit with async execution and timeout-to-handle support."""
 
+        @property
+        def shell_path_prepend(self) -> str | None:
+            """Expose the effective non-secret path setting after normal config merge."""
+            return self._shell_path_prepend
+
         def __init__(
             self,
             base_dir: Path | str | None = None,
@@ -346,6 +377,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             shell_path_prepend: str | None = None,
             *,
             runtime_paths: RuntimePaths,
+            worker_binding: ShellWorkerBinding | None = None,
             **kwargs: object,
         ) -> None:
             self.base_dir: Path | None = Path(base_dir) if isinstance(base_dir, str) else base_dir
@@ -380,6 +412,16 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             # long-lived shell supervisor so background handles survive the
             # per-request process.
             self._supervisor_socket = os.environ.get(SHELL_SUPERVISOR_SOCKET_ENV) or None
+            self._worker_binding = worker_binding
+            if worker_binding is not None:
+                self._supervisor_socket = worker_binding.socket_path
+                self._handle_namespace = worker_binding.namespace
+                self._runtime_env.update(
+                    {
+                        "MINDROOM_AGENT_CLI_GATEWAY_URL": worker_binding.gateway_url,
+                        "MINDROOM_AGENT_CLI_TOKEN_PATH": worker_binding.token_path,
+                    },
+                )
 
         async def run_shell_command(
             self,
@@ -390,8 +432,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             """Runs a shell command and returns the output or error.
 
             If the command completes within ``timeout`` seconds the last ``tail``
-            lines of stdout are returned (or the stderr on non-zero exit).  When
-            the timeout is exceeded the process keeps running in the background
+            lines of stdout are returned. On non-zero exit, useful stdout is
+            preserved together with stderr. When the timeout is exceeded, the
+            process keeps running in the background
             and a handle string is returned that can be polled with
             ``check_shell_command`` or stopped with ``kill_shell_command``.
 
@@ -443,6 +486,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     cwd=cwd,
                     tail=tail,
                     timeout=timeout,
+                    handle=self._worker_binding.handle if self._worker_binding is not None else None,
                     output_destination=output_destination,
                 )
             else:

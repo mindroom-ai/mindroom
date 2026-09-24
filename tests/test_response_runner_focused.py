@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
+from functools import partial
 from itertools import count
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -27,12 +28,16 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunContext, RunStatus
 from agno.run.requirement import RunRequirement
 from agno.session.agent import AgentSession
-from agno.tools.function import Function
+from agno.tools.function import Function, FunctionCall
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents as agents_module
-from mindroom import approval_receipt, interactive, response_runner
+from mindroom import approval_receipt, cli_approval_waits, interactive, response_runner
 from mindroom import background_tasks as background_tasks_module
+from mindroom.agent_cli.events import stream_cli_events
+from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifetime
+from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, TurnToolRegistry
+from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_storage import get_agent_session
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval_response import require_ordered_pause_presentation
@@ -66,8 +71,10 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, ScheduledHisto
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.event_journal import (
     ApprovalCall,
+    ApprovalCardReservation,
     ApprovalContinuation,
     ApprovalDecision,
+    ApprovalDecisionMetadata,
     DeliveryStage,
     EventClass,
     EventKind,
@@ -104,7 +111,17 @@ from mindroom.response_runner import (
     prepare_memory_and_model_context,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval, ResponseTurnContext
+from mindroom.response_turn import (
+    AttemptResolved,
+    CompletedApprovalRun,
+    CompletedAttempt,
+    PausedAttempt,
+    ResponsePausedForApproval,
+    ResponseTurnContext,
+    TurnSinks,
+    run_blocking_response_turn,
+    stream_response_turn,
+)
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.stop import StopManager
@@ -121,7 +138,7 @@ from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
-from mindroom.tool_system.runtime_context import ToolDispatchContext
+from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnTrust
 from mindroom.turn_policy import PreparedDispatch
@@ -143,6 +160,15 @@ from tests.response_runner_helpers import (
     _PersistenceSeamProbe,
     _plain_request,
     _target,
+)
+from tests.test_agent_tool_calls import _catalog
+from tests.test_response_turn import (
+    _AdapterLog,
+    _blocking_adapter,
+    _continuation,
+    _ctx,
+    _dynamic_tool_execution,
+    _streaming_adapter,
 )
 
 if TYPE_CHECKING:
@@ -8778,6 +8804,693 @@ async def test_scheduled_model_overrides_room_default_for_one_response(tmp_path:
     assert active_models == ["cheap"]
     runtime = await coordinator.prepare_response_runtime(_plain_request(_target()))
     assert runtime.active_model_name == "large"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authorized", [True, False])
+@pytest.mark.parametrize("call_count", [1, 2])
+async def test_cli_approval_claims_native_owner_and_wakes_without_source_lock(
+    tmp_path: Path,
+    authorized: bool,
+    call_count: int,
+) -> None:
+    """A live CLI waiter gets the same one-attempt claim before any effects."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    tools = tuple(
+        ToolExecution(
+            tool_call_id=f"inner-{index}",
+            tool_name="dangerous",
+            tool_args={"value": index},
+            requires_confirmation=True,
+            approval_type="mindroom_policy",
+        )
+        for index in range(call_count)
+    )
+    paused = _ordered_pause(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=tools,
+            requirements=tuple(RunRequirement(item) for item in tools),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
+            cli_call={"kind": "agent_cli", "call_id": "inner", "parent_bash_call_id": "bash"},
+        ),
+    )
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=request.response_envelope.target,
+        user_id=request.user_id,
+    )
+    waiter = asyncio.Event()
+    runner._cli_approval_waits.waiters["$source"] = waiter
+
+    async def publish(continuation, plan, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
+        await store.activate_approval_continuation(continuation.approval_id, expected_generation=0)
+        assert await runner.handoff_approval_source("$source") is False
+        assert waiter.is_set()
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
+        patch.object(runner._approval_responses, "publish_generation", new=publish),
+        patch.object(runner, "_request_remains_authorized", new=AsyncMock(return_value=authorized)),
+    ):
+        operation = runner._cli_approval_waits.wait(
+            paused,
+            waiter=waiter,
+            source=request.response_envelope.source_event_id,
+            target=request.response_envelope.target,
+            publish=partial(
+                runner._suspend_for_approval,
+                request=request,
+                target=request.response_envelope.target,
+                progress=response_runner._DeliveryProgress(tracked_event_id="$thinking"),
+                execution_identity=identity,
+                history_scope=runner.deps.state_writer.history_scope(),
+                entity_kind="agent",
+                show_tool_calls=True,
+            ),
+            authorize=lambda: runner._request_remains_authorized(request),
+            show_tool_calls=True,
+        )
+        if authorized:
+            resolved = await operation
+            assert len(resolved) == call_count
+            assert all(item.confirmation is True for item in resolved)
+            current = await store.approval_continuation_for_source("$source")
+            assert current.state == "claimed"
+            assert current.cli_call == paused.cli_call
+            assert await store.claim_approval_continuation(current.approval_id, runtime_generation="rival") is None
+        else:
+            with pytest.raises(PermissionError):
+                await operation
+            current = await store.approval_continuation_for_source("$source")
+            assert current.state != "claimed"
+
+
+@pytest.mark.asyncio
+async def test_cli_wait_reports_failed_card_publication(tmp_path: Path) -> None:
+    """A CLI caller sees why its approval card failed, not a generic ownership loss."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    tool = ToolExecution(
+        tool_call_id="inner",
+        tool_name="dangerous",
+        requires_confirmation=True,
+        approval_type="mindroom_policy",
+    )
+    paused = _ordered_pause(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+            requirements=(RunRequirement(tool),),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
+            cli_call={"kind": "agent_cli", "call_id": "inner", "parent_bash_call_id": "bash"},
+        ),
+    )
+
+    async def publish(continuation, plan, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
+        msg = "approval card send failed"
+        raise RuntimeError(msg)
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
+        patch.object(runner._approval_responses, "publish_generation", new=publish),
+        pytest.raises(RuntimeError, match="approval card send failed"),
+    ):
+        await runner._cli_approval_waits.wait(
+            paused,
+            waiter=asyncio.Event(),
+            source="$source",
+            target=request.response_envelope.target,
+            publish=partial(
+                runner._suspend_for_approval,
+                request=request,
+                target=request.response_envelope.target,
+                progress=response_runner._DeliveryProgress(tracked_event_id="$thinking"),
+                execution_identity=runner.deps.tool_runtime.build_execution_identity(
+                    target=request.response_envelope.target,
+                    user_id=request.user_id,
+                ),
+                history_scope=runner.deps.state_writer.history_scope(),
+                entity_kind="agent",
+                show_tool_calls=True,
+            ),
+            authorize=AsyncMock(return_value=True),
+            show_tool_calls=True,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_source", ["user_stop", "interrupted", "shutdown", "rival"])
+async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, cancel_source: str) -> None:
+    """The real response task, not its spawned tool task, owns cancellation provenance."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    target = request.response_envelope.target
+    continuation = ApprovalContinuation(
+        approval_id="cli-wait",
+        run_id="run",
+        session_id=target.session_id,
+        entity_kind="agent",
+        entity_name="general",
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+        requester_id=request.user_id,
+        response_event_id="$response",
+        sources=request.sources,
+        calls=(),
+        state="claimed" if cancel_source == "rival" else "waiting",
+        runtime_generation="other-process" if cancel_source == "rival" else None,
+        cli_call={"kind": "agent_cli"},
+    )
+    assert await store.create_approval_continuation(continuation) is not None
+    runtime = response_runner._PreparedResponseRuntime(
+        resolved_target=target,
+        response_thread_id=target.resolved_thread_id,
+        media_inputs=response_runner.MediaInputs(),
+        session_id=target.session_id,
+        model_prompt="test",
+        active_model_name="default",
+        show_tool_calls=False,
+        tool_dispatch=runner.deps.tool_runtime.build_dispatch_context(target, user_id=request.user_id),
+    )
+    started = asyncio.Event()
+
+    async def wait_for_decision(*_args: object, **_kwargs: object) -> tuple[RunRequirement, ...]:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def response() -> None:
+        async with runner._cli_approval_scope(
+            runtime,
+            request=request,
+            progress=response_runner._DeliveryProgress(),
+            history_scope=runner.deps.state_writer.history_scope(),
+        ) as scoped:
+            context = response_runner.runtime_context_from_dispatch_context(scoped.tool_dispatch)
+            assert context is not None
+            assert context.cli_approval_handler is not None
+            await context.cli_approval_handler(cast("PausedAttempt", None))
+
+    with patch.object(runner._cli_approval_waits, "wait", new=wait_for_decision):
+        task = asyncio.create_task(response())
+        await started.wait()
+        if cancel_source == "shutdown":
+            request_task_cancel(task, process_shutdown=True)
+        else:
+            task.cancel(cancel_source)
+        await asyncio.gather(task, return_exceptions=True)
+    current = await store.approval_continuation("cli-wait")
+    assert current is not None
+    assert current.state == (
+        "claimed" if cancel_source == "rival" else "waiting" if cancel_source == "shutdown" else "failing"
+    )
+    assert (
+        current.failure_reason
+        == {"shutdown": None, "rival": None, "user_stop": "cancelled_by_user", "interrupted": "interrupted"}[
+            cancel_source
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_cli_approval_scope_without_cli_pause_reads_no_approval_state(tmp_path: Path) -> None:
+    """Standard responses pass through the CLI scope without touching approval storage."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    target = request.response_envelope.target
+    runtime = response_runner._PreparedResponseRuntime(
+        resolved_target=target,
+        response_thread_id=target.resolved_thread_id,
+        media_inputs=response_runner.MediaInputs(),
+        session_id=target.session_id,
+        model_prompt="test",
+        active_model_name="default",
+        show_tool_calls=False,
+        tool_dispatch=runner.deps.tool_runtime.build_dispatch_context(target, user_id=request.user_id),
+    )
+    progress = response_runner._DeliveryProgress()
+    progress.settle(FinalDeliveryOutcome(terminal_status="suspended", event_id="$response", is_visible_response=True))
+    with patch.object(
+        type(runner._cli_approval_waits.store),
+        "approval_continuation_for_source",
+        new=AsyncMock(side_effect=AssertionError("standard responses own no CLI approval state")),
+    ):
+        async with runner._cli_approval_scope(
+            runtime,
+            request=request,
+            progress=progress,
+            history_scope=runner.deps.state_writer.history_scope(),
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ready", [False, True])
+@pytest.mark.parametrize("live", [False, True])
+async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa: C901, PLR0915 - one native expiry/teardown race
+    tmp_path: Path,
+    ready: bool,
+    live: bool,
+) -> None:
+    """Expiry leaves the same durable card unclaimed and detaches the live waiter."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    target = request.response_envelope.target
+    runtime = response_runner._PreparedResponseRuntime(
+        resolved_target=target,
+        response_thread_id=target.resolved_thread_id,
+        media_inputs=response_runner.MediaInputs(),
+        session_id=target.session_id,
+        model_prompt="test",
+        active_model_name="default",
+        show_tool_calls=False,
+        tool_dispatch=runner.deps.tool_runtime.build_dispatch_context(target, user_id=request.user_id),
+    )
+    tool = ToolExecution(
+        tool_call_id="inner",
+        tool_name="dangerous",
+        tool_args={"value": 7},
+        requires_confirmation=True,
+        approval_type="mindroom_policy",
+    )
+    paused = _ordered_pause(
+        PausedAttempt(
+            session_id=target.session_id,
+            run_id="run-1",
+            tools=(tool,),
+            requirements=(RunRequirement(tool),),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
+            cli_call={
+                "kind": "agent_cli",
+                "call_id": "inner",
+                "parent_bash_call_id": "bash",
+                "arguments": {"value": 7},
+            },
+        ),
+    )
+    published = []
+    retry = MagicMock()
+    runner._cli_approval_waits.retry_sources = retry
+
+    async def publish(continuation, plan, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
+        published.append(continuation.approval_id)
+        if live:
+            assert await store.reserve_approval_card_deliveries(
+                continuation_principal_id=store.principal_id,
+                continuation_id=continuation.approval_id,
+                expected_generation=0,
+                cards=(
+                    ApprovalCardReservation(
+                        delivery_id="expiry-card",
+                        tool_call_id="inner",
+                        event_type="io.mindroom.tool_approval",
+                        payload={
+                            "approval_id": "expiry-card",
+                            "continuation_id": continuation.approval_id,
+                            "continuation_generation": 0,
+                            "tool_call_id": "inner",
+                            "tool_name": "dangerous",
+                            "arguments": {"value": 7},
+                            "status": "pending",
+                        },
+                    ),
+                ),
+            )
+            assert await store.claim_matrix_delivery(delivery_id="expiry-card", stage=DeliveryStage.INITIAL) is not None
+            await store.record_matrix_delivery_device(
+                delivery_id="expiry-card",
+                stage=DeliveryStage.INITIAL,
+                device_id="device",
+            )
+            await store.acknowledge_matrix_delivery(
+                delivery_id="expiry-card",
+                stage=DeliveryStage.INITIAL,
+                event_id="$card",
+                delivered_projections=(),
+            )
+        elif ready:
+            await store.activate_approval_continuation(continuation.approval_id, expected_generation=0)
+
+    clock = SimpleNamespace(now=cli_approval_waits.time.time_ns())
+    original_timeout = asyncio.timeout
+    entered = asyncio.Event()
+    stopped = asyncio.Event()
+    retired = asyncio.Event()
+    observed = []
+    real_read = store.approval_continuation_for_source
+    raced = []
+
+    @asynccontextmanager
+    async def observe_timeout(delay):  # noqa: ANN001, ANN202
+        async with original_timeout(delay) as timeout:
+            if live and delay is not None and delay > 3600:
+                observed.append(timeout)
+                entered.set()
+            yield timeout
+
+    async def read_source(_store, source):  # noqa: ANN001, ANN202
+        if live and ready and published and not runner._cli_approval_waits.waiters and not raced:
+            raced.append(True)
+            decision = await store.resolve_continuation_approval_card(
+                card_event_id="$card",
+                requested_status="approved",
+                reason=None,
+                metadata=ApprovalDecisionMetadata(resolved_by=request.user_id),
+            )
+            assert decision.recorded
+            assert decision.continuation_ready
+        return await real_read(source)
+
+    @asynccontextmanager
+    async def worker():  # noqa: ANN202
+        try:
+            yield SimpleNamespace()
+        finally:
+            retired.set()
+
+    with (
+        patch.object(cli_approval_waits, "time", SimpleNamespace(time_ns=lambda: clock.now)),
+        patch.object(asyncio, "timeout", observe_timeout),
+        patch.object(type(store), "approval_continuation_for_source", read_source),
+        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch(
+            "mindroom.approval_response.evaluate_tool_approval",
+            new=AsyncMock(return_value=(live or not ready, 60.0)),
+        ),
+        patch.object(runner._approval_responses, "publish_generation", new=publish),
+        patch.object(runner._approval_responses, "request_failure", new=AsyncMock()) as fail,
+    ):
+        async with response_cli_lifetime() as lifetime:
+            lifetime.grant_expires_at_ns = clock.now + 86400 * 10**9 if live else 1
+            catalog = await _catalog(tmp_path / "owner", [])
+            owner = LiveTurnTools(
+                CliTurnOwner(
+                    build_execution_identity_from_runtime_context(catalog.runtime_context),
+                    "turn",
+                    "run",
+                    "worker",
+                ),
+                catalog=catalog,
+                worker=await lifetime.enter_worker(worker()),
+                authorize=AsyncMock(),
+            )
+            registry = TurnToolRegistry()
+            lifetime.register(owner, registry)
+            grant = owner.issue(now_ns=clock.now, expires_at_ns=clock.now + 86400 * 10**9)
+            async with runner._cli_approval_scope(
+                runtime,
+                request=request,
+                progress=response_runner._DeliveryProgress(tracked_event_id="$thinking"),
+                history_scope=runner.deps.state_writer.history_scope(),
+            ) as bound:
+                context = response_runner.runtime_context_from_dispatch_context(bound.tool_dispatch)
+                assert context is not None
+                assert context.cli_approval_handler is not None
+                if live:
+
+                    async def wait_for_approval() -> str:
+                        await context.cli_approval_handler(paused)
+                        pytest.fail("Expired owner must not receive execution authority")
+
+                    function = Function.from_callable(wait_for_approval)
+                    function.process_entrypoint()
+
+                    async def source():  # noqa: ANN202
+                        try:
+                            # Actual Agno swallows ordinary tool errors; the side channel must still suspend.
+                            await FunctionCall(function=function, call_id="bash", arguments={}).aexecute()
+                            yield "swallowed tool error"
+                            await asyncio.Event().wait()
+                        finally:
+                            stopped.set()
+
+                    stream = stream_cli_events(source())
+                    pulling = asyncio.create_task(anext(stream))
+                    await asyncio.wait_for(entered.wait(), timeout=2)
+                    before = await real_read("$source")
+                    assert before is not None
+                    assert before.state == "waiting"
+                    assert registry.resolve("Bearer " + grant.raw_token, now_ns=clock.now) is owner
+                    clock.now = lifetime.grant_expires_at_ns
+                    observed[0].reschedule(asyncio.get_running_loop().time())
+                    with pytest.raises(ResponsePausedForApproval) as caught:
+                        await asyncio.wait_for(pulling, timeout=2)
+                    await stream.aclose()
+                    assert stopped.is_set()
+                else:
+                    with pytest.raises(ResponsePausedForApproval) as caught:
+                        await asyncio.wait_for(context.cli_approval_handler(paused), timeout=1)
+                assert caught.value.paused.cli_call == paused.cli_call
+                outcome = await runner._suspend_for_approval(
+                    caught.value.paused,
+                    request=request,
+                    target=target,
+                    progress=response_runner._DeliveryProgress(tracked_event_id="$thinking"),
+                    execution_identity=runtime.tool_dispatch.execution_identity,
+                    entity_kind="agent",
+                    history_scope=runner.deps.state_writer.history_scope(),
+                    show_tool_calls=False,
+                )
+                assert outcome.terminal_status == "suspended"
+        assert retired.is_set()
+        with pytest.raises(CliAuthenticationError):
+            registry.resolve("Bearer " + grant.raw_token, now_ns=grant.expires_at_ns - 1)
+        current = await store.approval_continuation_for_source("$source")
+        assert current is not None
+        assert current.approval_id == published[0]
+        assert len(published) == 1
+        assert current.state == ("ready" if ready else "waiting")
+        assert current.cli_call == paused.cli_call
+        assert not runner._cli_approval_waits.waiters
+        fail.assert_not_awaited()
+        assert retry.called is ready
+        assert bool(raced) is (live and ready)
+        if live:
+            assert current.calls[0].tool_call_id == "inner"
+            assert current.runtime_generation is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("spent", [1, 2])
+async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budget(
+    tmp_path: Path,
+    streaming: bool,
+    spent: int,
+) -> None:
+    """A live hidden approval checkpoint retains the parent's consumed schema step."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    target = request.response_envelope.target
+    dispatch = runner.deps.tool_runtime.build_dispatch_context(target, user_id=request.user_id)
+    tool = ToolExecution(
+        tool_call_id="hidden",
+        tool_name="dangerous",
+        tool_args={},
+        requires_confirmation=True,
+        approval_type="mindroom_policy",
+    )
+    paused = _ordered_pause(
+        PausedAttempt(
+            session_id=target.session_id,
+            run_id="run-2",
+            tools=(tool,),
+            requirements=(RunRequirement(tool),),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
+            cli_call={"kind": "agent_cli", "call_id": "hidden", "parent_bash_call_id": "bash"},
+        ),
+    )
+    attempts = []
+
+    async def attempt(_run, _continuation):  # noqa: ANN001, ANN202
+        attempts.append(True)
+        if len(attempts) <= spent:
+            return CompletedAttempt(control_executions=(_dynamic_tool_execution(),))
+        lifetime = current_cli_lifetime()
+        assert lifetime is not None
+        lifetime.grant_expires_at_ns = 1
+        await runner._cli_approval_waits.wait(
+            paused,
+            waiter=asyncio.Event(),
+            source=request.response_envelope.source_event_id,
+            target=target,
+            publish=partial(
+                runner._suspend_for_approval,
+                request=request,
+                target=target,
+                progress=response_runner._DeliveryProgress(tracked_event_id="$thinking"),
+                execution_identity=dispatch.execution_identity,
+                history_scope=runner.deps.state_writer.history_scope(),
+                entity_kind="agent",
+                show_tool_calls=False,
+            ),
+            authorize=lambda: runner._request_remains_authorized(request),
+            show_tool_calls=False,
+        )
+        pytest.fail("expired live approval must suspend")
+
+    async def streamed_attempt(run, continuation):  # noqa: ANN001, ANN202
+        yield AttemptResolved(await attempt(run, continuation))
+
+    async def execute() -> None:
+        if streaming:
+            async for _chunk in stream_response_turn(
+                _ctx(),
+                _streaming_adapter(_AdapterLog(), streamed_attempt),
+                TurnSinks(),
+                continuation=_continuation(),
+            ):
+                pass
+        else:
+            await run_blocking_response_turn(
+                _ctx(),
+                _blocking_adapter(_AdapterLog(), attempt),
+                TurnSinks(),
+                continuation=_continuation(),
+            )
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
+        pytest.raises(ResponsePausedForApproval) as raised,
+    ):
+        await execute()
+    assert len(attempts) == spent + 1
+    stored = await store.approval_continuation_for_source("$source")
+    assert stored is not None
+    assert stored.continuation_count == spent
+    assert raised.value.paused.continuation_count == spent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suspend", [None, "live", "native"])
+async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, suspend: str | None) -> None:
+    """Recovered execution advances the native claim and preserves a new pending pause."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    target = _target(thread_id="$thread")
+    request = _plain_request(target, source_event_id="$source")
+    identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id=request.user_id)
+    continuation = ApprovalContinuation(
+        approval_id="recovery-chain",
+        run_id="saved-run",
+        session_id=target.session_id,
+        entity_kind="agent",
+        entity_name="general",
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+        requester_id=request.user_id,
+        response_event_id="$waiting",
+        sources=request.sources,
+        calls=(),
+        state="claimed",
+        runtime_generation=runner.deps.approval_runtime_generation,
+        execution_identity=serialize_tool_execution_identity(identity),
+        cli_call={"kind": "agent_cli"},
+        show_tool_calls=False,
+    )
+    await store.create_approval_continuation(continuation)
+    published = []
+    decisions: list[asyncio.Task[None]] = []
+
+    async def publish(current, plan, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
+        published.append(current.generation)
+
+        async def decide() -> None:
+            await asyncio.sleep(0)
+            await store.activate_approval_continuation(current.approval_id, expected_generation=current.generation)
+            bot.retry_approval_sources(current.room_id, current.source_event_ids)
+
+        decision = asyncio.create_task(decide())
+        decisions.append(decision)
+
+    async def recover(_self, current, *, tool_dispatch, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
+        context = response_runner.runtime_context_from_dispatch_context(tool_dispatch)
+        assert context.cli_approval_handler is not None
+        for index in range(2):
+            tool = ToolExecution(
+                tool_call_id=f"next-{index}",
+                tool_name="dangerous",
+                requires_confirmation=True,
+                approval_type="mindroom_policy",
+            )
+            paused = PausedAttempt(
+                session_id=target.session_id,
+                run_id="saved-run",
+                tools=(tool,),
+                requirements=(RunRequirement(tool),),
+                toolkit_owners={("general", "dangerous"): "test_toolkit"},
+                cli_call={"kind": "agent_cli", "call_id": tool.tool_call_id, "parent_bash_call_id": "old-bash"},
+            )
+            if suspend == "native":
+                return paused
+            if suspend == "live":
+                async with response_cli_lifetime() as lifetime:
+                    lifetime.grant_expires_at_ns = 1
+                    try:
+                        await context.cli_approval_handler(paused)
+                    except ResponsePausedForApproval as error:
+                        return error.paused
+            else:
+                resolved = await context.cli_approval_handler(paused)
+                assert resolved[0].confirmation is True
+        return CompletedApprovalRun(response_text="finished both approvals", metadata_content={})
+
+    with (
+        patch.object(type(runner._approval_execution), "continue_run", new=recover),
+        patch.object(runner._approval_responses, "publish_generation", new=publish),
+        patch.object(runner, "_request_remains_authorized", new=AsyncMock(return_value=True)),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
+        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)),
+        patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(return_value=_completed_outcome("$waiting", body="finished")),
+        ),
+    ):
+        completed: list[tuple[FinalDeliveryOutcome, ApprovalContinuation]] = []
+
+        async def recover_owned() -> None:
+            completed.append(await runner._execute_claimed_approval(continuation, request=request, target=target))
+
+        recovery = runner.track_inbox_response(
+            recover_owned(),
+            name="approval_recovery_chain",
+            room_id=target.room_id,
+            recovery_proof_ready=lambda: True,
+            source_event_ids=continuation.source_event_ids,
+        )
+        await asyncio.wait_for(recovery, timeout=2)
+        await asyncio.gather(*decisions)
+        result, current = completed[0]
+    assert result.terminal_status == ("suspended" if suspend else "completed")
+    assert published == ([1] if suspend else [1, 2])
+    saved = await store.approval_continuation(continuation.approval_id)
+    # A new pause stays ready; completion is left for the lifecycle owner to settle after post-response effects.
+    assert (saved.state, saved.cli_call["call_id"]) == (("ready", "next-0") if suspend else ("claimed", "next-1"))
+    assert current.generation == (1 if suspend else 2)
 
 
 @pytest.mark.asyncio

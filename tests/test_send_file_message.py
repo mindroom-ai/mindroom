@@ -351,6 +351,41 @@ class TestSendFileMessage:
         assert "m.relates_to" not in sent_content
 
     @pytest.mark.asyncio
+    async def test_named_upload_uses_given_filename_and_mimetype(self, tmp_path: Path) -> None:
+        """A retained copy with an opaque name is sent under its original name and type."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/f2"), {})
+        sent_content: dict | None = None
+
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+        ) -> DeliveredMatrixEvent:
+            nonlocal sent_content
+            sent_content = content
+            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
+
+        file = tmp_path / "att_0123.xsl"
+        file.write_bytes(b"<data/>")
+
+        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
+            event_id = await send_file_message(
+                client,
+                "!room:localhost",
+                file,
+                filename="data.xml",
+                mimetype="application/xml",
+            )
+
+        assert event_id == "$evt:localhost"
+        assert sent_content is not None
+        assert sent_content["body"] == "data.xml"
+        assert sent_content["filename"] == "data.xml"
+        assert sent_content["info"]["mimetype"] == "application/xml"
+        assert client.upload.await_args.kwargs["filename"] == "data.xml"
+
+    @pytest.mark.asyncio
     async def test_sends_encrypted_file_with_file_key(self, tmp_path: Path) -> None:
         """Encrypted file should produce content with 'file' key and no 'url'."""
         client = _mock_client(encrypted=True)
