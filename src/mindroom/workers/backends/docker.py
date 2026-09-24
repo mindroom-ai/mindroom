@@ -39,7 +39,12 @@ from mindroom.runtime_env_policy import (
     SHARED_CREDENTIALS_PATH_ENV,
 )
 from mindroom.tool_system.dependencies import ensure_optional_deps
-from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_key_agent_name
+from mindroom.tool_system.worker_routing import (
+    WORKER_SHARED_CREDENTIALS_DIRNAME,
+    resolved_worker_key_scope,
+    worker_dir_name,
+    worker_key_agent_name,
+)
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     build_dedicated_worker_runtime_paths,
@@ -1167,9 +1172,7 @@ class DockerWorkerBackend:
         ):
             return False
 
-        mount_checks = [
-            (paths.state.root, self.config.storage_mount_path, False),
-        ]
+        mount_checks = list(self._worker_root_mount_specs(paths.state))
         mount_checks.extend(storage_mounts)
         mount_checks.extend(config_mount_specs)
         return self._container_mount_layout_matches(container, expected_mounts=mount_checks)
@@ -1414,7 +1417,7 @@ class DockerWorkerBackend:
             ),
             "MINDROOM_STORAGE_PATH": self.config.storage_mount_path,
             _SHARED_STORAGE_ROOT_ENV: shared_storage_root,
-            SHARED_CREDENTIALS_PATH_ENV: f"{self.config.storage_mount_path}/.shared_credentials",
+            SHARED_CREDENTIALS_PATH_ENV: f"{self.config.storage_mount_path}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
             _DEDICATED_WORKER_KEY_ENV: worker_key,
             _DEDICATED_WORKER_ROOT_ENV: self.config.storage_mount_path,
             "HOME": self._container_home_path(worker_key),
@@ -1506,6 +1509,23 @@ class DockerWorkerBackend:
             return self.config.storage_mount_path
         return str(Path(self.config.storage_mount_path) / "agents" / agent_name / "workspace")
 
+    def _worker_root_mount_specs(self, paths: LocalWorkerStatePaths) -> list[tuple[Path, str, bool]]:
+        """Return the worker-root binds, keeping the shared-credential mirror read-only.
+
+        The worker root is writable so tools can persist state, but the primary keeps
+        mirroring credentials into ``.shared_credentials`` on every ensure. Mounting that
+        directory read-only stops worker code from deleting it or replacing it with a link
+        into the deployment-wide credential store.
+        """
+        return [
+            (paths.root, self.config.storage_mount_path, False),
+            (
+                paths.root / WORKER_SHARED_CREDENTIALS_DIRNAME,
+                f"{self.config.storage_mount_path}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
+                True,
+            ),
+        ]
+
     def _container_volumes(
         self,
         paths: _DockerWorkerPaths,
@@ -1514,7 +1534,10 @@ class DockerWorkerBackend:
         private_agent_names: frozenset[str] | None = None,
         state_scope_worker_key: str | None = None,
     ) -> list[str]:
-        volumes = [f"{paths.state.root}:{self.config.storage_mount_path}:rw"]
+        volumes = [
+            f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}"
+            for host_path, container_path, read_only in self._worker_root_mount_specs(paths.state)
+        ]
         storage_mounts = []
         if worker_key is not None:
             storage_mounts = self._scoped_storage_mount_specs(

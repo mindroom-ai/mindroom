@@ -602,6 +602,7 @@ path = "mindroom.matrix.relation_lookup"
 depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.event_info",
+    "mindroom.matrix.thread_membership",
 ]
 visibility = [
     "mindroom.bot",
@@ -661,7 +662,7 @@ visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.report_publishing"
-depends_on = ["mindroom.durable_write"]
+depends_on = ["mindroom.durable_write", "mindroom.path_confinement"]
 
 # Keep memory consumers explicit so imports are enforced rather than merely
 # interface-checked.
@@ -2923,6 +2924,7 @@ visibility = ["mindroom.memory.config"]
 [[modules]]
 path = "mindroom.memory._file_backend"
 depends_on = [
+    "mindroom.atomic_file",
     "mindroom.constants",
     "mindroom.embedding_errors",
     "mindroom.logging_config",
@@ -2930,6 +2932,7 @@ depends_on = [
     "mindroom.memory._shared",
     "mindroom.memory._semantic_file_search",
     "mindroom.memory_scope_ids",
+    "mindroom.path_confinement",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory._backend", "mindroom.memory.functions"]
@@ -6869,6 +6872,19 @@ visibility = ["mindroom.tools.modelslabs"]
 [[interfaces]]
 from = ["mindroom.tools.agno_compat_modelslabs"]
 expose = ["ModelsLabCompletionTools"]
+
+[[modules]]
+path = "mindroom.tools.trafilatura"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_trafilatura"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_trafilatura"
+depends_on = ["mindroom.server_fetch_url"]
+visibility = ["mindroom.tools.trafilatura"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_trafilatura"]
+expose = ["install_server_fetch_guard"]
 
 [[modules]]
 path = "mindroom.tools.browser_mcp"

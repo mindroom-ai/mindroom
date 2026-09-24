@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from typing import TYPE_CHECKING
 
 import pytest
@@ -69,6 +71,29 @@ def test_durable_directory_creation_retries_failed_parent_publication(
     create_directory_durable(target, mode=0o700)
 
     assert fsynced == [target, tmp_path, target, tmp_path]
+
+
+def test_durable_directory_creation_refuses_a_fifo_instead_of_blocking(tmp_path: Path) -> None:
+    """A FIFO swapped in at a directory name must fail fast rather than block the fsync open."""
+    fifo = tmp_path / "scope"
+    os.mkfifo(fifo)
+
+    with pytest.raises(NotADirectoryError):
+        durable_write.fsync_directory_durable(fifo)
+
+
+def test_durable_directory_creation_never_chmods_through_a_link(tmp_path: Path) -> None:
+    """A directory swapped for a link must not have the link target's mode changed."""
+    target = tmp_path / "victim"
+    target.mkdir(mode=0o755)
+    target.chmod(0o755)
+    link = tmp_path / "scope"
+    link.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(NotADirectoryError):
+        create_directory_durable(link, mode=0o700)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
 
 
 def test_durable_replace_fsyncs_parent_after_publish(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
