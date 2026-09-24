@@ -2407,14 +2407,15 @@ def test_secret_bearing_child_does_not_run_from_the_worker_venv(tmp_path: Path) 
     assert subprocess_context.subprocess_env["PYTHONSAFEPATH"] == "1"
     assert subprocess_context.subprocess_env["PYTHONNOUSERSITE"] == "1"
     assert subprocess_context.subprocess_env["PYTHONDONTWRITEBYTECODE"] == "1"
-    assert str(venv_dir) not in subprocess_context.subprocess_env["PYTHONPATH"]
     # The venv stays reachable from tool code, just not as the protocol runtime.
     assert subprocess_context.subprocess_env["VIRTUAL_ENV"] == str(venv_dir)
     assert subprocess_context.subprocess_env["PATH"].startswith(str(venv_dir / "bin"))
     assert subprocess_context.template_env is not None
     assert "PYTHONPYCACHEPREFIX" not in subprocess_context.template_env
     assert subprocess_context.template_env["PYTHONSAFEPATH"] == "1"
-    assert str(venv_dir) not in subprocess_context.template_env.get("PYTHONPATH", "")
+    worker_root = venv_dir.parent
+    for env in (subprocess_context.subprocess_env, subprocess_context.template_env):
+        assert not any(Path(entry).is_relative_to(worker_root) for entry in env["PYTHONPATH"].split(os.pathsep))
 
 
 def test_execution_child_keeps_the_worker_venv_runtime(tmp_path: Path) -> None:
@@ -2431,22 +2432,41 @@ def test_execution_child_keeps_the_worker_venv_runtime(tmp_path: Path) -> None:
     assert subprocess_context.subprocess_env["PYTHONPYCACHEPREFIX"]
 
 
-def test_isolated_protocol_child_env_ignores_worker_writable_imports(tmp_path: Path) -> None:
-    """A planted workspace package or user-site package must stay invisible to the child."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "mindroom_shadow_probe.py").write_text("raise SystemExit(99)\n", encoding="utf-8")
-    home = tmp_path / "worker-home"
-    user_site = home / ".local" / f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+def test_isolated_child_ignores_worker_writable_imports(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Planted workspace, user-site and `sitecustomize` code must stay invisible to the child.
+
+    Dedicated runners set HOME to the worker root, so the runner's own user site
+    lives there too; that directory must not reach the child through PYTHONPATH.
+    """
+    worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker-root")
+    worker_paths.workspace.mkdir(parents=True)
+    (worker_paths.workspace / "mindroom_shadow_probe.py").write_text("raise SystemExit(99)\n", encoding="utf-8")
+    python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    user_site = worker_paths.root / ".local" / "lib" / python_version / "site-packages"
     user_site.mkdir(parents=True)
     (user_site / "mindroom_user_site_probe.py").write_text("raise SystemExit(99)\n", encoding="utf-8")
+    sitecustomize_marker = tmp_path / "sitecustomize-ran"
+    (user_site / "sitecustomize.py").write_text(
+        f"import pathlib\npathlib.Path({str(sitecustomize_marker)!r}).write_text('ran')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sandbox_exec_module.site, "getusersitepackages", lambda: str(user_site))
 
-    environment = sandbox_exec_module.isolated_protocol_child_env(
-        {**sandbox_exec_module.generic_subprocess_env(), "HOME": str(home)},
+    python_executable, environment, cwd = sandbox_exec_module.resolve_subprocess_worker_context(
+        worker_paths,
+        isolate_runtime=True,
+    )
+    assert python_executable == sys.executable
+    assert environment is not None
+    assert not any(
+        Path(entry).is_relative_to(worker_paths.root) for entry in environment["PYTHONPATH"].split(os.pathsep)
     )
     completed = subprocess.run(
         [
-            sys.executable,
+            python_executable,
             "-c",
             "import importlib.util, json, sys;"
             "print(json.dumps({"
@@ -2455,12 +2475,13 @@ def test_isolated_protocol_child_env_ignores_worker_writable_imports(tmp_path: P
             "'dont_write_bytecode': sys.flags.dont_write_bytecode,"
             "'shadow': importlib.util.find_spec('mindroom_shadow_probe') is not None,"
             "'user_site': importlib.util.find_spec('mindroom_user_site_probe') is not None,"
+            "'mindroom': importlib.util.find_spec('mindroom.api.sandbox_runner') is not None,"
             "}))",
         ],
         check=True,
         capture_output=True,
         text=True,
-        cwd=str(workspace),
+        cwd=cwd,
         env=environment,
     )
 
@@ -2470,7 +2491,9 @@ def test_isolated_protocol_child_env_ignores_worker_writable_imports(tmp_path: P
         "dont_write_bytecode": 1,
         "shadow": False,
         "user_site": False,
+        "mindroom": True,
     }
+    assert not sitecustomize_marker.exists()
 
 
 def test_prepared_shell_execution_env_resolved_env_wins_over_extra_passthrough(tmp_path: Path) -> None:
@@ -4874,6 +4897,7 @@ def test_dedicated_worker_mode_uses_mounted_root(
         assert cmd[0] == sys.executable
         assert env["PYTHONSAFEPATH"] == "1"
         assert "PYTHONPYCACHEPREFIX" not in env
+        assert not any(Path(entry).is_relative_to(worker_root) for entry in env["PYTHONPATH"].split(os.pathsep))
         assert isinstance(cwd, str)
         assert cwd == str(worker_root / "workspace")
         assert "MINDROOM_STORAGE_PATH" not in env

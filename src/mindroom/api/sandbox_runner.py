@@ -1523,9 +1523,11 @@ def _run_forkserver_template() -> int:
 
     # `python -m` prepended the runner's cwd to sys.path at template startup;
     # fork children prepend their own request cwd instead, matching what a
-    # spawn-per-call child started in that cwd would see.
-    with suppress(ValueError):
-        sys.path.remove(str(Path.cwd()))
+    # spawn-per-call child started in that cwd would see. Under safe-path
+    # semantics that entry was never added, and a matching entry is a real one.
+    if not sys.flags.safe_path:
+        with suppress(ValueError):
+            sys.path.remove(str(Path.cwd()))
     return sandbox_forkserver.serve_template(socket_path, _run_subprocess_worker_payload)
 
 

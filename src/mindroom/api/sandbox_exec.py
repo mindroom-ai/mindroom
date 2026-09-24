@@ -288,6 +288,15 @@ def _subprocess_passthrough_env() -> dict[str, str]:
     return dict(sandbox_subprocess_system_env(os.environ))
 
 
+def _runner_python_path() -> str:
+    """Return the runner-owned `PYTHONPATH`: the project source plus the runner's own value."""
+    python_path_parts = [str(_project_src_path())]
+    existing_python_path = os.environ.get("PYTHONPATH", "")
+    if existing_python_path:
+        python_path_parts.append(existing_python_path)
+    return os.pathsep.join(python_path_parts)
+
+
 def generic_subprocess_env() -> dict[str, str]:
     """Build the baseline subprocess env for non-worker execution."""
     env = _subprocess_passthrough_env()
@@ -296,11 +305,7 @@ def generic_subprocess_env() -> dict[str, str]:
         value = os.environ.get(key)
         if value:
             env[key] = value
-    python_path_parts = [str(_project_src_path())]
-    existing_python_path = os.environ.get("PYTHONPATH", "")
-    if existing_python_path:
-        python_path_parts.append(existing_python_path)
-    env["PYTHONPATH"] = os.pathsep.join(python_path_parts)
+    env["PYTHONPATH"] = _runner_python_path()
     return env
 
 
@@ -341,11 +346,15 @@ def isolated_protocol_child_env(env: dict[str, str]) -> dict[str, str]:
     """Return `env` with every worker-writable import source removed.
 
     `PYTHONPYCACHEPREFIX` points at the worker cache, so leaving it set lets a
-    forged `.pyc` shadow an image-provided module. The added names are the env
-    form of `-P`, `-s` and `-B`: no cwd on `sys.path`, no `$HOME/.local` user
-    site (HOME is the worker root), and no bytecode written back out.
+    forged `.pyc` shadow an image-provided module. `PYTHONPATH` is reset to
+    runner-owned entries: the child runs the runner's own interpreter, which
+    finds its site-packages natively, and the worker env's extra entries include
+    the runner's user site, which lives under the worker root because dedicated
+    runners set HOME there. The added names are the env form of `-P`, `-s` and
+    `-B`: no cwd on `sys.path`, no user site, and no bytecode written back out.
     """
     isolated = {key: value for key, value in env.items() if key not in _WORKER_WRITABLE_IMPORT_ENV_NAMES}
+    isolated["PYTHONPATH"] = _runner_python_path()
     isolated.update(_PROTOCOL_CHILD_ISOLATION_ENV)
     return isolated
 
@@ -362,9 +371,9 @@ def resolve_subprocess_worker_context(
 ) -> tuple[str | None, dict[str, str] | None, str | None]:
     """Return the python executable, env, and cwd for subprocess dispatch.
 
-    `isolate_runtime` selects the runner's own image interpreter and its
-    image-owned site-packages for children that parse an envelope carrying the
-    credentials encryption key or leased credentials. The worker venv is
+    `isolate_runtime` selects the runner's own interpreter and site-packages
+    for children that parse an envelope carrying the credentials encryption
+    key or leased credentials. The worker venv is
     created and extended by the same uid the worker's `shell`/`python` tools
     run as, so using it as the runner protocol's runtime would let a `.pth`
     file, a replaced interpreter or an injected package execute with those
