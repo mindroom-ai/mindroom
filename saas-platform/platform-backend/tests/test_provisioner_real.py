@@ -61,6 +61,7 @@ class TestProvisionerCommandValidation:
 
         captured_helm_args = []
         captured_secret_manifests = []
+        captured_secret_patches = []
         operations = []
 
         async def capture_helm_command(args):
@@ -72,6 +73,12 @@ class TestProvisionerCommandValidation:
             if args[:2] == ["apply", "-f"]:
                 captured_secret_manifests.append(json.loads(Path(args[2]).read_text(encoding="utf-8")))
                 operations.append("secret")
+            if args[:3] == ["get", "secret", "mindroom-api-keys-123"] and "--ignore-not-found" not in args:
+                # The live Secret still holds the platform key written by older releases.
+                live_keys = [*captured_secret_manifests[-1]["stringData"], "supabase_service_key"]
+                return (0, " ".join(live_keys), "")
+            if args[:2] == ["patch", "secret"]:
+                captured_secret_patches.append(json.loads(args[args.index("-p") + 1]))
             return (0, "Success", "")
 
         with (
@@ -132,13 +139,21 @@ class TestProvisionerCommandValidation:
         assert "sandbox_proxy_token" not in set_args
         assert "credentials_encryption_key" not in set_args
         assert "matrix_registration_shared_secret" not in set_args
+        assert "platform_sso_secret" not in set_args
         assert set_file_args == {}
 
         secret_data = captured_secret_manifests[0]["stringData"]
         assert secret_data["sandbox_proxy_token"]
         assert secret_data["credentials_encryption_key"]
         assert secret_data["matrix_registration_shared_secret"]
-        assert operations == ["helm", "secret"]
+        assert secret_data["platform_sso_secret"]
+        assert secret_data["platform_sso_secret"] != secret_data["matrix_registration_shared_secret"]
+        assert "supabase_service_key" not in secret_data
+        # Before Helm so restarted pods read new values; after Helm in case legacy pruning deleted it.
+        assert operations == ["secret", "helm", "secret"]
+        assert captured_secret_manifests[0] == captured_secret_manifests[1]
+        # Stale-key cleanup removes only the retired platform key, never a key the provisioner still writes.
+        assert captured_secret_patches == [{"data": {"supabase_service_key": None}}] * 2
 
     def test_instance_secrets_are_stable_and_instance_scoped(self):
         """Provisioner-derived instance secrets should be stable without being shared across tenants."""
@@ -152,10 +167,13 @@ class TestProvisionerCommandValidation:
             second = provisioner_module._instance_credentials_encryption_key("123")
             other = provisioner_module._instance_credentials_encryption_key("456")
             registration_secret = provisioner_module._instance_matrix_registration_shared_secret("123")
+            platform_sso_secret = provisioner_module.instance_platform_sso_secret("123")
+            other_platform_sso_secret = provisioner_module.instance_platform_sso_secret("456")
 
         assert first == second
         assert first != other
         assert first != registration_secret
+        assert platform_sso_secret not in {first, registration_secret, other_platform_sso_secret}
         assert len(base64.urlsafe_b64decode(f"{first}=")) == 32
         assert len(base64.urlsafe_b64decode(f"{registration_secret}=")) == 32
 
@@ -165,10 +183,12 @@ class TestProvisionerCommandValidation:
         captured = {}
 
         async def capture_kubectl_command(args, namespace=None):
-            path = Path(args[2])
-            captured["mode"] = path.stat().st_mode & 0o777
-            captured["manifest"] = json.loads(path.read_text(encoding="utf-8"))
-            return (0, "Success", "")
+            if args[:2] == ["apply", "-f"]:
+                path = Path(args[2])
+                captured["mode"] = path.stat().st_mode & 0o777
+                captured["manifest"] = json.loads(path.read_text(encoding="utf-8"))
+                return (0, "Success", "")
+            return (0, "credentials_encryption_key ", "")
 
         with patch.object(provisioner_service, "run_kubectl", side_effect=capture_kubectl_command):
             await provisioner_service._apply_instance_secret(
@@ -178,6 +198,46 @@ class TestProvisionerCommandValidation:
         assert captured["mode"] == 0o600
         assert captured["manifest"]["metadata"]["name"] == "mindroom-api-keys-123"
         assert captured["manifest"]["stringData"]["credentials_encryption_key"] == "secret-key-value"
+
+    @pytest.mark.asyncio
+    async def test_instance_secret_apply_removes_keys_no_longer_written(self):
+        """Re-applying must delete retired keys such as the old platform service key from tenant Secrets."""
+        calls = []
+
+        async def capture_kubectl_command(args, namespace=None):
+            calls.append((args, namespace))
+            if args[:2] == ["get", "secret"]:
+                return (0, "credentials_encryption_key supabase_service_key ", "")
+            return (0, "Success", "")
+
+        with patch.object(provisioner_service, "run_kubectl", side_effect=capture_kubectl_command):
+            await provisioner_service._apply_instance_secret(
+                "123", "mindroom-instances", {"credentials_encryption_key": "secret-key-value"}
+            )
+
+        patch_args, patch_namespace = calls[-1]
+        assert patch_args[:4] == ["patch", "secret", "mindroom-api-keys-123", "--type=merge"]
+        assert json.loads(patch_args[5]) == {"data": {"supabase_service_key": None}}
+        assert patch_namespace == "mindroom-instances"
+        assert "secret-key-value" not in " ".join(arg for args, _ in calls for arg in args)
+
+    @pytest.mark.asyncio
+    async def test_instance_secret_apply_skips_patch_without_stale_keys(self):
+        """An up-to-date Secret needs no follow-up patch."""
+        calls = []
+
+        async def capture_kubectl_command(args, namespace=None):
+            calls.append(args)
+            if args[:2] == ["get", "secret"]:
+                return (0, "credentials_encryption_key ", "")
+            return (0, "Success", "")
+
+        with patch.object(provisioner_service, "run_kubectl", side_effect=capture_kubectl_command):
+            await provisioner_service._apply_instance_secret(
+                "123", "mindroom-instances", {"credentials_encryption_key": "secret-key-value"}
+            )
+
+        assert [args[0] for args in calls] == ["apply", "get"]
 
     @pytest.mark.asyncio
     async def test_helm_install_command_honors_instance_overrides(self):
@@ -201,6 +261,7 @@ class TestProvisionerCommandValidation:
             patch.multiple(
                 "backend.services.provisioner_service",
                 PROVISIONER_API_KEY="test-key",
+                PLATFORM_DOMAIN="platform.example.test",
                 INSTANCE_BASE_DOMAIN="local",
                 INSTANCE_STORAGE_CLASS_NAME="standard",
                 INSTANCE_MINDROOM_IMAGE="ghcr.io/mindroom-ai/mindroom:latest",
@@ -254,6 +315,7 @@ class TestProvisionerCommandValidation:
                 set_file_args[key] = value
 
         assert set_args["baseDomain"] == "local"
+        assert set_args["platformDomain"] == "platform.example.test"
         assert set_args["storageClassName"] == "standard"
         assert set_args["mindroom_image"] == "ghcr.io/mindroom-ai/mindroom:latest"
         assert set_args["mindroom_image_pull_policy"] == "IfNotPresent"

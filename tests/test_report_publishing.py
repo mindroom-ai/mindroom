@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, patch
@@ -299,6 +300,7 @@ def test_report_publishing_store_creates_static_site_snapshot(tmp_path: Path) ->
             title="Demo Site",
             requested_by="@alice:localhost",
             artifact_kind="static_site",
+            artifact_root=source_dir.parent,
         ),
         published_by="@alice:localhost",
         base_url="https://mindroom.lab.mindroom.chat",
@@ -313,6 +315,48 @@ def test_report_publishing_store_creates_static_site_snapshot(tmp_path: Path) ->
     assert index_path.read_text(encoding="utf-8").startswith("<!doctype html><script")
     assert script_path.read_text(encoding="utf-8") == "document.body.dataset.ready = 'true';"
     assert index_path.parent.is_relative_to(storage_root / "report_publishing" / "artifacts")
+
+
+def test_report_publishing_store_copies_nested_static_site_directories(tmp_path: Path) -> None:
+    """Nested site directories should be recreated with their files under the snapshot root."""
+    storage_root = tmp_path / "mindroom_data"
+    source_dir = tmp_path / "workspace" / "site"
+    (source_dir / "assets" / "vendor").mkdir(parents=True)
+    (source_dir / "empty").mkdir()
+    (source_dir / "index.html").write_text("<!doctype html>Site", encoding="utf-8")
+    (source_dir / "assets" / "app.js").write_text("document.body.dataset.ready = 'true';", encoding="utf-8")
+    (source_dir / "assets" / "vendor" / "lib.js").write_text("export const lib = 1;", encoding="utf-8")
+    store = ReportPublishingStore(storage_root)
+
+    report = store.publish_report(
+        source=PublishableReport(
+            source_type="static_site",
+            source={"path": "site"},
+            artifact_path=source_dir,
+            title="Nested Site",
+            requested_by="@alice:localhost",
+            artifact_kind="static_site",
+            artifact_root=source_dir.parent,
+        ),
+        published_by="@alice:localhost",
+        base_url="https://mindroom.lab.mindroom.chat",
+    )
+
+    loaded = store.get_public_report(report.slug)
+    site_root = store.report_asset_path(loaded).parent
+    assert store.report_asset_path(loaded, "assets/app.js").read_text(encoding="utf-8").startswith("document.body")
+    assert (
+        store.report_asset_path(loaded, "assets/vendor/lib.js").read_text(encoding="utf-8") == "export const lib = 1;"
+    )
+    assert (site_root / "empty").is_dir()
+    assert sorted(path.relative_to(site_root).as_posix() for path in site_root.rglob("*")) == [
+        "assets",
+        "assets/app.js",
+        "assets/vendor",
+        "assets/vendor/lib.js",
+        "empty",
+        "index.html",
+    ]
 
 
 def test_report_publishing_store_creates_single_page_snapshot(tmp_path: Path) -> None:
@@ -331,6 +375,7 @@ def test_report_publishing_store_creates_single_page_snapshot(tmp_path: Path) ->
             title="Single Page",
             requested_by="@alice:localhost",
             artifact_kind="static_site",
+            artifact_root=page_path.parent,
         ),
         published_by="@alice:localhost",
         base_url="https://mindroom.lab.mindroom.chat",
@@ -350,7 +395,7 @@ def test_report_publishing_store_removes_single_page_snapshot_on_copy_failure(tm
     store = ReportPublishingStore(storage_root)
 
     with (
-        patch("mindroom.report_publishing.static_site.shutil.copy2", side_effect=OSError("disk full")),
+        patch("mindroom.report_publishing.static_site._copy_regular_file", side_effect=OSError("disk full")),
         pytest.raises(ReportPublishingError, match="disk full"),
     ):
         store.publish_report(
@@ -361,6 +406,7 @@ def test_report_publishing_store_removes_single_page_snapshot_on_copy_failure(tm
                 title="Single Page",
                 requested_by="@alice:localhost",
                 artifact_kind="static_site",
+                artifact_root=page_path.parent,
             ),
             published_by="@alice:localhost",
             base_url="https://mindroom.lab.mindroom.chat",
@@ -383,7 +429,7 @@ def test_report_publishing_tool_reports_static_site_copy_failure(tmp_path: Path)
     (workspace_root / "report.html").write_text("<!doctype html><h1>Single Page</h1>", encoding="utf-8")
 
     with (
-        patch("mindroom.report_publishing.static_site.shutil.copy2", side_effect=OSError("disk full")),
+        patch("mindroom.report_publishing.static_site._copy_regular_file", side_effect=OSError("disk full")),
         tool_runtime_context(context),
     ):
         published = _tool_payload(
@@ -416,6 +462,7 @@ def test_report_publishing_store_rejects_single_page_without_html_suffix(tmp_pat
                 title="Not A Page",
                 requested_by="@alice:localhost",
                 artifact_kind="static_site",
+                artifact_root=page_path.parent,
             ),
             published_by="@alice:localhost",
             base_url="https://mindroom.lab.mindroom.chat",
@@ -439,6 +486,7 @@ def test_report_publishing_store_rejects_static_site_without_index(tmp_path: Pat
                 title="Broken Site",
                 requested_by="@alice:localhost",
                 artifact_kind="static_site",
+                artifact_root=source_dir.parent,
             ),
             published_by="@alice:localhost",
             base_url="https://mindroom.lab.mindroom.chat",
@@ -465,6 +513,78 @@ def test_report_publishing_store_rejects_static_site_symlink(tmp_path: Path) -> 
                 title="Unsafe Site",
                 requested_by="@alice:localhost",
                 artifact_kind="static_site",
+                artifact_root=source_dir.parent,
+            ),
+            published_by="@alice:localhost",
+            base_url="https://mindroom.lab.mindroom.chat",
+        )
+
+
+def test_report_publishing_store_rejects_static_site_symlink_swapped_after_listing(tmp_path: Path) -> None:
+    """An entry swapped to a symlink after the directory listing must never be copied."""
+    storage_root = tmp_path / "mindroom_data"
+    source_dir = tmp_path / "workspace" / "site"
+    secret_file = tmp_path / "secret.txt"
+    source_dir.mkdir(parents=True)
+    secret_file.write_text("matrix-access-token", encoding="utf-8")
+    (source_dir / "index.html").write_text("<!doctype html>Site", encoding="utf-8")
+    (source_dir / "zzz.js").write_text("console.log('ok')", encoding="utf-8")
+    store = ReportPublishingStore(storage_root)
+    real_listdir = os.listdir
+    swapped: list[bool] = []
+
+    def swapping_listdir(directory_fd: int) -> list[str]:
+        names = real_listdir(directory_fd)
+        if not swapped:
+            swapped.append(True)
+            (source_dir / "zzz.js").unlink()
+            (source_dir / "zzz.js").symlink_to(secret_file)
+        return names
+
+    with (
+        patch("mindroom.report_publishing.static_site.os.listdir", swapping_listdir),
+        pytest.raises(ReportPublishingError, match="symlink"),
+    ):
+        store.publish_report(
+            source=PublishableReport(
+                source_type="static_site",
+                source={"path": "site"},
+                artifact_path=source_dir,
+                title="Raced Site",
+                requested_by="@alice:localhost",
+                artifact_kind="static_site",
+                artifact_root=source_dir.parent,
+            ),
+            published_by="@alice:localhost",
+            base_url="https://mindroom.lab.mindroom.chat",
+        )
+
+    assert swapped == [True]
+    artifacts_root = storage_root / "report_publishing" / "artifacts"
+    assert not artifacts_root.exists() or list(artifacts_root.iterdir()) == []
+    assert not (storage_root / "report_publishing" / "public_reports").exists()
+
+
+def test_report_publishing_store_rejects_single_page_symlink(tmp_path: Path) -> None:
+    """A single-page source that is a symlink must fail instead of copying its target."""
+    storage_root = tmp_path / "mindroom_data"
+    workspace_root = tmp_path / "workspace"
+    secret_file = tmp_path / "secret.txt"
+    workspace_root.mkdir(parents=True)
+    secret_file.write_text("matrix-access-token", encoding="utf-8")
+    (workspace_root / "report.html").symlink_to(secret_file)
+    store = ReportPublishingStore(storage_root)
+
+    with pytest.raises(ReportPublishingError, match="symlink"):
+        store.publish_report(
+            source=PublishableReport(
+                source_type="static_site",
+                source={"path": "report.html"},
+                artifact_path=workspace_root / "report.html",
+                title="Linked Page",
+                requested_by="@alice:localhost",
+                artifact_kind="static_site",
+                artifact_root=workspace_root,
             ),
             published_by="@alice:localhost",
             base_url="https://mindroom.lab.mindroom.chat",
@@ -486,6 +606,7 @@ def test_report_publishing_store_rejects_static_site_asset_traversal(tmp_path: P
             title="Demo Site",
             requested_by="@alice:localhost",
             artifact_kind="static_site",
+            artifact_root=source_dir.parent,
         ),
         published_by="@alice:localhost",
         base_url="https://mindroom.lab.mindroom.chat",

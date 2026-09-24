@@ -64,7 +64,13 @@ def is_sender_allowed_for_responder(
     *,
     require_resolved_membership: bool = False,
 ) -> bool:
-    """Apply the complete membership policy, failing closed on uncertainty."""
+    """Apply the complete membership policy, failing closed on uncertainty.
+
+    This answers whether a sender may converse with one responder. ``room_id``
+    only adds the opt-in ``access.current_room_members`` grant; it never proves
+    that the sender belongs to that room. Callers acting on a requester-chosen
+    target room must additionally require current membership of that room.
+    """
     decision = _responder_reply_authorization(
         sender_id,
         entity_name,
@@ -127,7 +133,11 @@ def is_sender_allowed_for_agent_reply_in_room(
     *,
     require_resolved_membership: bool = False,
 ) -> bool:
-    """Require both current-room access and entity reply access."""
+    """Require conversation access to one agent, evaluated for one current room.
+
+    ``room_id`` is the conversation the sender is already part of, not a target
+    room this predicate entitles them to; see ``is_sender_allowed_for_responder``.
+    """
     return is_sender_allowed_for_entity_replies_in_room(
         sender_id,
         (agent_name,),
@@ -149,7 +159,11 @@ def is_sender_allowed_for_entity_replies_in_room(
     *,
     require_resolved_membership: bool = False,
 ) -> bool:
-    """Require membership access for every execution entity."""
+    """Require conversation access to every execution entity for one current room.
+
+    ``room_id`` is the conversation the sender is already part of, not a target
+    room this predicate entitles them to; see ``is_sender_allowed_for_responder``.
+    """
     decisions = {
         _responder_reply_authorization(
             sender_id,

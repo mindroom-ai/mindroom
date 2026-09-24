@@ -1,16 +1,22 @@
 """Tests for error handling module."""
 
 import httpx
+import pytest
 from agno.exceptions import ModelProviderError
+from agno.run.agent import RunErrorEvent
+from agno.utils.events import error_type_of
 from anthropic import AuthenticationError as AnthropicAuthError
 from openai import AuthenticationError as OpenAIAuthError
 
 from mindroom.error_handling import (
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+    MinimalModeUnavailableError,
     ModelSafeguardRefusalError,
     _extract_provider_from_error,
     get_user_friendly_error_message,
+    run_error_event_exception,
 )
+from mindroom.minimal_agent import MinimalAgent
 
 _MOCK_RESPONSE = httpx.Response(status_code=401, request=httpx.Request("POST", "https://api.example.com"))
 
@@ -198,3 +204,22 @@ def test_extract_provider_from_error() -> None:
     assert _extract_provider_from_error(anthropic_err) == "anthropic"
 
     assert _extract_provider_from_error(Exception("test")) is None
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "CLI gateway must be a separate gateway-only proxy origin",
+        "Minimal catalog requires its authenticated requester.",
+    ],
+)
+def test_minimal_mode_failure_keeps_standard_mode_hint(reason: str) -> None:
+    """Keyword classification never masks the minimal-mode recovery command after Agno flattens it."""
+    agent = MinimalAgent(id="helper", name="Helper")
+    with pytest.raises(MinimalModeUnavailableError) as raised:
+        agent._raise_failure(RuntimeError(reason))
+    event = RunErrorEvent(content=str(raised.value), error_type=error_type_of(raised.value))
+
+    message = get_user_friendly_error_message(run_error_event_exception(event), "helper")
+
+    assert message == (f"[helper] ⚠️ Error: {reason.rstrip('.')}. Return to standard mode with `!mode helper standard`.")

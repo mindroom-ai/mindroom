@@ -40,15 +40,12 @@ data:
 {{- end }}
 
     # Registration and authentication
-{{- if eq (toString .Values.matrixOidc.enabled) "true" }}
+    # The homeserver is public, so anonymous self-registration stays closed in every mode.
+    # Managed accounts are created through the shared-secret admin API; owners sign up through platform OIDC.
     enable_registration: false
     enable_registration_without_verification: false
     password_config:
       enabled: true
-{{- else }}
-    enable_registration: true
-    enable_registration_without_verification: true
-{{- end }}
     registration_shared_secret_path: /etc/mindroom-secrets/matrix_registration_shared_secret
 {{- if eq (toString .Values.matrixOidc.enabled) "true" }}
 
@@ -94,7 +91,8 @@ data:
 
     # ========================================
     # COMPLETE RATE LIMITING CONFIGURATION
-    # All values set to 10000 to effectively disable rate limiting
+    # Registration and login keep protective limits because the homeserver is public.
+    # Other values are set to 10000 to effectively disable rate limiting.
     # ========================================
 
     # Message sending rate limit
@@ -102,10 +100,10 @@ data:
       per_second: 10000
       burst_count: 10000
 
-    # Registration rate limit
+    # Registration rate limit (Synapse defaults; shared-secret admin registration is not limited)
     rc_registration:
-      per_second: 10000
-      burst_count: 10000
+      per_second: 0.17
+      burst_count: 3
 
     # Registration token validity checks
     rc_registration_token_validity:
@@ -113,16 +111,18 @@ data:
       burst_count: 10000
 
     # Login rate limits
+    # The burst lets the runtime sign in every managed account from one pod at startup,
+    # while failed attempts keep Synapse's default brute-force protection.
     rc_login:
       address:
-        per_second: 10000
-        burst_count: 10000
+        per_second: 0.5
+        burst_count: 100
       account:
-        per_second: 10000
-        burst_count: 10000
+        per_second: 0.05
+        burst_count: 10
       failed_attempts:
-        per_second: 10000
-        burst_count: 10000
+        per_second: 0.17
+        burst_count: 3
 
     # Admin redaction rate limit
     rc_admin_redaction:

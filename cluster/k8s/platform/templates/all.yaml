@@ -59,6 +59,9 @@ metadata:
 {{ if and $platformSecretsCreate $matrixOidcEnabled (not ($matrixOidc.privateKey | default "")) }}
 {{ fail "matrixOidc.privateKey is required when matrixOidc.enabled=true" }}
 {{ end }}
+{{ if and $platformSecretsCreate (.Values.stripe.secretKey | default "") (not (.Values.stripe.webhookSecret | default "" | trim)) }}
+{{ fail "stripe.webhookSecret is required when stripe.secretKey is set" }}
+{{ end }}
 data:
   PLATFORM_DOMAIN: {{ .Values.domain }}
   ENVIRONMENT: {{ .Values.environment }}

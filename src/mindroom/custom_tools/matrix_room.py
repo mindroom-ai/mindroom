@@ -575,7 +575,7 @@ class MatrixRoomTools(Toolkit):
         resolved_room_id, room_error = resolve_requested_room_id(context, request.room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", action=request.action, message=room_error)
-        if not room_access_allowed(context, resolved_room_id):
+        if not await room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",
                 action=request.action,

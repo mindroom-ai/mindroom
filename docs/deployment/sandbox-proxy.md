@@ -257,6 +257,8 @@ Control-plane-only sections that a worker never reads are cleared from that snap
 Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope: user_agent` snapshot only that agent's projected context files and assigned knowledge bases.
 `worker_scope: user` intentionally shares one worker across multiple agents, so it keeps the broader shared projection for that worker.
 Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.
+Everything under that state root is writable by the code running inside the container, so MindRoom keeps each worker's lifecycle record in a control directory beside the worker roots that is never mounted into a container.
+Worker containers are addressed by a name derived from the worker key, and MindRoom only starts, stops, or removes a container that carries its own worker labels and worker-key environment.
 MindRoom also masks config-adjacent `.env` inside the worker container, so the raw file is not mounted into the worker.
 Proxied `shell` receives a filtered system environment plus explicitly allowed process-env passthrough; `python` receives only allowed runtime names from the process and config-adjacent `.env`.
 Neither inherits arbitrary `.env` values; see [Shell env and PATH](#shell-env-and-path) for explicit passthrough and request-environment controls.

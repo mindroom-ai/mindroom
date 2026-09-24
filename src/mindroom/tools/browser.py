@@ -8,6 +8,7 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -27,13 +28,18 @@ if TYPE_CHECKING:
         "The user's local browser requires the separately configured desktop target."
     ),
     category=ToolCategory.RESEARCH,
+    file_access=ToolFileAccess.AGENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     icon="FaChrome",
     icon_color="text-orange-500",
     dependencies=["playwright"],
     docs_url="https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
-    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
+        ToolManagedInitArg.FILE_ACCESS,
+    ),
     config_fields=[
         ConfigField(
             name="output_dir",

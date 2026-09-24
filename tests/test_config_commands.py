@@ -1179,13 +1179,7 @@ async def test_resolve_pending_change_loads_exact_matrix_state_before_room_resto
         new_value=False,
         requester="@admin:example.org",
     )
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-        content=pending_change.to_dict(),
-        event_type=config_confirmation._PENDING_CONFIG_EVENT_TYPE,
-        state_key=event_id,
-        room_id=room_id,
-    )
+    client = _pending_state_client(pending_change, state_key=event_id, sender="@router:example.org")
     monkeypatch.setattr(config_confirmation, "_pending_changes", {})
 
     resolved = await config_confirmation._resolve_pending_change(client, room_id, event_id)
@@ -1197,6 +1191,56 @@ async def test_resolve_pending_change_loads_exact_matrix_state_before_room_resto
         config_confirmation._PENDING_CONFIG_EVENT_TYPE,
         event_id,
     )
+
+
+def _pending_state_client(
+    pending_change: config_confirmation._PendingConfigChange,
+    *,
+    state_key: str,
+    sender: str,
+) -> AsyncMock:
+    """Return a router client whose room state holds one pending change written by ``sender``."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@router:example.org"
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content=pending_change.to_dict(),
+        event_type=config_confirmation._PENDING_CONFIG_EVENT_TYPE,
+        state_key=state_key,
+        room_id=pending_change.room_id,
+    )
+    client.room_get_state.return_value = nio.RoomGetStateResponse(
+        events=[
+            {
+                "type": config_confirmation._PENDING_CONFIG_EVENT_TYPE,
+                "state_key": state_key,
+                "sender": sender,
+                "content": pending_change.to_dict(),
+            },
+        ],
+        room_id=pending_change.room_id,
+    )
+    return client
+
+
+@pytest.mark.asyncio
+async def test_pending_change_state_written_by_another_member_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forged room state must never become a change an admin reaction can apply."""
+    forged_change = replace(
+        _pending_config_change(),
+        config_path="administrators.0",
+        new_value="@attacker:evil.example",
+    )
+    client = _pending_state_client(forged_change, state_key="$attacker-message", sender="@attacker:evil.example")
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {})
+
+    resolved = await config_confirmation._resolve_pending_change(client, forged_change.room_id, "$attacker-message")
+    restored = await config_confirmation.restore_pending_changes(client, forged_change.room_id)
+
+    assert resolved is None
+    assert restored == 0
+    assert config_confirmation._pending_changes == {}
 
 
 @pytest.mark.asyncio
