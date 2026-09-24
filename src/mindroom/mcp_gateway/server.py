@@ -49,19 +49,68 @@ _PRIVATE_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no
 logger = get_logger(__name__)
 
 
+def _instructions(public_url: str, personal_agent_name: str | None) -> str:
+    personal_agent = (
+        f"The configured personal agent is {json.dumps(personal_agent_name)}. "
+        "It represents the signed-in user's personal assistant and service connections. "
+        if personal_agent_name
+        else "A personal agent represents the signed-in user's personal assistant and service connections. "
+    )
+    return (
+        "MindRoom connects AI agents to tools and services. This MCP gateway lets you use tools assigned to "
+        "the signed-in user's selected agents. "
+        + personal_agent
+        + "An agent selector chooses a tool and credential context; it does not send a message to that agent "
+        "or load its system prompt, memories, or conversation history. Shared agents may use shared connections. "
+        "Use MindRoom chat to converse with an agent.\n\n"
+        "Discovery workflow:\n"
+        "1. Call search_tools with {} to discover available agent/toolkit pairs, or supply a query. "
+        "Omit agent and toolkit initially. The limit is 1 to 10; narrow the query if needed.\n"
+        "2. Call search_tools with an exact returned agent and toolkit to discover functions.\n"
+        "3. Call get_tool with the returned agent, toolkit, and function to read its input schema.\n"
+        "4. Call invoke_tool with those same selectors and put the function inputs inside arguments.\n\n"
+        "Copy identifiers exactly from gateway discovery. Display names or names from an agent directory "
+        "(such as list_agents) do not establish gateway availability. MCP has no current Matrix room. "
+        f"The user can manage agent/tool selections and service connections at {public_url.rstrip('/')}/connections. "
+        "Availability requires both access permission and selection, including for the personal agent.\n\n"
+        "For invalid_arguments, check the tool's schema and use only its supported fields. "
+        "For tool_not_found, repeat discovery instead of guessing identifiers. For empty discovery, "
+        "ask the user to check their selections. For connection_required, ask the user to open the returned "
+        "connection_url and connect that service. Never automatically retry a failed or timed-out invoke_tool "
+        "action: it may already have taken effect."
+    )
+
+
 def _meta_tools() -> list[types.Tool]:
     handle = {"type": "string", "minLength": 1, "maxLength": 128}
-    agent_handle = {"type": "string", "minLength": 1, "maxLength": GATEWAY_AGENT_NAME_LIMIT}
+    agent_handle = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": GATEWAY_AGENT_NAME_LIMIT,
+        "description": "Exact agent identifier from search_tools. Selects tools and connections, not a chat recipient.",
+    }
+    toolkit_handle = {**handle, "description": "Exact toolkit identifier returned by search_tools for this agent."}
+    function_handle = {**handle, "description": "Exact function identifier returned by search_tools for this toolkit."}
     return [
         types.Tool(
             name="search_tools",
-            description="Search integrations from your selected agents. Select an agent and toolkit to search its functions. Results omit schemas; use get_tool for one definition.",
+            description=(
+                "Discover tools from your selected MindRoom agents, including your personal agent's integrations. "
+                "Start with {} or a query, omitting agent and toolkit, to find available agent/toolkit pairs. "
+                "Then pass an exact returned agent and toolkit to search functions. "
+                "Results omit schemas; use get_tool next. This does not start a conversation with an agent."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "agent": agent_handle,
-                    "query": {"type": "string", "maxLength": 256, "default": ""},
-                    "toolkit": handle,
+                    "query": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "default": "",
+                        "description": "Search text; omit or leave empty to browse. Narrow it if results reach the limit.",
+                    },
+                    "toolkit": toolkit_handle,
                     "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
                 },
                 "dependentRequired": {"toolkit": ["agent"]},
@@ -71,10 +120,14 @@ def _meta_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_tool",
-            description="Get the input schema for one discovered function. If a connection is required, open its connection_url and connect only that service.",
+            description=(
+                "Get the input schema for one function discovered by search_tools. Copy its agent, toolkit, "
+                "and function exactly; do not infer identifiers from display names or an agent directory. "
+                "If a connection is required, ask the user to open its connection_url and connect that service."
+            ),
             inputSchema={
                 "type": "object",
-                "properties": {"agent": agent_handle, "toolkit": handle, "function": handle},
+                "properties": {"agent": agent_handle, "toolkit": toolkit_handle, "function": function_handle},
                 "required": ["agent", "toolkit", "function"],
                 "additionalProperties": False,
             },
@@ -82,14 +135,21 @@ def _meta_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="invoke_tool",
-            description="Invoke one discovered function using the selected agent's connections. Fetch its schema first. A failed or timed-out action must not be retried automatically.",
+            description=(
+                "Run a discovered function using the selected agent's connections, without invoking the agent's model. "
+                "Fetch its schema with get_tool first, reuse the exact selectors, and place function inputs inside "
+                "arguments. A failed or timed-out action may already have taken effect and must not be retried automatically."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "agent": agent_handle,
-                    "toolkit": handle,
-                    "function": handle,
-                    "arguments": {"type": "object"},
+                    "toolkit": toolkit_handle,
+                    "function": function_handle,
+                    "arguments": {
+                        "type": "object",
+                        "description": "Function inputs matching the schema returned by get_tool; use {} for no inputs.",
+                    },
                 },
                 "required": ["agent", "toolkit", "function", "arguments"],
                 "additionalProperties": False,
@@ -228,6 +288,7 @@ class GatewayServer:
         authenticate: Callable[[Request], Awaitable[GatewayPrincipal]],
         dispatch: Callable[[Request, str, dict[str, Any]], Awaitable[Mapping[str, object]]],
         public_url: str,
+        personal_agent_name: str | None = None,
         allowed_origins: tuple[str, ...] | None = None,
         timeout_seconds: float = 60,
         max_active_calls: int = 128,
@@ -247,7 +308,10 @@ class GatewayServer:
         self._timeout = timeout_seconds
         self._closing = False
         self._active: dict[tuple[GatewayPrincipal, type, int | str], ExecutionLease] = {}
-        self._server: Server[None, Request] = Server("MindRoom gateway")
+        self._server: Server[None, Request] = Server(
+            "MindRoom gateway",
+            instructions=_instructions(public_url, personal_agent_name),
+        )
         self._server.list_tools()(self._list_tools)
         self._server.request_handlers[types.CallToolRequest] = self._handle_call_request
         origin = urlsplit(public_url)
