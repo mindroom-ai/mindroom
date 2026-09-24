@@ -7,6 +7,7 @@ import os
 import pickle
 from typing import TYPE_CHECKING
 
+import pandas as pd
 import pytest
 
 from mindroom.custom_tools.pandas import PandasTools
@@ -111,6 +112,52 @@ def test_readers_cannot_leave_the_workspace(tmp_path: Path, workspace: Path, pat
     assert not (workspace / "pandas_dataframes").exists()
 
 
+@pytest.mark.parametrize(
+    ("function", "parameters"),
+    [
+        ("read_excel", {"io": "empty.xls", "engine": "xlrd", "engine_kwargs": {"filename": "{outside}"}}),
+        ("read_csv", {"filepath_or_buffer": "sales.csv", "engine": "python"}),
+        ("read_csv", {"filepath_or_buffer": "sales.csv", "compression": {"method": "gzip"}}),
+        ("read_csv", {"filepath_or_buffer": "sales.csv", "storage_options": {"anon": True}}),
+        ("read_csv", {"filepath_or_buffer": "sales.csv", "memory_map": True}),
+        ("read_csv", {"filepath_or_buffer": "sales.csv", "chunksize": 1}),
+        ("read_json", {"path_or_buf": "sales.csv", "engine": "ujson"}),
+        ("DataFrame", {"data": {"value": [1]}, "copy": True}),
+    ],
+)
+def test_reader_keywords_outside_the_allow_list_are_refused(
+    tmp_path: Path,
+    workspace: Path,
+    function: str,
+    parameters: dict[str, object],
+) -> None:
+    """Engine, compression, and storage keywords could hand another file to a third-party reader."""
+    outside = tmp_path / "outside.csv"
+    outside.write_text("OPENAI_API_KEY=primary-only-value\n", encoding="utf-8")
+    (workspace / "empty.xls").write_bytes(b"")
+    arguments = json.loads(json.dumps(parameters).replace("{outside}", str(outside)))
+
+    result = _create(PandasTools(base_dir=workspace), "leak", function, arguments)
+
+    assert result.startswith(f"Error creating dataframe: Unsupported {function} parameters")
+    assert "OPENAI_A" not in result
+    assert not (workspace / "pandas_dataframes").exists()
+
+
+def test_json_and_excel_readers_open_workspace_files(workspace: Path) -> None:
+    """The other file readers receive the confined handle as well."""
+    (workspace / "events.jsonl").write_text('{"kind": "open"}\n{"kind": "close"}\n', encoding="utf-8")
+    pd.read_csv(workspace / "sales.csv").to_excel(workspace / "sales.xlsx", index=False)
+    toolkit = PandasTools(base_dir=workspace)
+    assert _create(toolkit, "sales", "read_csv", {"filepath_or_buffer": "sales.csv"}) == "sales"
+    sales = toolkit.run_dataframe_operation("sales", "head", {})
+
+    assert _create(toolkit, "events", "read_json", {"path_or_buf": "events.jsonl", "lines": True}) == "events"
+    assert _create(toolkit, "sheet", "read_excel", {"io": "sales.xlsx"}) == "sheet"
+    assert toolkit.run_dataframe_operation("events", "count", {}).split() == ["kind", "2"]
+    assert toolkit.run_dataframe_operation("sheet", "head", {}) == sales
+
+
 def test_saved_dataframes_are_rebuilt_by_fresh_toolkits(workspace: Path) -> None:
     """A later toolkit, like a fresh worker call, rebuilds the saved dataframe from its current source."""
     assert _create(PandasTools(base_dir=workspace), "sales", "read_csv", {"filepath_or_buffer": "sales.csv"}) == "sales"
@@ -137,6 +184,7 @@ def test_saved_dataframes_are_rebuilt_by_fresh_toolkits(workspace: Path) -> None
     [
         {"function": "read_pickle", "parameters": {"filepath_or_buffer": "evil.pkl"}},
         {"function": "read_csv", "parameters": {"filepath_or_buffer": "{outside}"}},
+        {"function": "read_excel", "parameters": {"io": "evil.pkl", "engine_kwargs": {"filename": "{outside}"}}},
         ["read_csv"],
     ],
 )

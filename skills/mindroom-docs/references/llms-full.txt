@@ -5386,6 +5386,7 @@ query_csv_file("sales_2025", 'SELECT "region", COUNT(*) FROM sales_2025 GROUP BY
 `pandas` exposes `create_pandas_dataframe()` and `run_dataframe_operation()`.
 `create_pandas_dataframe()` calls one allow-listed constructor, `DataFrame`, `read_csv`, `read_excel`, or `read_json`, and saves that call under a caller-chosen name.
 File readers only open regular files inside the agent workspace, with relative paths resolving from it, and URLs are not supported.
+Constructors accept only common parsing keywords, so `engine`, `engine_kwargs`, `compression`, `storage_options`, and `chunksize` are rejected.
 `run_dataframe_operation()` rebuilds the named dataframe from its saved call and then runs one allow-listed method such as `head`, `tail`, `describe`, `value_counts`, `sort_values`, `mean`, or `corr`.
 Methods that write files, evaluate expressions, or dispatch functions by name, such as `to_csv`, `query`, `eval`, `apply`, and `agg`, are rejected.
 With an agent workspace, saved calls live under `pandas_dataframes/` in that workspace so worker-routed calls and later turns can reuse the names.
@@ -5424,6 +5425,7 @@ run_dataframe_operation("sales", "describe", {})
 
 - Every operation rereads the source file, so results follow the current file contents and operations never modify the saved dataframe.
 - `create_pandas_dataframe()` rejects empty dataframes and replaces an existing dataframe with the same name.
+- Every conversation that uses the same agent workspace shares its dataframe names.
 - Dataframe names use 1-64 letters, digits, underscores, or hyphens.
 - Use `pandas` when you want dataframe-native operations rather than SQL.
 

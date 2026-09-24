@@ -6100,7 +6100,7 @@ class TestWorkerToolsOverride:
         [
             ("all", None, None, True),
             ("selective", {"pandas"}, None, True),
-            (None, None, ["pandas"], True),
+            ("off", None, ["pandas"], True),
             ("off", None, None, False),
         ],
     )

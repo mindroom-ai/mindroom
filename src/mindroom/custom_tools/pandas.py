@@ -27,12 +27,104 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Each constructor maps to the parameter naming its source file, or None when it reads no file.
-_CONSTRUCTOR_PATH_PARAMETERS: dict[str, str | None] = {
-    "DataFrame": None,
-    "read_csv": "filepath_or_buffer",
-    "read_excel": "io",
-    "read_json": "path_or_buf",
+
+@dataclass(frozen=True)
+class _Constructor:
+    """One allow-listed constructor, the parameter naming its source file, and its permitted keywords."""
+
+    path_parameter: str | None
+    keywords: frozenset[str]
+
+
+# Keywords are allow-listed because engines, engine keywords, compression, and storage
+# options can hand another file or URL to a third-party reader that ignores the opened handle.
+_CONSTRUCTORS: dict[str, _Constructor] = {
+    "DataFrame": _Constructor(None, frozenset({"data", "index", "columns", "dtype"})),
+    "read_csv": _Constructor(
+        "filepath_or_buffer",
+        frozenset(
+            {
+                "filepath_or_buffer",
+                "sep",
+                "delimiter",
+                "header",
+                "names",
+                "index_col",
+                "usecols",
+                "dtype",
+                "true_values",
+                "false_values",
+                "skipinitialspace",
+                "skiprows",
+                "skipfooter",
+                "nrows",
+                "na_values",
+                "keep_default_na",
+                "na_filter",
+                "skip_blank_lines",
+                "parse_dates",
+                "date_format",
+                "dayfirst",
+                "thousands",
+                "decimal",
+                "lineterminator",
+                "quotechar",
+                "quoting",
+                "doublequote",
+                "escapechar",
+                "comment",
+                "encoding",
+                "encoding_errors",
+                "on_bad_lines",
+            },
+        ),
+    ),
+    "read_excel": _Constructor(
+        "io",
+        frozenset(
+            {
+                "io",
+                "sheet_name",
+                "header",
+                "names",
+                "index_col",
+                "usecols",
+                "dtype",
+                "true_values",
+                "false_values",
+                "skiprows",
+                "nrows",
+                "na_values",
+                "keep_default_na",
+                "na_filter",
+                "parse_dates",
+                "date_format",
+                "thousands",
+                "decimal",
+                "comment",
+                "skipfooter",
+            },
+        ),
+    ),
+    "read_json": _Constructor(
+        "path_or_buf",
+        frozenset(
+            {
+                "path_or_buf",
+                "orient",
+                "dtype",
+                "convert_axes",
+                "convert_dates",
+                "keep_default_dates",
+                "precise_float",
+                "date_unit",
+                "encoding",
+                "encoding_errors",
+                "lines",
+                "nrows",
+            },
+        ),
+    ),
 }
 # Methods that only compute over the dataframe: none takes a path, buffer, expression, or function name.
 _OPERATIONS = frozenset(
@@ -115,13 +207,17 @@ def _validate_dataframe_name(name: object) -> str:
 
 def _validate_source(function: object, parameters: object) -> _DataFrameSource:
     """Check a model-supplied or saved call against the constructor allow-list."""
-    if not isinstance(function, str) or function not in _CONSTRUCTOR_PATH_PARAMETERS:
-        msg = f"Unsupported function {function!r}: use one of {', '.join(_CONSTRUCTOR_PATH_PARAMETERS)}"
+    if not isinstance(function, str) or function not in _CONSTRUCTORS:
+        msg = f"Unsupported function {function!r}: use one of {', '.join(_CONSTRUCTORS)}"
         raise ValueError(msg)
     if not isinstance(parameters, dict):
         msg = "Function parameters must be an object"
         raise TypeError(msg)
-    return _DataFrameSource(function, {str(key): value for key, value in parameters.items()})
+    keywords = {str(key): value for key, value in parameters.items()}
+    if unsupported := sorted(keywords.keys() - _CONSTRUCTORS[function].keywords):
+        msg = f"Unsupported {function} parameters {unsupported}: use {', '.join(sorted(_CONSTRUCTORS[function].keywords))}"
+        raise ValueError(msg)
+    return _DataFrameSource(function, keywords)
 
 
 def _validate_operation(operation: object, parameters: object) -> tuple[str, dict[str, Any]]:
@@ -136,8 +232,18 @@ def _validate_operation(operation: object, parameters: object) -> tuple[str, dic
 
 
 @contextmanager
+def _open_regular_file(root: Path, relative_path: Path) -> Iterator[BinaryIO]:
+    """Open one regular file below a canonical root without following links or blocking on a FIFO."""
+    with (
+        open_regular_file_within_root(root, relative_path) as descriptor,
+        os.fdopen(descriptor, "rb", closefd=False) as handle,
+    ):
+        yield handle
+
+
+@contextmanager
 def _open_workspace_file(base_dir: Path | None, path: object) -> Iterator[BinaryIO]:
-    """Open one regular file inside the workspace without following links swapped in after resolution."""
+    """Open one model-named regular file inside the workspace."""
     if base_dir is None:
         msg = "Reading files requires an agent workspace"
         raise ValueError(msg)
@@ -150,17 +256,14 @@ def _open_workspace_file(base_dir: Path | None, path: object) -> Iterator[Binary
     except ValueError:
         msg = f"File path {path!r} is outside the agent workspace"
         raise ValueError(msg) from None
-    with (
-        open_regular_file_within_root(root, resolved.relative_to(root)) as descriptor,
-        os.fdopen(descriptor, "rb", closefd=False) as handle,
-    ):
+    with _open_regular_file(root, resolved.relative_to(root)) as handle:
         yield handle
 
 
 def _build_dataframe(base_dir: Path | None, source: _DataFrameSource) -> pd.DataFrame:
     """Run one validated call, handing file readers an already-opened workspace file instead of a path."""
     constructor = getattr(pd, source.function)
-    path_parameter = _CONSTRUCTOR_PATH_PARAMETERS[source.function]
+    path_parameter = _CONSTRUCTORS[source.function].path_parameter
     if path_parameter is None:
         dataframe = constructor(**source.parameters)
     else:
@@ -203,19 +306,14 @@ class PandasTools(Toolkit):
         if self.base_dir is None:
             self._sources[name] = source
             return
-        root = self.base_dir.resolve()
-        root.mkdir(parents=True, exist_ok=True)
-        with open_directory_within_root(root, _DATAFRAMES_DIR, create=True) as directory:
+        with open_directory_within_root(self.base_dir.resolve(), _DATAFRAMES_DIR, create=True) as directory:
             atomic_write_bytes_at(directory, f"{name}.json", json.dumps(asdict(source)).encode())
 
     def _load_source(self, name: str) -> _DataFrameSource | None:
         if self.base_dir is None:
             return self._sources.get(name)
         try:
-            with (
-                open_regular_file_within_root(self.base_dir.resolve(), Path(_DATAFRAMES_DIR, f"{name}.json")) as fd,
-                os.fdopen(fd, "rb", closefd=False) as handle,
-            ):
+            with _open_regular_file(self.base_dir.resolve(), Path(_DATAFRAMES_DIR, f"{name}.json")) as handle:
                 saved = json.load(handle)
         except FileNotFoundError:
             return None
@@ -234,6 +332,7 @@ class PandasTools(Toolkit):
 
         `create_using_function` must be one of: DataFrame, read_csv, read_excel, read_json.
         File readers only open files inside the agent workspace; relative paths resolve from it and URLs are not supported.
+        Only common parsing keywords are accepted; an unsupported keyword returns the permitted ones.
         The call is saved under the name and rerun for every operation, so the dataframe reflects the current file.
 
         For Example:
