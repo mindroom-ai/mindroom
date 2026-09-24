@@ -7,9 +7,11 @@ credentials stored in MindRoom's unified credentials location.
 from __future__ import annotations
 
 import json
+import os
 from functools import wraps
 from inspect import signature
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 from agno.tools.google.auth import google_authenticate
@@ -22,8 +24,7 @@ from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
-from mindroom.path_confinement import resolve_path_within_root
-from mindroom.workspaces import resolve_workspace_relative_path
+from mindroom.path_confinement import open_regular_file_within_root, resolve_path_within_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -53,40 +54,53 @@ _GMAIL_SEND_SCOPES = frozenset(
         "https://www.googleapis.com/auth/gmail.send",
     },
 )
-# Upstream functions that open each ``attachments`` path in this process.
-_ATTACHMENT_FUNCTION_NAMES = ("create_draft_email", "send_email", "send_email_reply", "update_draft")
+# Gmail's message size limit, which also bounds attachment bytes held in memory.
+_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 
-def _resolve_attachment_path(workspace_root: Path, attachment: object) -> Path:
-    """Resolve one model-supplied attachment path to a regular file inside the workspace."""
-    if not isinstance(attachment, str):
-        msg = "Gmail attachments must be file paths"
-        raise ValueError(msg)  # noqa: TRY004 - returned to the model as a tool error
-    requested_path = Path(attachment).expanduser()
-    if requested_path.is_absolute():
-        try:
-            path = resolve_path_within_root(workspace_root, requested_path, symlinks="internal")
-        except ValueError:
-            msg = f"Gmail attachment must stay within the workspace root: {workspace_root.resolve()}"
-            raise ValueError(msg) from None
-    else:
-        path = resolve_workspace_relative_path(workspace_root, requested_path, field_name="Gmail attachment")
-    if not path.is_file():
-        msg = f"Gmail attachment is not a file: {attachment}"
-        raise ValueError(msg)
-    return path
+def _stage_attachments(workspace_root: Path | None, attachments: object, staging_dir: Path) -> list[str]:
+    """Snapshot workspace attachments through no-follow descriptors to private paths Agno can reopen.
 
-
-def _resolve_attachment_paths(workspace_root: Path | None, attachments: object) -> list[str]:
-    """Resolve every model-supplied attachment, failing closed without a workspace."""
+    Upstream Agno opens each attachment by pathname, so handing it a validated
+    workspace path would let a concurrent workspace writer swap in a link first.
+    """
     if workspace_root is None:
         msg = "Gmail attachments require an agent workspace"
         raise ValueError(msg)
     requested = [attachments] if isinstance(attachments, str) else attachments
-    if not isinstance(requested, list | tuple):
+    if not isinstance(requested, list | tuple) or not all(isinstance(path, str) for path in requested):
         msg = "Gmail attachments must be file paths"
-        raise ValueError(msg)  # noqa: TRY004 - returned to the model as a tool error
-    return [str(_resolve_attachment_path(workspace_root, attachment)) for attachment in requested]
+        raise ValueError(msg)
+    remaining = _MAX_ATTACHMENT_BYTES
+    staged_paths: list[str] = []
+    for index, attachment in enumerate(requested):
+        try:
+            canonical_root = workspace_root.resolve(strict=True)
+            path = resolve_path_within_root(
+                canonical_root,
+                Path(attachment).expanduser(),
+                symlinks="internal",
+                strict=True,
+            )
+            # Open through the authorized root spelling so a root replaced by a link is refused too.
+            with (
+                open_regular_file_within_root(workspace_root, path.relative_to(canonical_root)) as descriptor,
+                os.fdopen(descriptor, "rb", closefd=False) as source,
+            ):
+                data = source.read(remaining + 1)
+        except (OSError, RuntimeError, ValueError):
+            msg = f"Gmail attachment must be a regular file in the agent workspace: {attachment}"
+            raise ValueError(msg) from None
+        if len(data) > remaining:
+            msg = "Gmail attachments exceed the 25 MiB limit"
+            raise ValueError(msg)
+        remaining -= len(data)
+        destination = staging_dir / str(index) / path.name
+        destination.parent.mkdir(mode=0o700)
+        with destination.open("xb") as output:
+            output.write(data)
+        staged_paths.append(str(destination))
+    return staged_paths
 
 
 class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmailTools):
@@ -143,13 +157,14 @@ class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmai
         self._wrap_attachment_entrypoints()
 
     def _wrap_attachment_entrypoints(self) -> None:
-        """Confine attachment paths before upstream Agno checks or opens them."""
-        for function_name in _ATTACHMENT_FUNCTION_NAMES:
-            function = self.functions.get(function_name)
-            if function is None or function.entrypoint is None:
-                continue
+        """Stage workspace attachments before upstream Agno checks or opens their paths."""
+        for function in self.functions.values():
             entrypoint = function.entrypoint
+            if entrypoint is None:
+                continue
             entrypoint_signature = signature(entrypoint)
+            if "attachments" not in entrypoint_signature.parameters:
+                continue
 
             @wraps(entrypoint)
             def attachment_entrypoint(
@@ -160,15 +175,21 @@ class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmai
             ) -> object:
                 bound = _signature.bind(*args, **kwargs)
                 attachments = bound.arguments.get("attachments")
-                if attachments:
+                if not attachments:
+                    return _entrypoint(*bound.args, **bound.kwargs)
+                with TemporaryDirectory(prefix="mindroom-gmail-attachments-") as staging_dir:
                     try:
-                        bound.arguments["attachments"] = _resolve_attachment_paths(self._workspace_root, attachments)
+                        bound.arguments["attachments"] = _stage_attachments(
+                            self._workspace_root,
+                            attachments,
+                            Path(staging_dir),
+                        )
                     except ValueError as exc:
                         return json.dumps({"error": str(exc)})
-                return _entrypoint(*bound.args, **bound.kwargs)
+                    return _entrypoint(*bound.args, **bound.kwargs)
 
             function.entrypoint = attachment_entrypoint
-            setattr(self, function_name, attachment_entrypoint)
+            setattr(self, function.name, attachment_entrypoint)
 
     def _check_tools_filters(
         self,
