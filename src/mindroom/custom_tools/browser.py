@@ -1943,8 +1943,8 @@ class BrowserTools(Toolkit):
     def _browser_upload_roots(self) -> tuple[Path, ...]:
         """Return roots whose files can be read by browser upload.
 
-        Only the browser artifact directory is exposed; the runtime storage root
-        holds credentials, encryption keys, and received media.
+        Only the browser artifact directory or worker workspace is exposed; the
+        runtime storage root holds credentials, encryption keys, and received media.
         """
         root = self._browser_artifact_root()
         return (
