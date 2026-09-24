@@ -112,6 +112,7 @@ class MatrixApiTools(Toolkit):
         "redact": 2,
     }
     _HARD_BLOCKED_STATE_TYPES: ClassVar[frozenset[str]] = frozenset({"m.room.create"})
+    _RESERVED_CONTENT_PREFIXES: ClassVar[tuple[str, ...]] = ("com.mindroom.", "io.mindroom.")
     _DANGEROUS_STATE_TYPES: ClassVar[frozenset[str]] = frozenset(
         {
             "m.room.power_levels",
@@ -257,8 +258,9 @@ class MatrixApiTools(Toolkit):
             return "", "state_key must be a string."
         return state_key, None
 
-    @staticmethod
+    @classmethod
     def _validate_content(
+        cls,
         content: dict[str, object] | None,
     ) -> tuple[dict[str, object] | None, str | None]:
         if not isinstance(content, dict):
@@ -267,7 +269,31 @@ class MatrixApiTools(Toolkit):
             json.dumps(content, sort_keys=True)
         except (TypeError, ValueError) as exc:
             return None, f"content must be JSON-serializable: {exc}"
+        reserved_keys = cls._reserved_content_keys(content)
+        if reserved_keys:
+            return None, (
+                f"content must not set MindRoom-reserved keys ({', '.join(reserved_keys)}); "
+                "they carry runtime trust metadata such as the relayed requester identity."
+            )
         return content, None
+
+    @classmethod
+    def _reserved_content_keys(cls, value: object) -> list[str]:
+        """Return every MindRoom-reserved key the model placed anywhere in *value*.
+
+        A managed Matrix account speaks for the runtime, so content the model
+        composes must never carry the namespaces ingress reads as runtime
+        metadata. Nested payloads count: edits and sidecars promote inner
+        objects into the content the receiving agent validates.
+        """
+        if isinstance(value, dict):
+            found = {key for key in value if isinstance(key, str) and key.startswith(cls._RESERVED_CONTENT_PREFIXES)}
+            for item in value.values():
+                found.update(cls._reserved_content_keys(item))
+            return sorted(found)
+        if isinstance(value, list):
+            return sorted({key for item in value for key in cls._reserved_content_keys(item)})
+        return []
 
     @classmethod
     def _content_summary(
@@ -1374,6 +1400,7 @@ class MatrixApiTools(Toolkit):
         `room_id` defaults to the current Matrix tool runtime context room.
         `search` enforces a single-room scope via `room_id`; if `filter.rooms` is supplied it must match that room.
         `search` always uses the top-level `limit`; `filter.limit` is rejected to avoid conflicting inputs.
+        `content` may not set `com.mindroom.*` or `io.mindroom.*` keys; those are reserved for runtime metadata.
         `dry_run` is supported for send_event, put_state, and redact.
         `allow_dangerous` only affects put_state for a small set of high-risk room-state event types.
         `search` rejects `dry_run` and `allow_dangerous` because it is read-only.

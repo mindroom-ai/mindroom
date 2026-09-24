@@ -266,6 +266,7 @@ Matrix sync callback
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
+| `relay_proof.py` | Keyed runtime-authorship proofs binding relayed requester identity to runtime code, not to the sending account |
 | `access_policy.py` | Resolve membership access config into immutable effective room and responder policies |
 | `config/access.py` | Membership access configuration models (responder access, room defaults) |
 | `config/legacy_access.py` | One-shot migration from retired access fields to the membership schema; delete with the retired fields |
@@ -298,6 +299,7 @@ Matrix sync callback
 - `sync_continuity/` – Crash-atomic pending join/decrypt fences
 - `logs/` – Log files
 - `matrix_state.yaml` – Matrix sync state
+- `relay_signing_key` – Per-install key for the relayed-requester authorship proofs ingress verifies
 
 These agent paths describe ordinary shared agents; private agents use their resolved private state roots.
 `MINDROOM_SESSION_STORAGE_PATH` relocates session storage only, leaving learning and memory at their agent state roots.

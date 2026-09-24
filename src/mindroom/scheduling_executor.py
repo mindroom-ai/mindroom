@@ -35,6 +35,7 @@ from mindroom.recurring_schedule import (
     prepare_recurring_delivery,
     recurring_delivery_content,
 )
+from mindroom.relay_proof import sign_relay_metadata
 
 if TYPE_CHECKING:
     import nio
@@ -237,6 +238,7 @@ async def _prepare_scheduled_trigger(
         content[SCHEDULED_HISTORY_LIMIT_KEY] = workflow.history_limit
     if workflow.model is not None:
         content[SCHEDULED_MODEL_KEY] = workflow.model
+    sign_relay_metadata(content, runtime_paths)
     return content
 
 

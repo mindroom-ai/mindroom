@@ -124,6 +124,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.journal_helpers import admit_dispatch_event
+from tests.relay_helpers import signed_relay_content
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping
@@ -829,17 +830,20 @@ def _router_relay_event(
     """Build one trusted router relay that explicitly replies to its human source."""
     return nio.RoomMessageText.from_dict(
         {
-            "content": {
-                "body": body,
-                "msgtype": "m.text",
-                constants.ORIGINAL_SENDER_KEY: _SENDER,
-                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-                "m.relates_to": {
-                    "rel_type": "m.thread",
-                    "event_id": _THREAD_ROOT,
-                    "m.in_reply_to": {"event_id": original_event_id},
+            "content": signed_relay_content(
+                {
+                    "body": body,
+                    "msgtype": "m.text",
+                    constants.ORIGINAL_SENDER_KEY: _SENDER,
+                    constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": _THREAD_ROOT,
+                        "m.in_reply_to": {"event_id": original_event_id},
+                    },
                 },
-            },
+                config,
+            ),
             "event_id": event_id,
             "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
             "origin_server_ts": origin_server_ts,
@@ -1840,12 +1844,15 @@ async def test_trusted_router_relay_preserves_transport_sender_while_canonicaliz
     router_sender = _entity_user_id(config, ROUTER_AGENT_NAME)
     event = nio.RoomMessageText.from_dict(
         {
-            "content": {
-                "body": "@general use my private state",
-                "msgtype": "m.text",
-                constants.ORIGINAL_SENDER_KEY: bridge_sender,
-                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            },
+            "content": signed_relay_content(
+                {
+                    "body": "@general use my private state",
+                    "msgtype": "m.text",
+                    constants.ORIGINAL_SENDER_KEY: bridge_sender,
+                    constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                },
+                config,
+            ),
             "event_id": "$router-relay:localhost",
             "sender": router_sender,
             "origin_server_ts": 1_000_000,
@@ -2168,7 +2175,7 @@ def _scheduled_fire_event(
         content[constants.PER_FIRE_THREAD_ROOT_KEY] = True
     return nio.RoomMessageText.from_dict(
         {
-            "content": content,
+            "content": signed_relay_content(content, config),
             "event_id": event_id,
             "sender": _entity_user_id(config, "general"),
             "origin_server_ts": 1_000_000,
@@ -2187,13 +2194,16 @@ def _silent_schedule_event(
     """Build the message-shaped event journal dispatch gives the turn controller."""
     return nio.RoomMessageText.from_dict(
         {
-            "content": {
-                "body": "Poll the queue without posting the trigger",
-                "msgtype": "m.text",
-                constants.SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
-                constants.ORIGINAL_SENDER_KEY: _SENDER,
-                **extra_content,
-            },
+            "content": signed_relay_content(
+                {
+                    "body": "Poll the queue without posting the trigger",
+                    "msgtype": "m.text",
+                    constants.SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+                    constants.ORIGINAL_SENDER_KEY: _SENDER,
+                    **extra_content,
+                },
+                config,
+            ),
             "event_id": event_id,
             "sender": _entity_user_id(config, "general"),
             "origin_server_ts": 1_000_000,
@@ -2211,11 +2221,14 @@ def _silent_schedule_trigger_event(
     """Build the custom event admitted before message-shaped dispatch."""
     event = nio.Event.parse_event(
         {
-            "content": {
-                "body": "Poll the queue without posting the trigger",
-                constants.SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
-                constants.ORIGINAL_SENDER_KEY: _SENDER,
-            },
+            "content": signed_relay_content(
+                {
+                    "body": "Poll the queue without posting the trigger",
+                    constants.SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+                    constants.ORIGINAL_SENDER_KEY: _SENDER,
+                },
+                config,
+            ),
             "event_id": event_id,
             "sender": _entity_user_id(config, "general"),
             "origin_server_ts": 1_000_000,
@@ -2385,15 +2398,18 @@ async def test_scheduled_router_handoff_history_limit_reaches_response_request(
     room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
     event = nio.RoomMessageText.from_dict(
         {
-            "content": {
-                "body": "@general could you help with this?",
-                "msgtype": "m.text",
-                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-                constants.ORIGINAL_SENDER_KEY: _SENDER,
-                constants.SCHEDULED_HISTORY_LIMIT_KEY: 2,
-                "com.mindroom.scheduled_model": "cheap",
-                "m.relates_to": {"m.in_reply_to": {"event_id": "$scheduled:localhost"}},
-            },
+            "content": signed_relay_content(
+                {
+                    "body": "@general could you help with this?",
+                    "msgtype": "m.text",
+                    constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                    constants.ORIGINAL_SENDER_KEY: _SENDER,
+                    constants.SCHEDULED_HISTORY_LIMIT_KEY: 2,
+                    "com.mindroom.scheduled_model": "cheap",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$scheduled:localhost"}},
+                },
+                config,
+            ),
             "event_id": "$scheduled-router-handoff:localhost",
             "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
             "origin_server_ts": 1_000_000,
@@ -2426,17 +2442,20 @@ async def test_router_relay_keeps_original_alias_unsettled_through_gate_handoff(
     original_event_id = "$routed-original:localhost"
     event = nio.RoomMessageText.from_dict(
         {
-            "content": {
-                "body": "@general could you help with this?",
-                "msgtype": "m.text",
-                constants.ORIGINAL_SENDER_KEY: _SENDER,
-                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-                "m.relates_to": {
-                    "rel_type": "m.thread",
-                    "event_id": _THREAD_ROOT,
-                    "m.in_reply_to": {"event_id": original_event_id},
+            "content": signed_relay_content(
+                {
+                    "body": "@general could you help with this?",
+                    "msgtype": "m.text",
+                    constants.ORIGINAL_SENDER_KEY: _SENDER,
+                    constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": _THREAD_ROOT,
+                        "m.in_reply_to": {"event_id": original_event_id},
+                    },
                 },
-            },
+                config,
+            ),
             "event_id": "$router-relay:localhost",
             "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
             "origin_server_ts": 1_000_000,
@@ -2611,13 +2630,16 @@ async def test_external_trigger_fire_response_starts_per_fire_thread_session(tmp
     room = _room_with_members(config, "general")
     event = nio.RoomMessageText.from_dict(
         {
-            "content": {
-                "body": "@general poll the webhook queue",
-                "msgtype": "m.text",
-                constants.SOURCE_KIND_KEY: EXTERNAL_TRIGGER_SOURCE_KIND,
-                constants.ORIGINAL_SENDER_KEY: _SENDER,
-                constants.PER_FIRE_THREAD_ROOT_KEY: True,
-            },
+            "content": signed_relay_content(
+                {
+                    "body": "@general poll the webhook queue",
+                    "msgtype": "m.text",
+                    constants.SOURCE_KIND_KEY: EXTERNAL_TRIGGER_SOURCE_KIND,
+                    constants.ORIGINAL_SENDER_KEY: _SENDER,
+                    constants.PER_FIRE_THREAD_ROOT_KEY: True,
+                },
+                config,
+            ),
             "event_id": "$trigger:localhost",
             "sender": _entity_user_id(config, "general"),
             "origin_server_ts": 1_000_000,

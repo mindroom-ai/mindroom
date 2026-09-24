@@ -11,6 +11,7 @@ from mindroom.hooks.sender import send_matrix_message
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
+from mindroom.relay_proof import sign_relay_metadata
 from mindroom.requester_identity import equivalent_requester_ids
 
 if TYPE_CHECKING:
@@ -88,6 +89,7 @@ async def execute_external_trigger(
         extra_content=_external_trigger_content_metadata(
             snapshot,
             payload,
+            runtime_paths,
             per_fire_root=snapshot.target.new_thread and continue_thread_event_id is None,
         ),
     )
@@ -116,6 +118,7 @@ async def is_external_trigger_owner_joined_target_room(
 def _external_trigger_content_metadata(
     snapshot: TriggerDeliverySnapshot,
     payload: ExternalTriggerPayload,
+    runtime_paths: RuntimePaths,
     *,
     per_fire_root: bool,
 ) -> dict[str, Any]:
@@ -129,4 +132,5 @@ def _external_trigger_content_metadata(
     }
     if per_fire_root:
         metadata[PER_FIRE_THREAD_ROOT_KEY] = True
+    sign_relay_metadata(metadata, runtime_paths)
     return metadata

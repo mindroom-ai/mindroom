@@ -48,6 +48,7 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
 from mindroom.matrix.room_history_reads import fetch_thread_messages_from_source
+from mindroom.relay_proof import sign_relay_metadata
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
@@ -1649,12 +1650,13 @@ def _build_auto_resume_content(
         )
         mentioned_user_ids = [target_user_id]
 
-    extra_content = None
+    extra_content: dict[str, object] | None = None
     if interrupted_thread.original_sender_id is not None:
         extra_content = {
             SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             ORIGINAL_SENDER_KEY: interrupted_thread.original_sender_id,
         }
+        sign_relay_metadata(extra_content, runtime_paths)
     return build_message_content(
         body=body,
         formatted_body=formatted_body,

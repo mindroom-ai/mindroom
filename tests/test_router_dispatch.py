@@ -26,6 +26,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.relay_proof import sign_relay_metadata
 from mindroom.router_relay import execute_router_relay
 from mindroom.teams import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
@@ -747,14 +748,14 @@ class TestAgentBot(AgentBotTestBase):
             event_id="$scheduled_route_text",
         )
         event.body = "⏰ [Automated Task]\nhelp me"
-        event.source = {
-            "content": {
-                "body": event.body,
-                SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
-                ORIGINAL_SENDER_KEY: "@user:localhost",
-                SCHEDULED_HISTORY_LIMIT_KEY: 4,
-            },
+        scheduled_content = {
+            "body": event.body,
+            SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            SCHEDULED_HISTORY_LIMIT_KEY: 4,
         }
+        sign_relay_metadata(scheduled_content, runtime_paths_for(config))
+        event.source = {"content": scheduled_content}
 
         with (
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),

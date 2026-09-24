@@ -26,6 +26,7 @@ from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.message_extras import build_message_extras_content
+from mindroom.relay_proof import sign_relay_metadata
 from mindroom.requester_identity import is_human_requester_id
 
 if TYPE_CHECKING:
@@ -106,6 +107,7 @@ class MatrixMessageOperations:
         ):
             extra_content[ORIGINAL_SENDER_KEY] = context.requester_id
             extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+            sign_relay_metadata(extra_content, context.runtime_paths)
         if attachment_ids:
             extra_content[ATTACHMENT_IDS_KEY] = attachment_ids
         if message_extras:

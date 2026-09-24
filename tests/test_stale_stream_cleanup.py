@@ -66,6 +66,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.relay_helpers import signed_relay_content
 from tests.test_response_delivery_gateway import _gateway
 from tests.test_turn_store import _store
 
@@ -931,6 +932,8 @@ async def test_auto_resume_classifies_later_activity_by_effective_sender_and_his
 ) -> None:
     """Later direct or relayed humans suppress resume; internal bot events do not."""
     config = _make_config(tmp_path)
+    if newer_content is not None:
+        newer_content = signed_relay_content(dict(newer_content), config)
     client = AsyncMock(spec=nio.AsyncClient)
     interrupted = [
         InterruptedThread(
@@ -1712,13 +1715,16 @@ async def test_cleanup_uses_visible_content_for_fetched_edit_events(tmp_path: Pa
                 {
                     "body": "* Handoff",
                     "msgtype": "m.text",
-                    "m.new_content": {
-                        "body": "Handoff",
-                        "msgtype": "m.text",
-                        ORIGINAL_SENDER_KEY: USER_ID,
-                        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-                        "m.relates_to": _thread_reply_relation("$thread-root", "$user-root"),
-                    },
+                    "m.new_content": signed_relay_content(
+                        {
+                            "body": "Handoff",
+                            "msgtype": "m.text",
+                            ORIGINAL_SENDER_KEY: USER_ID,
+                            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                            "m.relates_to": _thread_reply_relation("$thread-root", "$user-root"),
+                        },
+                        config,
+                    ),
                     "m.relates_to": {"rel_type": "m.replace", "event_id": "$agent-a-original"},
                 },
             ).encode("utf-8"),

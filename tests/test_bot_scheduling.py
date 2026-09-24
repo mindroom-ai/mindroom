@@ -51,6 +51,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.relay_helpers import signed_relay_content
 from tests.turn_dispatch_helpers import dispatch_test_turn
 
 if TYPE_CHECKING:
@@ -1215,12 +1216,15 @@ class TestCommandHandling:
                     "event_id": "$scheduled_task",
                     "sender": "@mindroom_general:localhost",
                     "origin_server_ts": 1234567890,
-                    "content": {
-                        "msgtype": "m.text",
-                        "body": "⏰ [Automated Task]\nCheck the workloop status",
-                        SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
-                        ORIGINAL_SENDER_KEY: "@mindroom_router:localhost",
-                    },
+                    "content": signed_relay_content(
+                        {
+                            "msgtype": "m.text",
+                            "body": "⏰ [Automated Task]\nCheck the workloop status",
+                            SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                            ORIGINAL_SENDER_KEY: "@mindroom_router:localhost",
+                        },
+                        config,
+                    ),
                 },
             )
 
@@ -1280,12 +1284,15 @@ class TestCommandHandling:
                     "event_id": "$scheduled_task",
                     "sender": "@mindroom_general:localhost",
                     "origin_server_ts": 1234567890,
-                    "content": {
-                        "msgtype": "m.text",
-                        "body": "⏰ [Automated Task]\nCheck the workloop status",
-                        SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
-                        ORIGINAL_SENDER_KEY: "@mindroom_router:localhost",
-                    },
+                    "content": signed_relay_content(
+                        {
+                            "msgtype": "m.text",
+                            "body": "⏰ [Automated Task]\nCheck the workloop status",
+                            SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                            ORIGINAL_SENDER_KEY: "@mindroom_router:localhost",
+                        },
+                        config,
+                    ),
                 },
             )
 
@@ -2219,12 +2226,15 @@ class TestRouterSkipsSingleAgent:
                 "event_id": "$event_voice",
                 "sender": "@mindroom_router:localhost",
                 "origin_server_ts": 1234567890,
-                "content": {
-                    "msgtype": "m.text",
-                    "body": f"{VOICE_PREFIX}What's the weather today?",
-                    ORIGINAL_SENDER_KEY: "@user:localhost",
-                    SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
-                },
+                "content": signed_relay_content(
+                    {
+                        "msgtype": "m.text",
+                        "body": f"{VOICE_PREFIX}What's the weather today?",
+                        ORIGINAL_SENDER_KEY: "@user:localhost",
+                        SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+                    },
+                    config,
+                ),
             },
         )
 

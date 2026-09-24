@@ -39,6 +39,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.journal_helpers import admit_dispatch_event
+from tests.relay_helpers import signed_relay_content
 from tests.test_live_message_coalescing import (
     _enqueue_for_dispatch,
     _image_event,
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.coalescing_batch import PreparedTurn
+    from mindroom.config.main import Config
     from mindroom.event_journal import EventJournalStore
     from mindroom.handled_turns import TurnRecord
 
@@ -804,6 +806,7 @@ def _normalized_voice_transcript(
 
 
 def _router_voice_echo_event(
+    config: Config,
     *,
     event_id: str,
     thread_id: str,
@@ -819,14 +822,17 @@ def _router_voice_echo_event(
                 "origin_server_ts": server_timestamp,
                 "room_id": "!room:localhost",
                 "type": "m.room.message",
-                "content": {
-                    "msgtype": "m.text",
-                    "body": "voice transcript",
-                    "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
-                    SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-                    ORIGINAL_SENDER_KEY: "@user:localhost",
-                    VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
-                },
+                "content": signed_relay_content(
+                    {
+                        "msgtype": "m.text",
+                        "body": "voice transcript",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+                        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                        ORIGINAL_SENDER_KEY: "@user:localhost",
+                        VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+                    },
+                    config,
+                ),
             },
         ),
     )
@@ -893,7 +899,7 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
     room = _make_room()
     first = _text_event(event_id="$a0", body="start a long turn")
     voice_note = _audio_event(event_id="$v1", thread_id="$threadA")
-    echo = _router_voice_echo_event(event_id="$e1", thread_id="$threadA")
+    echo = _router_voice_echo_event(bot.config, event_id="$e1", thread_id="$threadA")
     follow_up = _text_event(event_id="$f1", body="thread A follow-up", thread_id="$threadA")
     image = _image_event(event_id="$img1", thread_id="$threadA")
     other_thread = _text_event(event_id="$b1", body="thread B message", thread_id="$threadB")

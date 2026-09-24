@@ -1045,6 +1045,7 @@ def _find_config(*, process_env: Mapping[str, str]) -> Path:
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
 SOURCE_KIND_KEY = "com.mindroom.source_kind"
+RELAY_PROOF_KEY = "com.mindroom.relay_proof"
 PER_FIRE_THREAD_ROOT_KEY = "com.mindroom.per_fire_thread_root"
 PER_FIRE_THREAD_ROOT_EVENT_ID_KEY = "com.mindroom.per_fire_thread_root_event_id"
 SCHEDULED_HISTORY_LIMIT_KEY = "com.mindroom.history_limit"

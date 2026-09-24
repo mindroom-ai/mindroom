@@ -23,6 +23,7 @@ from mindroom.matrix.room_membership import (
     ensure_room_membership_synced,
     room_membership_is_complete,
 )
+from mindroom.relay_proof import relay_metadata_is_runtime_authored
 from mindroom.requester_identity import resolve_human_requester_alias
 
 if TYPE_CHECKING:
@@ -231,7 +232,8 @@ def get_effective_sender_id_for_reply_permissions(
     Internal MindRoom senders may relay user-originated messages (voice
     transcriptions, scheduled task fires, etc.) and include the original sender
     in event content. For trusted internal senders and trusted source kinds, use
-    that embedded sender.
+    that embedded sender, but only when runtime code proved it authored the
+    relayed identity: the same accounts also deliver model-authored content.
     """
     is_internal_mindroom_sender = sender_id in current_internal_sender_ids(config, runtime_paths)
     if not is_internal_mindroom_sender:
@@ -246,7 +248,11 @@ def get_effective_sender_id_for_reply_permissions(
         return sender_id
 
     original_sender = content.get(ORIGINAL_SENDER_KEY)
-    if isinstance(original_sender, str) and original_sender:
+    if (
+        isinstance(original_sender, str)
+        and original_sender
+        and relay_metadata_is_runtime_authored(content, runtime_paths)
+    ):
         return original_sender
     return sender_id
 

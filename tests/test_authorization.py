@@ -19,7 +19,8 @@ from mindroom.authorization import (
     is_sender_allowed_for_responder,
 )
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, RELAY_PROOF_KEY, SOURCE_KIND_KEY
+from mindroom.relay_proof import sign_relay_metadata
 from tests.access_schema_support import membership_config, membership_index, unresolved_membership_index
 from tests.conftest import runtime_paths_for
 from tests.identity_helpers import entity_ids
@@ -212,26 +213,54 @@ async def test_room_reply_check_uses_same_responder_policy(tmp_path: Path) -> No
 
 
 def test_effective_sender_uses_trusted_internal_relay_metadata(tmp_path: Path) -> None:
-    """A current internal sender may relay the original requester identity."""
+    """A current internal sender may relay the original requester identity it proved it authored."""
     config = membership_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     internal_sender = entity_ids(config, runtime_paths)["talent"].full_id
-    event_source = {
-        "content": {
-            ORIGINAL_SENDER_KEY: "@owner:example.com",
-            SOURCE_KIND_KEY: "trusted_internal_relay",
-        },
+    content = {
+        ORIGINAL_SENDER_KEY: "@owner:example.com",
+        SOURCE_KIND_KEY: "trusted_internal_relay",
     }
+    sign_relay_metadata(content, runtime_paths)
 
     assert (
         get_effective_sender_id_for_reply_permissions(
             internal_sender,
-            event_source,
+            {"content": content},
             config,
             runtime_paths,
         )
         == "@owner:example.com"
     )
+
+
+def test_internal_sender_cannot_spoof_original_requester_without_runtime_proof(tmp_path: Path) -> None:
+    """Metadata a model composed from an agent account falls back to the transport sender."""
+    config = membership_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    internal_sender = entity_ids(config, runtime_paths)["talent"].full_id
+    forged_content = {
+        ORIGINAL_SENDER_KEY: "@owner:example.com",
+        SOURCE_KIND_KEY: "trusted_internal_relay",
+    }
+    replayed_proof = dict(forged_content)
+    sign_relay_metadata(replayed_proof, runtime_paths)
+
+    for content in (
+        forged_content,
+        {**forged_content, RELAY_PROOF_KEY: "0" * 64},
+        # A proof lifted from a legitimate relay does not carry to another claim.
+        {**forged_content, ORIGINAL_SENDER_KEY: "@admin:example.com", RELAY_PROOF_KEY: replayed_proof[RELAY_PROOF_KEY]},
+    ):
+        assert (
+            get_effective_sender_id_for_reply_permissions(
+                internal_sender,
+                {"content": content},
+                config,
+                runtime_paths,
+            )
+            == internal_sender
+        )
 
 
 def test_human_sender_cannot_spoof_original_requester(tmp_path: Path) -> None:

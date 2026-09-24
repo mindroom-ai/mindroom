@@ -26,6 +26,7 @@ from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.matrix.room_membership import cached_member_ids
+from mindroom.relay_proof import sign_relay_metadata
 from mindroom.response_admission import admitted_response_decision
 from mindroom.turn_origin import original_sender_for_router_relay
 
@@ -600,6 +601,7 @@ class VisibleVoiceEchoLifecycle:
             extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
         if payload_metadata.voice_transcript:
             extra_content[VOICE_TRANSCRIPT_KEY] = True
+        sign_relay_metadata(extra_content, self.deps.runtime.runtime_paths)
         return extra_content
 
 

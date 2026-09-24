@@ -38,6 +38,7 @@ from mindroom.matrix.personal_room_store import (
 )
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix_identifiers import managed_room_alias_localpart
+from mindroom.relay_proof import sign_relay_metadata
 from mindroom.requester_identity import is_human_requester_id, runtime_matrix_domain
 
 if TYPE_CHECKING:
@@ -441,6 +442,7 @@ class PersonalRoomService:
                         HOOK_SOURCE_KEY: "native:personal_room",
                     },
                 )
+                sign_relay_metadata(content, self.runtime_paths)
             else:
                 content["msgtype"] = "m.notice"
             record.welcome_content = content

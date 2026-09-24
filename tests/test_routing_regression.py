@@ -36,6 +36,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.relay_proof import sign_relay_metadata
 from mindroom.routing import ResponderSelection, suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
 from mindroom.text_ingress_dispatch import _run_admitted_router_relay
@@ -1185,6 +1186,7 @@ class TestRoutingRegression:
             content_with_metadata: dict[str, object] = {ORIGINAL_SENDER_KEY: original_sender, **content}
             if source_kind is not None:
                 content_with_metadata[SOURCE_KIND_KEY] = source_kind
+            sign_relay_metadata(content_with_metadata, runtime_paths)
             return router_bot._ingress_validator.requester_user_id(
                 sender=router_sender,
                 source={"content": content_with_metadata},

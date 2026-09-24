@@ -85,6 +85,7 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.relay_proof import sign_relay_metadata
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
@@ -109,6 +110,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.journal_helpers import admit_dispatch_event
+from tests.relay_helpers import signed_relay_content
 from tests.threading_helpers import seed_hydrated_conversation, seed_unhydrated_room_event
 from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
 
@@ -399,8 +401,14 @@ def _text_event(
     thread_id: str | None = None,
     source_kind: str | None = None,
     original_sender: str | None = None,
+    config: Config | None = None,
 ) -> nio.RoomMessageText:
-    """Build a synthetic inbound text event for coalescing tests."""
+    """Build a synthetic inbound text event for coalescing tests.
+
+    Pass ``config`` alongside ``original_sender`` to stamp the runtime
+    authorship proof a real relay would carry; omit it to fabricate the
+    unproven metadata an untrusted sender could compose.
+    """
     content: dict[str, object] = {
         "msgtype": "m.text",
         "body": body,
@@ -411,6 +419,8 @@ def _text_event(
         content[SOURCE_KIND_KEY] = source_kind
     if original_sender is not None:
         content[ORIGINAL_SENDER_KEY] = original_sender
+        if config is not None:
+            signed_relay_content(content, config)
     return cast(
         "nio.RoomMessageText",
         nio.RoomMessageText.from_dict(
@@ -2982,6 +2992,7 @@ async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
         thread_id="$thread_root",
         source_kind="scheduled",
         original_sender="@user:localhost",
+        config=bot.config,
     )
     second = _text_event(
         event_id="$m2",
@@ -2991,6 +3002,7 @@ async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
         thread_id="$thread_root",
         source_kind="scheduled",
         original_sender="@user:localhost",
+        config=bot.config,
     )
     entered_first_dispatch = asyncio.Event()
     release_first_dispatch = asyncio.Event()
@@ -3384,6 +3396,7 @@ async def test_trusted_relay_approval_fallthrough_reserves_effective_requester(t
     )
     first.source["content"][SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
     first.source["content"][ORIGINAL_SENDER_KEY] = "@external:example.org"
+    sign_relay_metadata(first.source["content"], bot.runtime_paths)
     later = _text_event(
         event_id="$later:localhost",
         body="later",
@@ -5010,13 +5023,16 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
         "origin_server_ts": 2000,
         "room_id": room.room_id,
         "type": "m.room.message",
-        "content": {
-            "msgtype": "m.text",
-            "body": "!help",
-            SOURCE_KIND_KEY: "voice",
-            ORIGINAL_SENDER_KEY: "@user:localhost",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
-        },
+        "content": signed_relay_content(
+            {
+                "msgtype": "m.text",
+                "body": "!help",
+                SOURCE_KIND_KEY: "voice",
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+            },
+            bot.config,
+        ),
     }
     await _admit_pending_thread_event(bot, newer_voice_event_source)
 
@@ -5190,14 +5206,17 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
         "origin_server_ts": 2000,
         "room_id": room.room_id,
         "type": "m.room.message",
-        "content": {
-            "msgtype": "m.text",
-            "body": "check my calendar",
-            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            ORIGINAL_SENDER_KEY: "@user:localhost",
-            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
-        },
+        "content": signed_relay_content(
+            {
+                "msgtype": "m.text",
+                "body": "check my calendar",
+                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+            },
+            bot.config,
+        ),
     }
     await _admit_pending_thread_event(bot, visible_echo_source)
     pending_turns = _watch_pending_turns(bot)
@@ -5252,14 +5271,17 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
         "origin_server_ts": 2000,
         "room_id": room.room_id,
         "type": "m.room.message",
-        "content": {
-            "msgtype": "m.text",
-            "body": "check my calendar",
-            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            ORIGINAL_SENDER_KEY: "@user:localhost",
-            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
-        },
+        "content": signed_relay_content(
+            {
+                "msgtype": "m.text",
+                "body": "check my calendar",
+                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+            },
+            bot.config,
+        ),
     }
     await _admit_pending_thread_event(bot, marked_helper_relay_source)
     pending_turns = _watch_pending_turns(bot)
@@ -6649,6 +6671,7 @@ async def test_gate_final_envelope_preserves_raw_trusted_relay_source_kind(tmp_p
         sender="@mindroom_test_agent:localhost",
         source_kind=None,
         original_sender="@external:example.org",
+        config=bot.config,
     )
 
     envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
@@ -6671,6 +6694,7 @@ async def test_trusted_router_relay_context_uses_handoff_ingress_metadata(tmp_pa
         body="router relay",
         sender="@mindroom_router:localhost",
         original_sender="@external:example.org",
+        config=bot.config,
     )
     trusted_context = MessageContext(
         am_i_mentioned=False,
@@ -6723,6 +6747,7 @@ async def test_gate_final_envelope_preserves_hook_metadata_with_original_sender(
         sender="@mindroom_test_agent:localhost",
         source_kind="hook_dispatch",
         original_sender="@requester:localhost",
+        config=bot.config,
     )
 
     envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
@@ -6771,6 +6796,7 @@ async def test_automation_and_relay_source_kinds_dispatch_solo_with_human_neighb
         sender="@mindroom_test_agent:localhost",
         source_kind=source_kind,
         original_sender="@requester:localhost",
+        config=bot.config,
     )
     human = _text_event(event_id="$human", body="human turn", sender="@requester:localhost", server_timestamp=1001)
 
