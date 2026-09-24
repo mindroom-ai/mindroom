@@ -146,6 +146,8 @@ Matrix sync callback
 | `custom_tools/matrix_message_idempotency.py` | Bounded durable keyed Matrix sends: preparation, receipts, retention, replay, and current authorization checks |
 | `personal_room_lifecycle.py` | Personal-room command and membership policy, target-service routing, reconciliation, and separate rejoin/cleanup retention projections |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
+| `file_access.py` | Agent `file_access` resolution and the shared path authorization every path-taking tool opens files through |
+| `orchestration/config_warnings.py` | Startup and reload warnings for risky but allowed config choices (foreign homeserver authorities, unrestricted file access next to worker code tools) |
 | `tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval_execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
 | `approval_tools.py` | Recorded toolkit restoration and exact owner validation for saved approvals |

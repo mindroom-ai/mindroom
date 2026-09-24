@@ -1646,7 +1646,7 @@ def test_resolve_entrypoint_builds_coding_with_routing_agent_file_access(
     routing_agent_name: str,
     restrict_to_base_dir: bool,
 ) -> None:
-    """Worker-side coding rebuilds follow the routing agent's file_access; unknown agents stay confined."""
+    """Worker-side coding rebuilds follow the routing agent's file_access; unknown agents inherit the default."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         (

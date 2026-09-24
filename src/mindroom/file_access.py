@@ -33,8 +33,8 @@ class AuthorizedFile:
 
 
 def agent_file_access(config: Config | None, agent_name: str | None) -> FileAccess:
-    """Resolve one agent's file_access; anything unknown stays confined to the workspace."""
-    if config is None or agent_name is None or agent_name not in config.agents:
+    """Resolve one agent's file_access; without an agent the configured default applies, without config ``workspace``."""
+    if config is None:
         return "workspace"
     return config.resolve_entity(agent_name).file_access
 

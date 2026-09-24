@@ -16,7 +16,7 @@ from uuid import uuid4
 from agno.media import Image
 
 from mindroom.file_access import resolve_agent_file
-from mindroom.path_confinement import open_regular_file_within_root, resolve_path_within_root
+from mindroom.path_confinement import open_regular_file_within_root
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -136,36 +136,13 @@ def _read_image_within_root(root: Path, relative: Path) -> bytes:
         return file.read(MAX_SOURCE_BYTES + 1)
 
 
-def _view_workspace_image(path: str, *, workspace: Path) -> ToolResult:
-    """Read one regular image confined to an already-authorized workspace."""
-    metadata: dict[str, object] = {"path": path}
-    if not isinstance(path, str) or not path.strip():
-        return media_error("path must be a non-empty string.", metadata=metadata)
-    try:
-        root = workspace.resolve(strict=True)
-        resolved = resolve_path_within_root(root, path, symlinks="internal", strict=True)
-        relative = resolved.relative_to(root)
-        if not relative.parts:
-            return media_error("Image path must name a regular file.", metadata=metadata)
-        metadata["path"] = relative.as_posix()
-        data = _read_image_within_root(root, relative)
-    except ValueError as exc:
-        return media_error(str(exc), metadata=metadata)
-    except (OSError, RuntimeError):
-        return media_error(
-            "Image file is missing, inaccessible, or outside the authorized workspace.",
-            metadata=metadata,
-        )
-    return image_result(data, metadata=metadata)
-
-
 def view_agent_image(path: str, *, workspace: Path | None, file_access: FileAccess) -> ToolResult:
     """Read one regular image under the agent's file access, resolving relative paths from the workspace."""
     metadata: dict[str, object] = {"path": path}
-    if file_access == "workspace":
-        if workspace is None:
-            return media_error("An authorized workspace is required for path viewing.", metadata=metadata)
-        return _view_workspace_image(path, workspace=workspace)
+    if not isinstance(path, str) or not path.strip():
+        return media_error("path must be a non-empty string.", metadata=metadata)
+    if file_access == "workspace" and workspace is None:
+        return media_error("An authorized workspace is required for path viewing.", metadata=metadata)
     try:
         authorized = resolve_agent_file(
             path,
@@ -173,10 +150,13 @@ def view_agent_image(path: str, *, workspace: Path | None, file_access: FileAcce
             file_access=file_access,
             field_name="Image path",
         )
-        metadata["path"] = str(authorized.path)
+        metadata["path"] = authorized.relative.as_posix() if file_access == "workspace" else str(authorized.path)
         data = _read_image_within_root(authorized.root, authorized.relative)
     except ValueError as exc:
         return media_error(str(exc), metadata=metadata)
     except OSError:
-        return media_error("Image file is missing or inaccessible.", metadata=metadata)
+        return media_error(
+            "Image file is missing, inaccessible, or outside the authorized workspace.",
+            metadata=metadata,
+        )
     return image_result(data, metadata=metadata)

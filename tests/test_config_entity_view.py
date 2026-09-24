@@ -313,3 +313,10 @@ def test_file_access_global_default_is_inherited() -> None:
 def test_file_access_rejects_unknown_values() -> None:
     with pytest.raises(ValueError, match="file_access"):
         Config.model_validate({"defaults": {"file_access": "readonly"}})
+
+
+def test_file_access_unknown_entity_names_inherit_the_default() -> None:
+    config = Config.model_validate(
+        {"defaults": {"file_access": "unrestricted"}, "agents": {"plain": {"display_name": "Plain"}}},
+    )
+    assert config.resolve_entity("not-configured").file_access == "unrestricted"

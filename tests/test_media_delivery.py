@@ -182,3 +182,18 @@ def test_path_view_rejects_symlink_swap_during_open(tmp_path: Path, monkeypatch:
     result = media_delivery.view_agent_image("image.png", workspace=workspace, file_access="workspace")
     assert not result.images
     assert json.loads(result.content)["view_status"] == "error"
+
+
+def test_path_view_refuses_workspace_root_replaced_by_link(tmp_path: Path) -> None:
+    """A workspace root swapped for a link after binding must not expose the link's target."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "image.png").write_bytes(image_bytes())
+    workspace.rmdir()
+    workspace.symlink_to(outside, target_is_directory=True)
+
+    result = media_delivery.view_agent_image("image.png", workspace=workspace, file_access="workspace")
+
+    assert not result.images

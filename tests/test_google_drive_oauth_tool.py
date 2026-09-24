@@ -20,6 +20,7 @@ from agno.models.response import ModelResponse
 from agno.tools.function import Function
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
+import mindroom.custom_tools.google_drive as google_drive_module
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
 from mindroom.config.main import Config
@@ -32,6 +33,8 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
+    from typing import BinaryIO
+
     from mindroom.config.models import FileAccess
 
 
@@ -162,9 +165,9 @@ class _FakeMediaIoBaseDownload:
         return None, self._done
 
 
-class _FakeMediaFileUpload:
-    def __init__(self, filename: str, *, mimetype: str) -> None:
-        self.filename = filename
+class _FakeMediaIoBaseUpload:
+    def __init__(self, file: BinaryIO, *, mimetype: str) -> None:
+        self.content = file.read()
         self.mimetype = mimetype
 
 
@@ -193,7 +196,7 @@ def _google_drive_write_tool(
     monkeypatch: pytest.MonkeyPatch,
     file_access: FileAccess = "workspace",
 ) -> tuple[GoogleDriveTools, _FakeDriveService, Path]:
-    monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaFileUpload", _FakeMediaFileUpload)
+    monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaIoBaseUpload", _FakeMediaIoBaseUpload)
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     tool = GoogleDriveTools(
@@ -864,8 +867,8 @@ def test_google_drive_upload_resolves_workspace_path_and_sets_metadata(
     assert result["id"] == "created-id"
     assert service.files_resource.create_kwargs is not None
     media = service.files_resource.create_kwargs["media_body"]
-    assert isinstance(media, _FakeMediaFileUpload)
-    assert Path(media.filename) == upload_path
+    assert isinstance(media, _FakeMediaIoBaseUpload)
+    assert media.content == upload_path.read_bytes()
     assert media.mimetype == "text/custom"
     assert service.files_resource.create_kwargs == {
         "body": {"name": "Launch plan.txt", "parents": ["folder-id"]},
@@ -913,8 +916,8 @@ def test_google_drive_update_replaces_binary_file_content(
     }
     assert service.files_resource.update_kwargs is not None
     media = service.files_resource.update_kwargs["media_body"]
-    assert isinstance(media, _FakeMediaFileUpload)
-    assert Path(media.filename) == replacement
+    assert isinstance(media, _FakeMediaIoBaseUpload)
+    assert media.content == replacement.read_bytes()
     assert media.mimetype == "text/markdown"
     assert service.files_resource.update_kwargs == {
         "fileId": "file-id",
@@ -978,14 +981,14 @@ def test_google_drive_upload_outside_workspace_follows_file_access(
         return
     assert result["id"] == "created-id"
     assert service.files_resource.create_kwargs is not None
-    assert Path(service.files_resource.create_kwargs["media_body"].filename) == outside_path.resolve()
+    assert service.files_resource.create_kwargs["media_body"].content == b"private"
 
 
 def test_google_drive_upload_requires_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaFileUpload", _FakeMediaFileUpload)
+    monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaIoBaseUpload", _FakeMediaIoBaseUpload)
     outside_path = tmp_path / "outside.txt"
     outside_path.write_text("private")
     tool = GoogleDriveTools(
@@ -1449,3 +1452,29 @@ def test_google_drive_download_preserves_existing_export_extension(
         "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     }
     assert service.files_resource.get_media_kwargs is None
+
+
+def test_google_drive_upload_refuses_file_swapped_for_link_after_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker code swapping the checked workspace file for a link must not redirect the upload."""
+    tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+    checked = workspace_root / "plan.txt"
+    checked.write_text("plan")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("private")
+    resolve = google_drive_module.resolve_agent_file
+
+    def resolve_then_swap(*args: object, **kwargs: object) -> object:
+        authorized = resolve(*args, **kwargs)
+        checked.unlink()
+        checked.symlink_to(secret)
+        return authorized
+
+    monkeypatch.setattr(google_drive_module, "resolve_agent_file", resolve_then_swap)
+
+    result = json.loads(tool.upload_file("plan.txt"))
+
+    assert "error" in result
+    assert service.files_resource.create_kwargs is None

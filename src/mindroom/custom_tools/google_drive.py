@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
+import os
+from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, cast
@@ -16,11 +18,11 @@ from google.auth.credentials import CredentialsWithQuotaProject
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaIoBaseUpload
 
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
-from mindroom.file_access import resolve_agent_file
+from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.credential_lifecycle import oauth_credentials_have_scopes
@@ -33,12 +35,16 @@ from mindroom.oauth.service import (
     OAUTH_MISSING_WRITE_SCOPE_REASON,
     oauth_connection_required,
 )
-from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
+from mindroom.path_confinement import (
+    open_directory_within_root,
+    open_regular_file_within_root,
+    resolve_path_within_root,
+)
 from mindroom.tool_system.metadata import coerce_optional_finite_number
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
@@ -98,6 +104,16 @@ def _download_target_path(workspace_root: Path, filename: str, extension: str) -
     except ValueError:
         return None
     return target_path
+
+
+@contextmanager
+def _open_upload_media(authorized: AuthorizedFile, mime_type: str) -> Iterator[MediaIoBaseUpload]:
+    """Stream the authorized file as an upload body, opened without following links swapped in after the check."""
+    with (
+        open_regular_file_within_root(authorized.root, authorized.relative) as descriptor,
+        os.fdopen(descriptor, "rb", closefd=False) as file,
+    ):
+        yield MediaIoBaseUpload(file, mimetype=mime_type)
 
 
 class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGoogleDriveTools):
@@ -259,13 +275,13 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             msg = "Google Drive max_read_size must be a number"
             raise ValueError(msg) from exc
 
-    def _resolve_upload_path(self, local_path: str) -> Path:
+    def _resolve_upload_file(self, local_path: str) -> AuthorizedFile:
         return resolve_agent_file(
             local_path,
             workspace_root=self._workspace_root,
             file_access=self._file_access,
             field_name="Google Drive local_path",
-        ).path
+        )
 
     def _download_guidance(self) -> str:
         if "google_drive_download_file" in self.functions:
@@ -282,26 +298,28 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
     ) -> str:
         """Upload one local file, resolving relative paths from the agent workspace."""
         try:
-            path = self._resolve_upload_path(local_path)
+            authorized = self._resolve_upload_file(local_path)
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
 
+        path = authorized.path
         resolved_mime_type = mime_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         body: dict[str, object] = {"name": name or path.name}
         if folder_id:
             body["parents"] = [folder_id]
         try:
             service = cast("Any", self.service)
-            uploaded_file = (
-                service.files()
-                .create(
-                    body=body,
-                    media_body=MediaFileUpload(str(path), mimetype=resolved_mime_type),
-                    fields=_WRITE_RESULT_FIELDS,
-                    supportsAllDrives=True,
+            with _open_upload_media(authorized, resolved_mime_type) as media_body:
+                uploaded_file = (
+                    service.files()
+                    .create(
+                        body=body,
+                        media_body=media_body,
+                        fields=_WRITE_RESULT_FIELDS,
+                        supportsAllDrives=True,
+                    )
+                    .execute()
                 )
-                .execute()
-            )
             return json.dumps(uploaded_file)
         except HttpError as exc:
             return json.dumps({"error": f"Google Drive API error: {exc}"})
@@ -329,7 +347,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
     def update_file(self, file_id: str, local_path: str, mime_type: str | None = None) -> str:
         """Replace the contents of one binary Drive file from the agent workspace."""
         try:
-            path = self._resolve_upload_path(local_path)
+            authorized = self._resolve_upload_file(local_path)
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
 
@@ -345,18 +363,21 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                         ),
                     },
                 )
-            resolved_mime_type = mime_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-            service = cast("Any", self.service)
-            updated_file = (
-                service.files()
-                .update(
-                    fileId=file_id,
-                    media_body=MediaFileUpload(str(path), mimetype=resolved_mime_type),
-                    fields=_WRITE_RESULT_FIELDS,
-                    supportsAllDrives=True,
-                )
-                .execute()
+            resolved_mime_type = (
+                mime_type or mimetypes.guess_type(authorized.path.name)[0] or "application/octet-stream"
             )
+            service = cast("Any", self.service)
+            with _open_upload_media(authorized, resolved_mime_type) as media_body:
+                updated_file = (
+                    service.files()
+                    .update(
+                        fileId=file_id,
+                        media_body=media_body,
+                        fields=_WRITE_RESULT_FIELDS,
+                        supportsAllDrives=True,
+                    )
+                    .execute()
+                )
             return json.dumps(updated_file)
         except HttpError as exc:
             return json.dumps({"error": f"Google Drive API error: {exc}"})

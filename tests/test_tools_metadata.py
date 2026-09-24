@@ -1376,7 +1376,7 @@ def _file_access_worker_target(agent_name: str) -> ResolvedWorkerTarget:
 
 
 def test_get_tool_by_name_passes_agent_file_access(tmp_path: Path) -> None:
-    """The managed file_access arg resolves the constructing agent's setting; unknowns stay confined."""
+    """The managed file_access arg resolves the constructing agent's setting; unknown agents inherit the default and no config stays confined."""
     tool_name = "test_file_access_tool"
 
     class FileAccessToolkit(Toolkit):
@@ -1425,8 +1425,8 @@ def test_get_tool_by_name_passes_agent_file_access(tmp_path: Path) -> None:
         assert build(config, _file_access_worker_target("admin")) == "unrestricted"
         assert build(config, _file_access_worker_target("plain")) == "workspace"
         assert build(None, _file_access_worker_target("admin")) == "workspace"
-        assert build(config, None) == "workspace"
-        assert build(config, _file_access_worker_target("stranger")) == "workspace"
+        assert build(config, None) == "unrestricted"
+        assert build(config, _file_access_worker_target("stranger")) == "unrestricted"
     finally:
         TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)

@@ -479,12 +479,12 @@ class AttachmentTools(Toolkit):
             )
         else:
             assert path is not None
-            result = await self._view_workspace_image(context, path)
+            result = await self._view_path_image(context, path)
         finalized = await asyncio.to_thread(finalize_tool_media, result)
         assert isinstance(finalized, ToolResult)
         return finalized
 
-    async def _view_workspace_image(self, context: ToolRuntimeContext, path: str) -> ToolResult:
+    async def _view_path_image(self, context: ToolRuntimeContext, path: str) -> ToolResult:
         runtime_paths = self._runtime_paths or context.runtime_paths
         metadata: dict[str, object] = {"tool": "view_file", "path": path}
         if attachment_save_uses_worker(runtime_paths=runtime_paths, worker_tools_override=self._worker_tools_override):

@@ -61,6 +61,12 @@ Do not report or "fix" these; they are deliberate.
 - `mindroom_output_path`, attachment saves, Google Drive downloads, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 
+## Known gaps
+
+These are real gaps that are tracked, not intentional behaviors; fix them rather than documenting around them.
+
+- `register_attachment` stores a reference to the registered file and later reads reopen `record.local_path` by pathname, so worker code that swaps a registered workspace file for a link can redirect a later read; the complete fix copies the file into attachment storage at registration.
+
 ## Reviewing security findings
 
 Classify every finding before proposing a change.
