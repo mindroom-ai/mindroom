@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.custom_tools.todo_poke import (
     TodoPokeDeliveryUnavailableError,
@@ -29,6 +30,7 @@ from mindroom.scheduling import get_pending_schedule_thread_ids_for_room
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -44,6 +46,7 @@ class TodoPokeRuntimeCoordinator:
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], AgentBot | TeamBot | None]
+    agent_reply_memberships: AgentReplyMembershipIndex
     _worker: TodoPokeWorker | None = field(default=None, init=False)
     _task: asyncio.Task | None = field(default=None, init=False)
 
@@ -149,8 +152,8 @@ class TodoPokeRuntimeCoordinator:
             return None
         return await get_pending_schedule_thread_ids_for_room(agent_bot.client, room_id)
 
-    def _requester_kind(self, requester_id: str) -> TodoPokeRequesterKind:
-        """Classify a recorded todo requester under the current config."""
+    def _requester_kind(self, requester_id: str, agent_name: str, room_id: str) -> TodoPokeRequesterKind:
+        """Classify a recorded todo requester for one assignee and room under the current config."""
         config = self.config_provider()
         if config is None:
             raise TodoPokeDeliveryUnavailableError
@@ -162,9 +165,21 @@ class TodoPokeRuntimeCoordinator:
         if requester_id in internal_sender_ids:
             return TodoPokeRequesterKind.INTERNAL
         # Ingress promotes only a human original sender to requester; any other sender would run with the assignee's authority.
-        if is_human_requester_id(requester_id, config, self.runtime_paths):
+        # Ingress also refuses a human the assignee may not reply to, so such work would only take poke slots.
+        if (
+            is_human_requester_id(requester_id, config, self.runtime_paths)
+            and agent_name in config.agents
+            and is_sender_allowed_for_responder(
+                requester_id,
+                agent_name,
+                room_id,
+                config,
+                self.runtime_paths,
+                self.agent_reply_memberships,
+            )
+        ):
             return TodoPokeRequesterKind.HUMAN
-        return TodoPokeRequesterKind.UNSUPPORTED
+        return TodoPokeRequesterKind.REFUSED
 
     async def _send_poke(
         self,

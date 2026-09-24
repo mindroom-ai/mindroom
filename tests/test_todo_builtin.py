@@ -10,8 +10,6 @@ import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.team.team import Team as AgnoTeam
 
-# Import before the autouse authorization bypass patches run, so the tool binds the real access check.
-import mindroom.custom_tools.todo
 import mindroom.tools  # noqa: F401
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
@@ -763,6 +761,21 @@ todos:
     items = _read_todos(config)["items"]
     assert [(item["title"], item["assigned_agent"]) for item in items] == [("Own work", "code")]
     assert items[0]["requester_id"] == "@attacker:localhost"
+
+
+@pytest.mark.usefixtures("enforce_turn_authorization")
+def test_todo_plan_refuses_default_assignee_the_requester_cannot_address(tmp_path: Path) -> None:
+    """A plan for a member whose own access is narrower than its caller's is refused for that requester."""
+    config = _restricted_config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+
+    with tool_runtime_context(_tool_context(config, requester_id="@attacker:localhost")):
+        result = tool.plan(agent=AgnoAgent(name="Secret", id="secret"), tasks="Exfiltrate secrets")
+
+    assert result == (
+        "Cannot give or change todo work for 'secret': that agent is not allowed to reply to you in this room."
+    )
+    assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
 
 
 @pytest.mark.usefixtures("enforce_turn_authorization")

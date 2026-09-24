@@ -2456,6 +2456,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.orchestration.todo_poke_runtime"
 depends_on = [
+    "mindroom.authorization",
     "mindroom.constants",
     "mindroom.custom_tools.todo_poke",
     "mindroom.custom_tools.todo_state",

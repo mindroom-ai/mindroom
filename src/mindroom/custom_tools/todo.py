@@ -855,6 +855,7 @@ class TodoTools(Toolkit):
                 if unauthorized_agent is not None:
                     return no_write(unauthorized_agent)
             # A kept title stays attributed to its author, who must also be allowed to address a new assignee.
+            # A legacy item has no author yet; the write below records the current requester, whose access is checked above.
             title_author = item.get("requester_id")
             if not clean_title and title_author is not None and not _may_address(title_author, new_agent):
                 return no_write(
@@ -893,7 +894,12 @@ class TodoTools(Toolkit):
             if not changes:
                 return no_write("No fields to update.")
 
-            # Writing a title makes the current requester its author; any write adopts an item that has none yet.
+            # Writing a title makes the current requester its author.
+            # LEGACY_COMPAT: Todo items without a recorded requester_id, adopted on their next write.
+            # Legacy format: A native `todos.json` item with no `requester_id` key.
+            # Last legacy release: v2026.9.292; replacement: the next release records the title author's `requester_id` on every item it writes.
+            # Handling: Any successful update records the current requester, after the access checks above, so unattributed text cannot reach a newly assigned agent as that agent's internal turn; the None guard above skips the title-author check that the adoption replaces.
+            # Coverage: tests/test_todo_builtin.py::test_todo_write_records_requester_on_legacy_item.
             if clean_title or title_author is None:
                 item["requester_id"] = requester_id
             item["updated_at"] = now

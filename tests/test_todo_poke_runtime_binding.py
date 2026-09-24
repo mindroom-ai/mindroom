@@ -83,6 +83,7 @@ def _coordinator(
         runtime_paths=runtime_paths,
         config_provider=lambda: config,
         bot_provider=bots.get,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
     )
 
 
@@ -192,19 +193,26 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.usefixtures("enforce_turn_authorization")
 def test_requester_kind_follows_current_config(tmp_path: Path) -> None:
-    """Humans keep their identity, internal senders run as the assignee, and any other sender is unsupported."""
+    """Allowed humans keep their identity, internal senders run as the assignee, and any other requester is refused."""
     config = _restricted_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
     coordinator = _coordinator(runtime_paths, config, {})
 
-    assert coordinator._requester_kind("@alice:localhost") is TodoPokeRequesterKind.HUMAN
-    assert coordinator._requester_kind("@mallory:localhost") is TodoPokeRequesterKind.HUMAN
-    assert coordinator._requester_kind(ids["code"].full_id) is TodoPokeRequesterKind.INTERNAL
-    assert coordinator._requester_kind(ids["router"].full_id) is TodoPokeRequesterKind.INTERNAL
-    assert coordinator._requester_kind(mindroom_user_id(config, runtime_paths) or "") is TodoPokeRequesterKind.INTERNAL
-    assert coordinator._requester_kind("@bridge:localhost") is TodoPokeRequesterKind.UNSUPPORTED
+    def kind(requester_id: str | None, agent_name: str = "secret") -> TodoPokeRequesterKind:
+        assert requester_id is not None
+        return coordinator._requester_kind(requester_id, agent_name, "!room:localhost")
+
+    assert kind("@alice:localhost") is TodoPokeRequesterKind.HUMAN
+    # A human the assignee no longer replies to would only have the poke ignored at ingress.
+    assert kind("@mallory:localhost") is TodoPokeRequesterKind.REFUSED
+    assert kind("@alice:localhost", "removed") is TodoPokeRequesterKind.REFUSED
+    assert kind(ids["code"].full_id) is TodoPokeRequesterKind.INTERNAL
+    assert kind(ids["router"].full_id) is TodoPokeRequesterKind.INTERNAL
+    assert kind(mindroom_user_id(config, runtime_paths)) is TodoPokeRequesterKind.INTERNAL
+    assert kind("@bridge:localhost") is TodoPokeRequesterKind.REFUSED
 
     with (
         patch(
@@ -213,9 +221,9 @@ def test_requester_kind_follows_current_config(tmp_path: Path) -> None:
         ),
         pytest.raises(TodoPokeDeliveryUnavailableError),
     ):
-        coordinator._requester_kind("@alice:localhost")
+        kind("@alice:localhost")
     with pytest.raises(TodoPokeDeliveryUnavailableError):
-        _coordinator(runtime_paths, None, {})._requester_kind("@alice:localhost")
+        _coordinator(runtime_paths, None, {})._requester_kind("@alice:localhost", "secret", "!room:localhost")
 
 
 @pytest.mark.asyncio
@@ -613,3 +621,4 @@ def test_orchestrator_composes_live_coordinator_providers(tmp_path: Path) -> Non
     orchestrator.agent_bots["code"] = sentinel
     assert coordinator.bot_provider("code") is sentinel
     assert coordinator.bot_provider("missing") is None
+    assert coordinator.agent_reply_memberships is orchestrator.agent_reply_memberships
