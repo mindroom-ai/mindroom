@@ -478,10 +478,24 @@ async def _provision_openrouter_key(
     return created_key.key
 
 
+def _require_instance_dashboard_auth() -> None:
+    """Refuse to provision a tenant whose dashboard would be served without authentication."""
+    trusted_upstream_enabled = INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED.strip().lower() in {"1", "true", "yes", "on"}
+    if trusted_upstream_enabled or (SUPABASE_URL and SUPABASE_ANON_KEY):
+        return
+    msg = (
+        "Instance provisioning is disabled: SUPABASE_URL and SUPABASE_ANON_KEY must both be configured "
+        "(or trusted upstream auth enabled) so provisioned tenant dashboards require authentication"
+    )
+    logger.error(msg)
+    raise HTTPException(status_code=503, detail=msg)
+
+
 async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     sb: Any, *, data: dict, background_tasks: BackgroundTasks | None
 ) -> dict[str, Any]:
     """Provision (or re-provision) a tenant instance and return the portal response payload."""
+    _require_instance_dashboard_auth()
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
     tier = data.get("tier", "free")

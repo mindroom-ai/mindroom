@@ -177,3 +177,12 @@ def reset_limiter():
     _mock_limiter.reset()
     yield
     _mock_limiter.reset()
+
+
+@pytest.fixture(autouse=True)
+def configured_instance_dashboard_auth(monkeypatch):
+    """Provisioning tests run on a platform whose tenant dashboards can authenticate users."""
+    from backend.services import provisioner_service
+
+    monkeypatch.setattr(provisioner_service, "SUPABASE_URL", "https://supabase.test")
+    monkeypatch.setattr(provisioner_service, "SUPABASE_ANON_KEY", "test-anon-key")

@@ -16,7 +16,12 @@ from mindroom import constants, file_watcher
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import ApiAuthState, public_origin, verify_user  # noqa: F401
+from mindroom.api.auth import (  # noqa: F401
+    ApiAuthState,
+    public_origin,
+    report_dashboard_auth_configuration,
+    verify_user,
+)
 from mindroom.api.auth import router as auth_router
 from mindroom.api.computers import active_computer_worker_keys, rebind_computer_runtime
 from mindroom.api.computers import router as computers_router
@@ -314,6 +319,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     """Initialize one API app instance with explicit runtime-bound state."""
     app_state = config_lifecycle.ensure_app_state(api_app)
     app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
+    report_dashboard_auth_configuration(runtime_paths, app_state.api_auth_account_id)
     previous_state = app_state.api_state
     if previous_state is None:
         app_state.thread_export_runner = None

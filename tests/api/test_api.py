@@ -248,11 +248,54 @@ class _ContextSwapLock:
 
 
 def test_init_supabase_auth_returns_none_without_credentials(tmp_path: Path) -> None:
-    """Supabase auth should stay disabled when credentials are incomplete."""
+    """No Supabase client can be built from incomplete credentials; the mode decision is separate."""
     runtime_paths = _runtime_paths(tmp_path)
     assert auth._init_supabase_auth(runtime_paths, None, None) is None
     assert auth._init_supabase_auth(runtime_paths, "https://supabase.test", None) is None
     assert auth._init_supabase_auth(runtime_paths, None, "anon-key") is None
+    # A missing client must never be read as "no hosted auth configured".
+    for partial_env in ({"SUPABASE_URL": "https://supabase.test"}, {"SUPABASE_ANON_KEY": "anon-key"}):
+        settings = auth._build_auth_settings(_runtime_paths(tmp_path, process_env=partial_env))
+        assert auth.hosted_auth_configuration_error(settings) is not None
+
+
+@pytest.mark.parametrize(
+    ("process_env", "account_id"),
+    [
+        ({}, None),
+        ({"SUPABASE_URL": "https://supabase.test", "SUPABASE_ANON_KEY": "anon-key"}, "account-123"),
+        ({"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true", "MINDROOM_PLATFORM_LOGIN_URL": "https://app/login"}, None),
+    ],
+)
+def test_hosted_auth_configuration_error_accepts_complete_setups(
+    tmp_path: Path,
+    process_env: dict[str, str],
+    account_id: str | None,
+) -> None:
+    """A runtime with no hosted indicators, a full Supabase pair, or trusted upstream is complete."""
+    settings = auth._build_auth_settings(_runtime_paths(tmp_path, process_env=process_env), account_id=account_id)
+    assert auth.hosted_auth_configuration_error(settings) is None
+
+
+@pytest.mark.parametrize(
+    ("process_env", "account_id"),
+    [
+        ({"SUPABASE_URL": "https://supabase.test"}, None),
+        ({"SUPABASE_ANON_KEY": "anon-key"}, None),
+        ({"MINDROOM_PLATFORM_LOGIN_URL": "https://app.example.com/auth/login"}, None),
+        ({}, "account-123"),
+        # An operator key must not excuse an incomplete hosted configuration either.
+        ({"SUPABASE_URL": "https://supabase.test", "MINDROOM_API_KEY": "operator-key"}, None),
+    ],
+)
+def test_hosted_auth_configuration_error_flags_partial_setups(
+    tmp_path: Path,
+    process_env: dict[str, str],
+    account_id: str | None,
+) -> None:
+    """Any hosted indicator without a usable Supabase pair must be reported as misconfigured."""
+    settings = auth._build_auth_settings(_runtime_paths(tmp_path, process_env=process_env), account_id=account_id)
+    assert "SUPABASE_ANON_KEY" in (auth.hosted_auth_configuration_error(settings) or "")
 
 
 def test_init_supabase_auth_raises_when_auto_install_disabled(
@@ -5296,6 +5339,60 @@ def test_api_key_keeps_oauth_callbacks_open(
     response = api_key_client.get(path)
     assert response.status_code == 400
     assert "OAuth state is invalid or expired" in response.json()["detail"]
+
+
+def _use_incomplete_hosted_auth_runtime(hosted_env: dict[str, str]) -> None:
+    """Reinitialize the API app with a partial hosted-auth environment and no operator key."""
+    runtime_paths = main._app_runtime_paths(main.app)
+    main.initialize_api_app(
+        main.app,
+        constants.resolve_primary_runtime_paths(
+            config_path=runtime_paths.config_path,
+            storage_path=runtime_paths.storage_root,
+            process_env={**dict(runtime_paths.process_env), **hosted_env},
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "hosted_env",
+    [
+        {"SUPABASE_URL": "https://supabase.test"},
+        {"SUPABASE_ANON_KEY": "anon-key"},
+        {"MINDROOM_PLATFORM_LOGIN_URL": "https://app.example.com/auth/login"},
+        {"ACCOUNT_ID": "account-123"},
+    ],
+)
+def test_incomplete_hosted_auth_refuses_admin_api_without_credentials(
+    test_client: TestClient,
+    hosted_env: dict[str, str],
+) -> None:
+    """A partial hosted configuration must fail closed, never grant the standalone administrator."""
+    _use_incomplete_hosted_auth_runtime(hosted_env)
+
+    saved = test_client.put("/api/config/save", json={"agents": {}}, headers={"Origin": "http://testserver"})
+    credential = test_client.get("/api/credentials/openai/api-key?include_value=true")
+
+    assert saved.status_code == 503
+    assert "SUPABASE_ANON_KEY" in saved.json()["detail"]
+    assert credential.status_code == 503
+
+
+def test_incomplete_hosted_auth_does_not_serve_dashboard(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A partially configured hosted runtime must not serve the dashboard shell unauthenticated."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    _use_incomplete_hosted_auth_runtime({"SUPABASE_URL": "https://supabase.test"})
+
+    response = test_client.get("/agents", follow_redirects=False)
+
+    assert response.status_code == 503
 
 
 def _set_platform_auth(

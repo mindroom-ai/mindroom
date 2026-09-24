@@ -11,11 +11,24 @@
 {{- $trustedUpstreamAuthEnabled := has $trustedUpstreamAuthEnabledValue (list "1" "true" "yes" "on") -}}
 {{- $trustedUpstreamRequireJwtValue := lower (toString ($trustedUpstreamAuth.requireJwt | default false)) -}}
 {{- $trustedUpstreamRequireJwt := has $trustedUpstreamRequireJwtValue (list "1" "true" "yes" "on") -}}
+{{- $supabaseUrl := .Values.supabaseUrl | default "" | toString -}}
+{{- $supabaseAnonKey := .Values.supabaseAnonKey | default "" | toString -}}
+{{- $accountId := .Values.accountId | default "" | toString -}}
+{{- $supabaseAuthConfigured := and $supabaseUrl $supabaseAnonKey -}}
 {{- $instanceSecretName := include "mindroom.instanceSecretName" .Values -}}
 {{- $instanceSecretHash := include "mindroom.instanceSecretHash" .Values -}}
 {{- $configHash := printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" (.Values.customer | toString) (.Values.baseDomain | toString) (.Values.accountId | default "" | toString) (.Values.storagePath | toString) (.Values.workerBackend | default "static_runner" | toString) (.Values.supabaseUrl | default "" | toString) (.Values.supabaseAnonKey | default "" | toString) ($trustedUpstreamAuth.enabled | default "" | toString) ($trustedUpstreamAuth.userIdHeader | default "" | toString) ($trustedUpstreamAuth.emailHeader | default "" | toString) ($trustedUpstreamAuth.matrixUserIdHeader | default "" | toString) ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "" | toString) ($trustedUpstreamAuth.requireJwt | default "" | toString) ($trustedUpstreamAuth.jwtHeader | default "" | toString) ($trustedUpstreamAuth.jwksUrl | default "" | toString) ($trustedUpstreamAuth.jwtAudience | default "" | toString) ($trustedUpstreamAuth.jwtIssuer | default "" | toString) ($trustedUpstreamAuth.jwtEmailClaim | default "email" | toString) ($trustedUpstreamAuth.jwtUserIdClaim | default "" | toString) ($trustedUpstreamAuth.jwtMatrixUserIdClaim | default "" | toString) (.Values.administrators | default (list) | toJson) (.Values.roomDefaults | default (dict) | toJson) ($trustedUpstreamAuth.emailDomain | default "" | toString) | sha256sum -}}
 {{- if and (eq $workerBackend "kubernetes") (ne $storageAccessMode "ReadWriteMany") (eq $controlPlaneNodeName "") -}}
 {{- fail "workerBackend=kubernetes with shared storage requires either storageAccessMode=ReadWriteMany or controlPlaneNodeName to keep the control plane and workers on one node" -}}
+{{- end -}}
+{{- if and (or $supabaseUrl $supabaseAnonKey) (not $supabaseAuthConfigured) -}}
+{{- fail "supabaseUrl and supabaseAnonKey must be set together: a partial Supabase configuration leaves the instance dashboard without hosted authentication" -}}
+{{- end -}}
+{{- if and $supabaseAuthConfigured (not $accountId) -}}
+{{- fail "accountId is required when supabaseUrl and supabaseAnonKey are set" -}}
+{{- end -}}
+{{- if and $accountId (not $supabaseAuthConfigured) (not $trustedUpstreamAuthEnabled) -}}
+{{- fail "accountId requires either supabaseUrl and supabaseAnonKey or trustedUpstreamAuth.enabled=true, otherwise the instance dashboard has no authentication" -}}
 {{- end -}}
 {{- if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.userIdHeader | default "")) -}}
 {{- fail "trustedUpstreamAuth.userIdHeader is required when trustedUpstreamAuth.enabled=true" -}}
@@ -204,8 +217,10 @@ spec:
         {{- end }}
         {{- end }}
         {{- end }}
+        {{- if or $supabaseAuthConfigured $trustedUpstreamAuthEnabled }}
         - name: MINDROOM_PLATFORM_LOGIN_URL
           value: "https://app.{{ .Values.baseDomain }}/auth/login"
+        {{- end }}
         - name: OPENROUTER_API_KEY_FILE
           value: "/etc/secrets/openrouter_key"
         - name: GOOGLE_API_KEY_FILE

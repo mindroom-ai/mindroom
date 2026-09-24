@@ -3,8 +3,10 @@
 import base64
 from unittest.mock import MagicMock, patch
 
+import pytest
 from backend.openrouter import CreatedOpenRouterKey
 from backend.services import provisioner_service
+from fastapi import HTTPException
 
 
 class TestSecretDerivation:
@@ -127,3 +129,41 @@ class TestOpenRouterMetadataRoundTrip:
         assert provisioner_service._stored_openrouter_key_hash({}) is None
         assert provisioner_service._stored_openrouter_key_hash({"openrouter_key_hash": "   "}) is None
         assert provisioner_service._stored_openrouter_key_hash({"openrouter_key_hash": " h1 "}) == "h1"
+
+
+class TestInstanceDashboardAuthGuard:
+    """Tenant instances are never provisioned without a dashboard auth configuration."""
+
+    def test_incomplete_supabase_configuration_blocks_provisioning(self):
+        """A platform missing the anon key would provision unauthenticated tenant dashboards."""
+        with (
+            patch.multiple(
+                provisioner_service,
+                SUPABASE_URL="https://supabase.test",
+                SUPABASE_ANON_KEY="",
+                INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED="",
+            ),
+            pytest.raises(HTTPException) as err,
+        ):
+            provisioner_service._require_instance_dashboard_auth()
+
+        assert err.value.status_code == 503
+        assert "SUPABASE_ANON_KEY" in err.value.detail
+
+    def test_complete_auth_configurations_allow_provisioning(self):
+        """Either a full Supabase pair or trusted upstream auth is enough to provision."""
+        with patch.multiple(
+            provisioner_service,
+            SUPABASE_URL="https://supabase.test",
+            SUPABASE_ANON_KEY="anon-key",
+            INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED="",
+        ):
+            provisioner_service._require_instance_dashboard_auth()
+
+        with patch.multiple(
+            provisioner_service,
+            SUPABASE_URL="",
+            SUPABASE_ANON_KEY="",
+            INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED="true",
+        ):
+            provisioner_service._require_instance_dashboard_auth()

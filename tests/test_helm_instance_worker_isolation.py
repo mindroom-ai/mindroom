@@ -271,6 +271,46 @@ def test_instance_chart_rejects_unsupported_worker_seccomp_profile() -> None:
     assert "kubernetesWorkerSeccompProfile" in completed.stderr
 
 
+@pytest.mark.parametrize(
+    ("set_args", "message"),
+    [
+        (("supabaseUrl=https://supabase.test", "accountId=account-123"), "must be set together"),
+        (("supabaseAnonKey=anon-key", "accountId=account-123"), "must be set together"),
+        (("supabaseUrl=https://supabase.test", "supabaseAnonKey=anon-key"), "accountId is required"),
+        (("accountId=account-123",), "accountId requires"),
+    ],
+)
+def test_instance_chart_rejects_incomplete_hosted_auth(set_args: tuple[str, ...], message: str) -> None:
+    """An instance that looks hosted but cannot authenticate anyone must not render."""
+    completed = _run_helm_template(Path("cluster/k8s/instance"), "customer=tenant42", *set_args)
+
+    assert completed.returncode != 0
+    assert message in completed.stderr
+
+
+def test_instance_chart_sets_platform_login_only_for_authenticated_instances() -> None:
+    """Hosted intent is only advertised when some dashboard auth mode can actually validate users."""
+
+    def _instance_env(*set_args: str) -> dict[str, dict[str, Any]]:
+        docs = _render_chart(Path("cluster/k8s/instance"), "customer=tenant42", "baseDomain=example.test", *set_args)
+        return _env_by_name(_container(_resource(docs, "Deployment", "mindroom-tenant42"), "mindroom"))
+
+    unauthenticated = _instance_env()
+    with_supabase = _instance_env(
+        "accountId=account-123",
+        "supabaseUrl=https://supabase.test",
+        "supabaseAnonKey=anon-key",
+    )
+    with_trusted_upstream = _instance_env(
+        "trustedUpstreamAuth.enabled=true",
+        "trustedUpstreamAuth.userIdHeader=X-Trusted-User",
+    )
+
+    assert "MINDROOM_PLATFORM_LOGIN_URL" not in unauthenticated
+    assert with_supabase["MINDROOM_PLATFORM_LOGIN_URL"]["value"] == "https://app.example.test/auth/login"
+    assert with_trusted_upstream["MINDROOM_PLATFORM_LOGIN_URL"]["value"] == "https://app.example.test/auth/login"
+
+
 def test_instance_chart_sets_public_url_for_oauth_redirects() -> None:
     """Hosted instances should derive OAuth callbacks from their public dashboard origin."""
     docs = _render_chart(

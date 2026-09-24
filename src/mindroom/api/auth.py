@@ -21,6 +21,7 @@ from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
 from mindroom.authorization import is_platform_administrator
+from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     matrix_user_id_from_email,
     try_parse_historical_matrix_user_id,
@@ -30,6 +31,8 @@ from mindroom.tool_system.dependencies import auto_install_enabled, auto_install
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+
+logger = get_logger(__name__)
 
 router = APIRouter(tags=["auth"])
 
@@ -141,25 +144,66 @@ class ApiAuthState:
     trusted_upstream_jwt_client: PyJWKClient | None = None
 
 
-def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None = None) -> _ApiAuthSettings:
-    """Read dashboard auth settings from one explicit runtime context."""
-    return _ApiAuthSettings(
-        platform_login_url=runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL"),
-        supabase_url=runtime_paths.env_value("SUPABASE_URL"),
-        supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
-        account_id=account_id,
-        mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
-        public_url=runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
-        trusted_upstream=_build_trusted_upstream_auth_settings(runtime_paths),
-    )
-
-
 def _env_text(runtime_paths: RuntimePaths, name: str) -> str | None:
     value = runtime_paths.env_value(name)
     if value is None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None = None) -> _ApiAuthSettings:
+    """Read dashboard auth settings from one explicit runtime context."""
+    return _ApiAuthSettings(
+        platform_login_url=_env_text(runtime_paths, "MINDROOM_PLATFORM_LOGIN_URL"),
+        supabase_url=_env_text(runtime_paths, "SUPABASE_URL"),
+        supabase_anon_key=_env_text(runtime_paths, "SUPABASE_ANON_KEY"),
+        account_id=(account_id or "").strip() or None,
+        mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
+        public_url=runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+        trusted_upstream=_build_trusted_upstream_auth_settings(runtime_paths),
+    )
+
+
+def hosted_auth_configuration_error(settings: _ApiAuthSettings) -> str | None:
+    """Return why hosted dashboard auth is configured but cannot authenticate anyone."""
+    if settings.trusted_upstream.enabled or (settings.supabase_url and settings.supabase_anon_key):
+        return None
+    configured = [
+        name
+        for name, value in (
+            ("SUPABASE_URL", settings.supabase_url),
+            ("SUPABASE_ANON_KEY", settings.supabase_anon_key),
+            ("MINDROOM_PLATFORM_LOGIN_URL", settings.platform_login_url),
+            ("ACCOUNT_ID", settings.account_id),
+        )
+        if value
+    ]
+    if not configured:
+        return None
+    return (
+        f"Hosted dashboard authentication is incomplete: {', '.join(configured)} is set but "
+        "SUPABASE_URL and SUPABASE_ANON_KEY are both required to validate dashboard users"
+    )
+
+
+def _require_complete_dashboard_auth(settings: _ApiAuthSettings) -> None:
+    """Refuse every request rather than downgrading a partial hosted setup to open access."""
+    configuration_error = hosted_auth_configuration_error(settings)
+    if configuration_error is not None:
+        raise HTTPException(status_code=503, detail=configuration_error)
+
+
+def report_dashboard_auth_configuration(runtime_paths: RuntimePaths, account_id: str | None) -> None:
+    """Log loudly at startup when hosted dashboard auth is configured but unusable."""
+    configuration_error = hosted_auth_configuration_error(
+        _build_auth_settings(runtime_paths, account_id=account_id),
+    )
+    if configuration_error is not None:
+        logger.error(
+            "Dashboard authentication is misconfigured - the API will reject every request until this is fixed",
+            detail=configuration_error,
+        )
 
 
 def _build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> _TrustedUpstreamAuthSettings:
@@ -955,6 +999,7 @@ async def authenticate_user(
     """Authenticate the request, enforcing account ownership and browser mutation origin."""
     snapshot = _bind_authenticated_request_snapshot(request)
     auth_state = cast("ApiAuthState", snapshot.auth_state)
+    _require_complete_dashboard_auth(auth_state.settings)
     mindroom_api_key = auth_state.settings.mindroom_api_key
     trusted_auth_user = await _trusted_upstream_auth_user(
         request,
