@@ -1161,6 +1161,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.knowledge.availability",
     "mindroom.knowledge.file_listing",
+    "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_locks",
     "mindroom.knowledge.refresh_runner",
@@ -4528,6 +4529,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.knowledge.file_listing"
 depends_on = [
+    "mindroom.git_invocation",
     "mindroom.knowledge.redaction",
     "mindroom.path_globs",
 ]
@@ -4590,9 +4592,11 @@ visibility = ["mindroom.knowledge.manager"]
 [[modules]]
 path = "mindroom.knowledge.git_source"
 depends_on = [
+    "mindroom.git_invocation",
     "mindroom.knowledge.file_listing",
     "mindroom.knowledge.github_app_auth",
     "mindroom.knowledge.redaction",
+    "mindroom.path_confinement",
 ]
 visibility = ["mindroom.knowledge.manager"]
 
@@ -4661,6 +4665,10 @@ depends_on = ["mindroom.git_urls"]
 
 [[modules]]
 path = "mindroom.git_urls"
+depends_on = []
+
+[[modules]]
+path = "mindroom.git_invocation"
 depends_on = []
 
 [[modules]]

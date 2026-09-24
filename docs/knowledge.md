@@ -310,11 +310,26 @@ MindRoom writes `repo_url` into the checkout's `origin` remote, so a network for
 
 Refused, with an error naming the reason: relative and home-relative paths (`./repo.git`, `../repo.git`, `~/repo.git`, `repo.git`), URLs with an empty authority (`https:///org/repo.git`), URLs whose separator is percent-encoded or written as a lookalike codepoint, and anything embedding a second URL.
 
-**Do not embed credentials in `repo_url`.** A password in a well-formed URL is stripped before the remote is written, so it never reaches `.git/config` — but it is still in your config file, and still handed to Git for every command.
+**Do not embed credentials in `repo_url`.** A password in a well-formed URL is stripped before the remote is written, so it never reaches the repository config — but it is still in your config file, and still handed to Git for every command.
 A password MindRoom cannot strip with confidence is refused outright rather than written: that covers forms where the scheme has been dropped, such as `oauth2:TOKEN@gitlab.com:org/repo.git` or `x-access-token:TOKEN@github.com/org/repo.git`.
 Use `credentials_service` instead: those credentials are passed to Git for the duration of one command and are never written to disk.
 
 If a checkout already holds a credential-bearing remote from before this check existed, the refusal cannot clean it — delete the checkout directory so the next sync clones afresh.
+
+#### Checkout layout
+
+The knowledge folder holds worktree files only; there is no `.git` inside it.
+The repository's Git directory lives at `<storage>/knowledge_git/<source key>`, which is control-plane state that no agent workspace or worker container can reach; bases that share a folder share it.
+That is deliberate: Git reads `core.fsmonitor`, `core.hooksPath`, `core.sshCommand`, credential helpers and content filters out of the repository it is pointed at, and runs them as the MindRoom process.
+A Git-backed base may live inside an agent workspace (`private.knowledge.git`, or a shared base rooted in a workspace), where the agent's file tools and its worker container can write every file, so a Git directory there would let them choose commands for the control plane to run.
+Every knowledge Git command also runs with hooks, fsmonitor, credential and askpass helpers, proxy commands and the `ext::` protocol disabled, and with a minimal environment that carries no MindRoom secrets beyond the repository credential for the command that needs it.
+Commands that run before the repository exists do so from that control-plane directory, so Git never discovers a repository an agent created around the knowledge folder.
+Agent file tools refuse to create or modify anything under a `.git`, `.hg`, `.svn` or `.bzr` directory in the workspace.
+
+A checkout created by an earlier release keeps its `.git` beside the knowledge files.
+The first sync after upgrading moves it to the current layout when that `.git` records the configured `repo_url` as its origin: MindRoom creates a fresh control-plane repository, deletes the in-tree `.git`, and force-aligns tracked files as any sync does, leaving untracked files in place.
+Nothing is carried over from the old `.git` and no Git command runs against it, so a repository config written before this rule cannot survive the upgrade.
+Any other `.git` in the folder — one whose origin differs because `repo_url` changed, one left by an interrupted clone, or somebody else's repository reached through a link — makes the sync fail with an error instead of being deleted; delete the folder and the next sync clones it afresh.
 
 ### Sync Behavior
 

@@ -387,7 +387,7 @@ class TestGrep:
         def counting_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[object]:
             nonlocal run_calls
             cmd = args[0] if args else kwargs.get("args")
-            if isinstance(cmd, list) and cmd[:2] == ["git", "check-ignore"]:
+            if isinstance(cmd, list) and cmd[:1] == ["git"] and "check-ignore" in cmd:
                 run_calls += 1
             return original_run(*args, **kwargs)
 
@@ -905,7 +905,7 @@ class TestFindFiles:
         def counting_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[object]:
             nonlocal run_calls
             cmd = args[0] if args else kwargs.get("args")
-            if isinstance(cmd, list) and cmd[:2] == ["git", "check-ignore"]:
+            if isinstance(cmd, list) and cmd[:1] == ["git"] and "check-ignore" in cmd:
                 run_calls += 1
             return original_run(*args, **kwargs)
 
@@ -1200,6 +1200,123 @@ class TestRestrictToBaseDir:
 
         assert str(outside_file) in find_result
         assert f"{outside_file}:1:needle" in grep_result
+
+
+class TestVcsMetadataWrites:
+    """A tool that writes model-authored content never writes VCS metadata.
+
+    ``.git/config`` names the commands Git runs -- ``core.fsmonitor``,
+    ``core.hooksPath``, ``core.sshCommand``, a content filter -- and MindRoom
+    runs Git against workspace trees from processes that hold every primary
+    secret. Containment inside base_dir is not enough on its own.
+    """
+
+    def test_file_tool_save_file_refuses_git_metadata(self, tmp_path: Path) -> None:
+        """save_file must refuse a checkout's Git config."""
+        base_dir = tmp_path / "workspace"
+        (base_dir / "kb_repo" / ".git").mkdir(parents=True)
+        config_path = base_dir / "kb_repo" / ".git" / "config"
+        config_path.write_text("[core]\n", encoding="utf-8")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir)
+        result = tool.save_file('[core]\n\tfsmonitor = "touch /tmp/pwned; false"\n', "kb_repo/.git/config")
+
+        assert "version control metadata" in result
+        assert config_path.read_text(encoding="utf-8") == "[core]\n"
+
+    def test_file_tool_replace_file_chunk_refuses_git_metadata(self, tmp_path: Path) -> None:
+        """replace_file_chunk must refuse the same paths as save_file."""
+        base_dir = tmp_path / "workspace"
+        (base_dir / "kb_repo" / ".git" / "hooks").mkdir(parents=True)
+        hook_path = base_dir / "kb_repo" / ".git" / "hooks" / "post-checkout"
+        hook_path.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir)
+        result = tool.replace_file_chunk("kb_repo/.git/hooks/post-checkout", 0, 0, "touch /tmp/pwned")
+
+        assert "version control metadata" in result
+        assert hook_path.read_text(encoding="utf-8") == "#!/bin/sh\n"
+
+    def test_file_tool_delete_file_refuses_git_metadata(self, tmp_path: Path) -> None:
+        """Removing metadata is a modification too."""
+        base_dir = tmp_path / "workspace"
+        (base_dir / "kb_repo" / ".git").mkdir(parents=True)
+        config_path = base_dir / "kb_repo" / ".git" / "config"
+        config_path.write_text("[core]\n", encoding="utf-8")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir, enable_delete_file=True)
+        result = tool.delete_file("kb_repo/.git/config")
+
+        assert "version control metadata" in result
+        assert config_path.exists()
+
+    def test_file_tool_refuses_git_metadata_reached_through_a_symlink(self, tmp_path: Path) -> None:
+        """An internal symlink must not launder a write into VCS metadata."""
+        base_dir = tmp_path / "workspace"
+        (base_dir / "kb_repo" / ".git").mkdir(parents=True)
+        config_path = base_dir / "kb_repo" / ".git" / "config"
+        config_path.write_text("[core]\n", encoding="utf-8")
+        try:
+            (base_dir / "link").symlink_to(base_dir / "kb_repo" / ".git", target_is_directory=True)
+        except (NotImplementedError, OSError):
+            pytest.skip("Symlinks not supported on this platform")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir)
+        result = tool.save_file("[core]\n", "link/config")
+
+        assert "Error saving file" in result
+        assert config_path.read_text(encoding="utf-8") == "[core]\n"
+
+    def test_file_tool_refuses_case_and_trailing_dot_spellings(self, tmp_path: Path) -> None:
+        """A case-insensitive filesystem opens .GIT, and Windows opens `.git.`."""
+        base_dir = tmp_path / "workspace"
+        base_dir.mkdir()
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir)
+
+        assert "version control metadata" in tool.save_file("x", "kb_repo/.GIT/config")
+        assert "version control metadata" in tool.save_file("x", "kb_repo/.git./config")
+        assert "version control metadata" in tool.save_file("x", "kb_repo/.Git/hooks/pre-commit")
+
+    def test_file_tool_still_writes_ordinary_dotfiles(self, tmp_path: Path) -> None:
+        """Only VCS metadata is refused; other dot paths stay writable."""
+        base_dir = tmp_path / "workspace"
+        base_dir.mkdir()
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir)
+        tool.save_file("value\n", ".config/settings.txt")
+
+        assert (base_dir / ".config" / "settings.txt").read_text(encoding="utf-8") == "value\n"
+
+    def test_coding_tool_write_file_refuses_git_metadata(self, tmp_path: Path) -> None:
+        """CodingTools.write_file shares the refusal."""
+        base_dir = tmp_path / "workspace"
+        (base_dir / "kb_repo" / ".git").mkdir(parents=True)
+
+        tools = CodingTools(base_dir=str(base_dir))
+        result = tools.write_file("kb_repo/.git/config", '[core]\n\tfsmonitor = "touch /tmp/pwned"\n')
+
+        assert "version control metadata" in result
+        assert not (base_dir / "kb_repo" / ".git" / "config").exists()
+
+    def test_coding_tool_edit_file_refuses_git_metadata(self, tmp_path: Path) -> None:
+        """CodingTools.edit_file shares the refusal."""
+        base_dir = tmp_path / "workspace"
+        (base_dir / "kb_repo" / ".git").mkdir(parents=True)
+        config_path = base_dir / "kb_repo" / ".git" / "config"
+        config_path.write_text("[core]\n\tbare = false\n", encoding="utf-8")
+
+        tools = CodingTools(base_dir=str(base_dir))
+        result = tools.edit_file("kb_repo/.git/config", "bare = false", 'fsmonitor = "touch /tmp/pwned"')
+
+        assert "version control metadata" in result
+        assert config_path.read_text(encoding="utf-8") == "[core]\n\tbare = false\n"
 
 
 class TestFileToolRestrictToBaseDir:

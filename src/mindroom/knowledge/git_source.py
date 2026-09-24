@@ -9,6 +9,14 @@ Credentials reach ``git`` only through process-local ``GIT_CONFIG_*``
 environment variables, never through the checkout's own config, and every error
 path that can carry a URL or a provider message is redacted before it is raised
 or logged.
+
+The worktree is not trusted. A knowledge checkout can sit inside an agent
+workspace or a private state root, both of which the agent's file tools and its
+worker container can write, so the Git directory is kept out of the checkout
+entirely (``knowledge_git_dir``) and named to ``git`` through
+``GIT_DIR``/``GIT_WORK_TREE``. Without that, a ``.git/config`` or
+``.git/hooks/*`` written next to the knowledge files would choose commands for
+this process -- which holds every primary secret -- to execute.
 """
 
 from __future__ import annotations
@@ -17,15 +25,18 @@ import asyncio
 import base64
 import os
 import re
+import shutil
 import signal
+import subprocess
+import tempfile
 from contextlib import suppress
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 from urllib.parse import urlparse
 
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.file_locks import current_inherited_file_lock
+from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.file_listing import (
     git_checkout_present,
     git_tracked_relative_paths_from_checkout,
@@ -44,9 +55,11 @@ from mindroom.knowledge.redaction import (
     redact_url_credentials,
 )
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_regular_file_within_root
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
     from mindroom.config.knowledge import KnowledgeGitConfig
     from mindroom.config.main import Config
@@ -375,6 +388,65 @@ def _persistable_remote_url(repo_url: str, base_id: str) -> str:
     return _parsed_remote_url(clean_url, base_id)
 
 
+#: A Git config is a few hundred bytes. The one read below belongs to whoever
+#: can write the knowledge files, so the read stops well short of anything that
+#: could exhaust memory.
+_MAX_RECORDED_CONFIG_BYTES = 1 << 20
+_RECORDED_ORIGIN_TIMEOUT_SECONDS = 10.0
+
+
+def _read_bounded_config(dot_git: Path) -> bytes | None:
+    """Copy a checkout's own config: regular files only, links refused, bounded.
+
+    Opening non-blocking and checking the type on the open descriptor means a
+    FIFO or a swapped link offered in its place is refused rather than read.
+    """
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        with open_regular_file_within_root(dot_git, "config") as descriptor:
+            while chunk := os.read(descriptor, 64 * 1024):
+                size += len(chunk)
+                if size > _MAX_RECORDED_CONFIG_BYTES:
+                    return None
+                chunks.append(chunk)
+    except (OSError, ValueError):
+        return None
+    return b"".join(chunks)
+
+
+def _recorded_origin_url(dot_git: Path, *, scratch_dir: Path) -> str | None:
+    """Return the ``remote.origin.url`` a checkout's own config records.
+
+    Git parses a copy, not the original: ``git config --file`` reads only the
+    named file, follows no includes and runs nothing, so this matches Git's own
+    reading of quoting, comments, continuations and last-value-wins without
+    letting Git near a config somebody else wrote. The copy lives in
+    ``scratch_dir``, which must be control-plane owned.
+    """
+    content = _read_bounded_config(dot_git)
+    if content is None:
+        return None
+    with tempfile.NamedTemporaryFile(dir=scratch_dir, prefix="recorded-config-") as copy:
+        copy.write(content)
+        copy.flush()
+        try:
+            result = subprocess.run(
+                hardened_git_command(["config", "--file", copy.name, "--get", "remote.origin.url"]),
+                cwd=str(scratch_dir),
+                env=hardened_git_env(search_ceiling=scratch_dir),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=_RECORDED_ORIGIN_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
     merged: dict[str, str] = {}
     for env in envs:
@@ -408,6 +480,10 @@ class GitKnowledgeSource:
     runtime_paths: RuntimePaths
     #: Resolved knowledge folder, which is the repository worktree root itself.
     source_path: Path
+    #: Control-plane Git directory for that worktree. It deliberately lives
+    #: outside ``source_path`` so that no writer of the knowledge files can
+    #: author the configuration, hooks or filters Git executes here.
+    git_dir: Path
     #: File recording the revision whose LFS objects are already hydrated, so a
     #: restart does not re-pull every object for an unchanged checkout.
     lfs_hydrated_head_path: Path
@@ -440,12 +516,13 @@ class GitKnowledgeSource:
         blocks on ``git``; call it from a worker thread on hot paths.
         """
         if self._tracked_relative_paths is None:
-            if not git_checkout_present(self.source_path, timeout_seconds=self._sync_timeout_seconds()):
+            if not git_checkout_present(self.source_path, self.git_dir, timeout_seconds=self._sync_timeout_seconds()):
                 return None
             self._tracked_relative_paths = git_tracked_relative_paths_from_checkout(
                 self.config,
                 self.base_id,
                 self.source_path,
+                self.git_dir,
             )
         return self._tracked_relative_paths
 
@@ -539,21 +616,10 @@ class GitKnowledgeSource:
         self.lfs_hydrated_head_path.unlink(missing_ok=True)
 
     def _git_index_lock_path(self) -> Path | None:
-        """Resolve the index lock for a repository or linked worktree."""
-        dot_git = self.source_path / ".git"
-        if dot_git.is_dir():
-            return dot_git / "index.lock"
-        try:
-            git_file = dot_git.read_text(encoding="utf-8").strip()
-        except OSError:
+        """Resolve the index lock inside the Git directory this source owns."""
+        if not self.git_dir.is_dir():
             return None
-        prefix, separator, raw_git_dir = git_file.partition(":")
-        if prefix.lower() != "gitdir" or not separator or not raw_git_dir.strip():
-            return None
-        git_dir = Path(raw_git_dir.strip())
-        if not git_dir.is_absolute():
-            git_dir = dot_git.parent / git_dir
-        return git_dir.resolve() / "index.lock"
+        return self.git_dir / "index.lock"
 
     def _clear_orphaned_index_lock(self) -> None:
         """Remove a Git index lock left behind before this owned sync began."""
@@ -585,6 +651,7 @@ class GitKnowledgeSource:
         return await asyncio.to_thread(
             git_checkout_present,
             self.source_path,
+            self.git_dir,
             timeout_seconds=self._sync_timeout_seconds(),
         )
 
@@ -594,17 +661,29 @@ class GitKnowledgeSource:
         *,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
+        in_repository: bool = True,
     ) -> str:
         repo_root = cwd or self.source_path
         capability = current_inherited_file_lock()
         inherited_lock_fd = None if capability is None else capability.fileno_for(self.source_path)
         owns_process_group = _git_process_group_is_owned_here()
+        # ``in_repository`` is False only for the clone, which creates the Git
+        # directory, and for the LFS probe that runs before it: naming a Git
+        # directory that does not exist yet would make both fail. Both run from
+        # the control-plane directory with discovery bounded to it, because
+        # ``lfs`` is not a builtin and Git would otherwise resolve it through
+        # the ``alias.lfs`` of any repository enclosing the working directory.
+        process_env = hardened_git_env(
+            env,
+            git_dir=self.git_dir if in_repository else None,
+            work_tree=self.source_path if in_repository else None,
+            search_ceiling=None if in_repository else repo_root,
+        )
         spawn_task = asyncio.create_task(
             asyncio.create_subprocess_exec(
-                "git",
-                *args,
+                *hardened_git_command(args),
                 cwd=str(repo_root),
-                env=None if env is None else {**os.environ, **env},
+                env=process_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 pass_fds=(() if inherited_lock_fd is None else (inherited_lock_fd,)),
@@ -670,11 +749,11 @@ class GitKnowledgeSource:
             msg = f"{msg}\n{details}"
         raise RuntimeError(msg)
 
-    async def _ensure_lfs_available(self, *, cwd: Path) -> None:
+    async def _ensure_lfs_available(self, *, cwd: Path, in_repository: bool = True) -> None:
         if not self._uses_lfs() or self._lfs_checked:
             return
         try:
-            await self._run_git(["lfs", "version"], cwd=cwd)
+            await self._run_git(["lfs", "version"], cwd=cwd, in_repository=in_repository)
         except RuntimeError as exc:
             msg = "Git LFS is required for this knowledge base but is not available in the runtime image"
             raise RuntimeError(msg) from exc
@@ -684,7 +763,9 @@ class GitKnowledgeSource:
         if not self._uses_lfs() or self._lfs_repository_ready:
             return
         await self._ensure_lfs_available(cwd=repo_root)
-        await self._run_git(["lfs", "install", "--local"], cwd=repo_root)
+        # ``--skip-repo``: LFS hooks only serve pushes, which never happen here,
+        # and hooks are disabled for every command anyway.
+        await self._run_git(["lfs", "install", "--local", "--skip-repo"], cwd=repo_root)
         self._lfs_repository_ready = True
 
     def _lfs_skip_smudge_env(self) -> dict[str, str]:
@@ -737,13 +818,100 @@ class GitKnowledgeSource:
         self._tracked_relative_paths = set(tracked_files)
         return tracked_files
 
+    def _legacy_checkout_to_adopt(self, expected_remote: str) -> bool:
+        """Decide what to do with a ``.git`` inside the knowledge folder.
+
+        Only asked when no control-plane checkout exists; once one does, an
+        in-tree ``.git`` is inert, because every command names the control-plane
+        Git directory outright. A real Git directory recording the configured
+        remote as its origin is a checkout an earlier release made, to be
+        adopted. Anything else is refused for an operator to resolve rather than
+        guessed at: this folder is named by config and resolved through links an
+        agent may control, so it can be somebody else's repository.
+        """
+        # LEGACY_COMPAT: knowledge checkout with an in-tree ``.git`` directory.
+        # Legacy format: every Git-backed knowledge base cloned before the Git
+        #   directory moved to the control-plane storage root; selected by a
+        #   ``.git`` directory directly inside the knowledge root whose config
+        #   records the configured remote as ``remote.origin.url``, while no
+        #   control-plane checkout exists yet.
+        # Last legacy release: v2026.09.23 wrote this layout natively; from the
+        #   next release the Git directory lives at
+        #   ``<storage root>/knowledge_git/<source key>`` and the knowledge
+        #   root holds worktree files only.
+        # Handling: a fresh control-plane repository is created and the in-tree
+        #   ``.git`` deleted; the sync then fetches and force-aligns tracked
+        #   paths as usual, leaving untracked files alone. Only the recorded
+        #   origin is read from the old config, from a bounded copy, and no Git
+        #   command ever runs against the old directory. Any other in-tree
+        #   ``.git`` is refused rather than deleted.
+        # Coverage: tests/test_knowledge_git_source.py::test_legacy_in_tree_git_checkout_is_adopted_in_place
+        #   and ::test_swapped_link_to_an_unrelated_repository_is_refused_not_deleted
+        dot_git = self.source_path / ".git"
+        if not dot_git.exists() and not dot_git.is_symlink():
+            return False
+        self.git_dir.parent.mkdir(parents=True, exist_ok=True)
+        if (
+            dot_git.is_dir()
+            and not dot_git.is_symlink()
+            and _recorded_origin_url(dot_git, scratch_dir=self.git_dir.parent) == expected_remote
+        ):
+            return True
+        msg = (
+            f"Refusing to sync knowledge base '{self.base_id}': its folder {self.source_path} holds a .git "
+            "entry MindRoom cannot adopt, because it is not a Git directory whose origin is the configured "
+            "repo_url. MindRoom keeps the Git directory outside the knowledge folder so that a writer of the "
+            "knowledge files cannot choose the commands Git runs. A checkout interrupted mid-clone, or one "
+            "made before repo_url changed, looks like this: delete the folder and the next sync clones it "
+            "afresh, or point the base at a dedicated path."
+        )
+        raise RuntimeError(msg)
+
+    async def _adopt_legacy_checkout(self, expected_remote: str) -> None:
+        """Move a legacy checkout's repository out of the knowledge folder.
+
+        Nothing is carried over from the in-tree ``.git``. The in-tree directory
+        is deleted only after its replacement exists, so an interruption before
+        that point is simply adopted again from the start on the next sync.
+        """
+        logger.warning(
+            "Moving knowledge Git directory out of the knowledge folder",
+            base_id=self.base_id,
+            source_path=str(self.source_path),
+            git_dir=str(self.git_dir),
+        )
+        await asyncio.to_thread(self._prepare_clone_destination)
+        await self._run_git(["init", "--quiet"])
+        await self._run_git(["remote", "add", "origin", expected_remote])
+        await asyncio.to_thread(shutil.rmtree, self.source_path / ".git")
+        await asyncio.to_thread(self._clear_lfs_hydrated_head)
+
+    def _prepare_clone_destination(self) -> None:
+        """Clear a stale Git directory left without its worktree."""
+        shutil.rmtree(self.git_dir, ignore_errors=True)
+        self.git_dir.parent.mkdir(parents=True, exist_ok=True)
+        self.source_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _remove_gitdir_pointer(self) -> None:
+        """Drop the ``.git`` pointer file ``--separate-git-dir`` leaves behind.
+
+        It is writable by everyone who can write the checkout, and every command
+        here names the Git directory outright, so a pointer somebody else can
+        redirect has nothing to offer.
+        """
+        (self.source_path / ".git").unlink(missing_ok=True)
+
     async def _ensure_repository(self, git_config: KnowledgeGitConfig) -> bool:
         runtime_paths = self.runtime_paths
         knowledge_root = self.source_path
-        if await self._checkout_present():
+        expected_remote = _persistable_remote_url(git_config.repo_url, self.base_id)
+        present = await self._checkout_present()
+        if not present and await asyncio.to_thread(self._legacy_checkout_to_adopt, expected_remote):
+            await self._adopt_legacy_checkout(expected_remote)
+            present = True
+        if present:
             await self._ensure_lfs_repository_ready(knowledge_root)
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
-            expected_remote = _persistable_remote_url(git_config.repo_url, self.base_id)
             if current_remote != expected_remote:
                 await self._run_git(["remote", "set-url", "origin", expected_remote])
             return False
@@ -755,20 +923,24 @@ class GitKnowledgeSource:
             )
             raise RuntimeError(msg)
 
-        knowledge_root.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(self._prepare_clone_destination)
+        # Not ``knowledge_root.parent``: that can be an agent workspace.
+        control_dir = self.git_dir.parent
         if git_config.lfs:
-            await self._ensure_lfs_available(cwd=knowledge_root.parent)
-        clone_url = _persistable_remote_url(git_config.repo_url, self.base_id)
+            await self._ensure_lfs_available(cwd=control_dir, in_repository=False)
+        clone_url = expected_remote
         await self._run_git(
             [
                 "clone",
                 "--single-branch",
                 "--branch",
                 git_config.branch,
+                f"--separate-git-dir={self.git_dir}",
                 clone_url,
                 str(knowledge_root),
             ],
-            cwd=knowledge_root.parent,
+            cwd=control_dir,
+            in_repository=False,
             env=_merge_git_env(
                 await _resolved_git_auth_env(
                     git_config.repo_url,
@@ -779,6 +951,7 @@ class GitKnowledgeSource:
                 self._lfs_skip_smudge_env(),
             ),
         )
+        await asyncio.to_thread(self._remove_gitdir_pointer)
         await self._run_git(["remote", "set-url", "origin", clone_url], cwd=knowledge_root)
         await asyncio.to_thread(self._clear_lfs_hydrated_head)
         await self._ensure_lfs_repository_ready(knowledge_root)

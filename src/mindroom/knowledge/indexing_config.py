@@ -259,6 +259,30 @@ def storage_key_for_base(base_id: str, knowledge_path: Path) -> str:
     return f"{_safe_identifier(base_id)}_{digest}"
 
 
+#: Control-plane namespace for Git directories. It is a sibling of the state
+#: roots dedicated workers mount, never a child of one, because the Git
+#: directory of a knowledge checkout decides which commands Git runs.
+_KNOWLEDGE_GIT_DIRNAME = "knowledge_git"
+
+
+def knowledge_git_dir(control_storage_root: Path, knowledge_path: Path) -> Path:
+    """Return the control-plane Git directory backing one knowledge checkout.
+
+    The checkout itself lives wherever the base is configured, which for a
+    private base or a workspace-relative base is a tree the agent's file tools
+    and its worker container can write. The Git directory must not be, so it is
+    kept here -- under the primary storage root, outside every scoped state
+    root a worker is given -- and passed to Git explicitly.
+
+    Keyed by the physical checkout rather than by base: bases that share a
+    source root share one worktree, so they must share the repository behind
+    it too, exactly as they shared an in-tree ``.git`` before.
+    """
+    resolved = knowledge_path.resolve()
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:16]
+    return (control_storage_root / _KNOWLEDGE_GIT_DIRNAME / f"{_safe_identifier(resolved.name)}_{digest}").resolve()
+
+
 def _filter_settings_key(values: Iterable[str]) -> str:
     return str(tuple(sorted(values)))
 

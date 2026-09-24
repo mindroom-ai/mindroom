@@ -61,7 +61,7 @@ from mindroom.knowledge.file_listing import (
 )
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
-from mindroom.knowledge.indexing_config import IndexingSettings
+from mindroom.knowledge.indexing_config import IndexingSettings, knowledge_git_dir
 from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature
 from mindroom.knowledge.redaction import (
     credential_free_repo_url,
@@ -860,11 +860,13 @@ def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) ->
         git_configs={"docs": git_config},
         modes={"docs": "files"},
     )
+    git_dir = knowledge_git_dir(runtime_paths_for(config).storage_root, docs_path)
 
     before = _knowledge_source_signature(
         config,
         "docs",
         docs_path,
+        git_dir=git_dir,
         tracked_relative_paths={"guide.md", "diagram.png"},
     )
     diagram.write_bytes(b"after")
@@ -874,6 +876,7 @@ def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) ->
             config,
             "docs",
             docs_path,
+            git_dir=git_dir,
             tracked_relative_paths={"guide.md", "diagram.png"},
         )
         != before
@@ -8133,6 +8136,7 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
         config,
         "docs",
         docs_path,
+        git_dir=knowledge_git_dir(runtime_paths.storage_root, docs_path),
         tracked_relative_paths={"doc.md"},
     )
     assert "ghp_secret" not in metadata_text
@@ -8196,10 +8200,17 @@ def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleT
         base_id: str,
         knowledge_root: Path,
         *,
+        git_dir: Path,
         tracked_relative_paths: Iterable[str] | None = None,
     ) -> str:
         counter.calls += 1
-        return original_signature(config, base_id, knowledge_root, tracked_relative_paths=tracked_relative_paths)
+        return original_signature(
+            config,
+            base_id,
+            knowledge_root,
+            git_dir=git_dir,
+            tracked_relative_paths=tracked_relative_paths,
+        )
 
     monkeypatch.setattr(module, "_knowledge_source_signature", _counting_signature)
     return counter
@@ -8521,6 +8532,7 @@ async def test_git_publish_records_verified_revision_before_later_rollback(
         config,
         "docs",
         docs_path,
+        git_dir=knowledge_git_dir(runtime_paths.storage_root, docs_path),
         tracked_relative_paths={"doc.md"},
     )
     assert result.index_published is True
@@ -9182,8 +9194,14 @@ async def test_git_pull_that_changes_one_file_only_reindexes_that_file(
 
 
 @pytest.mark.asyncio
-async def test_git_worktree_checkout_file_is_detected_for_sync_listing_and_api_status(tmp_path: Path) -> None:
-    """Git worktree checkouts use a .git file and must still count as present repositories."""
+async def test_unrecognized_in_tree_git_checkout_is_refused_not_deleted(tmp_path: Path) -> None:
+    """A .git MindRoom did not write is refused, never deleted.
+
+    Discarding means deleting a directory named by config, and a Git-backed base
+    can sit in a tree whose links an agent controls. Only a checkout recording
+    the configured remote as its own origin is replaced; a linked worktree, or
+    any repository reached through a swapped link, is left alone.
+    """
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
 
@@ -9235,11 +9253,14 @@ async def test_git_worktree_checkout_file_is_detected_for_sync_listing_and_api_s
     resolved_git_config = manager.git_source._git_config()
     assert resolved_git_config is not None
 
-    cloned = await manager.git_source._ensure_repository(resolved_git_config)
+    with pytest.raises(RuntimeError, match="MindRoom cannot adopt"):
+        await manager.git_source._ensure_repository(resolved_git_config)
+    git_dir = manager.git_source.git_dir
 
-    assert cloned is False
-    assert git_checkout_present(docs_path)
-    assert list_git_tracked_knowledge_files(config, "docs", docs_path) == [docs_path.resolve() / "doc.md"]
+    assert (docs_path / ".git").is_file()
+    assert (docs_path / "doc.md").read_text(encoding="utf-8") == "worktree checkout content"
+    assert not git_checkout_present(docs_path, git_dir)
+    assert list_git_tracked_knowledge_files(config, "docs", docs_path, git_dir) == []
 
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
@@ -9247,7 +9268,7 @@ async def test_git_worktree_checkout_file_is_detected_for_sync_listing_and_api_s
     response = client.get("/api/knowledge/bases/docs/status")
 
     assert response.status_code == 200
-    assert response.json()["git"]["repo_present"] is True
+    assert response.json()["git"]["repo_present"] is False
 
 
 @pytest.mark.asyncio

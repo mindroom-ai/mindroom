@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.path_globs import matches_root_glob
 
@@ -293,8 +294,12 @@ def knowledge_files_from_relative_paths(
     return files
 
 
-def git_checkout_present(root: Path, *, timeout_seconds: float | None = None) -> bool:
-    """Return whether root itself is a Git worktree checkout."""
+def git_checkout_present(root: Path, git_dir: Path, *, timeout_seconds: float | None = None) -> bool:
+    """Return whether root is the worktree of the Git directory MindRoom owns.
+
+    ``git_dir`` is named explicitly, never discovered from ``root``: a ``.git``
+    beside the worktree files is writable by whoever can write the checkout.
+    """
     if not root.is_dir():
         return False
     effective_timeout_seconds = _GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
@@ -304,11 +309,13 @@ def git_checkout_present(root: Path, *, timeout_seconds: float | None = None) ->
         effective_timeout = effective_timeout_seconds
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree", "--show-toplevel"],
+            hardened_git_command(["rev-parse", "--is-inside-work-tree", "--show-toplevel"]),
             check=False,
+            cwd=str(root),
             capture_output=True,
             text=True,
             timeout=effective_timeout,
+            env=hardened_git_env(git_dir=git_dir, work_tree=root),
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -327,6 +334,7 @@ def git_tracked_relative_paths_from_checkout(
     config: Config,
     base_id: str,
     knowledge_root: Path,
+    git_dir: Path,
     *,
     timeout_seconds: float | None = None,
 ) -> set[str]:
@@ -339,12 +347,13 @@ def git_tracked_relative_paths_from_checkout(
     )
     try:
         result = subprocess.run(
-            ["git", "ls-files", "-z"],
+            hardened_git_command(["ls-files", "-z"]),
             cwd=str(knowledge_root),
             check=False,
             capture_output=True,
             text=True,
             timeout=effective_timeout_seconds,
+            env=hardened_git_env(git_dir=git_dir, work_tree=knowledge_root),
         )
     except subprocess.TimeoutExpired as exc:
         msg = f"Git command timed out after {effective_timeout_seconds:g}s: git ls-files -z"
@@ -369,16 +378,17 @@ def list_git_tracked_knowledge_files(
     config: Config,
     base_id: str,
     knowledge_root: Path,
+    git_dir: Path,
     *,
     timeout_seconds: float | None = None,
 ) -> list[Path]:
     """List Git-tracked files using the active source set for one base."""
     root = knowledge_root.resolve()
-    if not git_checkout_present(root, timeout_seconds=timeout_seconds):
+    if not git_checkout_present(root, git_dir, timeout_seconds=timeout_seconds):
         return []
     return knowledge_files_from_relative_paths(
         config,
         base_id,
         root,
-        git_tracked_relative_paths_from_checkout(config, base_id, root, timeout_seconds=timeout_seconds),
+        git_tracked_relative_paths_from_checkout(config, base_id, root, git_dir, timeout_seconds=timeout_seconds),
     )

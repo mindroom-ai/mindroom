@@ -27,8 +27,11 @@ import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
 from mindroom import file_locks
 from mindroom.config.knowledge import KnowledgeGitConfig
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.git_invocation import hardened_git_env
+from mindroom.knowledge.file_listing import git_checkout_present
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
+from mindroom.knowledge.indexing_config import knowledge_git_dir
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_url_credentials
 from mindroom.knowledge.refresh_locks import refresh_source_root_lock
@@ -84,6 +87,52 @@ def _assert_github_app_auth_env(env: dict[str, str] | None) -> None:
     assert env is not None
     encoded = env["GIT_CONFIG_VALUE_0"].removeprefix("Authorization: Basic ")
     assert base64.b64decode(encoded).decode() == "x-access-token:installation-token"
+
+
+def _separate_git_dir(clone_args: list[str]) -> Path:
+    """Return the control-plane Git directory one clone argv names."""
+    prefix = "--separate-git-dir="
+    named = [arg.removeprefix(prefix) for arg in clone_args if arg.startswith(prefix)]
+    assert len(named) == 1
+    return Path(named[0])
+
+
+async def _fake_separate_git_dir_clone(clone_args: list[str], content: str) -> Path:
+    """Build the checkout a real ``git clone --separate-git-dir`` would leave."""
+    target = Path(clone_args[-1])
+    git_dir = _separate_git_dir(clone_args)
+    target.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "init", f"--separate-git-dir={git_dir}"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "remote", "add", "origin", clone_args[-2]],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (target / "doc.md").write_text(content, encoding="utf-8")
+    return git_dir
+
+
+async def _fake_git_in_separate_git_dir(args: list[str], *, cwd: Path, git_dir: Path) -> None:
+    """Run one real Git command against an out-of-tree Git directory."""
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_DIR": str(git_dir), "GIT_WORK_TREE": str(cwd)},
+    )
 
 
 def _git_manager(
@@ -185,7 +234,7 @@ async def test_git_source_sync_without_source_root_ownership_preserves_index_loc
 ) -> None:
     """A direct sync must not classify a possibly live Git lock as orphaned."""
     manager = _git_manager(tmp_path)
-    git_dir = manager.knowledge_path / ".git"
+    git_dir = manager.git_source.git_dir
     git_dir.mkdir(parents=True)
     lock_path = git_dir / "index.lock"
     lock_path.write_text("", encoding="utf-8")
@@ -212,7 +261,7 @@ async def test_git_source_sync_with_expired_inherited_capability_preserves_index
 ) -> None:
     """A child task cannot retain cleanup authority after its owner's context exits."""
     manager = _git_manager(tmp_path)
-    git_dir = manager.knowledge_path / ".git"
+    git_dir = manager.git_source.git_dir
     git_dir.mkdir(parents=True)
     lock_path = git_dir / "index.lock"
     lock_path.write_text("", encoding="utf-8")
@@ -254,7 +303,7 @@ async def test_git_source_sync_continues_when_orphaned_lock_cannot_be_removed(
 ) -> None:
     """Cleanup failure must leave Git responsible for reporting the repository error."""
     manager = _git_manager(tmp_path)
-    git_dir = manager.knowledge_path / ".git"
+    git_dir = manager.git_source.git_dir
     git_dir.mkdir(parents=True)
     lock_path = git_dir / "index.lock"
     lock_path.write_text("", encoding="utf-8")
@@ -448,6 +497,7 @@ async def test_git_credentials_service_token_stays_out_of_git_config_and_metadat
         {"token": "secret-token"},
     )
     clone_envs: list[dict[str, str] | None] = []
+    git_dirs: list[Path] = []
     clean_url = "https://example.com/org/private.git"
 
     async def _fake_run_git(
@@ -456,41 +506,17 @@ async def test_git_credentials_service_token_stays_out_of_git_config_and_metadat
         *,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
+        in_repository: bool = True,
     ) -> str:
-        _ = self
+        _ = (self, in_repository)
         if args[0] == "clone":
             clone_envs.append(env)
             assert args[-2] == clean_url
-            target = Path(args[-1])
-            target.mkdir(parents=True, exist_ok=True)
-            await asyncio.to_thread(
-                subprocess.run,
-                ["git", "init"],
-                cwd=target,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            await asyncio.to_thread(
-                subprocess.run,
-                ["git", "remote", "add", "origin", args[-2]],
-                cwd=target,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            (target / "doc.md").write_text("credential service content", encoding="utf-8")
+            git_dirs.append(await _fake_separate_git_dir_clone(args, "credential service content"))
             return ""
         if args == ["remote", "set-url", "origin", clean_url]:
             assert cwd is not None
-            await asyncio.to_thread(
-                subprocess.run,
-                ["git", *args],
-                cwd=cwd,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            await _fake_git_in_separate_git_dir(args, cwd=cwd, git_dir=git_dirs[0])
             return ""
         if args == ["ls-files", "-z"]:
             return "doc.md\x00"
@@ -503,8 +529,10 @@ async def test_git_credentials_service_token_stays_out_of_git_config_and_metadat
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     metadata_text = published_index_metadata_path(key).read_text(encoding="utf-8")
-    git_config_text = (docs_path / ".git" / "config").read_text(encoding="utf-8")
+    git_config_text = (git_dirs[0] / "config").read_text(encoding="utf-8")
     clone_env = clone_envs[0]
+
+    assert not (docs_path / ".git").exists()
 
     assert result.index_published is True
     assert clone_env is not None
@@ -542,8 +570,9 @@ async def test_git_clone_resolves_github_app_credentials_for_each_operation(
         *,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
+        in_repository: bool = True,
     ) -> str:
-        _ = cwd
+        _ = (cwd, in_repository)
         if args[0] == "clone":
             clone_envs.append(env)
         return ""
@@ -589,8 +618,9 @@ async def test_git_fetch_resolves_github_app_credentials_for_each_operation(
         *,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
+        in_repository: bool = True,
     ) -> str:
-        _ = cwd
+        _ = (cwd, in_repository)
         if args[0] == "fetch":
             fetch_envs.append(env)
         return ""
@@ -634,8 +664,9 @@ async def test_git_lfs_pull_resolves_github_app_credentials_for_each_operation(
         *,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
+        in_repository: bool = True,
     ) -> str:
-        _ = cwd
+        _ = (cwd, in_repository)
         if args[:2] == ["lfs", "pull"]:
             lfs_envs.append(env)
         return ""
@@ -733,8 +764,9 @@ async def test_git_embedded_userinfo_url_is_not_reused_in_git_auth_env(
         *,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
+        in_repository: bool = True,
     ) -> str:
-        _ = (self, cwd)
+        _ = (self, cwd, in_repository)
         if args[0] == "clone":
             clone_envs.append(env)
             assert args[-2] == clean_url
@@ -795,8 +827,9 @@ async def test_git_unsupported_scheme_userinfo_is_not_copied_to_git_config_env(
         *,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
+        in_repository: bool = True,
     ) -> str:
-        _ = (self, cwd)
+        _ = (self, cwd, in_repository)
         if args[0] == "clone":
             clone_calls.append((list(args), env))
             assert args[-2] == clean_url
@@ -847,6 +880,7 @@ async def test_git_query_and_fragment_tokens_stay_out_of_persistent_remote_and_m
     )
     runtime_paths = runtime_paths_for(config)
     clone_envs: list[dict[str, str] | None] = []
+    git_dirs: list[Path] = []
 
     async def _fake_run_git(
         self: KnowledgeManager,
@@ -854,41 +888,17 @@ async def test_git_query_and_fragment_tokens_stay_out_of_persistent_remote_and_m
         *,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
+        in_repository: bool = True,
     ) -> str:
-        _ = self
+        _ = (self, in_repository)
         if args[0] == "clone":
             clone_envs.append(env)
             assert args[-2] == clean_url
-            target = Path(args[-1])
-            target.mkdir(parents=True, exist_ok=True)
-            await asyncio.to_thread(
-                subprocess.run,
-                ["git", "init"],
-                cwd=target,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            await asyncio.to_thread(
-                subprocess.run,
-                ["git", "remote", "add", "origin", args[-2]],
-                cwd=target,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            (target / "doc.md").write_text("query credential content", encoding="utf-8")
+            git_dirs.append(await _fake_separate_git_dir_clone(args, "query credential content"))
             return ""
         if args == ["remote", "set-url", "origin", clean_url]:
             assert cwd is not None
-            await asyncio.to_thread(
-                subprocess.run,
-                ["git", *args],
-                cwd=cwd,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            await _fake_git_in_separate_git_dir(args, cwd=cwd, git_dir=git_dirs[0])
             return ""
         if args == ["ls-files", "-z"]:
             return "doc.md\x00"
@@ -901,8 +911,9 @@ async def test_git_query_and_fragment_tokens_stay_out_of_persistent_remote_and_m
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     metadata_text = published_index_metadata_path(key).read_text(encoding="utf-8")
-    git_config_text = (docs_path / ".git" / "config").read_text(encoding="utf-8")
+    git_config_text = (git_dirs[0] / "config").read_text(encoding="utf-8")
 
+    assert not (docs_path / ".git").exists()
     assert result.index_published is True
     assert clone_envs
     assert "query-secret" in str(clone_envs[0])
@@ -1029,7 +1040,7 @@ async def test_refresh_recovers_orphaned_git_index_lock(tmp_path: Path) -> None:
     (remote_work / "doc.md").write_text("after crash", encoding="utf-8")
     await _git(remote_work, "commit", "-am", "after")
     await _git(remote_work, "push", str(remote_bare), "main")
-    lock_path = docs_path / ".git" / "index.lock"
+    lock_path = knowledge_git_dir(runtime_paths.storage_root, docs_path) / "index.lock"
     lock_path.write_text("", encoding="utf-8")
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -1100,7 +1111,7 @@ async def test_crashed_git_subprocess_recovers_index_lock_on_next_refresh(  # no
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding_in_subprocess("docs", config=config, runtime_paths=runtime_paths)
 
-    lock_path = docs_path / ".git" / "index.lock"
+    lock_path = knowledge_git_dir(runtime_paths.storage_root, docs_path) / "index.lock"
     ready_path = tmp_path / "filter-ready"
     release_path = tmp_path / "filter-release"
     filter_script = tmp_path / "blocking-smudge.sh"
@@ -1119,9 +1130,10 @@ cat
     )
     filter_script.chmod(0o755)
     filter_command = " ".join(shlex.quote(str(path)) for path in (filter_script, ready_path, release_path))
-    await _git(docs_path, "config", "filter.blocking.smudge", filter_command)
-    await _git(docs_path, "config", "filter.blocking.clean", "cat")
-    await _git(docs_path, "config", "filter.blocking.required", "true")
+    checkout_git_dir = knowledge_git_dir(runtime_paths.storage_root, docs_path)
+    await _git(docs_path, "--git-dir", str(checkout_git_dir), "config", "filter.blocking.smudge", filter_command)
+    await _git(docs_path, "--git-dir", str(checkout_git_dir), "config", "filter.blocking.clean", "cat")
+    await _git(docs_path, "--git-dir", str(checkout_git_dir), "config", "filter.blocking.required", "true")
 
     (remote_work / ".gitattributes").write_text("doc.md filter=blocking\n", encoding="utf-8")
     (remote_work / "doc.md").write_text("after crash", encoding="utf-8")
@@ -1198,7 +1210,11 @@ cat
 
     assert lock_path.exists() is False
     assert (docs_path / "doc.md").read_text(encoding="utf-8") == "after crash"
-    assert await _git_output(docs_path, "rev-parse", "HEAD") == await _git_output(remote_work, "rev-parse", "HEAD")
+    assert await _git_output(docs_path, "--git-dir", str(checkout_git_dir), "rev-parse", "HEAD") == await _git_output(
+        remote_work,
+        "rev-parse",
+        "HEAD",
+    )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="process groups and POSIX shell filters are required")
@@ -1272,9 +1288,10 @@ cat
     )
     filter_script.chmod(0o755)
     filter_command = " ".join(shlex.quote(str(path)) for path in (filter_script, ready_path, release_path))
-    await _git(docs_path, "config", "filter.blocking.smudge", filter_command)
-    await _git(docs_path, "config", "filter.blocking.clean", "cat")
-    await _git(docs_path, "config", "filter.blocking.required", "true")
+    checkout_git_dir = knowledge_git_dir(runtime_paths.storage_root, docs_path)
+    await _git(docs_path, "--git-dir", str(checkout_git_dir), "config", "filter.blocking.smudge", filter_command)
+    await _git(docs_path, "--git-dir", str(checkout_git_dir), "config", "filter.blocking.clean", "cat")
+    await _git(docs_path, "--git-dir", str(checkout_git_dir), "config", "filter.blocking.required", "true")
 
     (remote_work / ".gitattributes").write_text("doc.md filter=blocking\n", encoding="utf-8")
     (remote_work / "doc.md").write_text("after timeout", encoding="utf-8")
@@ -1315,7 +1332,7 @@ cat
                 break
             await asyncio.sleep(0.01)
 
-    index_lock_path = docs_path / ".git" / "index.lock"
+    index_lock_path = knowledge_git_dir(runtime_paths.storage_root, docs_path) / "index.lock"
     index_lock_path.write_text("", encoding="utf-8")
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -1389,8 +1406,14 @@ os._exit(0)
 
 
 @pytest.mark.asyncio
-async def test_refresh_recovers_orphaned_index_lock_in_linked_worktree(tmp_path: Path) -> None:
-    """Recovery must follow a linked worktree's .git pointer to its real index lock."""
+async def test_legacy_in_tree_git_checkout_is_adopted_in_place(tmp_path: Path) -> None:
+    """A checkout whose .git sits beside the knowledge files moves to the control plane.
+
+    Anything that can write the knowledge root can write that .git, so no Git
+    command may ever run against it. A fresh control-plane repository replaces
+    it, and the ordinary force-align restores tracked paths while leaving
+    untracked files where they were.
+    """
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
 
@@ -1407,7 +1430,7 @@ async def test_refresh_recovers_orphaned_index_lock_in_linked_worktree(tmp_path:
     await _git(remote_work, "init", "-b", "main")
     await _git(remote_work, "config", "user.email", "tests@example.com")
     await _git(remote_work, "config", "user.name", "MindRoom Tests")
-    (remote_work / "doc.md").write_text("linked worktree content", encoding="utf-8")
+    (remote_work / "doc.md").write_text("legacy layout content", encoding="utf-8")
     await _git(remote_work, "add", "doc.md")
     await _git(remote_work, "commit", "-m", "main")
     remote_bare = tmp_path / "remote.git"
@@ -1418,20 +1441,23 @@ async def test_refresh_recovers_orphaned_index_lock_in_linked_worktree(tmp_path:
         capture_output=True,
         text=True,
     )
-    seed_checkout = tmp_path / "seed-checkout"
+    docs_path = tmp_path / "legacy-checkout"
     await asyncio.to_thread(
         subprocess.run,
-        ["git", "clone", str(remote_bare), str(seed_checkout)],
+        ["git", "clone", str(remote_bare), str(docs_path)],
         check=True,
         capture_output=True,
         text=True,
     )
-    docs_path = tmp_path / "worktree-checkout"
-    await _git(seed_checkout, "worktree", "add", "--detach", str(docs_path), "HEAD")
-    dot_git = docs_path / ".git"
-    git_dir = Path(dot_git.read_text(encoding="utf-8").removeprefix("gitdir:").strip())
-    lock_path = git_dir / "index.lock"
-    lock_path.write_text("", encoding="utf-8")
+    executed_marker = tmp_path / "fsmonitor-ran"
+    with (docs_path / ".git" / "config").open("a", encoding="utf-8") as handle:
+        handle.write(f'[core]\n\tfsmonitor = "touch {executed_marker}; false"\n')
+    hook_marker = tmp_path / "hook-ran"
+    post_checkout = docs_path / ".git" / "hooks" / "post-checkout"
+    post_checkout.write_text(f"#!/bin/sh\ntouch {hook_marker}\n", encoding="utf-8")
+    post_checkout.chmod(0o755)
+    (docs_path / "doc.md").write_text("tracked edit", encoding="utf-8")
+    (docs_path / "notes.txt").write_text("untracked, not ours to delete", encoding="utf-8")
 
     config = _config(
         tmp_path,
@@ -1444,12 +1470,296 @@ async def test_refresh_recovers_orphaned_index_lock_in_linked_worktree(tmp_path:
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
-    assert lock_path.exists() is False
+    assert not executed_marker.exists()
+    assert not hook_marker.exists()
+    assert not (docs_path / ".git").exists()
+    assert (docs_path / "doc.md").read_text(encoding="utf-8") == "legacy layout content"
+    assert (docs_path / "notes.txt").read_text(encoding="utf-8") == "untracked, not ours to delete"
+    assert (knowledge_git_dir(runtime_paths.storage_root, docs_path) / "HEAD").is_file()
     assert result.index_published is True
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("linked", max_results=5)] == [
-        "linked worktree content",
+    assert [document.content for document in lookup.index.knowledge.search("legacy", max_results=5)] == [
+        "legacy layout content",
     ]
+
+
+@pytest.mark.asyncio
+async def test_swapped_link_to_an_unrelated_repository_is_refused_not_deleted(tmp_path: Path) -> None:
+    """Re-cloning deletes a directory named by config, so it must recognize it first.
+
+    A Git-backed base can be configured inside a tree whose links an agent or a
+    worker controls, and the knowledge path is resolved through them. A
+    repository reached that way records a different origin and is refused, not
+    discarded.
+    """
+    remote_work = tmp_path / "remote-work"
+    remote_work.mkdir()
+
+    async def _git(cwd: Path, *args: str) -> None:
+        await asyncio.to_thread(subprocess.run, ["git", *args], cwd=cwd, check=True, capture_output=True)
+
+    await _git(remote_work, "init", "-b", "main")
+    await _git(remote_work, "config", "user.email", "tests@example.com")
+    await _git(remote_work, "config", "user.name", "MindRoom Tests")
+    (remote_work / "doc.md").write_text("knowledge content", encoding="utf-8")
+    await _git(remote_work, "add", "doc.md")
+    await _git(remote_work, "commit", "-m", "main")
+    remote_bare = tmp_path / "remote.git"
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
+        check=True,
+        capture_output=True,
+    )
+
+    # Somebody else's repository, which the knowledge path now resolves into.
+    bystander = tmp_path / "bystander"
+    bystander.mkdir()
+    await _git(bystander, "init", "-b", "main")
+    (bystander / "irreplaceable.txt").write_text("not ours to delete", encoding="utf-8")
+
+    docs_path = tmp_path / "docs"
+    docs_path.symlink_to(bystander, target_is_directory=True)
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url=str(remote_bare), branch="main")},
+    )
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+    resolved_git_config = manager.git_source._git_config()
+    assert resolved_git_config is not None
+
+    with pytest.raises(RuntimeError, match="MindRoom cannot adopt"):
+        await manager.git_source._ensure_repository(resolved_git_config)
+
+    assert (bystander / "irreplaceable.txt").read_text(encoding="utf-8") == "not ours to delete"
+    assert (bystander / ".git").is_dir()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="named pipes are created differently on Windows")
+@pytest.mark.asyncio
+async def test_hostile_in_tree_git_config_is_refused_without_blocking(tmp_path: Path) -> None:
+    """Recognizing a checkout reads a file its writer controls, so the read is bounded.
+
+    A FIFO where the config belongs would otherwise block the refresh for as
+    long as nobody opens the other end.
+    """
+    manager = _git_manager(tmp_path)
+    git_config = manager.git_source._git_config()
+    assert git_config is not None
+    dot_git = manager.knowledge_path / ".git"
+    dot_git.mkdir(parents=True)
+    os.mkfifo(dot_git / "config")
+
+    with pytest.raises(RuntimeError, match="MindRoom cannot adopt"):
+        async with asyncio.timeout(20):
+            await manager.git_source._ensure_repository(git_config)
+
+    assert (dot_git / "config").exists()
+
+
+async def _bare_remote(tmp_path: Path, content: str) -> Path:
+    """Create a one-commit bare repository on ``main`` to sync from."""
+    work = tmp_path / "remote-work"
+    work.mkdir()
+    for args in (
+        ["init", "-b", "main"],
+        ["config", "user.email", "tests@example.com"],
+        ["config", "user.name", "MindRoom Tests"],
+    ):
+        await asyncio.to_thread(subprocess.run, ["git", *args], cwd=work, check=True, capture_output=True)
+    (work / "doc.md").write_text(content, encoding="utf-8")
+    await asyncio.to_thread(subprocess.run, ["git", "add", "doc.md"], cwd=work, check=True, capture_output=True)
+    await asyncio.to_thread(subprocess.run, ["git", "commit", "-m", "c"], cwd=work, check=True, capture_output=True)
+    bare = tmp_path / "remote.git"
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "clone", "--bare", str(work), str(bare)],
+        check=True,
+        capture_output=True,
+    )
+    return bare
+
+
+@pytest.mark.asyncio
+async def test_pre_clone_commands_cannot_resolve_an_enclosing_repositorys_alias(tmp_path: Path) -> None:
+    """``lfs`` is not a builtin, so Git resolves it through any discovered ``alias.lfs``.
+
+    Before the first clone there is no control-plane repository to name, and a
+    knowledge folder's parent can be an agent workspace the agent turned into a
+    repository. The probe must not run from there, nor discover it.
+    """
+    remote = await _bare_remote(tmp_path, "lfs content")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    marker = tmp_path / "alias-ran"
+    await asyncio.to_thread(subprocess.run, ["git", "init"], cwd=workspace, check=True, capture_output=True)
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "config", "alias.lfs", f"!touch {marker}"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+    docs = workspace / "kb_repo"
+    git_config = KnowledgeGitConfig(repo_url=str(remote), branch="main", lfs=True)
+    config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"], git_configs={"docs": git_config})
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+    # Git LFS may or may not be installed; only whether the alias ran matters.
+    with suppress(RuntimeError):
+        await manager.git_source.sync()
+
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_bases_sharing_a_source_root_share_its_repository(tmp_path: Path) -> None:
+    """Two bases over one folder share one worktree, so they share its Git directory too."""
+    remote = await _bare_remote(tmp_path, "shared content")
+    docs = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(repo_url=str(remote), branch="main")
+    config = _config(
+        tmp_path,
+        bases={"alpha": docs, "beta": docs},
+        agent_bases=["alpha", "beta"],
+        git_configs={"alpha": git_config, "beta": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    alpha = KnowledgeManager("alpha", config=config, runtime_paths=runtime_paths)
+    beta = KnowledgeManager("beta", config=config, runtime_paths=runtime_paths)
+
+    first = await alpha.git_source.sync()
+    second = await beta.git_source.sync()
+
+    assert alpha.git_source.git_dir == beta.git_source.git_dir
+    assert first.updated is True
+    assert second.updated is False
+    assert second.head == first.head
+
+
+def test_git_env_overrides_cannot_replace_the_named_repository(tmp_path: Path) -> None:
+    """The repository a command operates on is not something a caller's env can move."""
+    env = hardened_git_env(
+        {"GIT_DIR": str(tmp_path / "elsewhere"), "GIT_WORK_TREE": str(tmp_path / "elsewhere")},
+        git_dir=tmp_path / "git",
+        work_tree=tmp_path / "tree",
+    )
+
+    assert env["GIT_DIR"] == str(tmp_path / "git")
+    assert env["GIT_WORK_TREE"] == str(tmp_path / "tree")
+
+
+@pytest.mark.asyncio
+async def test_worktree_git_directory_cannot_run_commands(tmp_path: Path) -> None:
+    """A .git written beside the knowledge files must be inert for every Git command.
+
+    The knowledge root is writable by the agent's file tools and by worker
+    containers. Git resolves ``core.fsmonitor``, hooks and content filters from
+    the repository it is pointed at, so a command that let it find that .git
+    would hand whoever wrote it command execution in this process. Once a
+    control-plane checkout exists the in-tree .git is left where it is, so
+    every listing and sync command below runs with it present.
+    """
+    remote = tmp_path / "remote"
+    remote.mkdir()
+
+    async def _git(cwd: Path, *args: str) -> None:
+        await asyncio.to_thread(subprocess.run, ["git", *args], cwd=cwd, check=True, capture_output=True)
+
+    await _git(remote, "init", "-b", "main")
+    await _git(remote, "config", "user.email", "tests@example.com")
+    await _git(remote, "config", "user.name", "MindRoom Tests")
+    (remote / "doc.md").write_text("before", encoding="utf-8")
+    await _git(remote, "add", "doc.md")
+    await _git(remote, "commit", "-m", "before")
+
+    docs = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(repo_url=str(remote), branch="main")
+    config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"], git_configs={"docs": git_config})
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+    await manager.git_source.sync()
+
+    # A complete, working repository, so nothing here fails for a reason other
+    # than Git never looking at it.
+    decoy = tmp_path / "decoy"
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "clone", str(remote), str(decoy)],
+        check=True,
+        capture_output=True,
+    )
+    (decoy / ".git").rename(docs / ".git")
+    fsmonitor_marker = tmp_path / "fsmonitor-ran"
+    filter_marker = tmp_path / "filter-ran"
+    hook_marker = tmp_path / "hook-ran"
+    with (docs / ".git" / "config").open("a", encoding="utf-8") as handle:
+        handle.write(
+            "[core]\n"
+            f'\tfsmonitor = "touch {fsmonitor_marker}; false"\n'
+            '[filter "pwn"]\n'
+            f'\tsmudge = "touch {filter_marker}; cat"\n'
+            f'\tclean = "touch {filter_marker}; cat"\n',
+        )
+    for hook_name in ("post-checkout", "post-merge", "pre-push", "reference-transaction"):
+        hook_path = docs / ".git" / "hooks" / hook_name
+        hook_path.write_text(f"#!/bin/sh\ntouch {hook_marker}\n", encoding="utf-8")
+        hook_path.chmod(0o755)
+    (docs / ".gitattributes").write_text("* filter=pwn\n", encoding="utf-8")
+
+    listed = await asyncio.to_thread(manager.git_source.tracked_relative_paths)
+    present = await asyncio.to_thread(git_checkout_present, docs, manager.git_source.git_dir)
+
+    assert listed == {"doc.md"}
+    assert present is True
+    assert not fsmonitor_marker.exists()
+    assert not filter_marker.exists()
+    assert not hook_marker.exists()
+
+    (remote / "doc.md").write_text("after", encoding="utf-8")
+    await _git(remote, "commit", "-am", "after")
+    result = await manager.git_source.sync()
+
+    assert not fsmonitor_marker.exists()
+    assert not filter_marker.exists()
+    assert not hook_marker.exists()
+    assert (docs / ".git" / "config").is_file(), "the inert in-tree .git should still be there"
+    assert result.updated is True
+    assert (docs / "doc.md").read_text(encoding="utf-8") == "after"
+
+
+@pytest.mark.asyncio
+async def test_git_children_do_not_inherit_primary_process_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git children start from a minimal environment, not this process's secrets."""
+    manager = _git_manager(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-canary")
+    monkeypatch.setenv("MINDROOM_API_KEY", "mindroom-canary")
+    monkeypatch.setenv("CREDENTIALS_ENCRYPTION_KEY", "encryption-canary")
+    monkeypatch.setenv("MATRIX_PASSWORD", "matrix-canary")
+    spawn_envs: list[dict[str, str]] = []
+    original_exec = asyncio.create_subprocess_exec
+
+    async def _capturing_exec(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        spawn_envs.append(dict(kwargs["env"]))
+        return await original_exec(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _capturing_exec)
+
+    with suppress(RuntimeError):
+        await manager.git_source._run_git(["rev-parse", "HEAD"])
+
+    assert spawn_envs
+    serialized = json.dumps(spawn_envs[0])
+    assert "canary" not in serialized
+    assert "ANTHROPIC_API_KEY" not in spawn_envs[0]
+    assert "MINDROOM_API_KEY" not in spawn_envs[0]
+    assert "CREDENTIALS_ENCRYPTION_KEY" not in spawn_envs[0]
+    assert spawn_envs[0]["GIT_DIR"] == str(manager.git_source.git_dir)
+    assert spawn_envs[0]["GIT_WORK_TREE"] == str(manager.git_source.source_path)
 
 
 @pytest.mark.asyncio
@@ -1482,7 +1792,7 @@ async def test_git_sync_does_not_run_automatic_maintenance(
     config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"], git_configs={"docs": git_config})
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
     await manager.git_source.sync()
-    await git(docs, "config", "maintenance.auto", "true")
+    await git(docs, "--git-dir", str(manager.git_source.git_dir), "config", "maintenance.auto", "true")
     if advance_remote:
         await commit("updated")
     trace = tmp_path / "git-trace.jsonl"
@@ -1814,8 +2124,9 @@ async def test_ensure_git_repository_clones_with_explicit_lfs_hydration_policy(
         *,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
+        in_repository: bool = True,
     ) -> str:
-        _ = cwd
+        _ = (cwd, in_repository)
         git_calls.append(args)
         if args[0] == "clone":
             clone_envs.append(env)

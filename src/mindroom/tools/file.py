@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constructor annotations.
+from pathlib import Path  # Runtime import: toolkit introspection evaluates constructor annotations.
 from typing import Any, cast
 
 from agno.tools.file import FileTools as AgnoFileTools
@@ -19,7 +19,9 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.path_safety import (
     blocked_file_action_message,
+    blocked_vcs_metadata_message,
     format_path_for_output,
+    is_vcs_metadata_path,
     is_within_base_dir,
     resolve_base_dir_path,
     split_search_pattern,
@@ -69,25 +71,38 @@ class _MindRoomFileTools(AgnoFileTools):
             **cast("dict[str, Any]", kwargs),
         )
 
-    def _check_path(self, file_name: str, base_dir: Path, restrict_to_base_dir: bool = True) -> tuple[bool, Path]:
+    def _check_path(
+        self,
+        file_name: str,
+        base_dir: Path,
+        restrict_to_base_dir: bool = True,
+        *,
+        for_write: bool = False,
+    ) -> tuple[bool, Path]:
         """Resolve a path against base_dir, honoring this toolkit's restriction setting.
 
         Replaces Agno's Toolkit helper so every method here shares one rule.
         """
         del restrict_to_base_dir
         try:
-            return True, resolve_base_dir_path(base_dir, file_name, self.restrict_to_base_dir)
+            return True, resolve_base_dir_path(base_dir, file_name, self.restrict_to_base_dir, for_write=for_write)
         except ValueError:
             log_error(f"Path escapes base directory: {file_name}")
             return False, base_dir
 
+    def _blocked_message(self, action: str, file_name: str) -> str:
+        """Name the rule that blocked a path so the model can correct itself."""
+        if is_vcs_metadata_path(Path(file_name)) or is_vcs_metadata_path(self.base_dir / file_name):
+            return blocked_vcs_metadata_message(action, file_name)
+        return blocked_file_action_message(action, file_name, self.base_dir)
+
     def save_file(self, contents: str, file_name: str, overwrite: bool = True, encoding: str = "utf-8") -> str:
         """Save content to a file, with clear blocked-path errors."""
         try:
-            safe, file_path = self._check_path(file_name, self.base_dir)
+            safe, file_path = self._check_path(file_name, self.base_dir, for_write=True)
             if not safe:
                 log_error(f"Attempted to save file: {file_name}")
-                return blocked_file_action_message("saving file", file_name, self.base_dir)
+                return self._blocked_message("saving file", file_name)
             log_debug(f"Saving contents to {file_path}")
             if not file_path.parent.exists():
                 file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -126,10 +141,10 @@ class _MindRoomFileTools(AgnoFileTools):
         """Replace a range of lines in a file."""
         try:
             log_debug(f"Patching file: {file_name}")
-            safe, file_path = self._check_path(file_name, self.base_dir)
+            safe, file_path = self._check_path(file_name, self.base_dir, for_write=True)
             if not safe:
                 log_error(f"Attempted to replace file chunk: {file_name}")
-                return blocked_file_action_message("replacing file chunk", file_name, self.base_dir)
+                return self._blocked_message("replacing file chunk", file_name)
             contents = file_path.read_text(encoding=encoding)
             lines = contents.split(self.line_separator)
             start = lines[0:start_line]
@@ -163,7 +178,7 @@ class _MindRoomFileTools(AgnoFileTools):
 
     def delete_file(self, file_name: str) -> str:
         """Delete a file or empty directory with clear blocked-path errors."""
-        safe, path = self._check_path(file_name, self.base_dir)
+        safe, path = self._check_path(file_name, self.base_dir, for_write=True)
         try:
             if safe:
                 if path.is_dir():
@@ -172,7 +187,7 @@ class _MindRoomFileTools(AgnoFileTools):
                 path.unlink()
                 return ""
             log_error(f"Attempt to delete file outside {self.base_dir}: {file_name}")
-            return blocked_file_action_message("removing file", file_name, self.base_dir)
+            return self._blocked_message("removing file", file_name)
         except Exception as e:
             log_error(f"Error removing {file_name}: {e}")
             return f"Error removing file: {e}"
