@@ -653,3 +653,82 @@ def test_create_rejects_case_insensitive_manual_frontmatter_collision(tmp_path: 
         store.publish("learned-task", MARKDOWN, action="create", expected=store.snapshot(), source="run")
     assert manual_path.read_text() == manual
     assert not (tmp_path / "skills/learned-task/SKILL.md").exists()
+
+
+@pytest.mark.parametrize("newer_before_exhaustion", [False, True])
+@pytest.mark.asyncio
+async def test_exhausted_proposal_leaves_newer_turn_for_fresh_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    newer_before_exhaustion: bool,
+) -> None:
+    """Rejected publications cannot pin a session to an old proposal or consume later turns."""
+    config, paths = _learner(tmp_path)
+    config.agents["mind"].skill_learning.max_attempts = 1
+    _persist(config, paths)
+    initial_worker = worker_module.SkillLearningWorker(paths, lambda: config)
+    traces = []
+
+    async def review(**kwargs: object) -> SkillReview:
+        traces.append(cast("str", kwargs["trace"]))
+        if len(traces) == 1:
+            if newer_before_exhaustion:
+                initial_worker.stop()
+            return worker_module.SkillReview(
+                action="create",
+                name="mindroom-docs",
+                markdown=MARKDOWN.replace("learned-task", "mindroom-docs"),
+            )
+        return worker_module.SkillReview(action="create", name="learned-task", markdown=MARKDOWN)
+
+    monkeypatch.setattr(worker_module, "_review_session", review)
+    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
+    await initial_worker._run_cycle()
+    _persist(config, paths, text="A newer successful verification")
+    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
+    restarted = worker_module.SkillLearningWorker(paths, lambda: config)
+    if newer_before_exhaustion:
+        await restarted._run_cycle()
+    with sqlite3.connect(paths.storage_root / "skill_learning.db") as connection:
+        generation, processed, attempts, proposal = connection.execute(
+            "SELECT generation, processed, attempts, proposal FROM reviews",
+        ).fetchone()
+    assert (generation, processed, attempts, proposal) == (2, 1, 0, None)
+    await restarted._run_cycle()
+    assert len(traces) == 2
+    assert "A newer successful verification" in traces[1]
+    assert (tmp_path / "agents/mind/workspace/skills/learned-task/SKILL.md").read_text() == MARKDOWN
+
+
+@pytest.mark.asyncio
+async def test_exhausted_inference_preserves_turn_queued_during_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure before a proposal exists settles only the generation that began review."""
+    config, paths = _learner(tmp_path)
+    config.agents["mind"].skill_learning.max_attempts = 1
+    _persist(config, paths)
+    calls = []
+
+    async def review(**kwargs: object) -> SkillReview:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            _persist(config, paths, text="Later completed turn")
+            worker_module.queue_skill_learning(
+                config,
+                paths,
+                agent_name="mind",
+                session_id="session",
+                execution_identity=None,
+            )
+            raise TimeoutError
+        return worker_module.SkillReview(action="create", name="learned-task", markdown=MARKDOWN)
+
+    monkeypatch.setattr(worker_module, "_review_session", review)
+    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
+    worker = worker_module.SkillLearningWorker(paths, lambda: config)
+    await worker._run_cycle()
+    await worker._run_cycle()
+    assert len(calls) == 2
+    assert (tmp_path / "agents/mind/workspace/skills/learned-task/SKILL.md").exists()

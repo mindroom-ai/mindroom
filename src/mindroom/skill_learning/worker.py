@@ -276,6 +276,22 @@ class SkillLearningWorker:
                 (generation if generation is not None else row["generation"], source, row["key"]),
             )
 
+    def _record_failure(self, row: sqlite3.Row, proposal: _Proposal | None, max_attempts: int) -> int:
+        attempts = row["attempts"] + 1
+        if attempts >= max_attempts:
+            self._complete(
+                row,
+                row["last_source"],
+                generation=proposal.generation if proposal is not None else row["generation"],
+            )
+        else:
+            with _queue(self.runtime_paths) as connection:
+                connection.execute(
+                    "UPDATE reviews SET attempts=?, due=? WHERE key=?",
+                    (attempts, time.time() + 30 * 2 ** (attempts - 1), row["key"]),
+                )
+        return attempts
+
     async def _process(self, row: sqlite3.Row) -> None:
         scope = json.loads(row["scope"])
         config = self._current_config(scope)
@@ -289,6 +305,7 @@ class SkillLearningWorker:
         settings = config.agents[scope["agent"]].skill_learning
         config_revision = config.agents[scope["agent"]].model_dump_json()
         identity = parse_tool_execution_identity_payload(scope["identity"]) if scope["identity"] is not None else None
+        proposal = None
         try:
             proposal = _Proposal.model_validate_json(row["proposal"]) if row["proposal"] else None
             if proposal is None:
@@ -357,18 +374,7 @@ class SkillLearningWorker:
                 source=proposal.source,
             )
         except Exception as exc:
-            attempts = row["attempts"] + 1
-            with _queue(self.runtime_paths) as connection:
-                connection.execute(
-                    "UPDATE reviews SET attempts=?, due=?, processed=CASE WHEN ? THEN ? ELSE processed END WHERE key=?",
-                    (
-                        attempts,
-                        time.time() + 30 * 2 ** (attempts - 1),
-                        attempts >= settings.max_attempts,
-                        row["generation"],
-                        row["key"],
-                    ),
-                )
+            attempts = self._record_failure(row, proposal, settings.max_attempts)
             logger.warning(
                 "Skill learning review failed",
                 agent=scope["agent"],
