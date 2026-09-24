@@ -7,21 +7,27 @@ Each instance's MindRoom backend serves its bundled dashboard and API.
 
 1. The user signs in to the platform app and obtains a Supabase session.
 2. The frontend calls `POST /my/sso-cookie` on the platform API with the Supabase access token as a bearer token.
-3. The platform backend validates the token and sets the `mindroom_jwt` cookie as a host-only cookie on the platform API host.
+3. The platform backend validates the token and sets the `__Host-mindroom_jwt` cookie on the platform API host.
 4. An unauthenticated instance dashboard request redirects to `GET /instance-sso/authorize` on the platform API with the dashboard URL as `redirect_to`.
-5. The platform validates the `mindroom_jwt` cookie, verifies that the user owns the instance named by the dashboard host and that its subscription allows sign-in, and redirects to the instance's `/api/auth/platform-sso` with a login ticket.
+5. The platform validates the `__Host-mindroom_jwt` cookie, verifies that the user owns the instance named by the dashboard host and that its subscription allows sign-in, and redirects to the instance's `/api/auth/platform-sso` with a login ticket.
 6. The runtime verifies the ticket, checks the user against its configured `ACCOUNT_ID`, and sets its own `__Host-mindroom_platform_session` cookie.
 
-The `mindroom_jwt` cookie has no `Domain` attribute, so browsers never send the platform's Supabase token to tenant MindRoom or Matrix hosts.
+The `__Host-` prefix makes browsers keep the cookie host-only, so they never send the platform's Supabase token to tenant MindRoom or Matrix hosts, and tenant hosts cannot overwrite it.
 It has `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, and a one-hour lifetime.
-Setting or clearing it also expires the `Domain=.PLATFORM_DOMAIN` cookie written by older releases.
+Setting or clearing it also expires the `mindroom_jwt` cookie with `Domain=.PLATFORM_DOMAIN` written by older releases.
 
 The login ticket is an HS256 JWT signed with a key derived for that one instance, and it expires after 60 seconds.
 It names the instance dashboard origin as its audience, and the runtime accepts each ticket once.
 The runtime signs its one-hour session cookie with the same instance key, so a ticket or session from one instance does not verify on another.
 Neither artefact is a Supabase token, so the platform API and Matrix OIDC endpoints reject both.
 An instance owner can read their own instance key, which only lets them sign in to their own instance.
-Platform logout clears `mindroom_jwt` but cannot clear instance cookies, so an existing instance session stays valid until its one-hour expiry.
+Platform logout clears `__Host-mindroom_jwt` but cannot clear instance cookies, so an existing instance session stays valid until its one-hour expiry.
+
+## Upgrading to Instance-Signed Login
+
+Instances provisioned before dashboard SSO have no `platform_sso_secret`, and the new platform no longer sends its cookie to instance hosts.
+Deploy the platform backend and then re-provision every instance through the provisioner so each one receives its instance key, `MINDROOM_PLATFORM_SSO_URL`, and `platformDomain`.
+Until an instance is re-provisioned, its pod still starts, but browser dashboard login returns `401` instead of redirecting to the platform.
 
 ## Instance Authentication Modes
 
@@ -44,7 +50,7 @@ See [Kubernetes Deployment](../../docs/deployment/kubernetes.md) for deployment 
 
 ## Matrix Login
 
-The platform's first-party Matrix OIDC endpoints on the platform API host are an additional, opt-in consumer of `mindroom_jwt`.
+The platform's first-party Matrix OIDC endpoints on the platform API host are an additional, opt-in consumer of `__Host-mindroom_jwt`.
 They apply the same user, instance ownership, and subscription check as dashboard login before authorizing hosted Matrix login.
 A missing or invalid cookie redirects this flow to platform login.
 This is separate from the instance dashboard/API Supabase authentication path.
@@ -58,12 +64,12 @@ This is separate from the instance dashboard/API Supabase authentication path.
 
 ## Troubleshooting
 
-- Dashboard login `404` from `/api/auth/platform-sso`: the instance lacks `platform_sso_secret`; re-provision the instance so the provisioner writes it.
+- Dashboard `401` without a platform redirect: the instance lacks `platform_sso_secret`; re-provision the instance so the provisioner writes it.
 - Dashboard login `401` from `/api/auth/platform-sso`: the ticket expired, was already used, or was signed for another instance.
 - API `401`: check the credentials required by the active authentication mode.
 - Supabase API `403`: check the configured account ID; cookie-authenticated mutations can also fail origin checks.
-- With hosted Supabase authentication, unauthenticated dashboard requests redirect to the configured platform login URL.
+- With hosted Supabase authentication and an instance key, unauthenticated dashboard requests redirect to `MINDROOM_PLATFORM_SSO_URL`.
 - Standalone API-key dashboards redirect unauthenticated users to `/login`; unauthenticated API requests return `401`.
-- Trusted-upstream authentication failures return `401` without a login redirect, even when a platform login URL is configured.
+- Trusted-upstream authentication failures return `401` without a login redirect, even when `MINDROOM_PLATFORM_SSO_URL` is configured.
 - Other unauthenticated dashboard requests return `401` when the active mode provides no login redirect.
 - Missing bundled frontend assets return `404`; inspect the runtime image and backend logs.

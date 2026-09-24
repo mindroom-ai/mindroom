@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import jwt
+import pytest
 from backend.routes import sso
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -31,7 +32,8 @@ def _patch_oidc(monkeypatch):
     monkeypatch.setattr(matrix_oidc, "MATRIX_OIDC_PRIVATE_KEY", _test_private_key())
     monkeypatch.setattr(matrix_oidc, "MATRIX_OIDC_KEY_ID", "test-key")
     monkeypatch.setattr(matrix_oidc, "PLATFORM_DOMAIN", "mindroom.chat")
-    monkeypatch.setattr(matrix_oidc, "INSTANCE_BASE_DOMAIN", "mindroom.chat")
+    monkeypatch.setattr(sso, "PLATFORM_DOMAIN", "mindroom.chat")
+    monkeypatch.setattr(sso, "INSTANCE_BASE_DOMAIN", "mindroom.chat")
     return matrix_oidc
 
 
@@ -71,6 +73,39 @@ def test_matrix_oidc_authorize_redirects_anonymous_users_to_platform_login(monke
     assert parse_qs(urlparse(location).query)["redirect_to"][0].startswith(
         "https://api.mindroom.chat/matrix-oidc/authorize?"
     )
+
+
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "http://1.matrix.mindroom.chat/_synapse/client/oidc/callback",
+        "https://01.matrix.mindroom.chat/_synapse/client/oidc/callback",
+        "https://1.matrix.mindroom.chat:8448/_synapse/client/oidc/callback",
+        "https://user@1.matrix.mindroom.chat/_synapse/client/oidc/callback",
+        "https://1.mindroom.chat/_synapse/client/oidc/callback",
+        "https://1.matrix.mindroom.chat/other",
+        "https://[::1/_synapse/client/oidc/callback",
+    ],
+)
+def test_matrix_oidc_authorize_rejects_non_instance_callbacks(monkeypatch, redirect_uri: str) -> None:
+    """Codes are only issued to the canonical Synapse callback on one instance's Matrix host."""
+    _patch_oidc(monkeypatch)
+    client = TestClient(app)
+
+    response = client.get(
+        "/matrix-oidc/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "mindroom-synapse",
+            "redirect_uri": redirect_uri,
+            "scope": "openid",
+            "state": "state-123",
+        },
+        headers={"host": "api.mindroom.chat"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 400
 
 
 def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -> None:
@@ -114,7 +149,7 @@ def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -
             "state": "state-123",
             "nonce": "nonce-123",
         },
-        cookies={"mindroom_jwt": "supabase-access-token"},
+        cookies={sso.SSO_COOKIE_NAME: "supabase-access-token"},
         headers={"host": "api.mindroom.chat"},
         follow_redirects=False,
     )

@@ -215,6 +215,8 @@ spec:
             secretKeyRef:
               name: {{ $instanceSecretName }}
               key: platform_sso_secret
+              # Instances provisioned before dashboard SSO start without browser login until re-provisioned.
+              optional: true
         - name: OPENROUTER_API_KEY_FILE
           value: "/etc/secrets/openrouter_key"
         - name: GOOGLE_API_KEY_FILE

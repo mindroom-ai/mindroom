@@ -196,7 +196,7 @@ def test_instance_sso_ticket_is_not_a_platform_credential(monkeypatch: pytest.Mo
     monkeypatch.setattr(matrix_oidc, "MATRIX_OIDC_ENABLED", True)
     monkeypatch.setattr(matrix_oidc, "MATRIX_OIDC_CLIENT_ID", "mindroom-synapse")
     monkeypatch.setattr(matrix_oidc, "PLATFORM_DOMAIN", "mindroom.chat")
-    monkeypatch.setattr(matrix_oidc, "INSTANCE_BASE_DOMAIN", "mindroom.chat")
+    monkeypatch.setattr(sso, "INSTANCE_BASE_DOMAIN", "mindroom.chat")
     client = TestClient(app)
 
     # Unique client IPs keep auth-failure monitoring from other tests out of these requests.

@@ -5565,6 +5565,29 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(
     assert response.headers["location"].startswith("https://api.example.com/instance-sso/authorize?redirect_to=")
 
 
+def test_platform_frontend_skips_sso_redirect_without_instance_secret(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Without the instance key, a platform redirect would only end in an unusable ticket."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    _set_platform_auth(
+        valid_tokens=set(),
+        platform_sso_url="https://api.example.com/instance-sso/authorize",
+        platform_sso_secret=None,
+    )
+
+    response = test_client.get("/agents", follow_redirects=False)
+
+    assert response.status_code == 401
+    assert "location" not in response.headers
+
+
 def test_platform_frontend_redirect_uses_public_url_for_redirect_to(
     test_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

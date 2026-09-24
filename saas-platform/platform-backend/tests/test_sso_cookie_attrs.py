@@ -31,14 +31,16 @@ def _legacy_shared_cookie_domain() -> str | None:
 
 
 def _token_cookie(cookies: list[str]) -> str:
-    token_cookies = [cookie for cookie in cookies if cookie.startswith("mindroom_jwt=tok")]
+    token_cookies = [cookie for cookie in cookies if cookie.startswith(f"{sso.SSO_COOKIE_NAME}=tok")]
     assert len(token_cookies) == 1
     return token_cookies[0]
 
 
 def _assert_host_only_expiry_cookie(cookies: list[str]) -> None:
     assert any(
-        cookie.startswith("mindroom_jwt=") and "domain=" not in cookie.lower() and "max-age=0" in cookie.lower()
+        cookie.startswith(f"{sso.SSO_COOKIE_NAME}=")
+        and "domain=" not in cookie.lower()
+        and "max-age=0" in cookie.lower()
         for cookie in cookies
     )
 
@@ -110,6 +112,8 @@ def test_sso_cookie_has_security_flags() -> None:
     assert "httponly" in set_cookie
     assert "secure" in set_cookie
     assert "samesite=lax" in set_cookie
+    assert "path=/" in set_cookie
+    assert set_cookie.startswith("__host-mindroom_jwt=")
 
 
 def test_sso_cookie_returns_401_without_bearer_token() -> None:

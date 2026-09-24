@@ -9,11 +9,10 @@ import json
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote
 
 import jwt
 from backend.config import (
-    INSTANCE_BASE_DOMAIN,
     MATRIX_OIDC_CLIENT_ID,
     MATRIX_OIDC_CLIENT_SECRET,
     MATRIX_OIDC_ENABLED,
@@ -23,7 +22,12 @@ from backend.config import (
     PLATFORM_DOMAIN,
 )
 from backend.deps import _extract_bearer_token, limiter
-from backend.routes.sso import assert_instance_login_allowed, platform_cookie_user, platform_login_redirect
+from backend.routes.sso import (
+    assert_instance_login_allowed,
+    parse_instance_url,
+    platform_cookie_user,
+    platform_login_redirect,
+)
 from cachetools import TTLCache
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
@@ -93,19 +97,10 @@ def _authorize_url(request: Request) -> str:
 
 
 def _validate_redirect_uri(redirect_uri: str) -> str:
-    parsed = urlparse(redirect_uri)
-    if parsed.scheme != "https" or parsed.path != "/_synapse/client/oidc/callback":
+    target = parse_instance_url(redirect_uri, host_prefix="matrix.")
+    if target is None or target.path != "/_synapse/client/oidc/callback":
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
-
-    hostname = (parsed.hostname or "").lower()
-    suffix = f".matrix.{(INSTANCE_BASE_DOMAIN or PLATFORM_DOMAIN).lower()}"
-    if not hostname.endswith(suffix):
-        raise HTTPException(status_code=400, detail="Invalid redirect_uri")
-
-    instance_id = hostname[: -len(suffix)]
-    if not instance_id or "." in instance_id:
-        raise HTTPException(status_code=400, detail="Invalid redirect_uri")
-    return instance_id
+    return target.instance_id
 
 
 def _subject_from_user(user: dict[str, Any]) -> str:

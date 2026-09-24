@@ -598,8 +598,8 @@ def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseU
     return response.user
 
 
-def _platform_sso_audience(request: Request, settings: _ApiAuthSettings) -> str | None:
-    """Return the dashboard origin that platform login tickets and sessions must name."""
+def _dashboard_origin(request: Request, settings: _ApiAuthSettings) -> str | None:
+    """Return this dashboard's public origin, which platform logins and browser mutations must name."""
     return public_origin(settings.public_url or str(request.base_url))
 
 
@@ -612,7 +612,7 @@ def _verified_platform_sso_claims(
     required_claims: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Verify a platform login ticket or session signed with this instance's own SSO key."""
-    audience = _platform_sso_audience(request, settings)
+    audience = _dashboard_origin(request, settings)
     if settings.platform_sso_secret is None or audience is None:
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
     try:
@@ -788,7 +788,12 @@ def login_redirect_for_request(request: Request, *, next_path: str | None = None
     auth_settings = _request_auth_state(request).settings
     if auth_settings.trusted_upstream.enabled:
         return None
-    if auth_settings.supabase_url and auth_settings.supabase_anon_key and auth_settings.platform_sso_url:
+    if (
+        auth_settings.supabase_url
+        and auth_settings.supabase_anon_key
+        and auth_settings.platform_sso_url
+        and auth_settings.platform_sso_secret
+    ):
         redirect_to = quote(_platform_redirect_target(request, auth_settings, next_path), safe="")
         return RedirectResponse(f"{auth_settings.platform_sso_url}?redirect_to={redirect_to}")
     if auth_settings.mindroom_api_key:
@@ -1026,7 +1031,7 @@ def _require_browser_mutation_origin(
         or _extract_bearer_token(validated_authorization) is not None
     ):
         return
-    origin = public_origin(settings.public_url or str(request.base_url))
+    origin = _dashboard_origin(request, settings)
     if origin is None:
         raise HTTPException(403, "Browser changes require a valid public origin")
     require_same_origin(request, origin)

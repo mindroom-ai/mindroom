@@ -777,6 +777,7 @@ def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
     assert platform_sso_secret_env["valueFrom"]["secretKeyRef"] == {
         "name": "tenant-runtime-secrets",
         "key": "platform_sso_secret",
+        "optional": True,
     }
     assert mindroom_env["MINDROOM_PLATFORM_SSO_URL"] == "https://api.mindroom.chat/instance-sso/authorize"
     assert mindroom["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "tenant-runtime-secrets"

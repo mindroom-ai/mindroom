@@ -594,7 +594,7 @@ Expected outcome: Legal pages render as static public content without requiring 
 Expected outcome: Account bootstrap and free-subscription bootstrap happen automatically when they do not already exist.
 
 - [ ] `SAAS-006` Verify SSO cookie scope and instance dashboard login after customer dashboard load and logout.
-Expected outcome: The host-only `mindroom_jwt` cookie is created or refreshed on the platform API host when signed in and removed on logout, no request to any `<id>.<domain>` host carries `mindroom_jwt`, and opening an owned instance dashboard signs in through a single-use ticket that sets that instance's `__Host-mindroom_platform_session` cookie.
+Expected outcome: The `__Host-mindroom_jwt` cookie is created or refreshed on the platform API host when signed in and removed on logout, no request to any `<id>.<domain>` host carries a platform token cookie, and opening an owned instance dashboard signs in through a single-use ticket that sets that instance's `__Host-mindroom_platform_session` cookie.
 
 - [ ] `SAAS-007` Load the no-instance customer dashboard state.
 Expected outcome: The UI shows provisioning guidance or wait messaging that is distinct from generic failure messaging.
