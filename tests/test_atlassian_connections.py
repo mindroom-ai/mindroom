@@ -57,13 +57,13 @@ CONNECTIONS = (
         site_url="https://acme.atlassian.net/wiki",
         cloud_id="00000000-0000-4000-8000-000000000002",
         products=("confluence",),
+        client_config_service="atlassian_oauth_client",
     ),
     AtlassianConnectionConfig(
         name="archive",
         display_name="Archive",
         site_url="https://archive.atlassian.net",
         write=False,
-        client_config_service="archive_atlassian_oauth_client",
     ),
 )
 
@@ -101,7 +101,8 @@ def test_connection_config_normalizes_the_site_pin() -> None:
     assert connection.provider_id == "partner_atlassian"
     assert connection.products == ("jira", "confluence")
     assert connection.write is True
-    assert connection.client_config_service == "atlassian_oauth_client"
+    assert connection.client_config_service is None
+    assert connection.oauth_client_service == "partner_atlassian_oauth_client"
 
 
 @pytest.mark.parametrize(
@@ -130,7 +131,7 @@ def test_connection_config_rejects_unsafe_or_ambiguous_values(overrides: dict[st
 
 
 def test_connection_provider_is_independent_of_the_default_connection() -> None:
-    """Each connection has its own provider ID, token store, callback, and scopes, sharing only the app."""
+    """Each connection has its own provider ID, token store, callback, scopes, and by default its own app."""
     default = atlassian_oauth_provider()
     partner = atlassian_connection_oauth_provider(_connection(products=("confluence",), write=False))
 
@@ -139,7 +140,8 @@ def test_connection_provider_is_independent_of_the_default_connection() -> None:
     assert partner.credential_service == "partner_atlassian_oauth"
     assert partner.tool_config_service == "partner_atlassian"
     assert partner.redirect_path == "/api/oauth/partner_atlassian/callback"
-    assert partner.shared_client_config_services == default.shared_client_config_services
+    assert default.shared_client_config_services == ("atlassian_oauth_client",)
+    assert partner.shared_client_config_services == ("partner_atlassian_oauth_client",)
     assert partner.requester_scoped_credentials is True
     assert partner.scopes == (
         "offline_access",
@@ -214,6 +216,25 @@ async def test_connections_share_one_app_but_use_their_own_callbacks(tmp_path: P
     assert partner_query["redirect_uri"] == ["https://chat.example.com/api/oauth/partner_atlassian/callback"]
     assert "read:jira-work" in default_query["scope"][0]
     assert "read:jira-work" not in partner_query["scope"][0]
+
+
+def test_connection_app_never_falls_back_to_the_default_app(tmp_path: Path) -> None:
+    """A connection with its own app stays unconfigured until that app's credentials are stored."""
+    config, paths = _plugin(tmp_path)
+    manager = save_client_config(paths)
+
+    with isolated_plugin_runtime(config, paths):
+        archive = load_oauth_providers(config, paths)["archive_atlassian"]
+        assert archive.client_config(paths) is None
+        manager.save_credentials(
+            "archive_atlassian_oauth_client",
+            {"client_id": "archive-client", "client_secret": "archive-secret"},
+        )
+        archive_config = archive.client_config(paths)
+
+    assert archive_config is not None
+    assert archive_config.client_id == "archive-client"
+    assert archive_config.redirect_uri == "https://chat.example.com/api/oauth/archive_atlassian/callback"
 
 
 def test_duplicate_connection_names_are_rejected(tmp_path: Path) -> None:

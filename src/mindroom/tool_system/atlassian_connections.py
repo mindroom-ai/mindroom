@@ -13,7 +13,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from mindroom.custom_tools.atlassian_client import normalize_cloud_id, normalize_site_url
 from mindroom.oauth.atlassian import (
-    ATLASSIAN_CLIENT_CONFIG_SERVICE,
     ATLASSIAN_PRODUCTS,
     AtlassianProduct,
     atlassian_function_names,
@@ -46,10 +45,7 @@ class AtlassianConnectionConfig(BaseModel):
     cloud_id: str | None = None
     products: tuple[AtlassianProduct, ...] = ATLASSIAN_PRODUCTS
     write: bool = True
-    client_config_service: str = Field(
-        default=ATLASSIAN_CLIENT_CONFIG_SERVICE,
-        pattern=r"^[a-z][a-z0-9_]*_oauth_client$",
-    )
+    client_config_service: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]*_oauth_client$")
 
     @field_validator("site_url")
     @classmethod
@@ -85,6 +81,14 @@ class AtlassianConnectionConfig(BaseModel):
         """Return the provider ID, which is also this connection's tool name and settings service."""
         return f"{self.name}_atlassian"
 
+    @property
+    def oauth_client_service(self) -> str:
+        """Return the service holding this connection's Atlassian app credentials.
+
+        Each connection defaults to its own app, since an Atlassian app may accept only one callback URL.
+        """
+        return self.client_config_service or f"{self.provider_id}_oauth_client"
+
 
 def atlassian_connection_oauth_provider(connection: AtlassianConnectionConfig) -> OAuthProvider:
     """Build this connection's provider for a plugin's OAuth registration callback."""
@@ -93,7 +97,7 @@ def atlassian_connection_oauth_provider(connection: AtlassianConnectionConfig) -
         display_name=connection.display_name,
         products=connection.products,
         write=connection.write,
-        client_config_service=connection.client_config_service,
+        client_config_service=connection.oauth_client_service,
     )
 
 
@@ -153,7 +157,7 @@ def register_atlassian_connection_tools(connection: AtlassianConnectionConfig) -
         docs_url=base.docs_url,
         helper_text=(
             f"Each user connects their own {connection.display_name} account. "
-            f"Store the Atlassian OAuth 2.0 (3LO) app client ID and secret in {connection.client_config_service}."
+            f"Store the Atlassian OAuth 2.0 (3LO) app client ID and secret in {connection.oauth_client_service}."
         ),
         function_names=atlassian_function_names(
             connection.products,

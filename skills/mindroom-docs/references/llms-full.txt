@@ -11106,7 +11106,7 @@ Both options are optional and can also be set once for every agent through `defa
 When neither is set and the connected account can reach exactly one Jira or Confluence site, the tool uses that site.
 When the account can reach several sites, the tool returns `site_selection_required` with the available sites instead of choosing one.
 When a configured site is not reachable with the connected account, the tool returns `site_not_found` and never falls back to a different site.
-Site URLs must use HTTPS, and cloud IDs must be UUIDs, so a misconfigured value fails when the tool is built.
+Site URLs must use HTTPS, and cloud IDs must be UUIDs, so a misconfigured value keeps the tool from loading and logs a warning.
 
 ## Connect An Account
 
@@ -11182,7 +11182,7 @@ agents:
 | `cloud_id` | `null` | Cloud ID of the site; it takes precedence over `site_url`. |
 | `products` | `("jira", "confluence")` | Products whose functions and scopes this connection enables. |
 | `write` | `True` | Set to `False` to register only read functions and request only read scopes. |
-| `client_config_service` | `atlassian_oauth_client` | Credential service holding the app client ID and secret. |
+| `client_config_service` | `<name>_atlassian_oauth_client` | Credential service holding the connection's app client ID and secret. |
 
 Every connection requires `site_url` or `cloud_id`, so a named connection always acts on one pinned site.
 The `name` determines every identifier, so keep it stable once users have connected.
@@ -11192,11 +11192,18 @@ The `name` determines every identifier, so keep it stable once users have connec
 | Tool and provider ID | `partner_atlassian` |
 | Callback URL | `https://mindroom.example.com/api/oauth/partner_atlassian/callback` |
 | Token service | `partner_atlassian_oauth` |
+| App client service | `partner_atlassian_oauth_client` |
 | Function names | `partner_confluence_search`, `partner_confluence_get_page`, and so on |
 
-Register each connection's callback URL on its Atlassian app before users connect.
-By default, every connection uses the same app through `atlassian_oauth_client`.
-If that app cannot hold another callback URL, or the site belongs to a different organization with its own app, create a separate app and set `client_config_service` to a service such as `partner_atlassian_oauth_client` that holds its client ID and secret.
+By default, each connection uses its own Atlassian app, because Atlassian documents one callback URL per app.
+Create an app for the connection as in [Set Up The Atlassian App](#set-up-the-atlassian-app), register the connection's callback URL on it, and store its client ID and secret in the connection's app client service.
+A connection that never received its own client credentials stays unconfigured and never falls back to the default app.
+
+To reuse the default app instead, set `client_config_service="atlassian_oauth_client"` and register the connection's callback URL on that app, if the developer console accepts an additional one.
+A shared app has two side effects.
+Atlassian records consent per user and app, so the default connection can then also reach the other site, and an unpinned `atlassian` tool starts returning `site_selection_required` until it gets a `site_url` or `cloud_id`.
+Revoking the shared app in Atlassian disconnects every connection that uses it.
+
 Each connection has its own card on the Integrations page, and its functions return their own connect link when they need a login.
 
 ## Approvals For Writes
@@ -11243,14 +11250,15 @@ The stored file name is always generated from the attachment ID.
 
 - The tool always runs in the primary MindRoom runtime, so worker containers never receive OAuth client configuration or user tokens.
 - The tool takes no local file paths and reads or writes no workspace files; downloads go only to MindRoom's managed attachment storage.
-- Requests go only to `https://api.atlassian.com/ex/{product}/{cloud_id}/...` for the pinned site, and cloud IDs from Atlassian are accepted only in UUID form.
+- The bearer goes only to `https://api.atlassian.com/oauth/token/accessible-resources` to find the connected sites and to `https://api.atlassian.com/ex/{product}/{cloud_id}/...` for the pinned site, and cloud IDs from Atlassian are accepted only in UUID form.
 - Page, attachment, issue, and cursor arguments are validated before any authentication or network access, so they cannot change a request path.
 - The OAuth bearer is sent only to the pinned site's gateway path for the product being called, never to the Atlassian media service or any other host.
 - Downloads follow at most three redirects, only over HTTPS on the default port without URL credentials, and only to that gateway path or `api.media.atlassian.com`.
-- A gateway path containing dot segments, encoded or double-encoded slashes, backslashes, or `;` parameters is treated as foreign and rejected.
+- A gateway path containing dot segments, encoded or repeatedly encoded slashes, backslashes, or `;` parameters is treated as foreign and rejected.
 - Cookies are cleared before every download hop, so a cookie set by one hop never reaches another.
 - Every download hop asks for `Accept-Encoding: identity`, and content-encoded responses are rejected instead of decoded.
 - Error results carry a code, a fixed message, and a status code, and never a request URL, signed download link, token, or raw response body.
+- HTTP request logs drop the signature query from media service URLs.
 - Jira and Confluence error messages are kept for failed API requests, with URLs replaced and control characters removed.
 - A rejected access token returns a reconnect link instead of Atlassian's error text.
 
@@ -11259,6 +11267,7 @@ The stored file name is always generated from the attachment ID.
 - Search and listing functions return at most 50 results per call.
 - Attachment downloads are limited to the inline worker transfer size, 16 MiB by default, controlled by `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`.
 - A download must finish within 120 seconds, including every redirect.
+- Page reads and attachment listings use Confluence search, so a page created moments ago can take a short time to appear, and archived or draft pages are not returned.
 - Only Atlassian Cloud is supported; Jira and Confluence Data Center use the existing `jira` and `confluence` tools.
 - The tool does not upload attachments, delete content, or manage spaces and projects.
 - `confluence_update_page` replaces the whole body and needs the page's current version number plus one from `confluence_get_page`.
@@ -15981,7 +15990,7 @@ If a configured restriction cannot be checked from verified provider claims, the
 
 The built-in GitHub provider uses the generic framework for GitHub App user tokens, requests no classic OAuth scopes, and requires S256 PKCE.
 The built-in Atlassian provider uses the generic framework for Atlassian Cloud OAuth 2.0 (3LO), stores tokens only in the requester's `user` scope like GitHub, and requests only the scopes its [Jira and Confluence functions](https://docs.mindroom.chat/tools/atlassian/#scopes) call.
-Additional Atlassian sites get separate providers through `AtlassianConnectionConfig`, and every Atlassian provider reads its app client from the shared `atlassian_oauth_client` service unless a connection names another.
+The built-in provider reads its app client from `atlassian_oauth_client`, and each additional site configured through `AtlassianConnectionConfig` gets a separate provider that defaults to its own `<name>_atlassian_oauth_client` service.
 Built-in Google providers use the generic framework for Drive, Docs, Calendar, Sheets, and Gmail.
 Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
 Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service.

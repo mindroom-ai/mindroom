@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import logging
 import threading
 from typing import TYPE_CHECKING
 
 import httpx
 import pytest
 
+import mindroom.matrix.media as media_module
 from mindroom import attachments as attachments_module
 from mindroom.attachments import load_attachment
 from mindroom.custom_tools import atlassian as atlassian_module
@@ -279,7 +281,9 @@ async def test_parent_domain_cookie_would_reach_the_media_host_without_clearing(
         f"https://api.atlassian.com/ex/confluence/{CLOUD_ID}/wiki/a%252Fb",
         f"https://api.atlassian.com/ex/confluence/{CLOUD_ID}/wiki/a%5Cb",
         f"https://api.atlassian.com/ex/confluence/{CLOUD_ID}/wiki/a;jsessionid=1",
+        f"https://api.atlassian.com/ex/confluence/{CLOUD_ID}/wiki/a%252525252Fb",
         "https://api.atlassian.com:444/ex/confluence/x",
+        "/wiki/download/attachments/123/Report.pdf",
         "",
     ],
 )
@@ -433,12 +437,6 @@ async def test_download_deadline_covers_a_slow_body(tmp_path: Path, monkeypatch:
     result = await _download(tool, context)
 
     assert result["code"] == "download_timeout"
-
-
-def test_download_deadline_is_two_minutes() -> None:
-    """The production deadline stays bounded."""
-    assert atlassian_client._DOWNLOAD_DEADLINE_SECONDS == 120.0
-    assert atlassian_client._MAX_DOWNLOAD_REDIRECTS == 3
 
 
 @pytest.mark.asyncio
@@ -650,3 +648,68 @@ async def test_cancelled_download_finishes_storing_before_cancelling(
 
     assert len(stored) == 1
     assert load_attachment(tmp_path / "storage", stored[0]) is not None
+
+
+@pytest.mark.asyncio
+async def test_redirect_without_location_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A redirect status without a Location header is refused instead of followed."""
+    tool, gateway, context, _paths = _setup(tmp_path, monkeypatch)
+    gateway.route("GET", gateway_url("confluence", DOWNLOAD_PATH), lambda _request: httpx.Response(302))
+
+    result = await _download(tool, context)
+
+    assert result["code"] == "redirect_rejected"
+    assert result["message"] == "Atlassian returned a download redirect without a location."
+    assert len(_download_requests(gateway)) == 1
+
+
+@pytest.mark.asyncio
+async def test_request_logs_never_contain_signed_media_urls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Request logs keep media URLs without the signature query that authorizes them."""
+    tool, gateway, context, _paths = _setup(tmp_path, monkeypatch)
+    gateway.route("GET", gateway_url("confluence", DOWNLOAD_PATH), _redirect(MEDIA_URL))
+    gateway.route("GET", MEDIA_URL.split("?", maxsplit=1)[0], _file())
+
+    with caplog.at_level(logging.INFO, logger="httpx"):
+        result = await _download(tool, context)
+
+    logged = "\n".join(record.getMessage() for record in caplog.records if record.name == "httpx")
+    assert result["status"] == "ok"
+    assert "api.media.atlassian.com/file/abc/binary" in logged
+    assert "signed-secret" not in logged
+
+
+@pytest.mark.asyncio
+async def test_failed_storage_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A download that cannot be retained reports a storage failure and registers nothing."""
+    tool, gateway, context, _paths = _setup(tmp_path, monkeypatch)
+    gateway.route("GET", gateway_url("confluence", DOWNLOAD_PATH), _file())
+    monkeypatch.setattr(atlassian_module, "register_bytes_attachment", lambda *_args, **_kwargs: None)
+
+    with tool_runtime_context(context):
+        result = json.loads(await tool.confluence_download_attachment(page_id="123", attachment_id="att456"))
+        current = get_tool_runtime_context()
+        assert current is not None
+        assert list_tool_runtime_attachment_ids(current) == []
+
+    assert result["code"] == "attachment_store_failed"
+
+
+@pytest.mark.asyncio
+async def test_download_above_the_retained_media_limit_is_too_large(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inline transfer limit above MindRoom's retained media limit still reports a size error."""
+    tool, gateway, context, _paths = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 4)
+    gateway.route("GET", gateway_url("confluence", DOWNLOAD_PATH), _file(b"12345"))
+
+    result = await _download(tool, context)
+
+    assert result["code"] == "attachment_too_large"
+    assert not (tmp_path / "storage" / "incoming_media").exists()

@@ -7,8 +7,9 @@ message, and non-sensitive details, never a request URL, header, or response bod
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 from urllib.parse import unquote, urljoin, urlsplit
 
@@ -43,6 +44,23 @@ _STATUS_ERROR_CODES = {
     413: "request_too_large",
     429: "rate_limited",
 }
+
+
+class _SignedMediaUrlLogFilter(logging.Filter):
+    """Drop the signature query from httpx request logs for Atlassian media downloads."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                arg.copy_with(query=None) if isinstance(arg, httpx.URL) and arg.host in _MEDIA_HOSTS else arg
+                for arg in record.args
+            )
+        return True
+
+
+_HTTPX_LOGGER = logging.getLogger("httpx")
+if not any(isinstance(log_filter, _SignedMediaUrlLogFilter) for log_filter in _HTTPX_LOGGER.filters):
+    _HTTPX_LOGGER.addFilter(_SignedMediaUrlLogFilter())
 
 
 class AtlassianError(Exception):
@@ -226,8 +244,15 @@ async def accessible_sites(access_token: str) -> list[AtlassianSite]:
     except httpx.HTTPError as exc:
         raise _transport_error(exc) from None
     resources = _json_response(response)
-    sites = [_site_from_resource(resource) for resource in resources] if isinstance(resources, list) else []
-    return [site for site in sites if site is not None]
+    sites_by_cloud_id: dict[str, AtlassianSite] = {}
+    for resource in resources if isinstance(resources, list) else []:
+        site = _site_from_resource(resource)
+        if site is None:
+            continue
+        # One site can be listed once per product; merge its entries so it counts once.
+        known = sites_by_cloud_id.get(site.cloud_id)
+        sites_by_cloud_id[site.cloud_id] = site if known is None else replace(known, scopes=known.scopes | site.scopes)
+    return list(sites_by_cloud_id.values())
 
 
 def select_site(
@@ -304,14 +329,14 @@ async def request_json(
     return _json_response(response)
 
 
-def _fully_unquoted(segment: str) -> str:
-    """Decode a path segment until stable, so double encoding cannot hide separators."""
+def _fully_unquoted(segment: str) -> str | None:
+    """Decode a path segment until stable, so nested encoding cannot hide separators; None if it never settles."""
     for _ in range(4):
         decoded = unquote(segment)
         if decoded == segment:
-            break
+            return segment
         segment = decoded
-    return segment
+    return None
 
 
 def _is_gateway_url(url: str, gateway_prefix: str) -> bool:
@@ -332,7 +357,7 @@ def _is_gateway_url(url: str, gateway_prefix: str) -> bool:
         return False
     for segment in parts.path.split("/"):
         decoded = _fully_unquoted(segment)
-        if decoded in {".", ".."} or any(char in decoded for char in "/\\;"):
+        if decoded is None or decoded in {".", ".."} or any(char in decoded for char in "/\\;"):
             return False
     return True
 

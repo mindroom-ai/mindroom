@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs
@@ -10,11 +11,14 @@ import httpx
 import pytest
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
+from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.atlassian import AtlassianTools
 from mindroom.oauth.atlassian import atlassian_function_names, atlassian_oauth_provider
+from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync, resolve_oauth_credential_context
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.worker_routing import tool_execution_identity
 from tests.atlassian_test_support import (
     ALICE,
     BOB,
@@ -24,6 +28,7 @@ from tests.atlassian_test_support import (
     SITE_URL,
     FakeGateway,
     bearer,
+    execution_identity,
     gateway_url,
     json_body,
     publish_grant,
@@ -38,7 +43,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
 
 TOKEN = "alice-access-token"  # noqa: S105
 
@@ -216,6 +220,82 @@ async def test_expiring_token_is_refreshed_through_the_atlassian_token_endpoint(
     assert [str(request.url) for request in token_requests] == ["https://auth.atlassian.com/oauth/token"]
     assert parse_qs(token_requests[0].content.decode())["refresh_token"] == ["expired-token-refresh"]
     assert {bearer(request) for request in gateway.requests} == {"rotated-token"}
+    stored = load_oauth_credentials_snapshot_sync(
+        resolve_oauth_credential_context(provider, paths, manager, worker_target()),
+    ).credentials
+    assert stored is not None
+    assert (stored["token"], stored["refresh_token"]) == ("rotated-token", "rotated-refresh")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "error", "expected_reason"),
+    [(400, "invalid_grant", "refresh_rejected"), (503, "temporarily_unavailable", None)],
+)
+async def test_refresh_failures_ask_to_reconnect_or_to_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    error: str,
+    expected_reason: str | None,
+) -> None:
+    """A rejected refresh asks the requester to reconnect, while a provider outage asks for a retry."""
+    paths = runtime_paths(tmp_path)
+    manager = save_client_config(paths)
+    publish_grant(atlassian_oauth_provider(), manager, "expired-token", expires_at=1.0)
+
+    def oauth_client(**kwargs: object) -> AsyncOAuth2Client:
+        response = httpx.Response(status_code, json={"error": error, "error_description": "secret-detail"})
+        return AsyncOAuth2Client(transport=httpx.MockTransport(lambda _request: response), **kwargs)
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", oauth_client)
+    gateway = FakeGateway().install(monkeypatch)
+
+    result = json.loads(await _tool(paths, manager).jira_get_issue(issue_key="PROJ-1"))
+
+    if expected_reason is None:
+        assert result["code"] == "oauth_refresh_failed"
+    else:
+        assert result["oauth_connection_required"] is True
+        assert result["reason"] == expected_reason
+    assert "secret-detail" not in json.dumps(result)
+    assert gateway.requests == []
+
+
+@pytest.mark.asyncio
+async def test_unreadable_grant_asks_for_a_reset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A grant that cannot be decrypted points the requester at a reset instead of a new login."""
+    active_key = base64.urlsafe_b64encode(b"a" * 32).decode()
+    paths = runtime_paths(tmp_path, {"MINDROOM_CREDENTIALS_ENCRYPTION_KEY": active_key})
+    manager = save_client_config(paths)
+    wrong_key_manager = CredentialsManager(
+        manager.base_path,
+        shared_base_path=manager.shared_base_path,
+        encryption_key=base64.urlsafe_b64encode(b"b" * 32).decode(),
+    )
+    publish_grant(atlassian_oauth_provider(), wrong_key_manager, TOKEN)
+    gateway = FakeGateway(sites_by_token={TOKEN: [site()]}).install(monkeypatch)
+
+    result = json.loads(await _tool(paths, manager).jira_get_issue(issue_key="PROJ-1"))
+
+    assert result["oauth_connection_required"] is True
+    assert result["reset_required"] is True
+    assert gateway.requests == []
+
+
+@pytest.mark.asyncio
+async def test_calls_follow_the_active_requester_not_the_constructing_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A toolkit built for one requester never lends that requester's grant to another active requester."""
+    tool, gateway = _connected(tmp_path, monkeypatch)
+
+    with tool_execution_identity(execution_identity(BOB)):
+        result = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
+
+    assert result["oauth_connection_required"] is True
+    assert gateway.requests == []
 
 
 @pytest.mark.asyncio
@@ -410,6 +490,7 @@ async def test_confluence_search_round_trips_encoded_cursors(tmp_path: Path, mon
     assert first["has_more"] is True
     assert first["next_cursor"] == "a+b==+c"
     assert gateway.product_requests()[1].url.params["cursor"] == "a+b==+c"
+    assert gateway.product_requests()[1].url.params["next"] == "true"
 
 
 @pytest.mark.asyncio
@@ -679,3 +760,89 @@ async def test_transport_errors_report_only_the_failure_type(tmp_path: Path, mon
     assert result["code"] == "request_failed"
     assert result["message"] == "The Atlassian request failed (ConnectError)."
     assert "api.atlassian.com" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_jira_search_flags_pages_without_a_usable_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """More issues without a safe next page token are reported as an incomplete result."""
+    tool, gateway = _connected(tmp_path, monkeypatch)
+    gateway.route(
+        "POST",
+        gateway_url("jira", "/rest/api/3/search/jql"),
+        {"issues": [], "nextPageToken": "bad token", "isLast": False},
+    )
+
+    result = json.loads(await tool.jira_search_issues(jql="project = PROJ"))
+
+    assert (result["has_more"], result["next_page_token"]) == (True, None)
+    assert "incomplete" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_comment_line_endings_are_normalized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows line endings split paragraphs like plain newlines and never reach Jira as text."""
+    tool, gateway = _connected(tmp_path, monkeypatch)
+    gateway.route("POST", gateway_url("jira", "/rest/api/3/issue/PROJ-3/comment"), {"id": "901"})
+
+    await tool.jira_add_comment(issue_key="PROJ-3", comment="First\r\nline\r\n\r\nSecond")
+
+    assert json_body(gateway.product_requests()[0])["body"]["content"] == [
+        {
+            "type": "paragraph",
+            "content": [{"type": "text", "text": "First"}, {"type": "hardBreak"}, {"type": "text", "text": "line"}],
+        },
+        {"type": "paragraph", "content": [{"type": "text", "text": "Second"}]},
+    ]
+
+
+@pytest.mark.parametrize("function_name", ["jira_create_issue", "jira_update_issue"])
+def test_extra_fields_accept_any_json_value(tmp_path: Path, function_name: str) -> None:
+    """The model-facing schema lets custom fields carry lists, strings, and objects."""
+    paths = runtime_paths(tmp_path)
+    function = _tool(paths, save_client_config(paths)).async_functions[function_name]
+
+    function.process_entrypoint()
+
+    field_schema = function.parameters["properties"]["fields"]["anyOf"][0]
+    assert field_schema == {"type": "object", "additionalProperties": True}
+
+
+@pytest.mark.asyncio
+async def test_one_site_listed_per_product_counts_as_one_site(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Separate Jira and Confluence entries for the same cloud ID merge instead of asking for a site pin."""
+    paths = runtime_paths(tmp_path)
+    manager = save_client_config(paths)
+    publish_grant(atlassian_oauth_provider(), manager, TOKEN)
+    gateway = FakeGateway(
+        sites_by_token={TOKEN: [site(scopes=["read:jira-work"]), site(scopes=["search:confluence"])]},
+    ).install(monkeypatch)
+    gateway.route("GET", gateway_url("jira", "/rest/api/3/issue/PROJ-1"), {"key": "PROJ-1"})
+    gateway.route("GET", gateway_url("confluence", "/wiki/rest/api/search"), {"results": []})
+    tool = _tool(paths, manager)
+
+    issue = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
+    search = json.loads(await tool.confluence_search(cql="type = page"))
+
+    assert issue["status"] == search["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_missing_page_is_reported_without_guessing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A page that search cannot see is reported as not found or not viewable."""
+    tool, gateway = _connected(tmp_path, monkeypatch)
+    gateway.route("GET", gateway_url("confluence", "/wiki/rest/api/content/search"), {"results": []})
+
+    result = json.loads(await tool.confluence_get_page(page_id="404"))
+
+    assert result["code"] == "page_not_found"
+
+
+@pytest.mark.asyncio
+async def test_numeric_issue_ids_get_no_browse_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Browse links need an issue key, so a write addressed by numeric ID reports no URL."""
+    tool, gateway = _connected(tmp_path, monkeypatch)
+    gateway.route("PUT", gateway_url("jira", "/rest/api/3/issue/10001"))
+
+    result = json.loads(await tool.jira_update_issue(issue_key="10001", summary="Renamed"))
+
+    assert result["issue"] == {"key": "10001", "id": None, "url": None}

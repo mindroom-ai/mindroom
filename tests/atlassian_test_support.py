@@ -65,9 +65,9 @@ def save_client_config(paths: RuntimePaths, service: str = "atlassian_oauth_clie
     return manager
 
 
-def worker_target(requester_id: str = ALICE) -> ResolvedWorkerTarget:
-    """Return the requester-owned target that requester-scoped OAuth credentials resolve to."""
-    identity = ToolExecutionIdentity(
+def execution_identity(requester_id: str = ALICE) -> ToolExecutionIdentity:
+    """Return one requester's tool execution identity for the test agent."""
+    return ToolExecutionIdentity(
         channel="matrix",
         agent_name="assistant",
         requester_id=requester_id,
@@ -76,7 +76,11 @@ def worker_target(requester_id: str = ALICE) -> ResolvedWorkerTarget:
         resolved_thread_id="$thread",
         session_id=None,
     )
-    return resolve_worker_target("user", "assistant", execution_identity=identity)
+
+
+def worker_target(requester_id: str = ALICE) -> ResolvedWorkerTarget:
+    """Return the requester-owned target that requester-scoped OAuth credentials resolve to."""
+    return resolve_worker_target("user", "assistant", execution_identity=execution_identity(requester_id))
 
 
 def grant(token: str, provider: OAuthProvider, **overrides: object) -> dict[str, object]:

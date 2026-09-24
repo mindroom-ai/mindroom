@@ -33,6 +33,7 @@ from mindroom.custom_tools.atlassian_client import (
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
+from mindroom.matrix.media import media_payload_exceeds_limit
 from mindroom.oauth.atlassian import (
     ATLASSIAN_PRODUCTS,
     AtlassianProduct,
@@ -163,7 +164,7 @@ def _extra_fields(value: object) -> dict[str, object]:
 def _adf_document(text: str) -> dict[str, object]:
     """Convert plain text into an Atlassian Document Format document, one paragraph per blank-line block."""
     paragraphs: list[dict[str, object]] = []
-    for block in text.split("\n\n"):
+    for block in text.replace("\r\n", "\n").replace("\r", "\n").split("\n\n"):
         lines = [line for line in block.split("\n") if line]
         if not lines:
             continue
@@ -201,8 +202,8 @@ def _next_cursor(links: object) -> tuple[bool, str | None]:
     return True, None
 
 
-def _page_fields(has_more: bool, next_cursor: str | None) -> dict[str, object]:
-    fields: dict[str, object] = {"has_more": has_more, "next_cursor": next_cursor}
+def _page_fields(has_more: bool, next_cursor: str | None, *, cursor_field: str = "next_cursor") -> dict[str, object]:
+    fields: dict[str, object] = {"has_more": has_more, cursor_field: next_cursor}
     if has_more and next_cursor is None:
         fields["warning"] = (
             "More results exist, but Atlassian returned no usable cursor, so this listing is incomplete."
@@ -261,7 +262,7 @@ def _issue_reference(issue: object, site: AtlassianSite) -> dict[str, object]:
     return {
         "key": key,
         "id": issue_data.get("id"),
-        "url": f"{site.url}/browse/{key}" if site.url and isinstance(key, str) else None,
+        "url": f"{site.url}/browse/{key}" if site.url and isinstance(key, str) and "-" in key else None,
     }
 
 
@@ -473,8 +474,7 @@ class AtlassianToolkit(Toolkit):
             issues = data.get("issues")
             return {
                 "issues": [_issue_summary(issue, site) for issue in issues] if isinstance(issues, list) else [],
-                "has_more": has_more,
-                "next_page_token": next_token,
+                **_page_fields(has_more, next_token, cursor_field="next_page_token"),
             }
 
         return await self._call("jira", search)
@@ -484,7 +484,7 @@ class AtlassianToolkit(Toolkit):
 
         Args:
             issue_key: Issue key such as PROJ-123.
-            fields: Optional Jira field IDs to include; all navigable fields are returned by default.
+            fields: Optional Jira field IDs to include, such as ["summary", "status"]; Jira returns every field by default.
 
         """
         try:
@@ -514,7 +514,7 @@ class AtlassianToolkit(Toolkit):
         summary: str,
         issue_type: str = "Task",
         description: str | None = None,
-        fields: dict[str, object] | None = None,
+        fields: dict | None = None,
     ) -> str:
         """Create a Jira issue.
 
@@ -559,7 +559,7 @@ class AtlassianToolkit(Toolkit):
         issue_key: str,
         summary: str | None = None,
         description: str | None = None,
-        fields: dict[str, object] | None = None,
+        fields: dict | None = None,
     ) -> str:
         """Update fields of a Jira issue.
 
@@ -681,7 +681,8 @@ class AtlassianToolkit(Toolkit):
                 "excerpt": "indexed",
             }
             if next_cursor := _cursor(cursor, "cursor"):
-                params["cursor"] = next_cursor
+                # Search's own next links pair the cursor with next=true.
+                params.update(cursor=next_cursor, next="true")
         except AtlassianError as exc:
             return self._error(exc)
 
@@ -808,6 +809,11 @@ class AtlassianToolkit(Toolkit):
         async def download_attachment(access_token: str, site: AtlassianSite) -> dict[str, object]:
             path = f"/wiki/rest/api/content/{page}/child/attachment/{confluence_attachment_id}/download"
             downloaded = await download(access_token, site, "confluence", path, max_bytes=max_bytes)
+            if media_payload_exceeds_limit(downloaded.content):
+                raise AtlassianError(
+                    code="attachment_too_large",
+                    message="The attachment exceeds MindRoom's retained media size limit.",
+                )
             display_name = _display_filename(downloaded.content_disposition, filename) or confluence_attachment_id
             mime_type = _mime_type(downloaded.content_type, display_name)
             # Like MindRoom's own media registration, a cancelled call still finishes storing,
@@ -890,7 +896,8 @@ class AtlassianToolkit(Toolkit):
                     space.get("id")
                     for space in spaces or []
                     if isinstance(space, dict)
-                    and str(space.get("key")).casefold() == space_key.casefold()
+                    and isinstance(space.get("key"), str)
+                    and space["key"].casefold() == space_key.casefold()
                     and space.get("id")
                 ),
                 None,

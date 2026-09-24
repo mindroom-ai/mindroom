@@ -44,6 +44,7 @@ PARTNER = AtlassianConnectionConfig(
     display_name="Partner Confluence",
     site_url="https://acme.atlassian.net",
     products=("confluence",),
+    client_config_service="atlassian_oauth_client",
 )
 register_atlassian_connection_tools(PARTNER)
 

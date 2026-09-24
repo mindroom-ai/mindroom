@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 AtlassianProduct = Literal["jira", "confluence"]
 ATLASSIAN_PRODUCTS: tuple[AtlassianProduct, ...] = ("jira", "confluence")
-ATLASSIAN_CLIENT_CONFIG_SERVICE = "atlassian_oauth_client"
+_ATLASSIAN_CLIENT_CONFIG_SERVICE = "atlassian_oauth_client"
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +106,7 @@ def atlassian_oauth_provider(
     display_name: str = "Atlassian",
     products: Sequence[AtlassianProduct] = ATLASSIAN_PRODUCTS,
     write: bool = True,
-    client_config_service: str = ATLASSIAN_CLIENT_CONFIG_SERVICE,
+    client_config_service: str = _ATLASSIAN_CLIENT_CONFIG_SERVICE,
 ) -> OAuthProvider:
     """Return one Atlassian connection's provider; tokens always belong to the requesting user."""
     return OAuthProvider(
@@ -117,7 +117,7 @@ def atlassian_oauth_provider(
         scopes=_atlassian_oauth_scopes(products, write=write),
         credential_service=f"{provider_id}_oauth",
         tool_config_service=provider_id,
-        # One Atlassian app can serve every connection, each with its own derived callback.
+        # Shared services derive each provider's own callback instead of reusing a stored redirect URI.
         shared_client_config_services=(client_config_service,),
         extra_auth_params={"audience": "api.atlassian.com", "prompt": "consent"},
         requester_scoped_credentials=True,
