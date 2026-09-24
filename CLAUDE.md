@@ -518,6 +518,21 @@ Design migrations around that assumption rather than adding machinery to coordin
   Remove a workaround only when the relevant tests pass without it; a merged PR alone is insufficient.
   Retain regression coverage for behavior MindRoom still requires and update Tach boundaries with any extraction or removal.
 
+### Security Trust Model
+
+A worker container (worker routing through the sandbox proxy) is the only security boundary between an agent and the MindRoom runtime.
+Check every reported vulnerability and every proposed hardening change against this model before implementing it, and decline changes that contradict it.
+
+- **Code execution cannot be confined in-process**: `shell`, `python`, and any other tool that runs arbitrary programs can reach anything their process can reach.
+  Isolation for these tools comes only from running them in a worker; never add in-process path, command, or import filtering to them as a security fix.
+- **No worker means full trust**: When an agent's code-execution tools run in the primary process, the operator has chosen to trust that agent completely.
+  Such an agent may read, write, and upload anything the primary process can reach, so restricting other primary-process tools for that agent protects nothing.
+- **With workers, primary-process tools must not bypass the worker**: Tools that still run in the primary process (for example `browser`, `attachments`, `matrix_message`, `gmail`, `e2b`, and `pandas`) must not reach more than the agent's worker can.
+  Confine their file access to the agent's workspace and its received attachments, and keep credentials, encryption keys, Matrix state, and other agents' or tenants' data out of reach.
+  Applying this confinement unconditionally is fine as long as legitimate workspace and attachment flows keep working.
+- **Protect the primary from worker code**: Hardening against untrusted worker code is in scope, such as symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
+- **Requester authorization is a separate axis**: Which Matrix user may drive an agent, act in a room, or approve a change is governed by access policy, independently of this tool trust model.
+
 ## 2. Workflow
 
 ### Step 1: Understand the Context
