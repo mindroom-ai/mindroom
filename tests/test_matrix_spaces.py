@@ -584,8 +584,8 @@ async def test_ensure_root_space_refuses_alias_published_by_another_account(
 
 
 @pytest.mark.asyncio
-async def test_ensure_root_space_forgets_recorded_space_the_router_no_longer_controls(tmp_path) -> None:  # noqa: ANN001
-    """A joined recorded Space that fails ownership checks is forgotten, so the router leaves it."""
+async def test_ensure_root_space_keeps_space_whose_invitees_hold_admin_power(tmp_path) -> None:  # noqa: ANN001
+    """Earlier releases made room invitees Space admins, and the Space grants no room access."""
     client = AsyncMock()
     client.homeserver = "http://localhost:8008"
     client.user_id = _ROUTER_USER_ID
@@ -596,7 +596,51 @@ async def test_ensure_root_space_forgets_recorded_space_the_router_no_longer_con
         matrix_space={"enabled": True},
     )
     client.room_get_state.return_value = nio.RoomGetStateResponse(
-        router_owned_room_events(_ROUTER_USER_ID, _ROOT_SPACE_ALIAS, users={"@other:localhost": 100}),
+        router_owned_room_events(_ROUTER_USER_ID, _ROOT_SPACE_ALIAS, users={"@owner:localhost": 100}),
+        "!space:localhost",
+    )
+
+    with (
+        patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
+        patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=["!space:localhost"])),
+        patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)),
+        patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
+        patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()),
+    ):
+        space_id = await matrix_rooms.ensure_root_space(
+            client,
+            config,
+            runtime_paths_for(config),
+            {"lobby": "!lobby:localhost"},
+        )
+
+    assert space_id == "!space:localhost"
+    assert state.space_room_id == "!space:localhost"
+    mock_add.assert_awaited_once()
+    assert matrix_rooms.rejected_managed_rooms() == {}
+
+
+@pytest.mark.asyncio
+async def test_ensure_root_space_forgets_recorded_space_the_router_no_longer_owns(tmp_path) -> None:  # noqa: ANN001
+    """A demoted router forgets its recorded Space but stays in it, so restoring its power recovers the Space."""
+    client = AsyncMock()
+    client.homeserver = "http://localhost:8008"
+    client.user_id = _ROUTER_USER_ID
+    state = MatrixState(space_room_id="!space:localhost")
+    config = _config_with_runtime_paths(
+        tmp_path,
+        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+        matrix_space={"enabled": True},
+    )
+    client.room_get_state.return_value = nio.RoomGetStateResponse(
+        [
+            *router_owned_room_events(_ROUTER_USER_ID, _ROOT_SPACE_ALIAS),
+            {
+                "type": "m.room.power_levels",
+                "state_key": "",
+                "content": {"users": {_ROUTER_USER_ID: 50, "@owner:localhost": 100}},
+            },
+        ],
         "!space:localhost",
     )
 
@@ -617,6 +661,7 @@ async def test_ensure_root_space_forgets_recorded_space_the_router_no_longer_con
     assert state.space_room_id is None
     mock_save.assert_called_once_with(state, runtime_paths=runtime_paths_for(config))
     mock_add.assert_not_awaited()
+    assert matrix_rooms.router_retained_room_ids() == {"!space:localhost"}
 
 
 @pytest.mark.asyncio
@@ -897,7 +942,9 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
             "_ensure_rooms_exist",
             new=AsyncMock(return_value={"lobby": "!room1:localhost"}),
         ) as mock_rooms,
+        patch.object(orchestrator, "_reconcile_managed_rooms", new=AsyncMock(return_value={})) as mock_reconcile,
         patch.object(orchestrator, "_ensure_root_space", new=AsyncMock()) as mock_root_space,
+        patch.object(orchestrator, "refresh_agent_reply_memberships", new=AsyncMock()) as mock_refresh,
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
     ):
         updated = await orchestrator.config_reload._update_config()
@@ -907,4 +954,6 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
     assert router_bot.config == updated_config
     mock_setup.assert_not_awaited()
     mock_rooms.assert_awaited_once_with()
+    mock_reconcile.assert_awaited_once_with({"lobby": "!room1:localhost"})
     mock_root_space.assert_awaited_once_with({"lobby": "!room1:localhost"})
+    mock_refresh.assert_awaited_once_with()

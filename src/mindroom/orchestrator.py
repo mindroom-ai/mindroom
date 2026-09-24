@@ -2038,6 +2038,8 @@ class _MultiAgentOrchestrator:
             # Policy enforcement gates managed status, so it follows every room-existence pass.
             await self._reconcile_managed_rooms(room_ids)
             await self._ensure_root_space(room_ids)
+            # A forgotten room must stop granting its members access to agents.
+            await self.refresh_agent_reply_memberships()
 
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
         """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
@@ -2217,8 +2219,12 @@ class _MultiAgentOrchestrator:
         self._resolve_bot_room_aliases(bots, config)
 
         async def _ensure_internal_user_memberships() -> None:
+            # Records for keys no longer configured are never re-verified, so the internal user skips them.
+            configured_rooms = config.get_all_configured_rooms()
             all_rooms = load_rooms(runtime_paths=self.runtime_paths)
-            all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
+            all_room_ids = {
+                room_key: room.room_id for room_key, room in all_rooms.items() if room_key in configured_rooms
+            }
             if all_room_ids and config.mindroom_user is not None:
                 await ensure_user_in_rooms(
                     constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
@@ -2231,6 +2237,8 @@ class _MultiAgentOrchestrator:
             if bot.agent_name == ROUTER_AGENT_NAME:
                 await bot.ensure_rooms()
         snapshots = await self._reconcile_managed_rooms(room_ids)
+        # Reconciliation forgets rooms whose policy it cannot enforce, so other bots must not join them.
+        self._resolve_bot_room_aliases(bots, config)
         await self._ensure_room_invitations(snapshots)
         await _ensure_internal_user_memberships()
 
