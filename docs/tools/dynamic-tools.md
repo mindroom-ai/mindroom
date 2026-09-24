@@ -19,7 +19,7 @@ agents:
     role: Help in chat
     tools:
       - shell
-      - coding: {defer: true, initial: true, restrict_to_base_dir: false}
+      - coding: {defer: true, initial: true}
       - searxng: {defer: true, host: https://search.example.test, fixed_max_results: 10}
       - name: serper
         defer: true
@@ -61,3 +61,9 @@ Rebuilding the agent after a tool load also makes that toolkit's instructions av
 Loaded state is keyed by the exact `(agent, session_id)` pair.
 Two agents in the same Matrix thread do not share loaded tools.
 Native tool-search sessions neither read nor write this state.
+
+## Minimal mode
+
+[Minimal mode](agent-cli.md) keeps configured tool authorization separate from provider schema presentation.
+Every minimal request exposes one Bash tool; the agent discovers and calls authorized tools through `mindroom-agent`.
+Loading or unloading a toolkit retains the existing session state and continuation timing while the next minimal request still exposes only Bash.

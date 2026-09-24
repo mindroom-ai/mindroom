@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 
 @register_tool_with_metadata(
     name="todoist",
+    file_access=ToolFileAccess.NONE,
     display_name="Todoist",
     description="Task management with Todoist - create, update, delete, and organize tasks and projects",
     category=ToolCategory.PRODUCTIVITY,

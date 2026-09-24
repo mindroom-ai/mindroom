@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.api.computers import ComputerRuntime
     from mindroom.api.mcp_gateway import GatewayRuntime
     from mindroom.api.usage_export import UsageExportRunner
@@ -137,6 +138,7 @@ class _MindroomAppState:
     mcp_gateway_runtime: GatewayRuntime | None = None
     computer_runtime: ComputerRuntime | None = None
     computer_sessions: ComputerSessionStore | None = None
+    agent_cli_registry: TurnToolRegistry | None = None
     usage_export_runner: UsageExportRunner | None = None
 
 

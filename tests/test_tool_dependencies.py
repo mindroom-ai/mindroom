@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from mindroom.constants import resolve_runtime_paths
-from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolMetadata, ToolStatus
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolMetadata, ToolStatus
 from mindroom.tool_system.dependencies import (
     _PIP_TO_IMPORT,
     _auto_install_optional_extra,
@@ -197,6 +197,7 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
     TOOL_REGISTRY[tool_name] = flaky_factory
     TOOL_METADATA[tool_name] = ToolMetadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Auto Install Test Tool",
         description="Temporary test tool",
         category=ToolCategory.DEVELOPMENT,
@@ -241,6 +242,7 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
     TOOL_REGISTRY[tool_name] = failing_factory
     TOOL_METADATA[tool_name] = ToolMetadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Auto Install Failure Tool",
         description="Temporary failing tool",
         category=ToolCategory.DEVELOPMENT,
