@@ -20,6 +20,20 @@ def blocked_file_action_message(action: str, requested_path: str, base_dir: Path
     return f"Error {action}: path '{requested_path}' is outside base_dir '{base_dir}'. {_BASE_DIR_ESCAPE_HINT}"
 
 
+def is_git_metadata_path(path: Path) -> bool:
+    """Return whether a resolved path is a ``.git`` entry or lies beneath one.
+
+    MindRoom runs Git in knowledge checkouts that may sit inside agent
+    workspaces, and Git trusts ``.git`` contents, so file tools must not write there.
+    """
+    return any(part.casefold() == ".git" for part in path.parts)
+
+
+def blocked_git_metadata_message(action: str, requested_path: str) -> str:
+    """Explain why a file-tool write into Git metadata was blocked."""
+    return f"Error {action}: path '{requested_path}' is inside Git metadata ('.git'), which file tools may not modify."
+
+
 def format_path_for_output(path: str | Path, base_dir: Path) -> str:
     """Prefer base-dir-relative output, falling back to absolute paths outside the base dir."""
     try:

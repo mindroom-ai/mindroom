@@ -1458,6 +1458,49 @@ class TestFileToolRestrictToBaseDir:
         assert result["matches_found"] == 1
 
 
+class TestGitMetadataWrites:
+    """Agent file tools must not author Git metadata that MindRoom later runs Git against."""
+
+    _CONFIG = "knowledge/docs/.git/config"
+    _ORIGINAL = "[core]\n\tbare = false\n"
+
+    @pytest.fixture
+    def git_config(self, tmp_path: Path) -> Path:
+        """Create a linked knowledge checkout's Git config inside the workspace."""
+        config_path = tmp_path / self._CONFIG
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(self._ORIGINAL)
+        return config_path
+
+    def test_file_tool_blocks_git_metadata_writes(self, tmp_path: Path, git_config: Path) -> None:
+        """save_file, replace_file_chunk, and delete_file refuse .git paths but reads still work."""
+        (tmp_path / "linked").symlink_to(git_config.parent, target_is_directory=True)
+        tool = file_tools()(base_dir=tmp_path, enable_delete_file=True)
+
+        for result in (
+            tool.save_file("[core]\n", self._CONFIG),
+            tool.save_file("[core]\n", "linked/config"),
+            tool.save_file("gitdir: elsewhere\n", "knowledge/other/.git"),
+            tool.save_file("[core]\n", "knowledge/other/.GIT/config"),
+            tool.replace_file_chunk(self._CONFIG, 0, 0, "[core]"),
+            tool.delete_file(self._CONFIG),
+        ):
+            assert "Git metadata" in result
+
+        assert git_config.read_text() == self._ORIGINAL
+        assert not (tmp_path / "knowledge" / "other").exists()
+        assert tool.read_file(self._CONFIG) == self._ORIGINAL
+
+    def test_coding_tools_block_git_metadata_writes(self, tmp_path: Path, git_config: Path) -> None:
+        """write_file and edit_file refuse .git paths."""
+        tools = CodingTools(base_dir=str(tmp_path))
+
+        assert "Git metadata" in tools.write_file(self._CONFIG, "[core]\n")
+        assert "Git metadata" in tools.edit_file(self._CONFIG, "bare = false", "bare = true")
+
+        assert git_config.read_text() == self._ORIGINAL
+
+
 class TestRegistration:
     """Tests for tool registration."""
 

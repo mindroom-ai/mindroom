@@ -4532,6 +4532,7 @@ Choose a destination shared with the tools that need the files, or generate work
 
 `file` exposes `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
 Paths resolve against `base_dir` and reject escapes by default; set `restrict_to_base_dir: false` to allow outside paths.
+`save_file()`, `replace_file_chunk()`, and `delete_file()` refuse any path inside a `.git` directory, because MindRoom runs Git in knowledge checkouts that may sit inside agent workspaces.
 `read_file()` enforces `max_file_length` and `max_file_lines`, and it tells the caller to use chunk reads when a file is too large.
 `search_files()` uses glob patterns relative to `base_dir` rather than full-text search.
 `search_content()` searches text-file contents and skips paths matching `exclude_patterns`.
@@ -4719,6 +4720,7 @@ If exact matching fails, `edit_file()` falls back to whitespace-and-Unicode-norm
 `grep()` prefers `rg` when available and falls back to Python regex search otherwise.
 `find_files()` filters hidden and gitignored paths, and `ls()` keeps dotfiles visible while adding `/` markers to directories.
 Path resolution stays inside `base_dir` by default; set `restrict_to_base_dir: false` to allow outside paths.
+`write_file()` and `edit_file()` refuse any path inside a `.git` directory.
 MindRoom marks `coding` as worker-routed by default.
 
 ### Configuration
