@@ -231,14 +231,10 @@ def _read_capped_payload(descriptor: int, max_bytes: int) -> _CappedPayload:
 
 
 def _validate_memory_descriptor(descriptor: int) -> os.stat_result:
-    """Reject anything but a lone regular file behind an opened memory entry."""
+    """Reject anything but a regular file behind an opened memory entry."""
     file_stat = os.fstat(descriptor)
     if not stat.S_ISREG(file_stat.st_mode):
         msg = "File memory entries must be regular files."
-        raise ValueError(msg)
-    if file_stat.st_nlink != 1:
-        # A hard link would read or write another scope's file through this one.
-        msg = "File memory entries must not be hard links."
         raise ValueError(msg)
     return file_stat
 

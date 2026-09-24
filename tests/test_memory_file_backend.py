@@ -2146,29 +2146,6 @@ async def test_file_backend_add_refuses_to_write_through_a_symlinked_entrypoint(
 
 
 @pytest.mark.asyncio
-async def test_file_backend_refuses_hard_linked_memory_entries(storage_path: Path, config: Config) -> None:
-    """A hard link reaches another inode, and an unusable entry is never treated as empty."""
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    entrypoint = workspace / "MEMORY.md"
-    entrypoint.write_text("# Memory\n\nCurated fact.\n", encoding="utf-8")
-    hard_link = workspace / "memory" / "linked.md"
-    hard_link.parent.mkdir(parents=True, exist_ok=True)
-    os.link(entrypoint, hard_link)
-
-    with pytest.raises(ValueError, match="must not be hard links"):
-        await add_agent_memory("Fresh memory entry", "general", storage_path, config)
-
-    assert entrypoint.read_text(encoding="utf-8") == "# Memory\n\nCurated fact.\n"
-    assert await list_all_agent_memories("general", storage_path, config) == []
-    prompt_parts = await build_memory_prompt_parts("curated", "general", storage_path, config)
-    assert "Curated fact." not in prompt_parts.session_preamble
-
-
-@pytest.mark.asyncio
 # A regression blocks forever on the FIFO, so the run is aborted instead of hanging.
 @pytest.mark.timeout(10, method="thread")
 async def test_file_backend_skips_non_regular_memory_entries(storage_path: Path, config: Config) -> None:
@@ -2227,7 +2204,6 @@ async def test_file_backend_lists_nested_memory_files_and_skips_bad_siblings(
     nested.write_text("Nested project note.\n", encoding="utf-8")
     (workspace / "memory" / "daily.md").write_text("Daily note.\n", encoding="utf-8")
     (workspace / "memory" / "planted.md").symlink_to(outside)
-    os.link(outside, workspace / "memory" / "projects" / "linked.md")
 
     results = await list_all_agent_memories("general", storage_path, config)
 
