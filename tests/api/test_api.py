@@ -546,6 +546,20 @@ def test_initialize_api_app_logs_error_for_supabase_without_account_id(
     assert any(log["log_level"] == "error" and "ACCOUNT_ID" in log["event"] for log in logs)
 
 
+def test_initialize_api_app_does_not_log_error_for_bound_supabase_auth(tmp_path: Path) -> None:
+    """A Supabase instance bound to its owner starts without the configuration error."""
+    process_env = {
+        "SUPABASE_URL": "https://supabase.example.com",
+        "SUPABASE_ANON_KEY": "anon-key",
+        "ACCOUNT_ID": "account-owner",
+    }
+
+    with capture_logs() as logs:
+        main.initialize_api_app(FastAPI(), _runtime_paths(tmp_path, process_env=process_env))
+
+    assert not any("ACCOUNT_ID" in log["event"] for log in logs)
+
+
 def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     """Replacing app runtime paths should invalidate cached auth settings."""
     fresh_app = FastAPI()

@@ -544,7 +544,7 @@ See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for th
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `CUSTOMER_ID` | Tenant identity for worker key derivation (SaaS platform only) | _(none)_ |
-| `ACCOUNT_ID` | Supabase user ID of the instance owner and the only dashboard/API authorization check when `SUPABASE_URL` and `SUPABASE_ANON_KEY` enable Supabase auth, which refuses every request while it is unset; also used for worker key derivation (SaaS platform only) | _(none)_ |
+| `ACCOUNT_ID` | Supabase user ID of the instance owner, used for worker key derivation (SaaS platform only). Required whenever `SUPABASE_URL` and `SUPABASE_ANON_KEY` enable Supabase auth, because it is the only dashboard/API authorization check; while it is unset, Supabase auth refuses every request. | _(none)_ |
 
 ## Basic Structure
 
