@@ -3106,7 +3106,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.constants"
-depends_on = []
+depends_on = ["mindroom.atomic_file"]
 
 [[modules]]
 path = "mindroom.matrix_identifiers"
@@ -4501,6 +4501,7 @@ visibility = [
     "mindroom.script_runs.manager",
     "mindroom.workers.backends.docker",
     "mindroom.workers.backends.docker_projection",
+    "mindroom.workers.backends.legacy_docker_worker_metadata",
 ]
 
 [[modules]]
@@ -6149,12 +6150,13 @@ expose = ["MindRoomToolCallError", "MindRoomTools"]
 from = ["mindroom.script_sdk"]
 
 [[interfaces]]
-expose = ["open_worker_state_root", "remove_directory_tree_at"]
+expose = ["open_worker_state_root", "read_worker_identity", "remove_directory_tree_at"]
 from = ["mindroom.workers.worker_retirement"]
 visibility = [
     "mindroom.script_runs.manager",
     "mindroom.workers.backends.docker",
     "mindroom.workers.backends.docker_projection",
+    "mindroom.workers.backends.legacy_docker_worker_metadata",
 ]
 exclusive = true
 

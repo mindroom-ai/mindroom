@@ -28,6 +28,7 @@ from mindroom.constants import (
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
     runtime_paths_with_storage_root,
+    sandbox_startup_manifest_path,
 )
 from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import (
@@ -50,6 +51,7 @@ from mindroom.workers import worker_retirement as worker_retirement_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.docker import (
+    _WORKER_CONTROL_DIRNAME,
     DockerWorkerBackend,
     _DockerLaunchConfig,
     _load_docker_client_and_errors,
@@ -81,6 +83,12 @@ if TYPE_CHECKING:
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _ROTATED_AUTH_TOKEN = "rotated-token"  # noqa: S105
 _TEST_UNSCOPED_WORKER_KEY = "v1:default:unscoped:code"
+
+
+def _control_metadata_path(storage_root: Path, worker_key: str) -> Path:
+    """Return one worker's control metadata, which lives outside its mounted state root."""
+    control_root = storage_root / "workers" / _WORKER_CONTROL_DIRNAME / worker_dir_name(worker_key)
+    return control_root / "metadata" / "worker.json"
 
 
 class _FakeDockerError(Exception):
@@ -761,9 +769,9 @@ def test_docker_storage_preflight_rejects_workers_without_changing_bytes(
     container = fake_client.containers.get(handle.worker_id)
     container.status = status
     container.attrs["Config"]["Labels"]["mindroom.ai/tenant"] = label
-    metadata = tmp_path / "workers" / worker_dir_name(_TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    metadata = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
     before = metadata.read_bytes()
-    sentinel = metadata.parents[1] / "retained.bin"
+    sentinel = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "retained.bin"
     sentinel.write_bytes(b"retained worker bytes")
 
     with pytest.raises(WorkerBackendError, match=r"(?i)remove|absent"):
@@ -787,7 +795,7 @@ def test_docker_storage_preflight_ignores_stale_metadata_and_foreign_namespace(
     handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
     container = fake_client.containers.get(handle.worker_id)
     container.attrs["Config"]["Labels"]["mindroom.ai/runtime-namespace"] = "another-runtime"
-    metadata = tmp_path / "workers" / worker_dir_name(_TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    metadata = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
     if metadata_bytes is None:
         metadata.unlink()
     else:
@@ -1480,7 +1488,7 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert labels["mindroom.ai/runtime-namespace"]
     assert labels["mindroom.ai/tenant"] == "test"
 
-    metadata_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["status"] == "ready"
     assert metadata["startup_count"] == 1
@@ -2441,7 +2449,7 @@ def test_docker_backend_cleanup_stops_idle_workers(
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
-    metadata_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["last_used_at"] = 0.0
     metadata["status"] = "ready"
@@ -2513,6 +2521,267 @@ def test_docker_backend_refuses_retirement_when_live_container_key_mismatches(
     assert worker_root_path(tmp_path, run_key).is_dir()
 
 
+def _foreign_container(fake_client: _FakeDockerClient, name: str) -> _FakeContainer:
+    """Register one unrelated container (a homeserver, a database) on the same Docker daemon."""
+    container = _FakeContainer(
+        name=name,
+        image="matrixdotorg/synapse:latest",
+        image_identity="sha256:foreign",
+        host_port=8008,
+        environment={},
+        labels={},
+        user=None,
+    )
+    fake_client.containers.by_name[name] = container
+    return container
+
+
+def _write_mounted_worker_metadata(storage_root: Path, worker_key: str, overrides: dict[str, object]) -> Path:
+    """Write metadata inside one worker's bind-mounted root, as its tool code could."""
+    control_metadata = json.loads(_control_metadata_path(storage_root, worker_key).read_text(encoding="utf-8"))
+    mounted_metadata_path = worker_root_path(storage_root, worker_key) / "metadata" / "worker.json"
+    mounted_metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    mounted_metadata_path.write_text(json.dumps(control_metadata | overrides), encoding="utf-8")
+    return mounted_metadata_path
+
+
+def test_docker_worker_cannot_retarget_the_backend_from_its_mounted_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Metadata written inside a worker's own mount never decides which container the primary touches."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+    victim_key = "v1:default:unscoped:victim"
+    attacker = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    victim = backend.ensure_worker(WorkerSpec(victim_key), now=10.0)
+    victim_container = fake_client.containers.by_name[victim.worker_id]
+    foreign_container = _foreign_container(fake_client, "synapse")
+
+    attacker_state_root = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    control_metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    assert control_metadata_path.is_file()
+    assert not control_metadata_path.is_relative_to(attacker_state_root)
+    assert list(attacker_state_root.rglob("worker.json")) == []
+
+    _write_mounted_worker_metadata(
+        tmp_path,
+        _TEST_UNSCOPED_WORKER_KEY,
+        {"container_name": "synapse", "worker_id": "synapse", "worker_key": victim_key},
+    )
+
+    reused = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+    backend.cleanup_idle_workers(now=10_000.0)
+
+    assert reused.worker_id == attacker.worker_id
+    assert victim_container.removed == 0
+    assert fake_client.containers.by_name[attacker.worker_id].removed == 0
+    assert sorted(handle.worker_key for handle in backend.list_workers()) == [
+        _TEST_UNSCOPED_WORKER_KEY,
+        victim_key,
+    ]
+
+    backend.shutdown()
+
+    assert foreign_container.removed == 0
+    assert foreign_container.stopped == 0
+
+
+def test_docker_backend_leaves_foreign_containers_named_by_control_records_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A recorded container name only ever reaps this backend's own container for that worker key."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    foreign_container = _foreign_container(fake_client, "synapse")
+    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["container_name"] = "synapse"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+    backend.cleanup_idle_workers(now=10_000.0)
+
+    assert foreign_container.removed == 0
+    assert foreign_container.stopped == 0
+
+
+def test_docker_backend_refuses_foreign_container_holding_the_derived_worker_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unowned container answering to the derived name fails the request instead of being destroyed."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    squatter = _foreign_container(fake_client, backend._container_name_for_worker(_TEST_UNSCOPED_WORKER_KEY))
+
+    with pytest.raises(WorkerBackendError, match="not owned by this MindRoom worker runtime"):
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    assert squatter.removed == 0
+    assert squatter.stopped == 0
+    assert fake_client.containers.run_calls == []
+
+
+def test_docker_backend_refuses_symlinked_startup_manifest_directory_in_worker_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A directory symlink planted in a worker's own mount cannot redirect the primary's manifest write."""
+    backend, _fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot={"shell": {"available": True}},
+    )
+    victim_key = "v1:default:unscoped:victim"
+    backend.ensure_worker(WorkerSpec(victim_key), now=10.0)
+    victim_control_metadata = _control_metadata_path(tmp_path, victim_key)
+    victim_metadata_before = victim_control_metadata.read_bytes()
+
+    runtime_dir = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / ".runtime"
+    runtime_dir.parent.mkdir(parents=True, exist_ok=True)
+    runtime_dir.symlink_to(victim_control_metadata.parent, target_is_directory=True)
+
+    with pytest.raises(WorkerBackendError, match="real directory"):
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert victim_control_metadata.read_bytes() == victim_metadata_before
+    assert not (victim_control_metadata.parent / "startup_manifest.json").exists()
+
+
+def test_docker_backend_replaces_symlinked_startup_manifest_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A file symlink planted as the manifest is replaced by a complete manifest instead of being followed."""
+    backend, _fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot={"shell": {"available": True}},
+    )
+    victim_key = "v1:default:unscoped:victim"
+    backend.ensure_worker(WorkerSpec(victim_key), now=10.0)
+    victim_control_metadata = _control_metadata_path(tmp_path, victim_key)
+    victim_metadata_before = victim_control_metadata.read_bytes()
+
+    manifest_path = sandbox_startup_manifest_path(worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY))
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.symlink_to(victim_control_metadata)
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert victim_control_metadata.read_bytes() == victim_metadata_before
+    assert not manifest_path.is_symlink()
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["tool_validation_snapshot"] == {
+        "shell": {"available": True},
+    }
+    assert [entry.name for entry in manifest_path.parent.iterdir()] == [manifest_path.name]
+
+
+def test_docker_backend_retires_worker_despite_tampered_mounted_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Retirement identity comes from control state, so a worker cannot pin its own state tree."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'d' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    _write_mounted_worker_metadata(tmp_path, run_key, {"worker_key": "v1:t:user_agent:mallory:watcher"})
+
+    backend.retire_worker(run_key)
+
+    assert fake_client.containers.by_name[handle.worker_id].removed == 1
+    assert worker_root_path(tmp_path, run_key).exists() is False
+    assert _control_metadata_path(tmp_path, run_key).exists() is False
+
+
+def _restart_backend(backend: DockerWorkerBackend, storage_root: Path) -> DockerWorkerBackend:
+    """Construct a new primary over the same storage root and fake Docker daemon."""
+    return DockerWorkerBackend(config=backend.config, auth_token=_TEST_AUTH_TOKEN, storage_path=storage_root)
+
+
+def _move_control_record_into_mounted_root(storage_root: Path, worker_key: str, overrides: dict[str, object]) -> None:
+    """Rewrite one worker into the pre-control-directory layout its last release left on disk."""
+    _write_mounted_worker_metadata(storage_root, worker_key, overrides)
+    control_metadata_path = _control_metadata_path(storage_root, worker_key)
+    control_metadata_path.unlink()
+    control_metadata_path.parent.rmdir()
+    control_metadata_path.parent.parent.rmdir()
+
+
+def test_docker_backend_adopts_legacy_mounted_worker_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Workers recorded inside their mount before the upgrade stay managed, trusting only their digest-bound key."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    legacy_container = fake_client.containers.by_name[handle.worker_id]
+    foreign_container = _foreign_container(fake_client, "synapse")
+    _move_control_record_into_mounted_root(
+        tmp_path,
+        _TEST_UNSCOPED_WORKER_KEY,
+        {"container_name": "synapse", "worker_id": "synapse", "status": "failed", "last_used_at": 1e12},
+    )
+    assert backend.list_workers() == []
+
+    upgraded = _restart_backend(backend, tmp_path)
+
+    adopted = json.loads(_control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).read_text(encoding="utf-8"))
+    assert adopted["worker_key"] == _TEST_UNSCOPED_WORKER_KEY
+    assert adopted["container_name"] == handle.worker_id
+    assert adopted["status"] == "idle"
+    assert adopted["last_used_at"] < 1e12
+    assert [listed.worker_id for listed in upgraded.list_workers()] == [handle.worker_id]
+
+    cleaned = upgraded.cleanup_idle_workers(now=adopted["last_used_at"] + 120.0)
+
+    assert [worker.worker_key for worker in cleaned] == [_TEST_UNSCOPED_WORKER_KEY]
+    assert legacy_container.stopped == 1
+    assert foreign_container.stopped == 0
+
+    upgraded.retire_worker(_TEST_UNSCOPED_WORKER_KEY)
+
+    assert legacy_container.removed == 1
+    assert foreign_container.removed == 0
+    assert worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).exists() is False
+    assert _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).exists() is False
+
+
+@pytest.mark.parametrize("tampering", ["foreign_key", "symlinked_record", "malformed_record"])
+def test_docker_backend_skips_unverifiable_legacy_worker_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tampering: str,
+) -> None:
+    """A legacy mounted record never claims another worker's key or follows a planted link."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    victim_key = "v1:default:unscoped:victim"
+    victim = backend.ensure_worker(WorkerSpec(victim_key), now=10.0)
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    _move_control_record_into_mounted_root(tmp_path, victim_key, {})
+    _move_control_record_into_mounted_root(tmp_path, _TEST_UNSCOPED_WORKER_KEY, {})
+    victim_record = worker_root_path(tmp_path, victim_key) / "metadata" / "worker.json"
+    attacker_record = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    victim_record.unlink()
+    if tampering == "foreign_key":
+        attacker_record.write_text(json.dumps({"worker_key": victim_key}), encoding="utf-8")
+    elif tampering == "symlinked_record":
+        victim_record.write_text(json.dumps({"worker_key": victim_key}), encoding="utf-8")
+        attacker_record.unlink()
+        attacker_record.symlink_to(victim_record)
+    else:
+        attacker_record.write_text("{malformed", encoding="utf-8")
+
+    upgraded = _restart_backend(backend, tmp_path)
+
+    assert _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).exists() is False
+    expected_victims = [victim_key] if tampering == "symlinked_record" else []
+    assert [listed.worker_key for listed in upgraded.list_workers()] == expected_victims
+    with pytest.raises(WorkerBackendError, match="missing the control identity metadata"):
+        upgraded.retire_worker(_TEST_UNSCOPED_WORKER_KEY)
+    assert fake_client.containers.by_name[victim.worker_id].removed == 0
+
+
 def test_docker_backend_refuses_symlinked_run_root_with_malformed_target_metadata(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2548,8 +2817,8 @@ def test_docker_backend_refuses_existing_run_root_without_exact_identity(
     sentinel = state_root / "keep.txt"
     sentinel.write_text("keep", encoding="utf-8")
     if metadata_contents is not None:
-        metadata_file = state_root / "metadata" / "worker.json"
-        metadata_file.parent.mkdir()
+        metadata_file = _control_metadata_path(tmp_path, run_key)
+        metadata_file.parent.mkdir(parents=True)
         metadata_file.write_text(metadata_contents, encoding="utf-8")
 
     with pytest.raises(WorkerBackendError, match="identity metadata"):
@@ -2925,7 +3194,7 @@ def test_docker_worker_failed_stale_replacement_retains_launch_identity_for_retr
 
     replacement = fake_client.containers.created_containers[-1]
     replacement_hash = replacement.attrs["Config"]["Labels"]["mindroom.ai/launch-config-hash"]
-    failed_metadata = backend._load_metadata(backend._state_paths(_TEST_UNSCOPED_WORKER_KEY))
+    failed_metadata = backend._load_metadata(backend._worker_paths(_TEST_UNSCOPED_WORKER_KEY))
     assert failed_metadata is not None
     assert failed_metadata.launch_config_hash == replacement_hash
 
@@ -2965,8 +3234,8 @@ def test_docker_worker_concurrent_tag_update_keeps_request_local_launch_identity
     replacement_labels = replacement.attrs["Config"]["Labels"]
     stale_reader_container = fake_client.containers.by_name[race.stale_reader_container_name]
     stale_reader_labels = stale_reader_container.attrs["Config"]["Labels"]
-    recovering_metadata = backend._load_metadata(backend._state_paths(recovering_key))
-    stale_reader_metadata = backend._load_metadata(backend._state_paths(stale_reader_key))
+    recovering_metadata = backend._load_metadata(backend._worker_paths(recovering_key))
+    stale_reader_metadata = backend._load_metadata(backend._worker_paths(stale_reader_key))
     assert recovering_metadata is not None
     assert stale_reader_metadata is not None
     assert replacement.attrs["Image"] == "sha256:image-v2"
@@ -4640,7 +4909,7 @@ def test_docker_backend_reconciles_missing_container_metadata_without_stale_endp
     assert handles[0].endpoint == "/api/sandbox-runner/execute"
     assert handle.endpoint != handles[0].endpoint
 
-    metadata_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["host_port"] is None
     assert metadata["container_id"] is None
@@ -5002,7 +5271,7 @@ def test_docker_backend_reuses_container_after_first_run_pulls_missing_image(
     assert fake_client.containers.by_name[second_handle.worker_id] is first_container
     assert len(fake_client.containers.run_calls) == 1
     assert first_container.removed == 0
-    metadata_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["startup_count"] == 1
     assert metadata["last_started_at"] == 10.0
@@ -5310,7 +5579,7 @@ def test_docker_ordinary_workers_preserve_pre_computer_identity(
         assert "cap_drop" not in client.containers.run_calls[0]
         assert "security_opt" not in client.containers.run_calls[0]
         return
-    metadata_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata/worker.json"
+    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
     metadata = json.loads(metadata_path.read_text())
     metadata["launch_config_hash"] = expected_hash
     metadata_path.write_text(json.dumps(metadata))

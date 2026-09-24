@@ -16,6 +16,7 @@ from urllib.parse import quote
 from dotenv import dotenv_values
 
 from mindroom import runtime_env_policy
+from mindroom.atomic_file import atomic_write_bytes_at
 
 # Agent names
 ROUTER_AGENT_NAME = "router"
@@ -438,15 +439,34 @@ def write_startup_manifest(
     """Write one sandbox-runner startup manifest and return its path."""
     manifest_path = sandbox_startup_manifest_path(storage_root)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
+    _write_manifest_without_following_symlinks(
+        manifest_path,
         _startup_manifest_json(
             runtime_paths,
             tool_validation_snapshot=tool_validation_snapshot,
             public_runtime=public_runtime,
         ),
-        encoding="utf-8",
     )
     return manifest_path
+
+
+def _write_manifest_without_following_symlinks(manifest_path: Path, payload: str) -> None:
+    """Atomically replace the manifest without following symlinks planted in the worker's own root.
+
+    The manifest directory sits inside the runtime root a dedicated worker mounts
+    read-write, so a symlink left there would otherwise redirect this write onto
+    any file the primary can reach. Publishing through a rename replaces a planted
+    file symlink instead of following it, and a worker never observes a partial manifest.
+    """
+    try:
+        directory_fd = os.open(manifest_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        msg = f"Sandbox startup manifest directory must be a real directory: {manifest_path.parent}"
+        raise OSError(msg) from exc
+    try:
+        atomic_write_bytes_at(directory_fd, manifest_path.name, payload.encode("utf-8"), file_mode=0o644)
+    finally:
+        os.close(directory_fd)
 
 
 def _is_json_object(value: object) -> TypeGuard[dict[str, object]]:
