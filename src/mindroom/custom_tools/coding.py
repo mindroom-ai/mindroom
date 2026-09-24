@@ -367,8 +367,9 @@ def _gitignored_paths(paths: list[Path], base_dir: Path) -> set[Path]:
     payload = "\0".join(path_map.keys()) + "\0"
     # The workspace, including any .git metadata in it, is agent-writable, so git
     # must not run commands named by repository config (core.fsmonitor runs on
-    # index reads). Skip the index, override command-valued settings, drop system
-    # and global config, and pass only PATH through from the environment.
+    # index reads). Skip the index, override command-valued settings, refuse
+    # repositories not found through a .git entry, drop system and global
+    # config, and pass only PATH through from the environment.
     try:
         result = subprocess.run(
             [
@@ -377,6 +378,8 @@ def _gitignored_paths(paths: list[Path], base_dir: Path) -> set[Path]:
                 "core.fsmonitor=false",
                 "-c",
                 f"core.hooksPath={os.devnull}",
+                "-c",
+                "safe.bareRepository=explicit",
                 "check-ignore",
                 "--no-index",
                 "--stdin",

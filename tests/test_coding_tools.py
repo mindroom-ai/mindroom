@@ -1083,6 +1083,28 @@ class TestGitMetadataSafety:
         assert "visible.txt" in result
         assert "ignored.txt" not in result
 
+    def test_gitignore_filter_refuses_repository_built_without_git_paths(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A repository layout written under ordinary names must not be used or run its fsmonitor."""
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        sub = tmp_path / "sub"
+        marker = tmp_path / "marker"
+        _plant_git_dir(
+            sub,
+            f"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tworktree = {sub}\n"
+            f"\tfsmonitor = \"touch '{marker}'\"\n",
+        )
+        (sub / "visible.txt").write_text("needle\n")
+        monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+
+        result = CodingTools(base_dir=str(tmp_path)).grep("needle", path="sub")
+
+        assert not marker.exists()
+        assert "sub/visible.txt:1:needle" in result
+
     def test_gitignore_filter_ignores_inherited_git_environment(
         self,
         tmp_path: Path,
