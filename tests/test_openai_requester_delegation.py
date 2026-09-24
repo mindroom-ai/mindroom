@@ -186,21 +186,29 @@ def test_mapped_model_visibility_and_direct_access(api: _ApiHarness) -> None:
     assert response.status_code == 403
 
 
-def test_team_access_requires_every_member(api: _ApiHarness) -> None:
-    """A permitted team cannot be used to reach a forbidden member."""
+def test_team_access_grants_its_members(api: _ApiHarness) -> None:
+    """A team's own access decides team requests, even for members the caller cannot address directly."""
     api.config.teams["mixed"] = TeamConfig(
         display_name="Mixed",
         role="Test team",
         agents=["specialist", "forbidden"],
         access=ResponderAccessConfig(users=["@alice:example.org"]),
     )
+    api.config.teams["closed"] = TeamConfig(
+        display_name="Closed",
+        role="Test team",
+        agents=["specialist"],
+        access=ResponderAccessConfig(users=["@bob:example.org"]),
+    )
     headers = {"Authorization": "Bearer alice-key"}
     response = api.client.get("/v1/models", headers=headers)
-    assert "team/mixed" not in {model["id"] for model in response.json()["data"]}
+    model_ids = {model["id"] for model in response.json()["data"]}
+    assert "team/mixed" in model_ids
+    assert "team/closed" not in model_ids
     response = api.client.post(
         "/v1/chat/completions",
         headers=headers,
-        json={"model": "team/mixed", "messages": [{"role": "user", "content": "help"}]},
+        json={"model": "team/closed", "messages": [{"role": "user", "content": "help"}]},
     )
     assert response.status_code == 403
 

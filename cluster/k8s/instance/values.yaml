@@ -92,10 +92,9 @@ matrixRegistrationSharedSecret: ""
 # With instanceSecrets.create=false, the provisioner writes platform_sso_secret into the existing instance Secret.
 platformSsoSecret: ""
 
-# Supabase (shared auth)
+# Supabase (shared auth). Tenant workloads get only the public anon key, never the service-role key.
 supabaseUrl: ""
 supabaseAnonKey: ""
-supabaseServiceKey: ""
 
 trustedUpstreamAuth:
   enabled: "false"

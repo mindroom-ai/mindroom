@@ -12,6 +12,7 @@ from mindroom.constants import RuntimePaths, deserialize_runtime_paths, serializ
 from mindroom.private_storage_paths import private_scope_alias_paths
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV, SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
+    WORKER_SHARED_CREDENTIALS_DIRNAME,
     private_instance_scope_root_path,
     resolved_worker_key_scope,
     visible_state_roots_for_worker_key,
@@ -217,7 +218,7 @@ def build_dedicated_worker_runtime_paths(
             "MINDROOM_CONFIG_PATH": str(config_path),
             "MINDROOM_STORAGE_PATH": str(dedicated_root),
             SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: shared_storage_root,
-            SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/.shared_credentials",
+            SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
             SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: worker_key,
             SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(dedicated_root),
         },

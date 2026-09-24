@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 
-# Update API keys in platform and instance secrets
+# Update API keys in platform secrets
 # Usage: ./scripts/update-api-keys.sh
+#
+# Instance Secrets (mindroom-api-keys-<id>) are owned by the provisioner and must hold only
+# tenant-scoped credentials, so this script never copies platform keys into them.
+# Re-provision an instance to refresh its Secret.
 
 set -e
 
@@ -60,30 +64,9 @@ echo "Restarting platform backend to pick up new keys..."
 kubectl rollout restart deployment/platform-backend -n mindroom-staging --kubeconfig="$KUBECONFIG"
 kubectl rollout status deployment/platform-backend -n mindroom-staging --kubeconfig="$KUBECONFIG"
 
-# Update instance secrets
-echo ""
-echo "Updating instance secrets..."
-INSTANCES=$(kubectl get secrets -n mindroom-instances --kubeconfig="$KUBECONFIG" -o name 2>/dev/null | grep "secret/mindroom-api-keys-" | sed 's|secret/||')
-
-if [ -z "$INSTANCES" ]; then
-    echo "No instance secrets found"
-else
-    for SECRET_NAME in $INSTANCES; do
-        INSTANCE_ID=$(echo "$SECRET_NAME" | sed 's/mindroom-api-keys-//')
-        update_secret "$SECRET_NAME" "mindroom-instances" "instance $INSTANCE_ID"
-
-        echo "  Restarting instance $INSTANCE_ID to pick up new keys..."
-        kubectl rollout restart deployment/mindroom-$INSTANCE_ID -n mindroom-instances --kubeconfig="$KUBECONFIG" 2>/dev/null || echo "  MindRoom deployment not found or restart failed"
-    done
-fi
-
 echo ""
 echo "✅ API keys update complete!"
 echo ""
 echo "Summary:"
 echo "- Platform secrets updated and backend restarted"
-if [ -n "$INSTANCES" ]; then
-    echo "- Updated secrets for instances: $(echo $INSTANCES | sed 's/mindroom-api-keys-//g' | tr '\n' ' ')"
-else
-    echo "- No instances to update"
-fi
+echo "- Instance secrets untouched; re-provision instances to refresh them"

@@ -602,6 +602,7 @@ path = "mindroom.matrix.relation_lookup"
 depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.event_info",
+    "mindroom.matrix.thread_membership",
 ]
 visibility = [
     "mindroom.bot",
@@ -661,7 +662,7 @@ visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.report_publishing"
-depends_on = ["mindroom.durable_write"]
+depends_on = ["mindroom.durable_write", "mindroom.path_confinement"]
 
 # Keep memory consumers explicit so imports are enforced rather than merely
 # interface-checked.
@@ -1951,6 +1952,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.attachment_helpers"
+depends_on = [
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.state",
+    "mindroom.requester_identity",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.attachments"
 depends_on = [
     "mindroom.file_access",
@@ -2033,6 +2042,7 @@ visibility = [
 [[modules]]
 path = "mindroom.custom_tools.matrix_room"
 depends_on = [
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.matrix.room_history_reads",
     "mindroom.custom_tools.matrix_helpers",
@@ -2043,6 +2053,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.thread_resolution"
 depends_on = [
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.matrix.thread_room_scan",
     "mindroom.thread_tags",
     "mindroom.tool_system.runtime_context",
@@ -2051,6 +2062,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.thread_tags"
 depends_on = [
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.matrix.room_history_reads",
     "mindroom.matrix.thread_room_scan",
     "mindroom.thread_tag_vocabulary",
@@ -2923,6 +2935,7 @@ visibility = ["mindroom.memory.config"]
 [[modules]]
 path = "mindroom.memory._file_backend"
 depends_on = [
+    "mindroom.atomic_file",
     "mindroom.constants",
     "mindroom.embedding_errors",
     "mindroom.logging_config",
@@ -2930,6 +2943,7 @@ depends_on = [
     "mindroom.memory._shared",
     "mindroom.memory._semantic_file_search",
     "mindroom.memory_scope_ids",
+    "mindroom.path_confinement",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory._backend", "mindroom.memory.functions"]
@@ -3103,7 +3117,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.constants"
-depends_on = []
+depends_on = ["mindroom.atomic_file"]
 
 [[modules]]
 path = "mindroom.matrix_identifiers"
@@ -3187,6 +3201,7 @@ visibility = [
     "mindroom.matrix.personal_rooms",
     "mindroom.api.matrix_operations",
     "mindroom.bot",
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.personal_room_lifecycle",
     "mindroom.bot_room_lifecycle",
     "mindroom.commands.encryption_commands",
@@ -4498,6 +4513,7 @@ visibility = [
     "mindroom.script_runs.manager",
     "mindroom.workers.backends.docker",
     "mindroom.workers.backends.docker_projection",
+    "mindroom.workers.backends.legacy_docker_worker_metadata",
 ]
 
 [[modules]]
@@ -6146,12 +6162,13 @@ expose = ["MindRoomToolCallError", "MindRoomTools"]
 from = ["mindroom.script_sdk"]
 
 [[interfaces]]
-expose = ["open_worker_state_root", "remove_directory_tree_at"]
+expose = ["open_worker_state_root", "read_worker_identity", "remove_directory_tree_at"]
 from = ["mindroom.workers.worker_retirement"]
 visibility = [
     "mindroom.script_runs.manager",
     "mindroom.workers.backends.docker",
     "mindroom.workers.backends.docker_projection",
+    "mindroom.workers.backends.legacy_docker_worker_metadata",
 ]
 exclusive = true
 
@@ -6819,6 +6836,7 @@ path = "mindroom.custom_tools.matrix_message_idempotency"
 depends_on = [
     "mindroom.authorization",
     "mindroom.background_tasks",
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.durable_write",
     "mindroom.file_locks",
     "mindroom.matrix.client_delivery",
@@ -6867,6 +6885,19 @@ visibility = ["mindroom.tools.modelslabs"]
 [[interfaces]]
 from = ["mindroom.tools.agno_compat_modelslabs"]
 expose = ["ModelsLabCompletionTools"]
+
+[[modules]]
+path = "mindroom.tools.trafilatura"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_trafilatura"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_trafilatura"
+depends_on = ["mindroom.server_fetch_url"]
+visibility = ["mindroom.tools.trafilatura"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_trafilatura"]
+expose = ["install_server_fetch_guard"]
 
 [[modules]]
 path = "mindroom.tools.browser_mcp"
