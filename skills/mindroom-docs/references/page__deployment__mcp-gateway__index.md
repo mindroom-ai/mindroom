@@ -1,6 +1,9 @@
 # MCP Gateway
 
-The optional MindRoom MCP gateway exposes your selected agents' assigned tools to external MCP clients at `/mcp`.
+MindRoom is a multi-agent, multi-user chat platform built on Matrix.
+People and AI agents communicate in rooms and threaded conversations.
+Each agent has a configured role and set of tools for working with services and performing tasks; agents can be personal assistants or shared specialists.
+The optional MCP gateway exposes a compatible subset of those tools to external MCP clients at `/mcp`, limited to the signed-in user's authorized and selected agents and tools.
 It reuses the [Connections portal](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#connections-portal), agent credential scopes, tool filters, and worker routing.
 Each user connects only the services they need.
 An unconnected or unavailable integration does not prevent discovery or use of another integration.

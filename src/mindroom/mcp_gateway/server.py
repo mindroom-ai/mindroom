@@ -58,8 +58,11 @@ def _instructions(public_url: str, personal_agent_name: str | None) -> str:
         else "A personal agent represents the signed-in user's personal assistant and service connections. "
     )
     return (
-        "MindRoom connects AI agents to tools and services. This MCP gateway lets you use tools assigned to "
-        "the signed-in user's selected agents. "
+        "MindRoom is a multi-agent, multi-user chat platform built on Matrix. People and AI agents communicate "
+        "in rooms and threaded conversations. Each agent has a configured role and set of tools for working "
+        "with services and performing tasks; agents can be personal assistants or shared specialists. "
+        "This MCP gateway exposes a compatible subset of those tools to external AI clients, limited to "
+        "the signed-in user's authorized and selected agents and tools. "
         + personal_agent
         + "An agent selector chooses a tool and credential context; it does not send a message to that agent "
         "or load its system prompt, memories, or conversation history. Shared agents may use shared connections. "
