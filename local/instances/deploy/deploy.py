@@ -48,7 +48,8 @@ DEFAULT_TRAEFIK_WEB_ENTRYPOINT = "websecure"
 DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT = "matrix-fed"
 DEFAULT_TRAEFIK_CERTRESOLVER = "porkbun"
 PERMISSION_REPAIR_IMAGE = "busybox:1.36"
-# Generated per instance into its env file; Compose refuses to start without them.
+# Random per-instance secrets kept in the instance env file.
+# start and restart add missing runtime secrets to env files written by older versions.
 RUNTIME_SECRET_NAMES = ("MINDROOM_API_KEY", "MINDROOM_SANDBOX_PROXY_TOKEN")
 SYNAPSE_SECRET_NAMES = ("POSTGRES_PASSWORD", "REDIS_PASSWORD")
 
@@ -222,7 +223,9 @@ def _prepare_matrix_config(
 
         # Render template with variables
         if matrix_type == MatrixType.SYNAPSE:
-            env_values = _ensure_env_secrets(ENV_DIR / f"{instance.name}.env", SYNAPSE_SECRET_NAMES)
+            env_file = ENV_DIR / f"{instance.name}.env"
+            _ensure_env_secrets(env_file, SYNAPSE_SECRET_NAMES)
+            env_values = _read_env_values(env_file)
             content = template.render(
                 matrix_server_name=matrix_server_name,
                 postgres_host=f"{instance.name}-postgres",
@@ -341,22 +344,21 @@ def _read_env_values(env_file: Path) -> dict[str, str]:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            values[key.strip()] = value.strip().strip("'\"")
+            values[key.strip().removeprefix("export ").strip()] = value.strip().strip("'\"")
     return values
 
 
-def _ensure_env_secrets(env_file: Path, names: tuple[str, ...]) -> dict[str, str]:
-    """Append a random value for each named secret the env file leaves empty, then return its values."""
+def _ensure_env_secrets(env_file: Path, names: tuple[str, ...]) -> list[str]:
+    """Append a random value for each named secret the env file leaves empty and return the generated names."""
     values = _read_env_values(env_file)
-    # Hex values stay safe as command-line arguments, URLs, and YAML scalars.
-    generated = {name: secrets.token_hex(32) for name in names if not values.get(name)}
+    generated = [name for name in names if not values.get(name)]
     if generated:
         content = env_file.read_text()
         suffix = "" if not content or content.endswith("\n") else "\n"
+        # Hex values stay safe as command-line arguments, URLs, and YAML scalars.
         with env_file.open("a") as f:
-            f.write(suffix + "".join(f"{name}={value}\n" for name, value in generated.items()))
-        values.update(generated)
-    return values
+            f.write(suffix + "".join(f"{name}={secrets.token_hex(32)}\n" for name in generated))
+    return generated
 
 
 def _load_traefik_settings(env_file: Path) -> TraefikSettings:
@@ -786,12 +788,13 @@ def _bring_up_instance(
     force_recreate: bool = False,
 ) -> None:
     """Start or restart an instance using one shared compose-up path."""
-    env_file = _require_instance_env_file(name)
-    # Compose interpolation, including the Authelia check, requires the runtime secrets.
-    _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES)
     if instance.auth_type == AuthType.AUTHELIA and not only_matrix:
         _require_authelia_account_setup(instance)
 
+    env_file = _require_instance_env_file(name)
+    generated_secrets = _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES)
+    if generated_secrets:
+        console.print(f"[yellow]i[/yellow] Added {', '.join(generated_secrets)} to {env_file}")
     _sync_matrix_host_overrides(registry.instances)
     _ensure_instance_env_file_reference(env_file)
 
@@ -1179,7 +1182,6 @@ def start(
     instance = registry.instances[name]
     previous_status = instance.status
     env_file = _require_instance_env_file(name)
-    _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES)
     if instance.auth_type == AuthType.AUTHELIA and not only_matrix:
         _require_authelia_account_setup(instance)
 

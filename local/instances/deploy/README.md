@@ -99,10 +99,10 @@ This will start:
 
 Before starting the sandbox runner, Compose initializes its scratch volume ownership using `UID` and `GID` (both default to `1000`).
 
-The sandbox runner joins only its own `sandbox-network`, so tool code cannot open connections to the MindRoom API, PostgreSQL, Redis, or the homeserver over Docker networking or their host ports.
-The runner keeps outbound internet access, so it reaches public HTTPS routes like any other client.
-The `sandbox-relay` container joins both networks and forwards only the runner port.
-The shared `mindroom-network` is internal, so services attached only to it, such as PostgreSQL and Redis, have no outbound access.
+The sandbox runner joins only its own `sandbox-network`, so tool code cannot open connections to MindRoom, PostgreSQL, Redis, Authelia, or the homeserver over Docker networking.
+The `sandbox-relay` container joins both networks, forwards only the runner port, and does not route other traffic.
+The runner keeps outbound internet access for package installs and web requests, so like any other client it can reach the instance's published host ports and public routes.
+`MINDROOM_API_KEY` protects the MindRoom API on those paths, and PostgreSQL and Redis publish no host ports.
 
 ### 4. Access Your Instance
 
@@ -110,8 +110,6 @@ After starting, these direct host-port endpoints are exposed on the host:
 - **MindRoom**: `http://localhost:{MINDROOM_PORT}` (e.g., `http://localhost:8765`)
 - **Matrix Server** (if enabled): `http://localhost:{MATRIX_PORT}` (e.g., `http://localhost:8448`)
 
-Both ports are published on the host loopback interface only, because containers, including the sandbox, can reach ports published on all interfaces through their Docker gateway.
-Use the Traefik routes below for access from other machines.
 The dashboard asks for the `MINDROOM_API_KEY` stored in `envs/{instance_name}.env`, and API clients send it as a bearer token.
 
 Some services, especially Synapse, can take a moment before they answer requests on those ports.
@@ -355,11 +353,17 @@ POSTGRES_PASSWORD=...
 REDIS_PASSWORD=...
 ```
 
-Compose refuses to start an instance without these secrets.
-`start` and `restart` add a missing `MINDROOM_API_KEY` or `MINDROOM_SANDBOX_PROXY_TOKEN` to env files created by older versions.
-Before the first start of an instance created by an older version, stop the instance with `./deploy.py stop <name>` and stop its bridges, because Compose must recreate `mindroom-network` as an internal network.
-Synapse instances created by older versions must add `REDIS_PASSWORD` to the env file and the same value as `redis.password` in `{DATA_DIR}/synapse/homeserver.yaml`.
-They should also replace the shared `synapse_password` PostgreSQL password with `ALTER USER synapse PASSWORD '...'` and store the new value as `POSTGRES_PASSWORD` and `database.args.password`.
+`create` generates these values, and Synapse's `homeserver.yaml` receives the same PostgreSQL and Redis passwords.
+Without `MINDROOM_SANDBOX_PROXY_TOKEN` the sandbox runner rejects every tool call, and without `MINDROOM_API_KEY` the MindRoom API accepts unauthenticated requests.
+
+### Upgrading Instances Created by Older Versions
+
+No manual steps are required.
+`start` and `restart` add a random `MINDROOM_API_KEY` and `MINDROOM_SANDBOX_PROXY_TOKEN` to an env file that lacks them and print the file path, after which the dashboard asks for that key.
+Compose then creates `sandbox-network` and the relay, recreates the runner on the new network, and reuses the existing `mindroom-network`, so attached bridges stay connected.
+Synapse instances keep their existing PostgreSQL password and unauthenticated Redis, which the runner can no longer reach.
+To enable Redis authentication on such an instance anyway, set one new value as `REDIS_PASSWORD` in the env file and as `redis.password` in `{DATA_DIR}/synapse/homeserver.yaml`, then restart it.
+When you run Docker Compose directly with an older env file, run `./deploy.py start <name>` once or add `MINDROOM_SANDBOX_PROXY_TOKEN` yourself, because the runner otherwise rejects every tool call.
 
 ## Examples
 

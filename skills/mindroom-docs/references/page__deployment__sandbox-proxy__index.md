@@ -90,6 +90,8 @@ services:
     user: "65534:65534"
     cap_drop:
       - ALL
+    sysctls:
+      net.ipv4.ip_forward: 0
     command: ["tcpsvd", "-c", "256", "0.0.0.0", "8766", "nc", "sandbox-runner", "8766"]
     networks:
       - mindroom-network
@@ -105,7 +107,8 @@ networks:
 
 Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
 Do not attach the runner to a network shared with MindRoom, its homeserver, or databases, because tool code could then call the MindRoom API or read those services directly.
-Set `MINDROOM_API_KEY` as well, because containers can still reach MindRoom through ports published on all host interfaces or its public URL.
+Keep IP forwarding disabled in the relay, because tool code can otherwise send packets for the MindRoom network through it.
+Set `MINDROOM_API_KEY` as well, because the runner keeps outbound access and can still reach MindRoom through ports published on the host or its public URL.
 
 > [!IMPORTANT]
 > The `sandbox-workspace` Docker volume is created as root by default.
@@ -117,7 +120,7 @@ Set `MINDROOM_API_KEY` as well, because containers can still reach MindRoom thro
 
 Key differences from the primary MindRoom runtime:
 - **No `env_file`** — runner has no API keys, no Matrix credentials
-- **Separate network** — only the relay reaches the runner, and the runner cannot reach MindRoom or its datastores
+- **Separate network** — only the relay reaches the runner, and the runner shares no Docker network with MindRoom or its datastores
 - **Scratch workspace** — a dedicated volume for worker-local files (caches, virtualenvs)
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the scratch workspace for tool registry and cache files
 

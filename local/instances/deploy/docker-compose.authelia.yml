@@ -38,6 +38,5 @@ services:
 networks:
   mindroom-network:
     driver: bridge
-    internal: true
   mynetwork:
     external: true

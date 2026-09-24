@@ -9,7 +9,8 @@ services:
     environment:
       POSTGRES_DB: synapse
       POSTGRES_USER: synapse
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in the instance env file}
+      # deploy.py generates the password; Postgres refuses to initialize a new volume without one.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -24,15 +25,16 @@ services:
   redis:
     image: redis:7-alpine
     container_name: ${INSTANCE_NAME:-mindroom}-redis
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in the instance env file and as redis.password in homeserver.yaml}"]
+    # deploy.py generates the password for new instances.
+    # An empty one keeps authentication off for older instances whose homeserver.yaml has no Redis password.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-}"]
     environment:
-      # Authenticates the healthcheck's redis-cli.
-      REDISCLI_AUTH: ${REDIS_PASSWORD}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
     volumes:
       - redis-data:/data
     healthcheck:
       # redis-cli exits 0 on NOAUTH, so require the reply.
-      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      test: ["CMD-SHELL", "if [ -n \"$$REDIS_PASSWORD\" ]; then export REDISCLI_AUTH=\"$$REDIS_PASSWORD\"; fi; redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -53,8 +55,7 @@ services:
       # DATA_DIR should be set in the .env file
       - ${DATA_DIR}/synapse:/data
     ports:
-      # Loopback only: containers, including the sandbox, reach the host through its bridge gateway.
-      - "127.0.0.1:${MATRIX_PORT:-8448}:8008"
+      - "${MATRIX_PORT:-8448}:8008"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8008/_matrix/client/versions"]
       interval: 10s
@@ -93,8 +94,7 @@ services:
   # Update MindRoom to know about the Matrix server
   mindroom:
     environment:
-      # Container names are unique; other instances' homeservers share the "synapse" alias on mynetwork.
-      - MATRIX_HOMESERVER=http://${INSTANCE_NAME:-mindroom}-synapse:8008
+      - MATRIX_HOMESERVER=http://synapse:8008
       - MINDROOM_DESKTOP_MATRIX_HOMESERVER=https://m-${INSTANCE_DOMAIN}
       - MATRIX_SERVER_NAME=m-${INSTANCE_DOMAIN}
     depends_on:
@@ -104,7 +104,6 @@ services:
 networks:
   mindroom-network:
     driver: bridge
-    internal: true
   mynetwork:
     external: true
 

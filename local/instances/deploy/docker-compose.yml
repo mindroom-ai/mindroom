@@ -17,20 +17,20 @@ services:
       - ${DATA_DIR}/mindroom_data:/app/mindroom_data
       - ${DATA_DIR}/logs:/app/logs
     ports:
-      # Loopback only: containers, including the sandbox, reach the host through its bridge gateway.
-      - "127.0.0.1:${MINDROOM_PORT:-8765}:8765"
+      - "${MINDROOM_PORT:-8765}:8765"
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MINDROOM_STORAGE_PATH=/app/mindroom_data
       - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
-      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:?MINDROOM_SANDBOX_PROXY_TOKEN must be set in the instance env file}
+      # deploy.py generates the token; without one the runner rejects every request.
+      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:-}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
       - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
       - HOME=/app
       - MEM0_DIR=/app/mindroom_data/memory/mem0  # Used by mem0
       - MINDROOM_PUBLIC_URL=https://${INSTANCE_DOMAIN}
       - MINDROOM_PORT=${MINDROOM_PORT:-8765}
-      - MINDROOM_API_KEY=${MINDROOM_API_KEY:?MINDROOM_API_KEY must be set in the instance env file}
+      - MINDROOM_API_KEY=${MINDROOM_API_KEY:-}
     networks:
       - mindroom-network
       - mynetwork
@@ -83,14 +83,16 @@ services:
       - sandbox-workspace:/app/workspace
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
-      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:?MINDROOM_SANDBOX_PROXY_TOKEN must be set in the instance env file}
+      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:-}
       - MINDROOM_CONFIG_PATH=/app/config.yaml
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
     # Tool code runs here, so share no network with the runtime, datastores, or homeserver.
+    # The sandbox network keeps outbound internet access for package installs and web requests.
     networks:
       - sandbox-network
 
   # Forwards only the runner port from the runtime network into the sandbox network.
+  # Disabled IP forwarding keeps the runner from routing packets through the relay.
   sandbox-relay:
     image: busybox:1.36
     container_name: ${INSTANCE_NAME:-mindroom}-sandbox-relay
@@ -111,7 +113,6 @@ volumes:
 networks:
   mindroom-network:
     driver: bridge
-    internal: true
   sandbox-network:
     driver: bridge
   mynetwork:
