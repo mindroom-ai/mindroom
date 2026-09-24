@@ -373,6 +373,18 @@ An upstream outage or delayed event can delay offboarding, and already-dispatche
 This directory governs MCP client grants; it does not deactivate Matrix accounts, erase upstream service credentials, or replace browser-session logout.
 Provisioned directory records are administrator-managed and outside the OAuth logical byte budgets; apply the runtime's physical volume quota to the whole database.
 
+## Inbound request diagnostics
+
+`mcp_gateway_http_completed` records the HTTP status, elapsed milliseconds, and authenticated `requester_id` when available.
+`mcp_gateway_call_completed` records the gateway operation, elapsed milliseconds, outcome, and allowlisted error code; an HTTP 200 response can still contain a tool error.
+Join these events and `mcp_gateway_call_failed` by the server-generated `request_id`, which is separate from the client's JSON-RPC ID.
+Unexpected failures include the exception type, without the exception message.
+`mcp_gateway_agent_selection` records whether the requested agent is eligible, saved, selected, or matches an eligible name ignoring case, plus eligible and selected agent counts.
+For example, `agent_eligible=false` with `agent_case_match=true` indicates a case mismatch; `agent_eligible=true` with `agent_selected=false` indicates the eligible agent was not selected.
+Unscoped discovery has `agent_provided=false`; a zero `selected_agent_count` explains empty agent discovery.
+These events omit credentials, grant IDs, client request IDs, arbitrary client-supplied names, tool arguments, queries, error messages, and result payloads.
+They describe inbound `/mcp` traffic, separately from outbound MCP integration logs.
+
 ## Execution limits
 
 - Tools requiring native confirmation or configured approval cannot run through the gateway; they return `approval_required`.
@@ -390,3 +402,8 @@ The gateway does not provide process isolation for native integrations.
 The gateway does not automatically retry an invocation whose outcome is unknown.
 Upstream MCP reconnection can refresh a failed session for a later call without replaying the failed action.
 Existing tool-specific authorization, provider scopes, worker isolation, and filters remain authoritative.
+
+## Agent CLI
+
+The [minimal-mode agent CLI](../tools/agent-cli.md) belongs to an active agent response and uses a separate restricted gateway.
+It does not change external MCP authentication, saved selections, or compatible-tool restrictions.

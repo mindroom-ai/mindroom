@@ -38,6 +38,7 @@ class EffectiveToolConfig:
 
 
 AgentLearningMode = Literal["always", "agentic"]
+FileAccess = Literal["workspace", "unrestricted"]
 _LargeMessageStrategy = Literal["sidecar", "split"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
@@ -434,9 +435,26 @@ class DefaultsConfig(BaseModel):
         ge=0,
         description="Max tool call messages replayed from history (None = no limit)",
     )
+    max_tool_calls_per_turn: int = Field(
+        default=1000,
+        ge=1,
+        description=(
+            "Maximum tool calls one agent or team turn may execute; further calls return a tool error, "
+            "and the turn ends with its text so far after this many plus two model requests"
+        ),
+    )
     show_tool_calls: bool = Field(
         default=True,
         description="Whether to show tool call details inline in responses",
+    )
+    file_access: FileAccess = Field(
+        default="workspace",
+        description=(
+            "Where in-process path-taking tools (file, coding, attachments, matrix_message, gmail, google_drive, browser) "
+            "may read and write files: workspace confines them to the agent workspace and its attachments, "
+            "unrestricted allows any path their process can reach. Code-execution tools such as shell and python "
+            "are always unrestricted; isolate them with worker_tools"
+        ),
     )
     worker_tools: list[str] | None = Field(
         default=None,

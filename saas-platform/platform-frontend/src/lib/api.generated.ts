@@ -336,6 +336,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/instance-sso/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Authorize Instance Sso
+         * @description Send one owned instance a short-lived login ticket signed with that instance's own key.
+         *
+         *     The platform cookie never leaves the API host, and the ticket is not a platform credential.
+         */
+        get: operations["authorize_instance_sso_instance_sso_authorize_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/matrix-oidc/.well-known/openid-configuration": {
         parameters: {
             query?: never;
@@ -690,7 +712,7 @@ export interface paths {
         put?: never;
         /**
          * Set Sso Cookie
-         * @description Set an SSO cookie with the current Supabase access token.
+         * @description Set a host-only platform API cookie with the current Supabase access token.
          */
         post: operations["set_sso_cookie_my_sso_cookie_post"];
         /**
@@ -2409,6 +2431,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    authorize_instance_sso_instance_sso_authorize_get: {
+        parameters: {
+            query: {
+                redirect_to: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -24,6 +24,7 @@ class CommandType(Enum):
     EDIT_SCHEDULE = "edit_schedule"
     CONFIG = "config"  # Configuration command
     DESKTOP = "desktop"  # Requester-scoped Desktop pairing
+    MODE = "mode"
     MODEL = "model"  # Per-thread model override command
     ROOM_MODEL = "room_model"  # Room-level model override command
     THREAD_MODE = "thread_mode"  # Room-level thread mode override command
@@ -35,6 +36,10 @@ class CommandType(Enum):
 
 # Command documentation for each command type
 _COMMAND_DOCS = {
+    CommandType.MODE: (
+        "!mode <agent> minimal|standard|show|reset",
+        "Switch one agent between standard tools and a Bash-only interface",
+    ),
     CommandType.SCHEDULE: ("!schedule <task>", "Schedule a task"),
     CommandType.LIST_SCHEDULES: ("!list_schedules", "List scheduled tasks"),
     CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
@@ -125,6 +130,7 @@ class _CommandParser:
     EDIT_SCHEDULE_PATTERN = re.compile(r"^!edit[_-]?schedule\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
     DESKTOP_PATTERN = re.compile(r"^!desktop(?:\s+(.+))?$", re.IGNORECASE)
+    MODE_PATTERN = re.compile(r"^!mode(?:\s+(.+))?$", re.IGNORECASE)
     MODEL_PATTERN = re.compile(r"^!model(?:\s+(.+))?$", re.IGNORECASE)
     ROOM_MODEL_PATTERN = re.compile(r"^!room[_-]?model(?:\s+(.+))?$", re.IGNORECASE)
     THREAD_MODE_PATTERN = re.compile(r"^!thread[_-]?mode(?:\s+(.+))?$", re.IGNORECASE)
@@ -220,6 +226,10 @@ class _CommandParser:
                 args={"args_text": args_text},
                 raw_text=message,
             )
+
+        match = self.MODE_PATTERN.match(message)
+        if match:
+            return Command(type=CommandType.MODE, args={"args_text": (match.group(1) or "").strip()}, raw_text=message)
 
         match = self.MODEL_PATTERN.match(message)
         if match:
@@ -407,6 +417,24 @@ Usage: `!config <operation>` - View and modify MindRoom configuration
 Set `authorization.config_command_enabled: true`; the caller must also be a platform administrator.
 
 **Note:** Configuration changes are immediately saved to config.yaml and affect all new agent interactions."""
+
+    if topic == "mode":
+        return """**Agent Mode Command**
+
+Usage: `!mode <agent> minimal|standard|show|reset`
+
+- `!mode helper minimal` - Use a Bash-only model interface with the agent's configured tools available through the CLI
+- `!mode helper standard` - Restore the standard tool interface
+- `!mode helper show` - Show the saved choice
+- `!mode helper reset` - Remove the choice and return to standard mode
+
+How it works:
+- Applies to this agent's next Matrix response in the same conversation and survives restarts
+- Thread agents require an existing thread; room-mode agents use one choice for the whole room
+- Private agents keep a separate choice for each requester; other agents and conversations are unaffected
+- Teams and OpenAI-compatible API requests do not use this selection
+- Minimal mode requires existing run/check/kill shell permissions, a canonical workspace, and a supported dedicated Docker worker deployment
+- If deployment settings change and minimal mode becomes unavailable, use `!mode <agent> standard` in the same conversation"""
 
     if topic == "model":
         return """**Model Command**

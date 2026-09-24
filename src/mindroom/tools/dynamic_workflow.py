@@ -4,6 +4,7 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolMetadata,
     ToolStatus,
 )
@@ -12,6 +13,7 @@ from mindroom.tool_system.registration import register_builtin_tool_metadata
 register_builtin_tool_metadata(
     ToolMetadata(
         name="dynamic_workflow",
+        file_access=ToolFileAccess.NONE,
         display_name="Dynamic Workflows",
         description="Create, update, run, and inspect reusable multi-agent Dynamic Workflows",
         category=ToolCategory.PRODUCTIVITY,

@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
@@ -51,6 +52,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     @property
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler: ...  # noqa: D102
+
+    @property
+    def agent_cli_registry(self) -> TurnToolRegistry: ...  # noqa: D102
 
     @property
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102

@@ -14,6 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
+from uuid import UUID
 
 import httpx
 import pytest
@@ -44,6 +45,7 @@ from mindroom.tool_system.worker_routing import (
     worker_dir_name,
     worker_root_path,
 )
+from mindroom.workers import runtime as worker_runtime
 from mindroom.workers import worker_retirement as worker_retirement_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
@@ -69,7 +71,7 @@ from mindroom.workers.backends.docker_projection import (
 )
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
-from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
+from mindroom.workers.models import WorkerReadyProgress, WorkerSpec, process_worker_key
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
@@ -5008,6 +5010,236 @@ def test_docker_backend_recreates_container_when_same_tag_resolves_to_new_image_
     assert replacement_container is not existing_container
     assert existing_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
+
+
+def test_cli_workers_have_private_control_auth_and_only_canonical_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Fresh turn processes share state, never backend credentials or config assets."""
+    seeded_runtime = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_API_KEY": "seeded-primary-admin", "OPENAI_API_KEY": "seeded-provider-key"},
+    )
+    backend, client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=seeded_runtime)
+    backend.config = replace(backend.config, extra_env={})
+    base = "v1:default:user_agent:alice:code"
+    keys = [process_worker_key(base, purpose="agent-turn", process_id=UUID(int=i)) for i in (1, 2)]
+    handles = [
+        backend.ensure_worker(
+            WorkerSpec(
+                key,
+                private_agent_names=frozenset(),
+                mirrored_credential_services=frozenset(),
+                state_scope_worker_key=base,
+            ),
+        )
+        for key in keys
+    ]
+    assert handles[0].auth_token != handles[1].auth_token
+    assert all(handle.auth_token != _TEST_AUTH_TOKEN for handle in handles)
+    calls = client.containers.run_calls
+    assert calls[0]["volumes"][1:] == calls[1]["volumes"][1:]
+    for call, handle in zip(calls, handles, strict=True):
+        assert _TEST_AUTH_TOKEN not in json.dumps(call)
+        for secret in ("seeded-primary-admin", "seeded-provider-key", _TEST_AUTH_TOKEN):
+            assert secret not in json.dumps(call)
+            manifest = Path(handle.debug_metadata["state_root"]) / ".runtime/startup_manifest.json"
+            assert secret not in manifest.read_text()
+        assert call["environment"][SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]] == handle.auth_token
+        assert all("config-host" not in mount for mount in call["volumes"])
+        assert call["cap_drop"] == ["ALL"]
+        assert call["security_opt"] == ["no-new-privileges:true"]
+
+
+def test_cli_worker_rejects_extra_env_and_credential_mirroring(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Explicit worker overlays cannot smuggle provider authority into Bash."""
+    backend, client, _ = _backend(monkeypatch, tmp_path)
+    base = "v1:default:user_agent:alice:code"
+    key = process_worker_key(base, purpose="agent-turn", process_id=UUID(int=1))
+    spec = WorkerSpec(
+        key,
+        private_agent_names=frozenset(),
+        mirrored_credential_services=frozenset(),
+        state_scope_worker_key=base,
+    )
+    with pytest.raises(WorkerBackendError, match="extra env"):
+        backend.ensure_worker(spec)
+    backend.config = replace(backend.config, extra_env={})
+    with pytest.raises(WorkerBackendError, match="credential"):
+        backend.ensure_worker(replace(spec, mirrored_credential_services=frozenset({"openai"})))
+    assert not client.containers.run_calls
+
+
+def test_cli_worker_inspection_rejects_authority_and_mount_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Runtime inspect catches injected image secrets and capability mount overlaps."""
+    backend, docker, _ = _backend(monkeypatch, tmp_path)
+    backend.config = replace(backend.config, extra_env={})
+    base = "v1:default:user_agent:alice:code"
+    key = process_worker_key(base, purpose="agent-turn", process_id=UUID(int=3))
+    handle = backend.ensure_worker(
+        WorkerSpec(
+            key,
+            private_agent_names=frozenset(),
+            mirrored_credential_services=frozenset(),
+            state_scope_worker_key=base,
+        ),
+    )
+    container = docker.containers.created_containers[-1]
+    container.attrs["HostConfig"] = {
+        "NetworkMode": "default",
+        "Privileged": False,
+        "PidMode": "",
+        "CapAdd": None,
+        "CapDrop": ["ALL"],
+        "SecurityOpt": ["no-new-privileges:true"],
+    }
+    assert backend.inspect_cli_worker(handle) == ()
+    container.attrs["Config"]["Env"].append("OPENAI_API_KEY=seeded-fake-provider-key")
+    with pytest.raises(WorkerBackendError, match="environment"):
+        backend.inspect_cli_worker(handle)
+    container.attrs["Config"]["Env"].pop()
+    container.attrs["Mounts"].append({"Destination": "/app/.mindroom-agent-cli", "Type": "bind"})
+    with pytest.raises(WorkerBackendError, match="capability"):
+        backend.inspect_cli_worker(handle)
+
+
+@pytest.mark.parametrize("peer_status", ["running", "exited"])
+def test_cli_worker_inspection_inventories_live_idle_peers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    peer_status: str,
+) -> None:
+    """Idle metadata never excludes a still-running peer's control endpoint."""
+    backend, docker, _ = _backend(monkeypatch, tmp_path)
+    backend.config = replace(backend.config, extra_env={})
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0)
+    peer = docker.containers.created_containers[-1]
+    peer.status = peer_status
+    peer.attrs["NetworkSettings"]["Networks"] = {"bridge": {"IPAddress": "172.17.0.7"}}
+    base = "v1:default:user_agent:alice:code"
+    handle = backend.ensure_worker(
+        WorkerSpec(
+            process_worker_key(base, purpose="agent-turn", process_id=UUID(int=5)),
+            private_agent_names=frozenset(),
+            mirrored_credential_services=frozenset(),
+            state_scope_worker_key=base,
+        ),
+    )
+    docker.containers.created_containers[-1].attrs["HostConfig"] = {
+        "NetworkMode": "default",
+        "Privileged": False,
+        "PidMode": "",
+        "CapAdd": None,
+        "CapDrop": ["ALL"],
+        "SecurityOpt": ["no-new-privileges:true"],
+    }
+    assert backend.inspect_cli_worker(handle) == (("http://172.17.0.7:8766",) if peer_status == "running" else ())
+
+
+@pytest.mark.parametrize("user", [None, "root", "0", "00:1000", "+0", "-0"])
+def test_cli_profile_rejects_root_before_container_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    user: str | None,
+) -> None:
+    """The preflight and launch share the same root-equivalent Docker user policy."""
+    backend, docker, _ = _backend(monkeypatch, tmp_path)
+    backend.config = replace(backend.config, extra_env={}, user=user)
+    with pytest.raises(WorkerBackendError, match="non-root"):
+        backend.config.validate_cli_profile()
+    assert not docker.containers.run_calls
+
+
+def test_replacement_manager_preserves_leased_cli_worker_until_idle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A replacement cannot kill another live response; abandoned workers still stop."""
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_WORKER_BACKEND": "docker", "MINDROOM_DOCKER_WORKER_IMAGE": "test:fake"},
+    )
+    backend, docker, _ = _backend(monkeypatch, tmp_path, runtime_paths=paths)
+    backend.config = replace(backend.config, extra_env={})
+    base = "v1:default:user_agent:alice:code"
+
+    def spec(nonce: int) -> WorkerSpec:
+        return WorkerSpec(
+            process_worker_key(base, purpose="agent-turn", process_id=UUID(int=nonce)),
+            private_agent_names=frozenset(),
+            mirrored_credential_services=frozenset(),
+            state_scope_worker_key=base,
+        )
+
+    restarted, _, _ = _backend(monkeypatch, tmp_path, runtime_paths=paths)
+    restarted.config = replace(restarted.config, extra_env={})
+    restarted._client = docker
+    managers = iter((backend, restarted))
+    monkeypatch.setattr(worker_runtime, "_build_primary_worker_manager", lambda *_args, **_kwargs: next(managers))
+    kwargs = {"proxy_url": None, "proxy_token": "test", "storage_root": tmp_path}
+    first = worker_runtime.lease_primary_worker_manager(
+        backend._runtime_paths,
+        **kwargs,
+        dedicated_worker_validation_snapshot={},
+    )
+    second = None
+    try:
+        first.manager.ensure_worker(spec(1), now=100)
+        old = docker.containers.created_containers[-1]
+        second = worker_runtime.lease_primary_worker_manager(
+            backend._runtime_paths,
+            **kwargs,
+            dedicated_worker_validation_snapshot={"new_tool": {"name": "new_tool"}},
+        )
+        second.manager.ensure_worker(spec(2), now=100)
+        assert first._entry.active_leases == 1
+        assert old.removed == 0
+        assert old.status == "running"
+        restarted.cleanup_idle_workers(now=101 + restarted.idle_timeout_seconds)
+        assert old.status == "exited"
+    finally:
+        if second is not None:
+            second.release()
+        first.release()
+
+
+def test_cli_readiness_checks_worker_specific_control_auth(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Public health alone cannot certify that primary controls the isolated worker."""
+    backend, docker, _ = _backend(monkeypatch, tmp_path)
+    backend.config = replace(backend.config, extra_env={})
+    base = "v1:default:user_agent:alice:code"
+    key = process_worker_key(base, purpose="agent-turn", process_id=UUID(int=99))
+    handle = backend.ensure_worker(
+        WorkerSpec(
+            key,
+            private_agent_names=frozenset(),
+            mirrored_credential_services=frozenset(),
+            state_scope_worker_key=base,
+        ),
+    )
+    requests = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/healthz":
+            return httpx.Response(200, json={"worker_protocol": WORKER_PROTOCOL_VERSION})
+        assert request.headers["x-mindroom-sandbox-token"] == handle.auth_token
+        return httpx.Response(401)
+
+    original_client = httpx.Client
+    monkeypatch.setattr(
+        "mindroom.workers.backends.docker.httpx.Client",
+        lambda **_kwargs: original_client(transport=httpx.MockTransport(respond)),
+    )
+    with pytest.raises(WorkerBackendError, match="control authentication"):
+        DockerWorkerBackend._wait_for_ready(backend, docker.containers.created_containers[-1])
+    assert requests[-1].url.path == "/api/sandbox-runner/workers"
 
 
 @pytest.mark.parametrize("flag", [None, "false"])

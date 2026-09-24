@@ -340,7 +340,8 @@ async def test_attachment_id_like_filename_can_be_sent_with_dot_slash(
             ),
         )
     assert result["status"] == "ok"
-    assert send.await_args.args[2] == local
+    assert send.await_args.args[2].read_text() == "report"
+    assert send.await_args.kwargs["filename"] == "att_report"
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
 from mindroom.server_fetch_url import validate_server_fetch_url
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="crawl4ai",
+    file_access=ToolFileAccess.NONE,
     display_name="Crawl4AI",
     description="Web crawling and scraping using the Crawl4ai library",
     category=ToolCategory.RESEARCH,

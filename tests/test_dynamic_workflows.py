@@ -23,7 +23,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.dynamic_workflow import _MINIMAL_SPEC_EXAMPLE, DynamicWorkflowTools
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError, execute_workflow_spec
@@ -34,6 +34,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import _matching_tool_approval_rule
+from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
@@ -42,6 +43,7 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
+    FakeModel,
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
@@ -2321,7 +2323,11 @@ def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> Non
             "mindroom.agents.build_agent_toolkit",
             side_effect=lambda name, **_kwargs: sentinel_toolkits[name],
         ) as build_toolkit_mock,
-        patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=SimpleNamespace()),
+        patch.object(
+            dynamic_workflow_module.model_loading,
+            "get_model_instance",
+            return_value=FakeModel(id="participant-model", provider="fake"),
+        ),
         patch.object(dynamic_workflow_module, "Agent", agent_mock),
     ):
         create_payload = _tool_payload(tool.create_workflow(spec))
@@ -2366,7 +2372,11 @@ def test_ephemeral_participant_without_grants_runs_with_empty_tools(tmp_path: Pa
     with (
         tool_runtime_context(context),
         patch("mindroom.agents.build_agent_toolkit") as build_toolkit_mock,
-        patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=SimpleNamespace()),
+        patch.object(
+            dynamic_workflow_module.model_loading,
+            "get_model_instance",
+            return_value=FakeModel(id="participant-model", provider="fake"),
+        ),
         patch.object(dynamic_workflow_module, "Agent", agent_mock),
     ):
         create_payload = _tool_payload(tool.create_workflow(spec))
@@ -2377,6 +2387,47 @@ def test_ephemeral_participant_without_grants_runs_with_empty_tools(tmp_path: Pa
     assert agent_mock.call_count == 2
     assert [call.kwargs["tools"] for call in agent_mock.call_args_list] == [[], []]
     build_toolkit_mock.assert_not_called()
+
+
+def test_ephemeral_participant_runs_within_the_default_tool_call_budget(tmp_path: Path) -> None:
+    """Ephemeral participants get the default per-turn tool budget and its model-call cap, not the caller's budget."""
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    tools=["dynamic_workflow"],
+                    max_tool_calls_per_turn=3,
+                ),
+            },
+            defaults=DefaultsConfig(max_tool_calls_per_turn=12),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
+    tool = DynamicWorkflowTools()
+    model = FakeModel(id="participant-model", provider="fake")
+    agent_mock = Mock(return_value=_fake_stream_agent(content="done"))
+
+    with (
+        tool_runtime_context(context),
+        patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=model),
+        patch.object(dynamic_workflow_module, "Agent", agent_mock),
+        patch.object(
+            dynamic_workflow_module,
+            "install_model_call_cap",
+            wraps=install_model_call_cap,
+        ) as install_cap,
+    ):
+        create_payload = _tool_payload(tool.create_workflow(_workflow_spec()))
+        run_payload = _tool_payload(tool.run_workflow("competitor-research-report", {"topic": "Agno"}))
+
+    assert create_payload["status"] == "ok"
+    assert run_payload["status"] == "completed"
+    assert agent_mock.call_args.kwargs["tool_call_limit"] == 12
+    install_cap.assert_called_once_with(model, entity_name="dynamic_workflow_writer")
 
 
 def test_run_agent_raises_on_failed_agno_status(tmp_path: Path) -> None:

@@ -253,7 +253,6 @@ def _publish_config(
     context.auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
         settings=auth._ApiAuthSettings(
-            platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
             account_id=None,

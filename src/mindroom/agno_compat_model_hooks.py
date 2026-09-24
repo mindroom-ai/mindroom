@@ -16,8 +16,8 @@ if TYPE_CHECKING:
     from agno.models.base import Model
     from agno.models.message import Message
     from agno.models.response import ModelResponse
-    from agno.run.agent import RunOutputEvent
-    from agno.run.team import TeamRunOutputEvent
+    from agno.run.agent import RunOutput, RunOutputEvent
+    from agno.run.team import TeamRunOutput, TeamRunOutputEvent
 
 type _AsyncInvoke = Callable[..., Coroutine[object, object, ModelResponse]]
 type _AsyncStream = Callable[..., AsyncIterator[ModelResponse]]
@@ -202,6 +202,140 @@ def install_tool_result_callback(
     except AttributeError:
         return
     model_dict["_handle_function_call_media"] = handle_media
+
+
+# AGNO_COMPAT: Agno's response loops call the model for as long as it requests tools.
+# Reason: Agno 3.0.9 keeps looping while the model requests tools. tool_call_limit only refuses
+# counted calls; calls naming an unknown tool or carrying unparseable arguments are answered in
+# get_function_calls_to_run before any limit accounting, so a model that keeps requesting tools
+# keeps its run alive indefinitely. The loop's counters are local to aresponse/aresponse_stream,
+# and one model object can serve concurrent runs, so bounding a run's model requests needs a
+# per-loop gate consulted before each request.
+# Upstream issue: https://github.com/agno-agi/agno/issues/8304 and
+# https://github.com/agno-agi/agno/issues/10041 cover refused tool_call_limit batches; no upstream
+# issue identified for loops of unknown-tool or unparseable-argument calls.
+# Upstream PR: https://github.com/agno-agi/agno/pull/10042 and
+# https://github.com/agno-agi/agno/pull/8324 are open and stop only after a batch of limit refusals,
+# which unknown-tool and unparseable-argument batches never produce.
+# Remove when: Agno ends every async streaming and non-streaming response loop after a bounded
+# number of model requests, whatever the requested tool calls, through its normal completion path;
+# the owner's cap derived from tool_call_limit and its once-per-run tool_call_limit_reached warning
+# must remain.
+# Coverage: tests/test_tool_call_budget.py.
+def install_response_request_gate(
+    model: Model,
+    *,
+    marker: str,
+    open_gate: Callable[[int | None], Callable[[], bool] | None],
+) -> None:
+    """Consult one gate per async Agno response loop before each of that loop's model requests.
+
+    ``open_gate`` receives the loop's ``tool_call_limit`` when ``aresponse`` or ``aresponse_stream``
+    starts and returns the loop's gate, or ``None`` to leave the loop ungated.
+    Agno passes the run's ``run_response`` to every iteration, so loops of concurrent runs sharing
+    this model keep separate gates; a nested loop of the same run shares its outer loop's gate.
+    A refused request never reaches the provider: the iteration ends with an empty assistant message
+    and no tool calls, so Agno's loop breaks through its normal completion path.
+    """
+    model_dict = vars(model)
+    if model_dict.get(marker) is True:
+        return
+    model_dict[marker] = True
+    original_response = cast("Callable[..., Awaitable[ModelResponse]]", model.aresponse)
+    original_response_stream = cast(
+        "Callable[..., AsyncGenerator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]]",
+        model.aresponse_stream,
+    )
+    original_process = cast("Callable[..., Awaitable[None]]", model._aprocess_model_response)
+    original_process_stream = cast("Callable[..., AsyncGenerator[ModelResponse]]", model.aprocess_response_stream)
+    gates: dict[int, Callable[[], bool]] = {}
+
+    async def response(
+        *args: object,
+        tool_call_limit: int | None = None,
+        run_response: RunOutput | TeamRunOutput | None = None,
+        **kwargs: object,
+    ) -> ModelResponse:
+        with _gated_response_loop(gates, open_gate, run_response, tool_call_limit):
+            return await original_response(
+                *args,
+                tool_call_limit=tool_call_limit,
+                run_response=run_response,
+                **kwargs,
+            )
+
+    async def response_stream(
+        *args: object,
+        tool_call_limit: int | None = None,
+        run_response: RunOutput | TeamRunOutput | None = None,
+        **kwargs: object,
+    ) -> AsyncIterator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]:
+        with _gated_response_loop(gates, open_gate, run_response, tool_call_limit):
+            async with aclosing(
+                original_response_stream(
+                    *args,
+                    tool_call_limit=tool_call_limit,
+                    run_response=run_response,
+                    **kwargs,
+                ),
+            ) as stream:
+                async for event in stream:
+                    yield event
+
+    async def process_model_response(
+        *args: object,
+        model_response: ModelResponse,
+        run_response: RunOutput | TeamRunOutput | None = None,
+        **kwargs: object,
+    ) -> None:
+        if _request_refused(gates, run_response):
+            # The non-streaming loop keeps one ModelResponse and adds its usage to the run
+            # metrics after every request, so a refused request must not repeat the last usage.
+            model_response.response_usage = None
+            return
+        await original_process(*args, model_response=model_response, run_response=run_response, **kwargs)
+
+    async def process_response_stream(
+        *args: object,
+        run_response: RunOutput | TeamRunOutput | None = None,
+        **kwargs: object,
+    ) -> AsyncIterator[ModelResponse]:
+        if _request_refused(gates, run_response):
+            return
+        async with aclosing(original_process_stream(*args, run_response=run_response, **kwargs)) as stream:
+            async for delta in stream:
+                yield delta
+
+    model_dict["aresponse"] = response
+    model_dict["aresponse_stream"] = response_stream
+    model_dict["_aprocess_model_response"] = process_model_response
+    model_dict["aprocess_response_stream"] = process_response_stream
+
+
+@contextmanager
+def _gated_response_loop(
+    gates: dict[int, Callable[[], bool]],
+    open_gate: Callable[[int | None], Callable[[], bool] | None],
+    run_response: RunOutput | TeamRunOutput | None,
+    tool_call_limit: int | None,
+) -> Iterator[None]:
+    """Hold the gate of a run's outermost response loop for as long as that loop runs."""
+    key = id(run_response)
+    gate = None if run_response is None or key in gates else open_gate(tool_call_limit)
+    if gate is None:
+        yield
+        return
+    gates[key] = gate
+    try:
+        yield
+    finally:
+        del gates[key]
+
+
+def _request_refused(gates: dict[int, Callable[[], bool]], run_response: RunOutput | TeamRunOutput | None) -> bool:
+    """Consult the gate of the loop serving ``run_response`` for one more model request."""
+    gate = gates.get(id(run_response)) if run_response is not None else None
+    return gate is not None and not gate()
 
 
 # AGNO_COMPAT: Model invocation and streaming lack composable middleware.
