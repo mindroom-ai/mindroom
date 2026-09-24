@@ -164,6 +164,7 @@ class GatewayRuntime:
             authenticate=self.authenticate,
             dispatch=self.dispatch,
             public_url=self.origin,
+            personal_agent_name=(paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip() or None,
             allowed_origins=_browser_origins(paths),
             record_activity=self._record_activity,
             max_active_calls=int(paths.env_value("MINDROOM_MCP_GATEWAY_MAX_ACTIVE_CALLS") or "128"),

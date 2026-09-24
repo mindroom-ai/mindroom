@@ -1317,7 +1317,7 @@ async def test_lane_worker_failure_at_wait_phase_does_not_poison_lane() -> None:
 
 @pytest.mark.asyncio
 async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
-    """Follow-ups queued behind a response that fails still dispatch as the follow-up turn."""
+    """Follow-ups queued behind a response that fails still dispatch, one turn per requester."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first")
@@ -1380,15 +1380,14 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
 
         fail_response.set()
 
-        await _wait_for(lambda: len(generated) == 2)
-        assert "$f1" in generated[1][1]
-        assert "$f2" in generated[1][1]
+        await _wait_for(lambda: len(generated) == 3)
+        assert [source_event_id for source_event_id, _prompt in generated[1:]] == ["$f1", "$f2"]
         await runner.drain_inbox_responses()
 
 
 @pytest.mark.asyncio
 async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> None:
-    """Follow-ups queued behind a cancelled detached response still dispatch together."""
+    """Follow-ups queued behind a cancelled detached response still dispatch, one turn per requester."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     target = MessageTarget.resolve(room.room_id, "$thread", "$m0")
@@ -1437,8 +1436,9 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
         response_task.cancel()
         assert await runner.drain_inbox_responses() is True
 
-        await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$f1", "$f2"]])
-    assert calls[0].ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+        await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$f1"], ["$f2"]])
+    assert [batch.requester_user_id for batch in calls] == ["@alice:localhost", "@bob:localhost"]
+    assert all(batch.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND for batch in calls)
 
 
 @pytest.mark.asyncio
