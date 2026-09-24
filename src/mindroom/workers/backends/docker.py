@@ -70,6 +70,7 @@ from mindroom.workers.backends.docker_config import (
     resolve_docker_storage_path,
 )
 from mindroom.workers.backends.docker_projection import PROJECTED_CONFIGS_DIRNAME, DockerProjectionManager
+from mindroom.workers.backends.legacy_docker_worker_metadata import legacy_docker_worker_keys
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
 from mindroom.workers.backends.worker_security import (
     docker_worker_security_options,
@@ -508,6 +509,7 @@ class DockerWorkerBackend:
         self.worker_grantable_credentials = worker_grantable_credentials
         self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
         self._workers_root.mkdir(parents=True, exist_ok=True)
+        self._adopt_legacy_worker_records()
 
     @classmethod
     def from_runtime(
@@ -807,6 +809,18 @@ class DockerWorkerBackend:
                 expected_worker_key=worker_key,
             ) or self._default_metadata(worker_key, timestamp)
             return self._record_failure_locked(paths, metadata, failure_reason, now=timestamp, stop_container=True)
+
+    def _adopt_legacy_worker_records(self) -> None:
+        """Give workers from before the control directory a fresh backend-owned record."""
+        worker_keys = legacy_docker_worker_keys(self._workers_root, control_root=self._control_root)
+        if not worker_keys:
+            return
+        now = time.time()
+        launch_config_hash = self._resolve_launch_config().launch_config_hash
+        for worker_key in worker_keys:
+            metadata = self._default_metadata(worker_key, now, launch_config_hash=launch_config_hash)
+            write_lifecycle_state(metadata, mark_worker_idle(read_lifecycle_state(metadata)))
+            self._save_metadata(self._worker_paths(worker_key), metadata)
 
     def _worker_lock(self, worker_key: str) -> threading.Lock:
         with self._worker_locks_lock:

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
-__all__ = ["open_worker_state_root", "remove_directory_tree_at"]
+__all__ = ["open_worker_state_root", "read_worker_identity", "remove_directory_tree_at"]
 
 
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -99,12 +99,13 @@ def _identity_value(payload: dict[str, object], field_path: tuple[str, ...]) -> 
     return value
 
 
-def _read_identity(
+def read_worker_identity(
     worker_fd: int,
     *,
     identity_path: tuple[str, ...],
     identity_field_path: tuple[str, ...],
 ) -> object:
+    """Read one bounded identity field below an open worker tree without following symlinks."""
     if not identity_path or not identity_field_path:
         msg = "Worker identity metadata path is missing."
         raise ValueError(msg)
@@ -230,7 +231,7 @@ def open_worker_state_root(
             return
         descriptors.append(worker_fd)
         if expected_worker_key is not None:
-            actual_worker_key = _read_identity(
+            actual_worker_key = read_worker_identity(
                 worker_fd,
                 identity_path=identity_path,
                 identity_field_path=identity_field_path,

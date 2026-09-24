@@ -27,6 +27,7 @@ from mindroom.constants import (
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
     runtime_paths_with_storage_root,
+    sandbox_startup_manifest_path,
 )
 from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import (
@@ -2601,17 +2602,11 @@ def test_docker_backend_refuses_foreign_container_holding_the_derived_worker_nam
     assert fake_client.containers.run_calls == []
 
 
-@pytest.mark.parametrize(
-    ("planted_link", "expected_error"),
-    [("directory", "real directory"), ("file", "real file")],
-)
-def test_docker_backend_refuses_symlinked_startup_manifest_in_worker_root(
+def test_docker_backend_refuses_symlinked_startup_manifest_directory_in_worker_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    planted_link: str,
-    expected_error: str,
 ) -> None:
-    """A symlink planted in a worker's own mount cannot redirect the primary's manifest write."""
+    """A directory symlink planted in a worker's own mount cannot redirect the primary's manifest write."""
     backend, _fake_client, _sync_calls = _backend(
         monkeypatch,
         tmp_path,
@@ -2623,18 +2618,43 @@ def test_docker_backend_refuses_symlinked_startup_manifest_in_worker_root(
     victim_metadata_before = victim_control_metadata.read_bytes()
 
     runtime_dir = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / ".runtime"
-    if planted_link == "directory":
-        runtime_dir.parent.mkdir(parents=True, exist_ok=True)
-        runtime_dir.symlink_to(victim_control_metadata.parent, target_is_directory=True)
-    else:
-        runtime_dir.mkdir(parents=True)
-        (runtime_dir / "startup_manifest.json").symlink_to(victim_control_metadata)
+    runtime_dir.parent.mkdir(parents=True, exist_ok=True)
+    runtime_dir.symlink_to(victim_control_metadata.parent, target_is_directory=True)
 
-    with pytest.raises(WorkerBackendError, match=expected_error):
+    with pytest.raises(WorkerBackendError, match="real directory"):
         backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
     assert victim_control_metadata.read_bytes() == victim_metadata_before
     assert not (victim_control_metadata.parent / "startup_manifest.json").exists()
+
+
+def test_docker_backend_replaces_symlinked_startup_manifest_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A file symlink planted as the manifest is replaced by a complete manifest instead of being followed."""
+    backend, _fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot={"shell": {"available": True}},
+    )
+    victim_key = "v1:default:unscoped:victim"
+    backend.ensure_worker(WorkerSpec(victim_key), now=10.0)
+    victim_control_metadata = _control_metadata_path(tmp_path, victim_key)
+    victim_metadata_before = victim_control_metadata.read_bytes()
+
+    manifest_path = sandbox_startup_manifest_path(worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY))
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.symlink_to(victim_control_metadata)
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert victim_control_metadata.read_bytes() == victim_metadata_before
+    assert not manifest_path.is_symlink()
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["tool_validation_snapshot"] == {
+        "shell": {"available": True},
+    }
+    assert [entry.name for entry in manifest_path.parent.iterdir()] == [manifest_path.name]
 
 
 def test_docker_backend_retires_worker_despite_tampered_mounted_metadata(
@@ -2652,6 +2672,94 @@ def test_docker_backend_retires_worker_despite_tampered_mounted_metadata(
     assert fake_client.containers.by_name[handle.worker_id].removed == 1
     assert worker_root_path(tmp_path, run_key).exists() is False
     assert _control_metadata_path(tmp_path, run_key).exists() is False
+
+
+def _restart_backend(backend: DockerWorkerBackend, storage_root: Path) -> DockerWorkerBackend:
+    """Construct a new primary over the same storage root and fake Docker daemon."""
+    return DockerWorkerBackend(config=backend.config, auth_token=_TEST_AUTH_TOKEN, storage_path=storage_root)
+
+
+def _move_control_record_into_mounted_root(storage_root: Path, worker_key: str, overrides: dict[str, object]) -> None:
+    """Rewrite one worker into the pre-control-directory layout its last release left on disk."""
+    _write_mounted_worker_metadata(storage_root, worker_key, overrides)
+    control_metadata_path = _control_metadata_path(storage_root, worker_key)
+    control_metadata_path.unlink()
+    control_metadata_path.parent.rmdir()
+    control_metadata_path.parent.parent.rmdir()
+
+
+def test_docker_backend_adopts_legacy_mounted_worker_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Workers recorded inside their mount before the upgrade stay managed, trusting only their digest-bound key."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    legacy_container = fake_client.containers.by_name[handle.worker_id]
+    foreign_container = _foreign_container(fake_client, "synapse")
+    _move_control_record_into_mounted_root(
+        tmp_path,
+        _TEST_UNSCOPED_WORKER_KEY,
+        {"container_name": "synapse", "worker_id": "synapse", "status": "failed", "last_used_at": 1e12},
+    )
+    assert backend.list_workers() == []
+
+    upgraded = _restart_backend(backend, tmp_path)
+
+    adopted = json.loads(_control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).read_text(encoding="utf-8"))
+    assert adopted["worker_key"] == _TEST_UNSCOPED_WORKER_KEY
+    assert adopted["container_name"] == handle.worker_id
+    assert adopted["status"] == "idle"
+    assert adopted["last_used_at"] < 1e12
+    assert [listed.worker_id for listed in upgraded.list_workers()] == [handle.worker_id]
+
+    cleaned = upgraded.cleanup_idle_workers(now=adopted["last_used_at"] + 120.0)
+
+    assert [worker.worker_key for worker in cleaned] == [_TEST_UNSCOPED_WORKER_KEY]
+    assert legacy_container.stopped == 1
+    assert foreign_container.stopped == 0
+
+    upgraded.retire_worker(_TEST_UNSCOPED_WORKER_KEY)
+
+    assert legacy_container.removed == 1
+    assert foreign_container.removed == 0
+    assert worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).exists() is False
+    assert _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).exists() is False
+
+
+@pytest.mark.parametrize("tampering", ["foreign_key", "symlinked_record", "malformed_record"])
+def test_docker_backend_skips_unverifiable_legacy_worker_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tampering: str,
+) -> None:
+    """A legacy mounted record never claims another worker's key or follows a planted link."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    victim_key = "v1:default:unscoped:victim"
+    victim = backend.ensure_worker(WorkerSpec(victim_key), now=10.0)
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    _move_control_record_into_mounted_root(tmp_path, victim_key, {})
+    _move_control_record_into_mounted_root(tmp_path, _TEST_UNSCOPED_WORKER_KEY, {})
+    victim_record = worker_root_path(tmp_path, victim_key) / "metadata" / "worker.json"
+    attacker_record = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    victim_record.unlink()
+    if tampering == "foreign_key":
+        attacker_record.write_text(json.dumps({"worker_key": victim_key}), encoding="utf-8")
+    elif tampering == "symlinked_record":
+        victim_record.write_text(json.dumps({"worker_key": victim_key}), encoding="utf-8")
+        attacker_record.unlink()
+        attacker_record.symlink_to(victim_record)
+    else:
+        attacker_record.write_text("{malformed", encoding="utf-8")
+
+    upgraded = _restart_backend(backend, tmp_path)
+
+    assert _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).exists() is False
+    expected_victims = [victim_key] if tampering == "symlinked_record" else []
+    assert [listed.worker_key for listed in upgraded.list_workers()] == expected_victims
+    with pytest.raises(WorkerBackendError, match="missing the control identity metadata"):
+        upgraded.retire_worker(_TEST_UNSCOPED_WORKER_KEY)
+    assert fake_client.containers.by_name[victim.worker_id].removed == 0
 
 
 def test_docker_backend_refuses_symlinked_run_root_with_malformed_target_metadata(
