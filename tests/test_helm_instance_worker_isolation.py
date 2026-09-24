@@ -323,6 +323,27 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
     assert synapse_config["autocreate_auto_join_rooms"] is False
 
 
+@pytest.mark.parametrize(
+    "oidc_args",
+    [(), ("matrixOidc.enabled=true", "matrixOidc.issuer=https://api.example.test/matrix-oidc")],
+    ids=["default", "oidc"],
+)
+def test_instance_chart_closes_public_synapse_registration(oidc_args: tuple[str, ...]) -> None:
+    """Tenant homeservers are public, so no mode may accept anonymous self-registration."""
+    docs = _render_chart(Path("cluster/k8s/instance"), *oidc_args)
+    synapse_config = yaml.safe_load(_resource(docs, "ConfigMap", "synapse-config-demo")["data"]["homeserver.yaml"])
+
+    assert synapse_config["enable_registration"] is False
+    assert synapse_config["enable_registration_without_verification"] is False
+    assert synapse_config["registration_shared_secret_path"] == (
+        "/etc/mindroom-secrets/matrix_registration_shared_secret"  # noqa: S105
+    )
+    assert synapse_config["rc_registration"] == {"per_second": 0.17, "burst_count": 3}
+    assert synapse_config["rc_login"]["failed_attempts"] == {"per_second": 0.17, "burst_count": 3}
+    assert synapse_config["rc_login"]["account"]["per_second"] < 1
+    assert synapse_config["rc_login"]["address"]["per_second"] < 1
+
+
 def test_instance_chart_wires_image_pull_secrets_to_control_plane_pods() -> None:
     """Private registry credentials should be available before pulling instance images."""
     docs = _render_chart(

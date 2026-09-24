@@ -53,6 +53,22 @@ def _assert_helm_uses_external_instance_secret(helm_args: list[str]) -> None:
     assert "credentials_encryption_key" not in set_file_args
 
 
+_OWNER_ACCOUNT_ID = "11111111-1111-4111-8111-111111111111"
+
+
+def _mock_owner_account_tables(mock_supabase: MagicMock) -> MagicMock:
+    """Route Supabase tables to a new instance row and an owner account with an email; return the accounts table."""
+    instances_table = MagicMock()
+    instances_table.insert.return_value.execute.return_value = Mock(data=[{"instance_id": "123"}])
+    instances_table.update.return_value.eq.return_value.execute.return_value = Mock()
+    accounts_table = MagicMock()
+    accounts_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = Mock(
+        data=[{"email": "Owner.User+Test@example.com"}]
+    )
+    mock_supabase.table.side_effect = lambda table: {"accounts": accounts_table, "instances": instances_table}[table]
+    return accounts_table
+
+
 def _applied_instance_secret_data(apply_secret: AsyncMock) -> dict[str, str]:
     """Return the Secret payload passed to _apply_instance_secret."""
     from backend.services.provisioner_service import _apply_instance_secret
@@ -687,17 +703,7 @@ class TestProvisionerEndpoints:
         mock_config,
     ):
         """Provisioning should authorize the platform owner inside the hosted Matrix tenant."""
-        account_id = "11111111-1111-4111-8111-111111111111"
-        instances_table = MagicMock()
-        instances_table.insert.return_value.execute.return_value = Mock(data=[{"instance_id": "123"}])
-        instances_table.update.return_value.eq.return_value.execute.return_value = Mock()
-        accounts_table = MagicMock()
-        accounts_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = Mock(
-            data=[{"email": "Owner.User+Test@example.com"}]
-        )
-        mock_supabase.table.side_effect = lambda table: {"accounts": accounts_table, "instances": instances_table}[
-            table
-        ]
+        _mock_owner_account_tables(mock_supabase)
 
         with patch.multiple(
             "backend.services.provisioner_service",
@@ -707,7 +713,7 @@ class TestProvisionerEndpoints:
         ):
             response = client.post(
                 "/system/provision",
-                json={"subscription_id": "sub_test_123", "account_id": account_id, "tier": "byok"},
+                json={"subscription_id": "sub_test_123", "account_id": _OWNER_ACCOUNT_ID, "tier": "byok"},
                 headers=valid_auth_header,
             )
 
@@ -723,6 +729,33 @@ class TestProvisionerEndpoints:
         assert set_string_args["roomDefaults.inviteUsers[0]"] == "@owner.user+test:123.mindroom.test"
         assert set_string_args["roomDefaults.admins[0]"] == "@owner.user+test:123.mindroom.test"
         _assert_helm_uses_external_instance_secret(helm_args)
+
+    def test_provision_does_not_authorize_unbound_owner_matrix_user_without_oidc(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Without platform OIDC nothing binds the derived owner MXID to the account, so it gets no authority."""
+        accounts_table = _mock_owner_account_tables(mock_supabase)
+
+        with patch("backend.services.provisioner_service.INSTANCE_MATRIX_OIDC_ENABLED", ""):
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": _OWNER_ACCOUNT_ID, "tier": "byok"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        set_string_args = _helm_set_string_args(mock_helm.call_args.args[0])
+        assert "administrators[0]" not in set_string_args
+        assert "roomDefaults.inviteUsers[0]" not in set_string_args
+        assert "roomDefaults.admins[0]" not in set_string_args
+        accounts_table.select.assert_not_called()
 
     def test_provision_re_provision_existing(
         self,
