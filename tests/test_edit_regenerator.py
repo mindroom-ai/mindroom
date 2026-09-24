@@ -1416,8 +1416,9 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
         source_event_prompts={first_event_id: "first message", second_event_id: "second message"},
         source_event_metadata={
             first_event_id: SourceEventMetadata(sender="@alice:example.org", timestamp_ms=1_774_019_700_000),
-            second_event_id: SourceEventMetadata(sender="@bob:example.org", timestamp_ms=1_774_019_760_000),
+            second_event_id: SourceEventMetadata(sender="@alice:example.org", timestamp_ms=1_774_019_760_000),
         },
+        requester_id="@alice:example.org",
     )
     harness = _harness(tmp_path, turn_record=record)
     harness.config.timezone = "America/Los_Angeles"
@@ -1448,7 +1449,7 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
         "<messages>\n"
         '<msg event_id="$m1:example.org" from="@alice:example.org" ts="2026-03-20 08:15 PDT">'
         "<![CDATA[edited ]]]]><![CDATA[> first <message>]]></msg>\n"
-        '<msg event_id="$m2:example.org" from="@bob:example.org" ts="2026-03-20 08:16 PDT">'
+        '<msg event_id="$m2:example.org" from="@alice:example.org" ts="2026-03-20 08:16 PDT">'
         "<![CDATA[second message]]></msg>\n"
         "</messages>"
     )
@@ -1461,23 +1462,22 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
-    ("original_event_id", "sender", "allowed"),
+    ("original_event_id", "sender"),
     [
-        ("$alice:example.org", "@alice:example.org", True),
-        ("$bob:example.org", "@bob:example.org", True),
-        ("$alice:example.org", "@bob:example.org", False),
-        ("$bob:example.org", "@alice:example.org", False),
-        ("$alice:example.org", "@attacker:example.org", False),
+        ("$alice:example.org", "@alice:example.org"),
+        ("$bob:example.org", "@bob:example.org"),
+        ("$alice:example.org", "@bob:example.org"),
+        ("$bob:example.org", "@alice:example.org"),
+        ("$alice:example.org", "@attacker:example.org"),
     ],
 )
 @pytest.mark.asyncio
-async def test_multi_sender_coalesced_source_allows_only_its_sender_to_edit(
+async def test_multi_sender_coalesced_record_never_regenerates_as_one_sender(
     tmp_path: Path,
     original_event_id: str,
     sender: str,
-    allowed: bool,
 ) -> None:
-    """Each coalesced source remains editable only by its persisted sender."""
+    """Regeneration would run every sender's source as the editor, so mixed records never regenerate."""
     alice_event_id = "$alice:example.org"
     bob_event_id = "$bob:example.org"
     record = _turn_record(
@@ -1505,16 +1505,8 @@ async def test_multi_sender_coalesced_source_allows_only_its_sender_to_edit(
 
     await harness.regenerator.handle_message_edit(harness.room, event, event_info, sender)
 
-    if not allowed:
-        _assert_no_regeneration(harness)
-        harness.resolver.build_message_envelope.assert_not_called()
-        return
-    request = harness.generate_response.await_args.args[0]
-    assert request.user_id == sender
-    assert "what is 3+3?" in request.prompt
-    assert harness.turn_store.publish_committed_response.call_args.args[2].source_event_revisions == {
-        original_event_id: (event.server_timestamp, event.event_id),
-    }
+    _assert_no_regeneration(harness)
+    harness.resolver.build_message_envelope.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1530,12 +1522,12 @@ async def test_physical_source_edit_outranks_colliding_discovery_alias(tmp_path:
         },
         source_event_metadata={
             relay_event_id: SourceEventMetadata(
-                sender="@bob:example.org",
+                sender="@alice:example.org",
                 discovery_event_id=human_event_id,
             ),
             human_event_id: SourceEventMetadata(sender="@alice:example.org"),
         },
-        requester_id="@bob:example.org",
+        requester_id="@alice:example.org",
     )
     harness = _harness(tmp_path, turn_record=record)
     event, event_info = _edit_event(
