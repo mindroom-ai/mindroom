@@ -57,6 +57,7 @@ from tests.identity_helpers import entity_ids
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from mindroom.config.models import FileAccess
     from mindroom.matrix.client import DeliveredMatrixEvent
 
 
@@ -1019,6 +1020,45 @@ async def test_matrix_message_send_resolves_relative_attachment_file_paths_from_
         thread_id=ctx.resolved_thread_id,
         latest_thread_event_id="$evt",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("file_access", ["workspace", "unrestricted"])
+async def test_matrix_message_send_outside_workspace_attachment_follows_file_access(
+    tmp_path: Path,
+    file_access: FileAccess,
+) -> None:
+    """Unrestricted agents send any readable file by path; workspace agents keep the rejection."""
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    outside_file = tmp_path / "outside" / "report.txt"
+    outside_file.parent.mkdir()
+    outside_file.write_text("outside", encoding="utf-8")
+    tool = MatrixMessageTools(tool_output_workspace_root=workspace_root, file_access=file_access)
+    ctx = _make_context(storage_path=tmp_path)
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ),
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mock_send_file,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="send", attachments=[str(outside_file)]))
+
+    if file_access == "workspace":
+        assert payload["status"] == "error"
+        assert "inside the agent workspace" in payload["message"]
+        mock_send_file.assert_not_awaited()
+        return
+    assert payload["status"] == "ok"
+    assert payload["attachment_event_ids"] == ["$file_evt"]
+    assert payload["newly_registered_attachment_ids"]
+    assert mock_send_file.await_args.args[2] == outside_file.resolve()
 
 
 @pytest.mark.asyncio
@@ -2042,7 +2082,7 @@ async def test_matrix_message_rejects_missing_attachment_paths(tmp_path: Path) -
         )
 
     assert payload["status"] == "error"
-    assert "Failed to register attachment file" in payload["message"]
+    assert "must be an existing file" in payload["message"]
 
 
 @pytest.mark.asyncio

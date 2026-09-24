@@ -32,7 +32,11 @@ def resolve_agent_file(
     field_name: str,
 ) -> AuthorizedFile:
     """Return the authorized file for one model-supplied path, or raise ``ValueError``."""
-    requested = Path(raw_path).expanduser()
+    try:
+        requested = Path(raw_path).expanduser()
+    except RuntimeError as exc:
+        msg = f"{field_name} '{raw_path}' names a home directory that cannot be determined."
+        raise ValueError(msg) from exc
     if file_access == "unrestricted":
         base = workspace_root if workspace_root is not None else Path.cwd()
         candidate = requested if requested.is_absolute() else base / requested

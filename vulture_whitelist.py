@@ -412,5 +412,3 @@ _.embed_captions  # MoviePyVideoTools registers this caption-style override dyna
 _.scrape_website
 _.custom_scrape_website
 _._execute_query
-_._file_access  # injected agent file_access stored by path tools ahead of their path-resolution wiring; remove once read (src/mindroom/custom_tools/)
-resolve_agent_file  # shared agent file-path resolver ahead of its tool call sites; remove once called (src/mindroom/file_access.py)

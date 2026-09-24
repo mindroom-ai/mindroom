@@ -117,3 +117,15 @@ def test_both_modes_reject_missing_files_and_directories(tmp_path: Path) -> None
         for raw in ("missing.txt", "dir"):
             with pytest.raises(ValueError, match="attachment"):
                 resolve_agent_file(raw, workspace_root=workspace, file_access=mode, field_name="attachment")
+
+
+def test_both_modes_reject_unknown_home_directories_as_value_errors(tmp_path: Path) -> None:
+    """An unexpandable ``~user`` prefix is a rejected path, not an escaping RuntimeError."""
+    for mode in ("workspace", "unrestricted"):
+        with pytest.raises(ValueError, match="attachment"):
+            resolve_agent_file(
+                "~mindroom-no-such-user/.env",
+                workspace_root=tmp_path,
+                file_access=mode,
+                field_name="attachment",
+            )

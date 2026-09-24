@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import BinaryIO
 
+    from mindroom.config.models import FileAccess
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -35,6 +36,7 @@ def _upload_tool(
     monkeypatch: pytest.MonkeyPatch,
     *,
     workspace_root: Path | None = None,
+    file_access: FileAccess = "workspace",
 ) -> tuple[BrowserTools, AsyncMock, Path]:
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -43,7 +45,7 @@ def _upload_tool(
     )
     root = runtime_paths.storage_root / "browser"
     root.mkdir(parents=True)
-    tool = BrowserTools(runtime_paths, tool_output_workspace_root=workspace_root)
+    tool = BrowserTools(runtime_paths, tool_output_workspace_root=workspace_root, file_access=file_access)
     consumer = AsyncMock()
     page: Any = SimpleNamespace(
         locator=MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=consumer))),
@@ -288,11 +290,12 @@ def _upload_context(
 def _primary_upload_tool(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    file_access: FileAccess = "workspace",
 ) -> tuple[BrowserTools, AsyncMock, Path, Path]:
     storage = tmp_path / "storage"
     workspace = agent_workspace_root_path(storage, "general")
     workspace.mkdir(parents=True)
-    tool, consumer, _root = _upload_tool(tmp_path, monkeypatch, workspace_root=workspace)
+    tool, consumer, _root = _upload_tool(tmp_path, monkeypatch, workspace_root=workspace, file_access=file_access)
     return tool, consumer, storage, workspace
 
 
@@ -407,6 +410,47 @@ async def test_primary_upload_rejects_runtime_state_and_other_agents(
     ):
         await _upload(tool, [source])
     consumer.assert_not_awaited()
+    await tool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_primary_upload_unrestricted_reads_any_readable_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrestricted file access uploads runtime storage files a workspace agent cannot reach."""
+    tool, consumer, storage, _workspace = _primary_upload_tool(tmp_path, monkeypatch, "unrestricted")
+    source = storage / "credentials" / "x.json"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"trusted setup")
+    consumed = _capture_uploads(consumer)
+
+    with tool_runtime_context(_upload_context(tool, storage)):
+        result = await _upload(tool, [source])
+
+    assert consumed == [b"trusted setup"]
+    assert result["paths"] == [str(source)]
+    await tool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_worker_upload_unrestricted_reads_any_worker_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrestricted worker-bound browser uploads files outside its worker workspace."""
+    tool, consumer, root = _upload_tool(tmp_path, monkeypatch, file_access="unrestricted")
+    tool._worker_workspace = root.parent
+    tool._configured_output_dir = root
+    outside_file = tmp_path / "outside" / "notes.txt"
+    outside_file.parent.mkdir()
+    outside_file.write_bytes(b"outside notes")
+    consumed = _capture_uploads(consumer)
+
+    result = await _upload(tool, [outside_file])
+
+    assert consumed == [b"outside notes"]
+    assert result["paths"] == [str(outside_file)]
     await tool.aclose()
 
 

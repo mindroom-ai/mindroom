@@ -74,9 +74,9 @@ class MatrixMessageTools(Toolkit):
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
     ) -> None:
-        self._file_access = file_access
         self._operations = matrix_conversation_operations.MatrixMessageOperations(
             tool_output_workspace_root=tool_output_workspace_root,
+            file_access=file_access,
         )
         super().__init__(name="matrix_message", tools=[self.matrix_message])
 

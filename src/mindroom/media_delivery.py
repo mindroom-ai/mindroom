@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from agno.tools.function import ToolResult
     from PIL.Image import Image as PillowImage
 
+    from mindroom.file_access import AuthorizedFile
+
 VIEWED_IMAGE_ID_PREFIX = "mindroom_viewed_"
 MAX_SOURCE_BYTES = 20 * 1024 * 1024
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -121,8 +123,8 @@ def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:  # 
     )
 
 
-def _read_workspace_image(root: Path, relative: Path) -> bytes:
-    """Read through directory descriptors so path swaps cannot escape the workspace."""
+def _read_image_within_root(root: Path, relative: Path) -> bytes:
+    """Read through directory descriptors so path swaps cannot escape the authorizing root."""
     with (
         open_regular_file_within_root(root, relative) as descriptor,
         os.fdopen(descriptor, "rb", closefd=False) as file,
@@ -145,7 +147,7 @@ def view_image_path(path: str, *, workspace: Path) -> ToolResult:
         if not relative.parts:
             return media_error("Image path must name a regular file.", metadata=metadata)
         metadata["path"] = relative.as_posix()
-        data = _read_workspace_image(root, relative)
+        data = _read_image_within_root(root, relative)
     except ValueError as exc:
         return media_error(str(exc), metadata=metadata)
     except (OSError, RuntimeError):
@@ -153,4 +155,16 @@ def view_image_path(path: str, *, workspace: Path) -> ToolResult:
             "Image file is missing, inaccessible, or outside the authorized workspace.",
             metadata=metadata,
         )
+    return image_result(data, metadata=metadata)
+
+
+def view_authorized_image(authorized: AuthorizedFile) -> ToolResult:
+    """Read one regular image a caller authorized under the agent's file access."""
+    metadata: dict[str, object] = {"path": str(authorized.path)}
+    try:
+        data = _read_image_within_root(authorized.root, authorized.path.relative_to(authorized.root))
+    except ValueError as exc:
+        return media_error(str(exc), metadata=metadata)
+    except OSError:
+        return media_error("Image file is missing or inaccessible.", metadata=metadata)
     return image_result(data, metadata=metadata)

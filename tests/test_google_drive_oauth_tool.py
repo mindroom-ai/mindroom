@@ -10,6 +10,7 @@ import threading
 from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from agno.agent import Agent
@@ -29,6 +30,9 @@ from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
+
+if TYPE_CHECKING:
+    from mindroom.config.models import FileAccess
 
 
 def _save_oauth_credentials(
@@ -187,6 +191,7 @@ def _google_drive_download_tool(
 def _google_drive_write_tool(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    file_access: FileAccess = "workspace",
 ) -> tuple[GoogleDriveTools, _FakeDriveService, Path]:
     monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaFileUpload", _FakeMediaFileUpload)
     workspace_root = tmp_path / "workspace"
@@ -196,6 +201,7 @@ def _google_drive_write_tool(
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         creds=_valid_credentials(),
         tool_output_workspace_root=workspace_root,
+        file_access=file_access,
     )
     service = _FakeDriveService()
     tool.service = service
@@ -879,7 +885,7 @@ def test_google_drive_upload_rejects_workspace_escape(
 
     result = json.loads(tool.upload_file("../outside.txt"))
 
-    assert "must stay within the workspace root" in result["error"]
+    assert "inside the agent workspace" in result["error"]
     assert service.files_resource.create_kwargs is None
 
 
@@ -950,8 +956,29 @@ def test_google_drive_upload_rejects_absolute_workspace_escape(
 
     result = json.loads(tool.upload_file(str(outside_path)))
 
-    assert "must stay within the workspace root" in result["error"]
+    assert "inside the agent workspace" in result["error"]
     assert service.files_resource.create_kwargs is None
+
+
+@pytest.mark.parametrize("file_access", ["workspace", "unrestricted"])
+def test_google_drive_upload_outside_workspace_follows_file_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_access: FileAccess,
+) -> None:
+    tool, service, _workspace_root = _google_drive_write_tool(tmp_path, monkeypatch, file_access)
+    outside_path = tmp_path / "outside.txt"
+    outside_path.write_text("private")
+
+    result = json.loads(tool.upload_file(str(outside_path)))
+
+    if file_access == "workspace":
+        assert "inside the agent workspace" in result["error"]
+        assert service.files_resource.create_kwargs is None
+        return
+    assert result["id"] == "created-id"
+    assert service.files_resource.create_kwargs is not None
+    assert Path(service.files_resource.create_kwargs["media_body"].filename) == outside_path.resolve()
 
 
 def test_google_drive_upload_requires_workspace(
@@ -972,7 +999,8 @@ def test_google_drive_upload_requires_workspace(
 
     result = json.loads(tool.upload_file(str(outside_path)))
 
-    assert result["error"] == "Google Drive local_path requires an agent workspace"
+    assert "Google Drive local_path" in result["error"]
+    assert "requires an agent workspace" in result["error"]
     assert service.files_resource.create_kwargs is None
 
 

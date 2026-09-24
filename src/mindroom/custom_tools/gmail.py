@@ -21,10 +21,11 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
+from mindroom.file_access import resolve_agent_file
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
-from mindroom.path_confinement import open_regular_file_within_root, resolve_path_within_root
+from mindroom.path_confinement import open_regular_file_within_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -59,48 +60,58 @@ _GMAIL_SEND_SCOPES = frozenset(
 _MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 
-def _stage_attachments(workspace_root: Path | None, attachments: object, staging_dir: Path) -> list[str]:
-    """Snapshot workspace attachments through no-follow descriptors to private paths Agno can reopen.
+def _stage_attachments(
+    workspace_root: Path | None,
+    attachments: object,
+    staging_dir: Path,
+    *,
+    file_access: FileAccess,
+) -> list[str]:
+    """Snapshot authorized attachments through no-follow descriptors to private paths Agno can reopen.
 
     Upstream Agno opens each attachment by pathname, so handing it a validated
-    workspace path would let a concurrent workspace writer swap in a link first.
+    path would let a concurrent writer swap in a link first.
     """
-    if workspace_root is None:
-        msg = "Gmail attachments require an agent workspace"
-        raise ValueError(msg)
+    # Open workspace files through the configured root spelling so a root replaced by a link is refused too.
+    pinned_root = workspace_root if file_access == "workspace" else None
+    if file_access == "workspace":
+        if workspace_root is None:
+            msg = "Gmail attachments require an agent workspace"
+            raise ValueError(msg)
+        if not workspace_root.is_dir():
+            msg = "Gmail attachments require an existing agent workspace"
+            raise ValueError(msg)
     requested = [attachments] if isinstance(attachments, str) else attachments
     if not isinstance(requested, list | tuple) or not all(isinstance(path, str) for path in requested):
         msg = "Gmail attachments must be file paths"
         raise ValueError(msg)
-    try:
-        canonical_root = workspace_root.resolve(strict=True)
-    except (OSError, RuntimeError):
-        msg = "Gmail attachments require an existing agent workspace"
-        raise ValueError(msg) from None
+    location = "in the agent workspace" if pinned_root is not None else "readable by MindRoom"
     remaining = _MAX_ATTACHMENT_BYTES
     staged_paths: list[str] = []
     for index, attachment in enumerate(requested):
         try:
-            path = resolve_path_within_root(
-                canonical_root,
-                Path(attachment).expanduser(),
-                symlinks="internal",
-                strict=True,
+            authorized = resolve_agent_file(
+                attachment,
+                workspace_root=workspace_root,
+                file_access=file_access,
+                field_name="Gmail attachment",
             )
-            # Open through the authorized root spelling so a root replaced by a link is refused too.
             with (
-                open_regular_file_within_root(workspace_root, path.relative_to(canonical_root)) as descriptor,
+                open_regular_file_within_root(
+                    pinned_root or authorized.root,
+                    authorized.path.relative_to(authorized.root),
+                ) as descriptor,
                 os.fdopen(descriptor, "rb", closefd=False) as source,
             ):
                 data = source.read(remaining + 1)
-        except (OSError, RuntimeError, ValueError):
-            msg = f"Gmail attachment must be a regular file in the agent workspace: {attachment}"
+        except (OSError, ValueError):
+            msg = f"Gmail attachment must be a regular file {location}: {attachment}"
             raise ValueError(msg) from None
         if len(data) > remaining:
             msg = "Gmail attachments exceed the 25 MiB limit"
             raise ValueError(msg)
         remaining -= len(data)
-        destination = staging_dir / str(index) / path.name
+        destination = staging_dir / str(index) / authorized.path.name
         destination.parent.mkdir(mode=0o700)
         with destination.open("xb") as output:
             output.write(data)
@@ -129,8 +140,8 @@ class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmai
 
         This wrapper automatically loads credentials from MindRoom's
         unified credential storage and passes them to the Agno GmailTools.
-        Attachment paths are confined to ``tool_output_workspace_root`` and
-        refused when the agent has no workspace.
+        Attachment paths follow ``file_access``: ``workspace`` confines them to
+        ``tool_output_workspace_root`` and refuses them without a workspace.
         """
         provided_creds = kwargs.pop("creds", None)
         if credentials_manager is None:
@@ -164,7 +175,7 @@ class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmai
         self._wrap_attachment_entrypoints()
 
     def _wrap_attachment_entrypoints(self) -> None:
-        """Stage workspace attachments before upstream Agno checks or opens their paths."""
+        """Stage authorized attachments before upstream Agno checks or opens their paths."""
         for function in self.functions.values():
             entrypoint = function.entrypoint
             if entrypoint is None:
@@ -190,6 +201,7 @@ class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmai
                             self._workspace_root,
                             attachments,
                             Path(staging_dir),
+                            file_access=self._file_access,
                         )
                     except ValueError as exc:
                         return json.dumps({"error": str(exc)})

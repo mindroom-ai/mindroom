@@ -20,10 +20,17 @@ from mindroom.attachments import (
     load_attachment,
     register_local_attachment,
 )
+from mindroom.file_access import resolve_agent_file
 from mindroom.matrix.client_delivery import send_file_message, send_runtime_encrypted_media_message
 from mindroom.matrix.media import resolve_image_mime_type
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
-from mindroom.media_delivery import MAX_SOURCE_BYTES, image_result, media_error, view_image_path
+from mindroom.media_delivery import (
+    MAX_SOURCE_BYTES,
+    image_result,
+    media_error,
+    view_authorized_image,
+    view_image_path,
+)
 from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.output_files import (
     ToolOutputFilePolicy,
@@ -46,7 +53,6 @@ from mindroom.tool_system.sandbox_proxy import (
     save_attachment_to_worker,
     view_file_from_worker,
 )
-from mindroom.workspaces import resolve_workspace_relative_path
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
@@ -260,13 +266,18 @@ def _register_attachment_file_path(
     context: ToolRuntimeContext,
     file_path: str,
     *,
-    workspace_root: Path | None = None,
+    workspace_root: Path | None,
+    file_access: FileAccess,
 ) -> tuple[AttachmentRecord | None, str | None]:
     """Register a local file path in the current tool context."""
     if context.storage_path is None:
         return None, "Attachment storage path is unavailable in this runtime path."
 
-    resolved_path, path_error = _resolve_attachment_file_path(file_path, workspace_root=workspace_root)
+    resolved_path, path_error = _resolve_attachment_file_path(
+        file_path,
+        workspace_root=workspace_root,
+        file_access=file_access,
+    )
     if path_error is not None or resolved_path is None:
         return None, path_error
     kind, filename, mime_type = _infer_local_attachment_metadata(resolved_path)
@@ -290,39 +301,33 @@ def _register_attachment_file_path(
 def _resolve_attachment_file_path(
     file_path: str,
     *,
-    workspace_root: Path | None = None,
+    workspace_root: Path | None,
+    file_access: FileAccess,
 ) -> tuple[Path | None, str | None]:
-    """Resolve one model-requested attachment file path inside the agent workspace.
+    """Resolve one model-requested attachment file path under the agent's file access.
 
     The path is model-supplied and reaches an open in the primary process, so
-    absolute, ``~``-prefixed, and relative paths are all confined to the
-    workspace. Without a workspace root this fails closed and only already
-    authorized ``att_*`` IDs remain sendable.
+    workspace access confines it to the workspace and fails closed without one;
+    only already authorized ``att_*`` IDs then remain sendable.
     """
-    if workspace_root is None:
-        return None, "Attaching a file path requires an agent workspace in this runtime path."
     try:
-        requested_path = Path(file_path).expanduser()
-    except RuntimeError:
-        return None, "attachment file path could not be expanded to a home directory."
-    try:
-        return (
-            resolve_workspace_relative_path(
-                workspace_root,
-                requested_path,
-                field_name="attachment file path",
-            ),
-            None,
+        authorized = resolve_agent_file(
+            file_path,
+            workspace_root=workspace_root,
+            file_access=file_access,
+            field_name="attachment file path",
         )
-    except (OSError, ValueError) as exc:
+    except ValueError as exc:
         return None, str(exc)
+    return authorized.path, None
 
 
 def _resolve_attachment_file_paths(
     context: ToolRuntimeContext,
     attachment_file_paths: list[str],
     *,
-    workspace_root: Path | None = None,
+    workspace_root: Path | None,
+    file_access: FileAccess,
 ) -> tuple[list[Path], list[str], str | None]:
     """Register file paths and return local paths plus generated attachment IDs."""
     if not attachment_file_paths:
@@ -335,6 +340,7 @@ def _resolve_attachment_file_paths(
             context,
             attachment_file_path,
             workspace_root=workspace_root,
+            file_access=file_access,
         )
         if register_error is not None:
             return [], [], register_error
@@ -352,6 +358,7 @@ def resolve_send_attachments(
     attachment_ids: list[str],
     attachment_file_paths: list[str],
     workspace_root: Path | None = None,
+    file_access: FileAccess = "workspace",
 ) -> tuple[list[_ResolvedSendAttachment], list[str], list[str], str | None]:
     """Resolve context IDs and/or local paths to ordered sendable attachments."""
     attachments, resolved_attachment_ids, attachment_error = _resolve_attachment_ids(
@@ -364,6 +371,7 @@ def resolve_send_attachments(
         context,
         attachment_file_paths,
         workspace_root=workspace_root,
+        file_access=file_access,
     )
     if file_path_error is not None:
         return [], [], [], file_path_error
@@ -419,6 +427,20 @@ async def send_resolved_attachments(
         attachment_event_ids.append(attachment_event_id)
         latest_thread_event_id = attachment_event_id
     return attachment_event_ids, None
+
+
+def _view_unrestricted_image(path: str, *, workspace_root: Path | None) -> ToolResult:
+    """View one image anywhere this process can read, resolving relative paths from the workspace."""
+    try:
+        authorized = resolve_agent_file(
+            path,
+            workspace_root=workspace_root,
+            file_access="unrestricted",
+            field_name="Image path",
+        )
+    except ValueError as exc:
+        return media_error(str(exc), metadata={"path": path})
+    return view_authorized_image(authorized)
 
 
 class AttachmentTools(Toolkit):
@@ -498,6 +520,12 @@ class AttachmentTools(Toolkit):
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 return media_error(str(exc), metadata=metadata)
             return result or media_error("Worker workspace is unavailable.", metadata=metadata)
+        if self._file_access == "unrestricted":
+            return await asyncio.to_thread(
+                _view_unrestricted_image,
+                path,
+                workspace_root=self._tool_output_workspace_root,
+            )
         if self._tool_output_workspace_root is None:
             return media_error("An authorized workspace is required for path viewing.", metadata=metadata)
         return await asyncio.to_thread(view_image_path, path, workspace=self._tool_output_workspace_root)
@@ -798,6 +826,7 @@ class AttachmentTools(Toolkit):
             context,
             file_path.strip(),
             workspace_root=self._tool_output_workspace_root,
+            file_access=self._file_access,
         )
         if register_error is not None or attachment_record is None:
             return _attachment_tool_payload(

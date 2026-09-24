@@ -42,6 +42,8 @@ from tests.conftest import bind_runtime_paths, make_latest_thread_event_id_mock,
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.config.models import FileAccess
+
 
 def _tool_context(
     tmp_path: Path,
@@ -1037,7 +1039,7 @@ async def test_attachments_tool_register_attachment_rejects_paths_outside_worksp
         payload = json.loads(await tool.register_attachment(requested_path))
 
     assert payload["status"] == "error"
-    assert "must stay within the workspace root" in payload["message"]
+    assert "inside the agent workspace" in payload["message"]
     mocked_register.assert_not_called()
 
 
@@ -1075,6 +1077,53 @@ async def test_attachments_tool_register_attachment_requires_a_workspace(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("file_access", ["workspace", "unrestricted"])
+@pytest.mark.parametrize(
+    ("requested_path", "expected_name"),
+    [
+        ("{outside}/secret.txt", "secret.txt"),
+        ("~/.env", ".env"),
+        ("workspace_link/secret.txt", "secret.txt"),
+        ("../outside/secret.txt", "secret.txt"),
+    ],
+)
+async def test_attachments_tool_register_attachment_outside_workspace_follows_file_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_access: FileAccess,
+    requested_path: str,
+    expected_name: str,
+) -> None:
+    """Unrestricted agents register any readable file; workspace agents keep the rejection."""
+    workspace = _outside_workspace_secrets(tmp_path, monkeypatch)
+    tool = AttachmentTools(tool_output_workspace_root=workspace, file_access=file_access)
+
+    with tool_runtime_context(_tool_context(tmp_path)):
+        payload = json.loads(await tool.register_attachment(requested_path.format(outside=tmp_path / "outside")))
+
+    if file_access == "workspace":
+        assert payload["status"] == "error"
+        assert "inside the agent workspace" in payload["message"]
+        return
+    assert payload["status"] == "ok"
+    assert payload["attachment"]["local_path"] == str((tmp_path / "outside" / expected_name).resolve())
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_unrestricted_needs_no_workspace(tmp_path: Path) -> None:
+    """Unrestricted file access registers absolute paths even without an agent workspace."""
+    generated_file = tmp_path / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    tool = AttachmentTools(file_access="unrestricted")
+
+    with tool_runtime_context(_tool_context(tmp_path)):
+        payload = json.loads(await tool.register_attachment(str(generated_file)))
+
+    assert payload["status"] == "ok"
+    assert payload["attachment"]["local_path"] == str(generated_file.resolve())
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "requested_path",
     ["/etc/passwd", "~/.env", "workspace_link/secret.txt", "../outside/secret.txt"],
@@ -1100,7 +1149,7 @@ async def test_matrix_message_attachments_reject_paths_outside_workspace(
         )
 
     assert result["status"] == "error"
-    assert "must stay within the workspace root" in result["message"]
+    assert "inside the agent workspace" in result["message"]
     mocked_register.assert_not_called()
     mocked.assert_not_awaited()
 

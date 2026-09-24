@@ -20,6 +20,7 @@ from googleapiclient.http import MediaFileUpload
 
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
+from mindroom.file_access import resolve_agent_file
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.credential_lifecycle import oauth_credentials_have_scopes
@@ -35,7 +36,6 @@ from mindroom.oauth.service import (
 from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
 from mindroom.tool_system.metadata import coerce_optional_finite_number
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
-from mindroom.workspaces import resolve_workspace_relative_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -260,21 +260,12 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             raise ValueError(msg) from exc
 
     def _resolve_upload_path(self, local_path: str) -> Path:
-        if self._workspace_root is None:
-            msg = "Google Drive local_path requires an agent workspace"
-            raise ValueError(msg)
-        requested_path = Path(local_path).expanduser()
-        if requested_path.is_absolute():
-            try:
-                return resolve_path_within_root(self._workspace_root, requested_path, symlinks="internal")
-            except ValueError:
-                msg = f"Google Drive local_path must stay within the workspace root: {self._workspace_root.resolve()}"
-                raise ValueError(msg) from None
-        return resolve_workspace_relative_path(
-            self._workspace_root,
-            requested_path,
+        return resolve_agent_file(
+            local_path,
+            workspace_root=self._workspace_root,
+            file_access=self._file_access,
             field_name="Google Drive local_path",
-        )
+        ).path
 
     def _download_guidance(self) -> str:
         if "google_drive_download_file" in self.functions:
@@ -294,8 +285,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             path = self._resolve_upload_path(local_path)
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
-        if not path.is_file():
-            return json.dumps({"error": f"The file '{path}' does not exist or is not a file."})
 
         resolved_mime_type = mime_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         body: dict[str, object] = {"name": name or path.name}
@@ -343,8 +332,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             path = self._resolve_upload_path(local_path)
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
-        if not path.is_file():
-            return json.dumps({"error": f"The file '{path}' does not exist or is not a file."})
 
         try:
             metadata = self._get_file_metadata(file_id, "id,name,mimeType")

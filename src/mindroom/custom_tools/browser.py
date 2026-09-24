@@ -37,6 +37,7 @@ from mindroom.desktop.client import desktop_response_router
 from mindroom.desktop.media import download_encrypted_screenshot
 from mindroom.desktop.playwright_mcp import browser_action_requires_control
 from mindroom.desktop.protocol import MAX_COMMAND_TTL_MS, DesktopCommand
+from mindroom.file_access import resolve_agent_file
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import PinnedMatrixDevice
 from mindroom.media_delivery import image_result
@@ -1944,38 +1945,42 @@ class BrowserTools(Toolkit):
             pass
         return output_dir
 
-    def _browser_upload_roots(self) -> tuple[Path, ...]:
-        """Return directories whose files browser upload may read.
-
-        A worker-bound browser reads its worker workspace. A primary-process
-        browser reads its artifact directory and the agent workspace, never the
-        rest of the runtime storage root with its credentials, keys, and state.
-        """
-        root = self._browser_artifact_root()
-        if self._worker_workspace is not None:
-            return (root,)
-        roots = [root if self._configured_output_dir is not None else root / "browser"]
-        if self._workspace_root is not None:
-            roots.append(self._workspace_root)
-        return tuple(roots)
-
     def _resolve_upload_path(self, path: str) -> tuple[Path, Path]:
-        """Resolve one upload path or ``att_*`` ID to its authorizing root and canonical file."""
-        if self._worker_workspace is None and path.startswith("att_"):
+        """Resolve one upload path or ``att_*`` ID to its authorizing root and canonical file.
+
+        The agent's ``file_access`` governs paths in the agent workspace, which
+        is the worker workspace for a worker-bound browser. A primary-process
+        browser also reads its own artifact directory, never the rest of the
+        runtime storage root with its credentials, keys, and state.
+        """
+        worker_bound = self._worker_workspace is not None
+        if not worker_bound and path.startswith("att_"):
             return self._resolve_upload_attachment(path)
+        workspace = self._worker_workspace if worker_bound else self._workspace_root
+        try:
+            authorized = resolve_agent_file(
+                path,
+                workspace_root=workspace,
+                file_access=self._file_access,
+                field_name="upload path",
+            )
+        except ValueError:
+            pass
+        else:
+            return authorized.root, authorized.path
         requested = Path(path).expanduser()
-        if not requested.is_absolute() and self._worker_workspace is None and self._workspace_root is not None:
-            requested = self._workspace_root / requested
-        resolved = requested.resolve()
+        resolved = (workspace / requested if workspace is not None else requested).resolve()
         if not resolved.is_file():
             msg = f"upload path must be an existing file: {path}"
             raise ValueError(msg)
-        roots = self._browser_upload_roots()
-        for root in roots:
+        roots = [] if workspace is None else [workspace]
+        if not worker_bound:
+            artifact_root = self._browser_artifact_root()
+            artifact_dir = artifact_root if self._configured_output_dir is not None else artifact_root / "browser"
             try:
-                return root, resolve_path_within_root(root, resolved, symlinks="internal")
+                return artifact_dir, resolve_path_within_root(artifact_dir, resolved, symlinks="internal")
             except ValueError:
-                continue
+                roots.insert(0, artifact_dir)
         root_list = ", ".join(str(root) for root in roots)
         msg = f"upload path '{path}' resolves to '{resolved}', outside browser upload root(s): {root_list}"
         raise ValueError(msg)
