@@ -2940,6 +2940,44 @@
         "summary": "Health Check"
       }
     },
+    "/instance-sso/authorize": {
+      "get": {
+        "description": "Send one owned instance a short-lived login ticket signed with that instance's own key.\n\nThe platform cookie never leaves the API host, and the ticket is not a platform credential.",
+        "operationId": "authorize_instance_sso_instance_sso_authorize_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "redirect_to",
+            "required": true,
+            "schema": {
+              "title": "Redirect To",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Authorize Instance Sso"
+      }
+    },
     "/matrix-oidc/.well-known/openid-configuration": {
       "get": {
         "description": "Return OIDC discovery metadata for Synapse.",
@@ -3716,7 +3754,7 @@
         "summary": "Clear Sso Cookie"
       },
       "post": {
-        "description": "Set an SSO cookie with the current Supabase access token.",
+        "description": "Set a host-only platform API cookie with the current Supabase access token.",
         "operationId": "set_sso_cookie_my_sso_cookie_post",
         "parameters": [
           {

@@ -305,7 +305,7 @@ These agent paths describe ordinary shared agents; private agents use their reso
 ### SaaS Platform (`saas-platform/`)
 - **Platform Backend**: Modular FastAPI app with routes in `saas-platform/platform-backend/src/backend/routes/`
 - **Platform Frontend**: Next.js 16 with centralized API client in `saas-platform/platform-frontend/src/lib/api.ts`
-- **Authentication**: SSO via HttpOnly cookies across subdomains
+- **Authentication**: Host-only platform cookie on the API host; instance dashboards exchange single-use, instance-signed tickets for host-only instance sessions
 - **Deployment**: Kubernetes with Helm charts, dual-mode support (platform/standalone)
 - **Database**: Supabase with comprehensive RLS policies
 
