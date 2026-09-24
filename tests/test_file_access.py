@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.path_confinement import open_regular_file_within_root
+
+if TYPE_CHECKING:
+    from mindroom.config.models import FileAccess
 
 
 def test_workspace_mode_accepts_relative_and_absolute_paths_inside_workspace(tmp_path: Path) -> None:
@@ -151,3 +155,13 @@ def test_unrestricted_mode_opens_from_the_filesystem_anchor(tmp_path: Path) -> N
     assert authorized.root == Path(target.resolve().anchor)
     with open_regular_file_within_root(authorized.root, authorized.relative) as descriptor:
         assert descriptor >= 0
+
+
+@pytest.mark.parametrize("mode", ["workspace", "unrestricted"])
+def test_symlink_loops_are_reported_as_value_errors(tmp_path: Path, mode: FileAccess) -> None:
+    """Symlink loops raise RuntimeError on Python 3.12 and OSError on 3.13; both become ValueError."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "loop").symlink_to(workspace / "loop")
+    with pytest.raises(ValueError, match="attachment"):
+        resolve_agent_file("loop", workspace_root=workspace, file_access=mode, field_name="attachment")
