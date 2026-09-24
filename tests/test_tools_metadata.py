@@ -1,10 +1,15 @@
 """Test tool metadata JSON snapshot for dashboard consumption."""
 
+import contextlib
 import gc
+import inspect
 import json
 import sys
+import threading
 import weakref
+from collections.abc import Iterator
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Never
@@ -24,7 +29,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
-from mindroom.tool_system.declarations import SetupType, ToolFileAccess, ToolValidationInfo
+from mindroom.tool_system.declarations import SetupType, ToolExecutionTarget, ToolFileAccess, ToolValidationInfo
 from mindroom.tool_system.metadata import (
     _AUTHORED_OVERRIDE_INHERIT,
     ConfigField,
@@ -388,6 +393,111 @@ async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pyte
     result = await tool._async_crawl("https://example.com")
 
     assert result == "public content"
+
+
+# Research toolkits whose URL functions download pages from the MindRoom process through the server-fetch guard.
+_LOCAL_URL_FETCH_TOOLS = ("crawl4ai", "trafilatura", "website")
+# Research toolkits that still download model-chosen URLs locally without the guard; each is tracked separately.
+_UNGUARDED_LOCAL_URL_FETCH_TOOLS = ("agentql", "newspaper")
+# Research toolkits that forward URLs to a hosted service instead of downloading them locally.
+_HOSTED_URL_FETCH_TOOLS = (
+    "brightdata",
+    "browserbase",
+    "exa",
+    "firecrawl",
+    "jina",
+    "oxylabs",
+    "scrapegraph",
+    "serper",
+    "spider",
+    "tavily",
+)
+
+
+def _url_functions(tool_name: str) -> list[tuple[str, str]]:
+    """Return each statically defined toolkit function and the URL parameter it accepts."""
+    toolkit_class = BUILTIN_TOOL_REGISTRY[tool_name]()
+    functions: list[tuple[str, str]] = []
+    for function_name in BUILTIN_TOOL_METADATA[tool_name].function_names:
+        method = getattr(toolkit_class, function_name, None)
+        if method is None:
+            continue
+        functions.extend(
+            (function_name, parameter)
+            for parameter in inspect.signature(method).parameters
+            if "url" in parameter.lower()
+        )
+    return functions
+
+
+@contextlib.contextmanager
+def _recording_loopback_server() -> Iterator[tuple[str, list[object]]]:
+    """Serve a loopback page that records every accepted connection."""
+    connections: list[object] = []
+
+    class RecordingHandler(BaseHTTPRequestHandler):
+        def setup(self) -> None:
+            connections.append(self.client_address)
+            super().setup()
+
+        def do_GET(self) -> None:
+            body = b"<html><body><article><p>loopback secret</p></article></body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *_args: object) -> None:  # noqa: A002, ARG002
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), RecordingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/api/config/raw", connections
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_research_url_tools_declare_their_fetch_path() -> None:
+    """Every research toolkit taking URLs must be classified as a guarded, unguarded, or hosted fetcher."""
+    url_tools = sorted(
+        tool_name
+        for tool_name, metadata in BUILTIN_TOOL_METADATA.items()
+        if tool_name in BUILTIN_TOOL_REGISTRY
+        and metadata.category is ToolCategory.RESEARCH
+        and _url_functions(tool_name)
+    )
+
+    assert url_tools == sorted((*_LOCAL_URL_FETCH_TOOLS, *_UNGUARDED_LOCAL_URL_FETCH_TOOLS, *_HOSTED_URL_FETCH_TOOLS))
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        *_LOCAL_URL_FETCH_TOOLS,
+        # Newspaper4k needs no browser, so it shows that this check catches an unguarded local download.
+        pytest.param(
+            "newspaper",
+            marks=pytest.mark.xfail(strict=True, reason="Newspaper4k downloads are unguarded and tracked separately."),
+        ),
+    ],
+)
+def test_local_url_fetch_tools_do_not_contact_loopback_targets(tool_name: str) -> None:
+    """Local page fetchers must refuse loopback targets before connecting unless they default to a worker."""
+    if BUILTIN_TOOL_METADATA[tool_name].default_execution_target is ToolExecutionTarget.WORKER:
+        pytest.skip("Worker execution keeps downloads behind the worker egress policy.")
+    toolkit = BUILTIN_TOOL_REGISTRY[tool_name]()()
+
+    with _recording_loopback_server() as (url, connections):
+        for function_name, parameter in _url_functions(tool_name):
+            argument = [url] if parameter.endswith("urls") else url
+            with contextlib.suppress(ServerFetchUrlError):
+                getattr(toolkit, function_name)(**{parameter: argument})
+
+    assert connections == []
 
 
 def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1361,7 +1471,6 @@ _UNCONFINED_LOCAL_FILE_TOOLS = (
     "composio",
     "csv",
     "duckdb",
-    "e2b",
     "groq",
     "moviepy_video_tools",
     "newspaper",
@@ -1397,7 +1506,7 @@ def test_only_code_execution_tools_execute_code() -> None:
 
 def test_path_tools_follow_agent_file_access_and_receive_it() -> None:
     """Tools that take model-supplied paths follow and receive the agent file_access."""
-    for name in ("file", "coding", "attachments", "matrix_message", "gmail", "google_drive", "browser"):
+    for name in ("file", "coding", "attachments", "matrix_message", "gmail", "google_drive", "browser", "e2b"):
         metadata = TOOL_METADATA[name]
         assert metadata.file_access is ToolFileAccess.AGENT, name
         assert ToolManagedInitArg.FILE_ACCESS in metadata.managed_init_args, name

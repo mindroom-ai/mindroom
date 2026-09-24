@@ -16,6 +16,7 @@ import pytest
 
 import mindroom.custom_tools.attachments as attachments_module
 import mindroom.custom_tools.browser as browser_module
+import mindroom.custom_tools.e2b as e2b_module
 import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
 import mindroom.media_delivery as media_delivery_module
@@ -24,6 +25,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachments
 from mindroom.custom_tools.coding import CodingTools
+from mindroom.custom_tools.e2b import MindRoomE2BTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import ToolFileAccess
@@ -31,6 +33,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tools.file import file_tools
 from tests.test_attachments_tool import _tool_context
 from tests.test_browser_upload_safety import _capture_uploads, _upload, _upload_tool
+from tests.test_e2b_tools import _FakeSandbox
 from tests.test_google_drive_oauth_tool import (
     _FakeDriveService,
     _FakeMediaIoBaseUpload,
@@ -165,6 +168,20 @@ async def _upload_in_browser(
     return consumed == [_PNG]
 
 
+async def _upload_to_e2b(
+    _tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    file_access: FileAccess,
+    raw_path: str,
+) -> bool:
+    monkeypatch.setattr("agno.tools.e2b.Sandbox", _FakeSandbox)
+    tool = MindRoomE2BTools(api_key="test", tool_output_workspace_root=workspace, file_access=file_access)
+    assert isinstance(tool.sandbox, _FakeSandbox)
+    tool.upload_file(raw_path, "upload.bin")
+    return tool.sandbox.files.stored.get("upload.bin") == _PNG
+
+
 async def _read_with_file_tool(
     _tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
@@ -194,6 +211,7 @@ _PROBES = (
     _ToolProbe("gmail", "attachments", _stage_gmail_attachment, gmail_module),
     _ToolProbe("google_drive", "upload_file", _upload_to_google_drive, google_drive_module),
     _ToolProbe("browser", "upload", _upload_in_browser, browser_module),
+    _ToolProbe("e2b", "upload_file", _upload_to_e2b, e2b_module),
     # `file` and `coding` run in a worker by default, where worker code shares their trust,
     # so they are held to the confinement contract but not to the link-swap contract.
     _ToolProbe("file", "read_file", _read_with_file_tool, None, "doc.txt"),

@@ -38,7 +38,7 @@ from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.relation_lookup import RelationLookup
-from mindroom.matrix.thread_membership import ThreadMembershipLookupError
+from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from tests.conftest import (
     bind_runtime_paths,
@@ -49,7 +49,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
 _ROOM_ID = "!test:localhost"
@@ -858,6 +858,112 @@ async def test_coalescing_still_fails_closed_when_the_repair_cannot_prove_the_ro
     ) as resolver:
         with pytest.raises(ThreadMembershipLookupError):
             await resolver.coalescing_thread_id(_room(), _reply_event())
+
+
+@dataclass
+class _HomeserverRefusingEveryEvent(_HomeserverWithAThread):
+    """A homeserver that answers every event lookup with one fixed error."""
+
+    errcode: str = "M_NOT_FOUND"
+
+    async def room_get_event(
+        self,
+        room_id: str,
+        event_id: str,
+    ) -> nio.RoomGetEventResponse | nio.RoomGetEventError:
+        """Refuse the event, whatever it is."""
+        del room_id, event_id
+        return nio.RoomGetEventError("refused", self.errcode)
+
+
+def _reference_event() -> nio.RoomMessageText:
+    return _event(
+        {
+            "body": "a reference",
+            "m.relates_to": {"rel_type": "m.reference", "event_id": "$fabricated:localhost"},
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("errcode", ["M_NOT_FOUND", "M_FORBIDDEN"])
+@pytest.mark.parametrize("make_event", [_reply_event, _reference_event])
+async def test_coalescing_reports_a_relation_target_the_homeserver_will_not_serve(
+    config: Config,
+    tmp_path: Path,
+    errcode: str,
+    make_event: Callable[[], nio.RoomMessageText],
+) -> None:
+    """A target that is missing or hidden fails the same way on every retry.
+
+    Anyone in the room can name one, so the caller has to be able to tell it
+    from a lookup that failed for a moment, or one message holds up the room.
+    """
+    async with _resolver_on_a_cold_journal(
+        config,
+        tmp_path,
+        client=_HomeserverRefusingEveryEvent(errcode=errcode),
+    ) as resolver:
+        with pytest.raises(RelatedEventUnavailableError):
+            await resolver.coalescing_thread_id(_room(), make_event())
+
+
+@dataclass
+class _HomeserverServingAStateEvent(_HomeserverWithAThread):
+    """A homeserver whose ``$parent`` is a membership event, not a message."""
+
+    async def room_get_event(
+        self,
+        room_id: str,
+        event_id: str,
+    ) -> nio.RoomGetEventResponse | nio.RoomGetEventError:
+        """Serve a join event under the ID every relation in these tests names."""
+        del room_id, event_id
+        response = nio.RoomGetEventResponse()
+        response.event = _parse(
+            {
+                "event_id": _PARENT,
+                "sender": _SENDER,
+                "origin_server_ts": 1_000,
+                "type": "m.room.member",
+                "state_key": _SENDER,
+                "room_id": _ROOM_ID,
+                "content": {"membership": "join"},
+            },
+        )
+        return response
+
+
+@pytest.mark.asyncio
+async def test_coalescing_reports_a_relation_target_that_is_not_a_message(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """An event's type never changes, so a reply to a join fails the same way on every retry."""
+    async with _resolver_on_a_cold_journal(
+        config,
+        tmp_path,
+        client=_HomeserverServingAStateEvent(),
+    ) as resolver:
+        with pytest.raises(RelatedEventUnavailableError):
+            await resolver.coalescing_thread_id(_room(), _reply_event())
+
+
+@pytest.mark.asyncio
+async def test_coalescing_keeps_a_server_failure_retryable(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A homeserver that failed to answer may answer next time, so it is not a refusal."""
+    async with _resolver_on_a_cold_journal(
+        config,
+        tmp_path,
+        client=_HomeserverRefusingEveryEvent(errcode="M_UNKNOWN"),
+    ) as resolver:
+        with pytest.raises(ThreadMembershipLookupError) as raised:
+            await resolver.coalescing_thread_id(_room(), _reply_event())
+
+    assert not isinstance(raised.value, RelatedEventUnavailableError)
 
 
 @pytest.mark.asyncio

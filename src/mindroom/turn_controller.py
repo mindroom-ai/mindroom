@@ -84,7 +84,7 @@ from mindroom.matrix.media import (
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
-from mindroom.matrix.thread_membership import ThreadMembershipLookupError
+from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
 from mindroom.response_admission import admitted_response_decision
 from mindroom.response_lifecycle import response_lifecycle_reservation_context
@@ -793,6 +793,20 @@ class TurnController:
                 event_info,
                 prechecked_event.requester_user_id,
             )
+
+    def _log_unplaceable_event(self, room: nio.MatrixRoom, event: DispatchEvent | MatrixMediaEvent) -> None:
+        """Record an event left unanswered because its relation target cannot be read.
+
+        Without that target there is no conversation to place the event in,
+        and asking the homeserver again gets the same refusal, so retrying the
+        turn would only hold up every later event in the room.
+        """
+        self.deps.logger.warning(
+            "relation_target_unavailable",
+            event_id=event.event_id,
+            room_id=room.room_id,
+            sender=event.sender,
+        )
 
     async def _notify_command_target_not_ready(
         self,
@@ -2306,13 +2320,16 @@ class TurnController:
         event = prechecked_event.event
         try:
             ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
-        except ThreadMembershipLookupError:
+        except ThreadMembershipLookupError as exc:
             if await self._notify_command_target_not_ready(
                 room,
                 event,
                 requester_user_id=prechecked_event.requester_user_id,
             ):
                 return _IngressAdmissionOutcome.CONSUMED
+            if isinstance(exc, RelatedEventUnavailableError):
+                self._log_unplaceable_event(room, event)
+                return _IngressAdmissionOutcome.IGNORED
             raise
         if await self._should_skip_router_before_shared_ingress_work(
             room,
@@ -2408,7 +2425,7 @@ class TurnController:
         reservation_owner.pending_turn_claim = turn_claim
         try:
             if is_audio_message_event(prechecked_event.event):
-                await self._on_audio_media_message(
+                dispatch_outcome = await self._on_audio_media_message(
                     room,
                     _PrecheckedEvent(
                         event=prechecked_event.event,
@@ -2418,10 +2435,12 @@ class TurnController:
                     reservation_owner=reservation_owner,
                     turn_claim=turn_claim,
                 )
-                reservation_owner.pending_turn_claim = None
-                dispatch_outcome = TurnDispatchOutcome.DEFERRED
             else:
-                coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
+                try:
+                    coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
+                except RelatedEventUnavailableError:
+                    self._log_unplaceable_event(room, prechecked_event.event)
+                    return TurnDispatchOutcome.INTENTIONALLY_IGNORED
                 admission_outcome = await self._dispatch_special_media_as_text(
                     room,
                     prechecked_event,
@@ -2479,7 +2498,7 @@ class TurnController:
         dispatch_timing: DispatchPipelineTiming | None,
         reservation_owner: _PromptIngressReservationOwner,
         turn_claim: TurnRecord,
-    ) -> None:
+    ) -> TurnDispatchOutcome:
         """Resolve the audio conversation key once, then defer voice normalization."""
         event = prechecked_event.event
 
@@ -2490,11 +2509,15 @@ class TurnController:
             logger=self.deps.logger,
         )
         prepared = readiness.prepared_source(event.event_id)
-        coalescing_thread_id = (
-            prepared.coalescing_thread_id
-            if prepared is not None
-            else await self.deps.resolver.coalescing_thread_id(room, event)
-        )
+        try:
+            coalescing_thread_id = (
+                prepared.coalescing_thread_id
+                if prepared is not None
+                else await self.deps.resolver.coalescing_thread_id(room, event)
+            )
+        except RelatedEventUnavailableError:
+            self._log_unplaceable_event(room, event)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         voice_target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=coalescing_thread_id,
@@ -2523,6 +2546,9 @@ class TurnController:
             source_event_id=event.event_id,
             source_kind=VOICE_SOURCE_KIND,
         )
+        # The ready task now owns the claim and releases it however it ends.
+        reservation_owner.pending_turn_claim = None
+        return TurnDispatchOutcome.DEFERRED
 
     async def _ready_voice_event(
         self,

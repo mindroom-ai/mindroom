@@ -38,6 +38,7 @@ from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import (
+    RelatedEventUnavailableError,
     ThreadMembershipAccess,
     ThreadMembershipLookupError,
     ThreadResolution,
@@ -607,7 +608,12 @@ class ConversationResolver:
         room: nio.MatrixRoom,
         event: DispatchEvent | MatrixMediaEvent,
     ) -> str | None:
-        """Return the coalescing thread scope for one inbound event."""
+        """Return the coalescing thread scope for one inbound event.
+
+        Raises ``RelatedEventUnavailableError`` when the event's relation
+        target is one the homeserver will not serve, and
+        ``ThreadMembershipLookupError`` when the scope is unknown for now.
+        """
         config = self.deps.runtime.config
         event_info = EventInfo.from_event(event.source)
         if (
@@ -649,6 +655,10 @@ class ConversationResolver:
         if resolution.state is ThreadResolutionState.ROOM_LEVEL:
             return None
         msg = f"Could not resolve canonical coalescing thread for {event.event_id}"
+        if isinstance(resolution.error, RelatedEventUnavailableError):
+            # The event names a relation target the homeserver will not serve,
+            # so no retry can place it either.
+            raise RelatedEventUnavailableError(msg) from resolution.error
         if resolution.error is not None:
             raise ThreadMembershipLookupError(msg) from resolution.error
         raise ThreadMembershipLookupError(msg)
@@ -662,6 +672,7 @@ class ConversationResolver:
         mode: ThreadReadMode,
     ) -> ThreadResolution:
         """Resolve one event's coalescing membership under one read mode."""
+        msg = f"Could not resolve canonical coalescing thread for {event.event_id}"
         try:
             return await resolve_event_thread_membership(
                 room.room_id,
@@ -672,8 +683,9 @@ class ConversationResolver:
                     requires_complete_history=True,
                 ),
             )
+        except RelatedEventUnavailableError as exc:
+            raise RelatedEventUnavailableError(msg) from exc
         except Exception as exc:
-            msg = f"Could not resolve canonical coalescing thread for {event.event_id}"
             raise ThreadMembershipLookupError(msg) from exc
 
     async def _explicit_thread_id_for_event(
