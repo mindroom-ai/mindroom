@@ -47,10 +47,14 @@ def _make_context(
     room_id: str = "!room:localhost",
     threads: dict[str, str | None] | None = None,
     relations: object | None = None,
+    aliases: dict[str, list[str]] | None = None,
 ) -> ToolRuntimeContext:
     runtime_root = Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
-        Config(agents={"general": AgentConfig(display_name="General Agent")}),
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            authorization={"aliases": aliases or {}},
+        ),
         test_runtime_paths(runtime_root),
     )
     client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
@@ -1441,41 +1445,6 @@ async def test_matrix_api_put_state_blocks_room_create() -> None:
     ctx.client.room_put_state.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "event_type",
-    [
-        "m.room.power_levels",
-        "m.room.server_acl",
-        "m.room.tombstone",
-        "com.mindroom.scheduled.task",
-        "com.mindroom.pending.config",
-        "com.mindroom.thread.tags",
-        "io.mindroom.future_state",
-    ],
-)
-async def test_matrix_api_put_state_blocks_room_takeover_and_mindroom_state_types(event_type: str) -> None:
-    """Room-takeover and MindRoom-owned state types should stay blocked even with allow_dangerous."""
-    tool = MatrixApiTools()
-    ctx = _make_context()
-
-    with tool_runtime_context(ctx):
-        payload = json.loads(
-            await tool.matrix_api(
-                action="put_state",
-                event_type=event_type,
-                content={"users": {"@user:localhost": 100}},
-                allow_dangerous=True,
-            ),
-        )
-
-    assert payload["status"] == "error"
-    assert payload["event_type"] == event_type
-    assert "blocked" in payload["message"]
-    ctx.client.room_get_state_event.assert_not_awaited()
-    ctx.client.room_put_state.assert_not_awaited()
-
-
 def _install_room_state(
     ctx: ToolRuntimeContext,
     *,
@@ -1506,7 +1475,7 @@ def _install_room_state(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("event_type", ["m.room.join_rules", "m.room.guest_access"])
+@pytest.mark.parametrize("event_type", ["m.room.power_levels", "m.room.join_rules", "m.room.guest_access"])
 async def test_matrix_api_put_state_requires_allow_dangerous(event_type: str) -> None:
     """Dangerous state writes should require explicit opt-in."""
     tool = MatrixApiTools()
@@ -1530,7 +1499,17 @@ async def test_matrix_api_put_state_requires_allow_dangerous(event_type: str) ->
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_put_state_allow_dangerous_succeeds_for_joined_room_admin() -> None:
+@pytest.mark.parametrize(
+    ("event_type", "content"),
+    [
+        ("m.room.power_levels", {"users": {"@user:localhost": 100, "@other:localhost": 50}}),
+        ("m.room.join_rules", {"join_rule": "invite"}),
+    ],
+)
+async def test_matrix_api_put_state_allow_dangerous_succeeds_for_joined_room_admin(
+    event_type: str,
+    content: dict[str, object],
+) -> None:
     """Dangerous state writes should succeed when a joined room admin requester explicitly allows them."""
     tool = MatrixApiTools()
     ctx = _make_context()
@@ -1540,7 +1519,45 @@ async def test_matrix_api_put_state_allow_dangerous_succeeds_for_joined_room_adm
         memberships={"@user:localhost": "join"},
     )
     ctx.client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
-        {"event_id": "$join_rules:localhost"},
+        {"event_id": "$state:localhost"},
+        room_id=ctx.room_id,
+    )
+
+    with (
+        patch("mindroom.custom_tools.matrix_api.logger.warning"),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="put_state",
+                event_type=event_type,
+                content=content,
+                allow_dangerous=True,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["event_id"] == "$state:localhost"
+    ctx.client.room_put_state.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        event_type=event_type,
+        state_key="",
+        content=content,
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_put_state_dangerous_accepts_joined_admin_bridge_alias() -> None:
+    """A requester's configured bridge alias counts when it is the joined room admin identity."""
+    tool = MatrixApiTools()
+    ctx = _make_context(aliases={"@user:localhost": ["@user_bridge:localhost"]})
+    _install_room_state(
+        ctx,
+        users={"@user_bridge:localhost": 100, "@mindroom_general:localhost": 50},
+        memberships={"@user_bridge:localhost": "join"},
+    )
+    ctx.client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state:localhost"},
         room_id=ctx.room_id,
     )
 
@@ -1558,13 +1575,7 @@ async def test_matrix_api_put_state_allow_dangerous_succeeds_for_joined_room_adm
         )
 
     assert payload["status"] == "ok"
-    assert payload["event_id"] == "$join_rules:localhost"
-    ctx.client.room_put_state.assert_awaited_once_with(
-        room_id=ctx.room_id,
-        event_type="m.room.join_rules",
-        state_key="",
-        content={"join_rule": "invite"},
-    )
+    ctx.client.room_put_state.assert_awaited_once()
 
 
 @pytest.mark.asyncio

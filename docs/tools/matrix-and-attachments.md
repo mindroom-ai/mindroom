@@ -382,11 +382,10 @@ reset_thread_model()
 It defaults `room_id` to the active room, but it also supports authorized cross-room access when the requester is allowed to act there.
 It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations.
 `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs.
-Dangerous state event types like `m.room.join_rules`, `m.room.member`, and `m.room.encryption` are blocked by default.
+Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
-A dangerous write also requires the human requester to be joined to the target room with room admin power (power level 100), so the model's flag alone never authorizes it.
-Room-takeover state event types `m.room.create`, `m.room.power_levels`, `m.room.server_acl`, and `m.room.tombstone` are always blocked.
-State event types in MindRoom's own `com.mindroom.` and `io.mindroom.` namespaces are also always blocked, because scheduled tasks, pending config changes, and thread tags carry requester identity and are managed by dedicated tools with their own authorization.
+A dangerous write also requires the human requester, or one of their configured bridge aliases, to be joined to the target room with room admin power (power level 100), so the model's flag alone never authorizes it.
+Hard-blocked state event types like `m.room.create` remain blocked.
 `search` is read-only, scopes results to one room via `room_id`, uses the top-level `limit` parameter, and rejects `filter.limit`.
 When `event_context={"include_profile": true}` is requested, returned context preserves `profile_info` for matching senders.
 
