@@ -1830,6 +1830,24 @@ models:
         backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
 
+def test_docker_backend_mounts_shared_credential_mirror_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker code must not be able to delete or relink the primary's credential mirror."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
+    worker_root = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    assert volumes[str(worker_root)] == {"bind": "/app/worker", "mode": "rw"}
+    assert volumes[str(worker_root / ".shared_credentials")] == {
+        "bind": "/app/worker/.shared_credentials",
+        "mode": "ro",
+    }
+
+
 def test_docker_backend_syncs_shared_credentials_from_runtime_storage_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -5040,7 +5058,14 @@ def test_cli_workers_have_private_control_auth_and_only_canonical_state(
     assert handles[0].auth_token != handles[1].auth_token
     assert all(handle.auth_token != _TEST_AUTH_TOKEN for handle in handles)
     calls = client.containers.run_calls
-    assert calls[0]["volumes"][1:] == calls[1]["volumes"][1:]
+    # Each process owns its worker root and that root's read-only credential mirror;
+    # every canonical state mount after those two is shared.
+    for call, handle in zip(calls, handles, strict=True):
+        worker_root = handle.debug_metadata["state_root"]
+        assert call["volumes"][1] == (
+            f"{worker_root}/.shared_credentials:{backend.config.storage_mount_path}/.shared_credentials:ro"
+        )
+    assert calls[0]["volumes"][2:] == calls[1]["volumes"][2:]
     for call, handle in zip(calls, handles, strict=True):
         assert _TEST_AUTH_TOKEN not in json.dumps(call)
         for secret in ("seeded-primary-admin", "seeded-provider-key", _TEST_AUTH_TOKEN):
