@@ -720,3 +720,39 @@ async def test_forgetting_a_managed_room_revokes_room_grants_at_once(
         await orchestrator._ensure_rooms_exist()
 
     assert invalidate.call_count == expected_invalidations
+
+
+@pytest.mark.asyncio
+async def test_legacy_record_naming_another_keys_room_is_refused(tmp_path: Path) -> None:
+    """A record adopted before ownership checks through another key's alias is refused on upgrade."""
+    config = membership_config(tmp_path, agent_rooms=["lobby"])
+    _record_legacy_lobby(config, _GENUINE_ROOM)
+    client = _router_client(_GENUINE_ROOM, router_owned_room_events(_ROUTER, "#dev:localhost"))
+
+    assert await _ensure_lobby(client, config) is None
+    assert matrix_state.load_rooms(runtime_paths=runtime_paths_for(config)) == {}
+    assert "does not publish" in matrix_rooms.rejected_managed_rooms()[_LOBBY_ALIAS]
+
+
+@pytest.mark.asyncio
+async def test_legacy_record_with_leftover_admins_stays_managed(tmp_path: Path) -> None:
+    """Admins left over from earlier configuration are reported, not refused, when the router owns the room."""
+    config = membership_config(tmp_path, agent_rooms=["lobby"])
+    _record_legacy_lobby(config, _GENUINE_ROOM)
+    events = router_owned_room_events(_ROUTER, _LOBBY_ALIAS, users={"@former-admin:localhost": 100})
+
+    assert await _ensure_lobby(_router_client(_GENUINE_ROOM, events), config) == _GENUINE_ROOM
+    assert matrix_state.load_rooms(runtime_paths=runtime_paths_for(config))["lobby"].router_verified is True
+    assert matrix_rooms.rejected_managed_rooms() == {}
+
+
+@pytest.mark.asyncio
+async def test_room_without_power_levels_is_refused_without_error(tmp_path: Path) -> None:
+    """Admin drift is only evaluated for an owned room, so missing power levels refuse cleanly."""
+    config = membership_config(tmp_path, agent_rooms=["lobby"])
+    events = [
+        event for event in router_owned_room_events(_ROUTER, _LOBBY_ALIAS) if event["type"] != "m.room.power_levels"
+    ]
+
+    assert await _ensure_lobby(_router_client(_GENUINE_ROOM, events), config) is None
+    assert "power levels are missing" in matrix_rooms.rejected_managed_rooms()[_LOBBY_ALIAS]

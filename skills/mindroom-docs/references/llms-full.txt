@@ -19326,8 +19326,9 @@ Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_roo
 
 Any homeserver account can publish a managed alias such as `#lobby:<server>` before MindRoom does, so a resolved alias alone never makes a room managed.
 MindRoom keeps a resolved room only when the router created it and is joined with admin power; in room version 12 and later the creator outranks every power level.
-A room not yet recorded for its key must also still publish the alias as its canonical or alternative alias, and no user outside the room's configured `admins` may hold admin power (100) or, from room version 12, be a co-creator.
-For the recorded room, that alias or admin drift is logged as `managed_room_policy_drift` instead, because the router still owns the room.
+A room not yet verified for its key must also publish the alias as its canonical or alternative alias, which stops one key's alias from adopting another key's room.
+A room not yet recorded for its key must also have no user outside the room's configured `admins` holding admin power (100) or, from room version 12, being a co-creator.
+Later alias or admin drift in the recorded room is logged as `managed_room_policy_drift` instead, because the router still owns the room.
 A recorded room the router verified keeps its record through a transient state-read failure, and records written before this check are re-verified on their next readable pass.
 Every room reconciliation pass on startup or config reload also requires the room to be at least as protected as configured: encrypted when required, and no more open in join rule or directory listing than its policy.
 Failing to open a room further or to adjust its power levels only leaves it stricter, so that is logged without refusing the room.

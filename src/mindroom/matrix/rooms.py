@@ -111,10 +111,11 @@ async def _verify_resolved_room(
 ) -> bool:
     """Return whether the router controls the room a managed alias resolved to, refusing it otherwise.
 
-    Any homeserver user can publish a predictable managed alias first, so a room
-    not yet recorded for this key must also publish the alias and have no admins
-    outside the configured ones. For the recorded room that drift is only
-    reported, and a verified record survives a transient state-read failure.
+    Any homeserver user can publish a predictable managed alias first, so the
+    router must own the room. A room not yet verified for this key must also
+    publish the alias, and one not yet recorded must have no admins outside the
+    configured ones; later drift is reported. A verified record survives a
+    transient state-read failure.
     """
     recorded = record is not None and record.room_id == room_id
     verified = record is not None and record.room_id == room_id and record.router_verified
@@ -125,13 +126,18 @@ async def _verify_resolved_room(
             logger.warning("managed_room_state_unreadable", room_key=room_key, room_id=room_id)
             return False
         problem = "room state is unreadable by the router"
-    else:
-        problem = room_ownership_problem(snapshot, client.user_id)
-        drift = room_alias_problem(snapshot, room_alias) or room_admin_problem(snapshot, client.user_id, admin_user_ids)
-        if problem is None and drift is not None and recorded:
-            logger.error("managed_room_policy_drift", room_key=room_key, room_id=room_id, problem=drift)
-        elif problem is None:
-            problem = drift
+    elif (problem := room_ownership_problem(snapshot, client.user_id)) is None:
+        # Only an owned room has integer power levels for the admin check to read.
+        alias_drift = room_alias_problem(snapshot, room_alias)
+        admin_drift = room_admin_problem(snapshot, client.user_id, admin_user_ids)
+        problem = (None if verified else alias_drift) or (None if recorded else admin_drift)
+        if problem is None and (alias_drift or admin_drift):
+            logger.error(
+                "managed_room_policy_drift",
+                room_key=room_key,
+                room_id=room_id,
+                problem=alias_drift or admin_drift,
+            )
     if problem is None:
         return True
     # The router stays in a room it may have created, so fixing the cause restores the room.
