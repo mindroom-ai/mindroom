@@ -522,6 +522,7 @@ Design migrations around that assumption rather than adding machinery to coordin
 
 A worker container (worker routing through the sandbox proxy) is the only security boundary between an agent and the MindRoom runtime.
 Check every reported vulnerability and every proposed hardening change against this model before implementing it, and decline changes that contradict it.
+The full model, the `file_access` setting, and the list of intentional behaviors reviewers must not "fix" live in `docs/architecture/security-posture.md`; read it before reporting or fixing any security issue.
 
 - **Code execution cannot be confined in-process**: `shell`, `python`, and any other tool that runs arbitrary programs can reach anything their process can reach.
   Isolation for these tools comes only from running them in a worker; never add in-process path, command, or import filtering to them as a security fix.
