@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 from collections import defaultdict, deque
+from dataclasses import replace
 from pathlib import Path
 from threading import Lock
 from unittest.mock import AsyncMock, patch
@@ -15,10 +16,11 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, STREAM_STATUS_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY, STREAM_STATUS_KEY
 from mindroom.custom_tools.matrix_api import MatrixApiTools, _MatrixSearchResponse
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.thread_mutation_impact import MutationThreadImpactState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
@@ -46,10 +48,14 @@ def _make_context(
     room_id: str = "!room:localhost",
     threads: dict[str, str | None] | None = None,
     relations: object | None = None,
+    aliases: dict[str, list[str]] | None = None,
 ) -> ToolRuntimeContext:
     runtime_root = Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
-        Config(agents={"general": AgentConfig(display_name="General Agent")}),
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            authorization={"aliases": aliases or {}},
+        ),
         test_runtime_paths(runtime_root),
     )
     client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
@@ -1545,8 +1551,37 @@ async def test_matrix_api_put_state_blocks_room_create() -> None:
     ctx.client.room_put_state.assert_not_awaited()
 
 
+def _install_room_state(
+    ctx: ToolRuntimeContext,
+    *,
+    users: dict[str, int],
+    memberships: dict[str, str],
+) -> None:
+    async def room_get_state_event(
+        room_id: str,
+        event_type: str,
+        state_key: str = "",
+    ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        if event_type == "m.room.power_levels":
+            return _state_response(
+                content={"users": users, "users_default": 0, "state_default": 50},
+                event_type=event_type,
+                room_id=room_id,
+            )
+        if event_type == "m.room.member" and state_key in memberships:
+            return _state_response(
+                content={"membership": memberships[state_key]},
+                event_type=event_type,
+                state_key=state_key,
+                room_id=room_id,
+            )
+        return _state_error(room_id=room_id)
+
+    ctx.client.room_get_state_event.side_effect = room_get_state_event
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("event_type", ["m.room.power_levels", "m.room.guest_access"])
+@pytest.mark.parametrize("event_type", ["m.room.power_levels", "m.room.join_rules", "m.room.guest_access"])
 async def test_matrix_api_put_state_requires_allow_dangerous(event_type: str) -> None:
     """Dangerous state writes should require explicit opt-in."""
     tool = MatrixApiTools()
@@ -1565,16 +1600,32 @@ async def test_matrix_api_put_state_requires_allow_dangerous(event_type: str) ->
     assert payload["event_type"] == event_type
     assert payload["dangerous"] is True
     assert "allow_dangerous" in payload["message"]
+    ctx.client.room_get_state_event.assert_not_awaited()
     ctx.client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_put_state_allow_dangerous_succeeds() -> None:
-    """Dangerous state writes should succeed when explicitly allowed."""
+@pytest.mark.parametrize(
+    ("event_type", "content"),
+    [
+        ("m.room.power_levels", {"users": {"@user:localhost": 100, "@other:localhost": 50}}),
+        ("m.room.join_rules", {"join_rule": "invite"}),
+    ],
+)
+async def test_matrix_api_put_state_allow_dangerous_succeeds_for_joined_room_admin(
+    event_type: str,
+    content: dict[str, object],
+) -> None:
+    """Dangerous state writes should succeed when a joined room admin requester explicitly allows them."""
     tool = MatrixApiTools()
     ctx = _make_context()
+    _install_room_state(
+        ctx,
+        users={"@user:localhost": 100, "@mindroom_general:localhost": 50},
+        memberships={"@user:localhost": "join"},
+    )
     ctx.client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
-        {"event_id": "$power:localhost"},
+        {"event_id": "$state:localhost"},
         room_id=ctx.room_id,
     )
 
@@ -1585,15 +1636,164 @@ async def test_matrix_api_put_state_allow_dangerous_succeeds() -> None:
         payload = json.loads(
             await tool.matrix_api(
                 action="put_state",
-                event_type="m.room.power_levels",
-                content={"users": {"@user:localhost": 100}},
+                event_type=event_type,
+                content=content,
                 allow_dangerous=True,
             ),
         )
 
     assert payload["status"] == "ok"
-    assert payload["event_id"] == "$power:localhost"
+    assert payload["event_id"] == "$state:localhost"
+    ctx.client.room_put_state.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        event_type=event_type,
+        state_key="",
+        content=content,
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_put_state_dangerous_accepts_joined_admin_bridge_alias() -> None:
+    """A requester's configured bridge alias counts when it is the joined room admin identity."""
+    tool = MatrixApiTools()
+    ctx = _make_context(aliases={"@user:localhost": ["@user_bridge:localhost"]})
+    _install_room_state(
+        ctx,
+        users={"@user_bridge:localhost": 100, "@mindroom_general:localhost": 50},
+        memberships={"@user_bridge:localhost": "join"},
+    )
+    ctx.client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state:localhost"},
+        room_id=ctx.room_id,
+    )
+
+    with (
+        patch("mindroom.custom_tools.matrix_api.logger.warning"),
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="put_state",
+                event_type="m.room.join_rules",
+                content={"join_rule": "invite"},
+                allow_dangerous=True,
+            ),
+        )
+
+    assert payload["status"] == "ok"
     ctx.client.room_put_state.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requester_level", "membership", "dry_run"),
+    [
+        (0, "join", False),
+        (0, "join", True),
+        (50, "join", False),
+        (100, "leave", False),
+        (100, None, False),
+    ],
+)
+async def test_matrix_api_put_state_dangerous_requires_joined_room_admin_requester(
+    requester_level: int,
+    membership: str | None,
+    dry_run: bool,
+) -> None:
+    """allow_dangerous alone must not authorize critical state writes for non-admin or absent requesters."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    _install_room_state(
+        ctx,
+        users={"@user:localhost": requester_level, "@mindroom_general:localhost": 50},
+        memberships={} if membership is None else {"@user:localhost": membership},
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="put_state",
+                event_type="m.room.join_rules",
+                content={"join_rule": "public"},
+                allow_dangerous=True,
+                dry_run=dry_run,
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["dangerous"] is True
+    assert "joined room admin" in payload["message"]
+    ctx.client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requester_entity", ["general", ROUTER_AGENT_NAME])
+async def test_matrix_api_put_state_dangerous_rejects_non_human_requester(requester_entity: str) -> None:
+    """The agent itself (the no-human fallback) or another MindRoom account must not authorize dangerous writes."""
+    tool = MatrixApiTools()
+    base_ctx = _make_context()
+    requester_id = (
+        entity_identity_registry(base_ctx.config, base_ctx.runtime_paths).current_id(requester_entity).full_id
+    )
+    ctx = replace(base_ctx, requester_id=requester_id)
+    _install_room_state(
+        ctx,
+        users={requester_id: 100},
+        memberships={requester_id: "join"},
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="put_state",
+                event_type="m.room.member",
+                state_key="@attacker:localhost",
+                content={"membership": "invite"},
+                allow_dangerous=True,
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "joined room admin" in payload["message"]
+    ctx.client.room_get_state_event.assert_not_awaited()
+    ctx.client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_put_state_dangerous_fails_closed_when_power_levels_unreadable() -> None:
+    """Unreadable power levels must deny dangerous writes instead of trusting the model flag."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+
+    async def membership_then_power_levels_error(
+        room_id: str,
+        event_type: str,
+        state_key: str = "",
+    ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        if event_type == "m.room.member":
+            return _state_response(
+                content={"membership": "join"},
+                event_type=event_type,
+                state_key=state_key,
+                room_id=room_id,
+            )
+        return _state_error(message="forbidden", status_code="M_FORBIDDEN", room_id=room_id)
+
+    ctx.client.room_get_state_event.side_effect = membership_then_power_levels_error
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="put_state",
+                event_type="m.room.history_visibility",
+                content={"history_visibility": "world_readable"},
+                allow_dangerous=True,
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "joined room admin" in payload["message"]
+    ctx.client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio

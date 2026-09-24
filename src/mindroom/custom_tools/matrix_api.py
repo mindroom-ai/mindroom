@@ -15,12 +15,13 @@ from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import send_room_event_result
+from mindroom.matrix.client import room_admin_power_user, send_room_event_result
 from mindroom.matrix.thread_mutation_impact import (
     MutationThreadImpactState,
     resolve_event_thread_impact_for_client,
     resolve_redaction_thread_impact_for_client,
 )
+from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 logger = get_logger(__name__)
@@ -696,12 +697,43 @@ class MatrixApiTools(Toolkit):
                     dangerous=True,
                     message=(
                         f"State event type '{event_type}' is dangerous. "
-                        "Re-run with allow_dangerous=true only when you intentionally want to change critical room state."
+                        "Re-run with allow_dangerous=true only when you intentionally want to change critical room state; "
+                        "the requester must also be a joined room admin in the target room."
                     ),
                 ),
                 True,
             )
         return None, dangerous
+
+    @staticmethod
+    async def _requester_may_write_dangerous_state(
+        context: ToolRuntimeContext,
+        room_id: str,
+    ) -> bool:
+        """Return whether the human requester could authorize this room's critical state themselves."""
+        requester_id = context.requester_id
+        config = context.current_config
+        if requester_id == context.client.user_id or not is_human_requester_id(
+            requester_id,
+            config,
+            context.runtime_paths,
+        ):
+            return False
+        joined_ids = [
+            user_id
+            for user_id in sorted(equivalent_requester_ids(requester_id, config, context.runtime_paths))
+            if await MatrixApiTools._is_joined(context.client, room_id, user_id)
+        ]
+        return await room_admin_power_user(context.client, room_id, joined_ids) is not None
+
+    @staticmethod
+    async def _is_joined(client: nio.AsyncClient, room_id: str, user_id: str) -> bool:
+        membership = await client.room_get_state_event(room_id, "m.room.member", user_id)
+        return (
+            isinstance(membership, nio.RoomGetStateEventResponse)
+            and isinstance(membership.content, dict)
+            and membership.content.get("membership") == "join"
+        )
 
     @classmethod
     def _send_event_policy_error(
@@ -1057,6 +1089,19 @@ class MatrixApiTools(Toolkit):
         )
         if policy_error is not None:
             return policy_error
+
+        if dangerous and not await self._requester_may_write_dangerous_state(context, room_id):
+            return self._error_payload(
+                action="put_state",
+                room_id=room_id,
+                event_type=normalized_event_type,
+                state_key=resolved_state_key,
+                dangerous=True,
+                message=(
+                    f"State event type '{normalized_event_type}' requires the requester to be a joined room admin "
+                    "in the target room."
+                ),
+            )
 
         if dry_run:
             return self._payload(
@@ -1460,7 +1505,8 @@ class MatrixApiTools(Toolkit):
         `com.mindroom.*` and `io.mindroom.*` are reserved for runtime metadata: `content` may not set keys in
         those namespaces, and `send_event`/`put_state` may not write event types in them.
         `dry_run` is supported for send_event, put_state, and redact.
-        `allow_dangerous` only affects put_state for a small set of high-risk room-state event types.
+        `allow_dangerous` only affects put_state for a small set of high-risk room-state event types,
+        which also require the requester to be a joined room admin in the target room.
         `search` rejects `dry_run` and `allow_dangerous` because it is read-only.
         """
         context = get_tool_runtime_context()
