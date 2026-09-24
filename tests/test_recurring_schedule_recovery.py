@@ -22,6 +22,7 @@ from mindroom.matrix.large_messages import MatrixEventTooLargeError
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow
 from tests.conftest import delivered_matrix_event, delivered_matrix_side_effect
 from tests.conftest import test_runtime_paths as runtime_paths
+from tests.scheduling_helpers import persist_schedule_writer, scheduled_task_state_response
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -92,7 +93,12 @@ def client_for(task: ScheduledWorkflow) -> AsyncMock:
             return nio.RoomGetStateEventResponse({"membership": "join"}, event_type, state_key, room_id)
         return client.room_get_state_event.return_value
 
+    async def read_room_state(room_id: str) -> nio.RoomGetStateResponse:
+        content = client.room_get_state_event.return_value.content
+        return scheduled_task_state_response(room_id, {"daily": content}, sender=client.user_id)
+
     client.room_get_state_event.side_effect = read_state
+    client.room_get_state.side_effect = read_room_state
     return client
 
 
@@ -124,6 +130,8 @@ async def run_until_wait(
     config: Config | None = None,
 ) -> None:
     """Run the production scheduler until it sleeps or finishes a delivery."""
+    paths = runtime_paths(tmp_path)
+    persist_schedule_writer(paths, client.user_id)
     with suppress(asyncio.CancelledError):
         await scheduling._run_cron_task(
             client,
@@ -131,7 +139,7 @@ async def run_until_wait(
             task,
             {},
             config or Config(),
-            runtime_paths(tmp_path),
+            paths,
             AsyncMock(),
         )
 

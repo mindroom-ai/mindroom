@@ -10,7 +10,6 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
-from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.matrix.state import get_room_alias_from_id, resolve_room_aliases, resolve_room_id
 from mindroom.matrix.users import create_agent_http_client
@@ -137,6 +136,8 @@ async def list_schedules(
             room_tasks: list[ScheduledTaskRecord] = await get_scheduled_tasks_for_room(
                 client=client,
                 room_id=resolved_room_id,
+                config=runtime_config,
+                runtime_paths=runtime_paths,
                 include_non_pending=include_cancelled,
             )
             tasks.extend(build_scheduled_task_read_model(task) for task in room_tasks)
@@ -157,12 +158,18 @@ async def update_schedule(
     api_request: Request,
 ) -> ScheduledTaskResponse:
     """Update prompt text and schedule fields for an existing task."""
-    _, runtime_paths = config_lifecycle.read_committed_runtime_config(api_request)
+    runtime_config, runtime_paths = config_lifecycle.read_committed_runtime_config(api_request)
     resolved_room_id = resolve_room_id(request.room_id, runtime_paths=runtime_paths)
 
     client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     try:
-        existing_task = await get_scheduled_task(client=client, room_id=resolved_room_id, task_id=task_id)
+        existing_task = await get_scheduled_task(
+            client=client,
+            room_id=resolved_room_id,
+            task_id=task_id,
+            config=runtime_config,
+            runtime_paths=runtime_paths,
+        )
         if not existing_task:
             raise HTTPException(status_code=404, detail=f"Task `{task_id}` not found")
 
@@ -183,6 +190,8 @@ async def update_schedule(
                 task_id=task_id,
                 workflow=updated_workflow,
                 existing_task=existing_task,
+                config=runtime_config,
+                runtime_paths=runtime_paths,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"{e!s}") from e
@@ -199,12 +208,18 @@ async def cancel_schedule(
     room_id: CancelRoomId,
 ) -> CancelScheduleResponse:
     """Cancel a scheduled task by ID."""
-    runtime_paths = api_runtime_paths(request)
+    runtime_config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     resolved_room_id = resolve_room_id(room_id, runtime_paths=runtime_paths)
 
     client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     try:
-        existing = await get_scheduled_task(client=client, room_id=resolved_room_id, task_id=task_id)
+        existing = await get_scheduled_task(
+            client=client,
+            room_id=resolved_room_id,
+            task_id=task_id,
+            config=runtime_config,
+            runtime_paths=runtime_paths,
+        )
         if not existing:
             raise HTTPException(status_code=404, detail=f"Task `{task_id}` not found")
 
@@ -212,6 +227,8 @@ async def cancel_schedule(
             client=client,
             room_id=resolved_room_id,
             task_id=task_id,
+            config=runtime_config,
+            runtime_paths=runtime_paths,
             cancel_in_memory=False,
         )
         if result.startswith("❌"):

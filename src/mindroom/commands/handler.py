@@ -385,6 +385,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             room_id=room.room_id,
             thread_id=effective_thread_id,
             config=context.config,
+            runtime_paths=context.runtime_paths,
         )
 
     elif command.type == CommandType.CANCEL_SCHEDULE:
@@ -395,6 +396,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             response_text = await cancel_all_scheduled_tasks(
                 client=context.client,
                 room_id=room.room_id,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
                 matrix_admin=context.matrix_admin,
             )
         else:
@@ -404,6 +407,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 client=context.client,
                 room_id=room.room_id,
                 task_id=task_id,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
                 matrix_admin=context.matrix_admin,
             )
 

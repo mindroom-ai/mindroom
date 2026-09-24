@@ -407,6 +407,7 @@ async def test_list_schedules_tool_calls_backend() -> None:
         room_id=context.room_id,
         thread_id=context.resolved_thread_id,
         config=context.config,
+        runtime_paths=context.runtime_paths,
     )
 
 
@@ -458,6 +459,8 @@ async def test_cancel_schedule_tool_calls_backend() -> None:
         client=context.client,
         room_id=context.room_id,
         task_id="task123",
+        config=context.config,
+        runtime_paths=context.runtime_paths,
         matrix_admin=matrix_admin,
     )
 

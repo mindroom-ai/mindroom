@@ -133,7 +133,12 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
         )
 
     assert pending == frozenset({"$scheduled"})
-    schedule_query.assert_awaited_once_with(agent_bot.client, "!room:localhost")
+    schedule_query.assert_awaited_once_with(
+        agent_bot.client,
+        "!room:localhost",
+        coordinator.config_provider(),
+        coordinator.runtime_paths,
+    )
     assert event_id == "$event"
     agent_bot._hook_send_message.assert_awaited_once_with(
         "!room:localhost",
@@ -170,7 +175,12 @@ async def test_schedule_query_uses_joined_candidate_for_shared_room(tmp_path: Pa
         )
 
     assert pending == frozenset({"$scheduled"})
-    schedule_query.assert_awaited_once_with(joined_client, "!room:localhost")
+    schedule_query.assert_awaited_once_with(
+        joined_client,
+        "!room:localhost",
+        coordinator.config_provider(),
+        coordinator.runtime_paths,
+    )
 
 
 @pytest.mark.asyncio
@@ -251,7 +261,12 @@ async def test_schedule_query_continues_after_candidate_membership_probe_failure
         )
 
     assert pending == frozenset({"$scheduled"})
-    schedule_query.assert_awaited_once_with(joined_client, "!room:localhost")
+    schedule_query.assert_awaited_once_with(
+        joined_client,
+        "!room:localhost",
+        coordinator.config_provider(),
+        coordinator.runtime_paths,
+    )
 
 
 @pytest.mark.asyncio

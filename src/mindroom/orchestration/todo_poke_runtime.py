@@ -137,10 +137,13 @@ class TodoPokeRuntimeCoordinator:
         agent_names: tuple[str, ...],
     ) -> frozenset[str | None] | None:
         """Return pending schedule scopes through one assigned agent joined to the room."""
+        config = self.config_provider()
+        if config is None:
+            return None
         agent_bot = await self._joined_agent_bot(room_id, agent_names)
         if agent_bot is None or agent_bot.client is None:
             return None
-        return await get_pending_schedule_thread_ids_for_room(agent_bot.client, room_id)
+        return await get_pending_schedule_thread_ids_for_room(agent_bot.client, room_id, config, self.runtime_paths)
 
     async def _send_poke(
         self,
