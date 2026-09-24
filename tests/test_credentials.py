@@ -2,6 +2,7 @@
 
 import base64
 import errno
+import os
 import stat
 from pathlib import Path
 from typing import Any
@@ -153,14 +154,11 @@ class TestCredentialsManager:
         """Permission failures should identify the path, mode, and ownership fix."""
         credentials_dir = tmp_path / "credentials"
         credentials_dir.mkdir(mode=0o755)
-        original_chmod = Path.chmod
 
-        def deny_credentials_chmod(path: Path, mode: int) -> None:
-            if path == credentials_dir:
-                raise PermissionError
-            original_chmod(path, mode)
+        def deny_chmod(_fd: int, _mode: int) -> None:
+            raise PermissionError
 
-        monkeypatch.setattr(Path, "chmod", deny_credentials_chmod)
+        monkeypatch.setattr(credentials_module.os, "fchmod", deny_chmod)
 
         with pytest.raises(
             PermissionError,
@@ -1334,26 +1332,119 @@ class TestCredentialsManager:
         assert not planted_link.is_symlink()
         assert victim_manager.load_credentials("google_calendar") == {"token": "victim-token"}
 
-    def test_worker_credential_path_replaced_by_a_file_fails_closed(
+    @pytest.mark.parametrize("planted_kind", ["file", "fifo"])
+    def test_worker_credential_path_replaced_by_a_non_directory_is_recreated(
         self,
         temp_credentials_dir: Path,
+        planted_kind: str,
     ) -> None:
-        """Anything other than a directory or a droppable link must stop the sync."""
+        """A non-directory planted at a credential path must not lock the worker out for good."""
         manager = CredentialsManager(temp_credentials_dir)
         sync_shared_credentials_to_worker("worker-a", allowed_services=frozenset(), credentials_manager=manager)
 
-        planted_file = worker_root_path(manager.storage_root, "worker-a") / ".shared_credentials"
-        for child in planted_file.iterdir():
-            child.unlink()
-        planted_file.rmdir()
-        planted_file.write_text("not a directory", encoding="utf-8")
+        planted = worker_root_path(manager.storage_root, "worker-a") / "credentials"
+        planted.rmdir()
+        if planted_kind == "file":
+            planted.write_text("not a directory", encoding="utf-8")
+        else:
+            os.mkfifo(planted)
 
-        with pytest.raises(WorkerCredentialPathError, match=str(planted_file)):
+        sync_shared_credentials_to_worker("worker-a", allowed_services=frozenset(), credentials_manager=manager)
+
+        assert planted.is_dir()
+        assert not planted.is_symlink()
+
+    def test_worker_root_that_is_not_a_directory_fails_closed(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """The worker root is not the primary's to repair, so a non-directory there stops the sync."""
+        manager = CredentialsManager(temp_credentials_dir)
+        worker_root = worker_root_path(manager.storage_root, "worker-a")
+        worker_root.parent.mkdir(parents=True)
+        worker_root.write_text("not a directory", encoding="utf-8")
+
+        with pytest.raises(WorkerCredentialPathError, match=str(worker_root)):
             sync_shared_credentials_to_worker(
                 "worker-a",
                 allowed_services=frozenset(),
                 credentials_manager=manager,
             )
+
+    def test_hardening_never_chmods_through_an_entry_swapped_after_listing(
+        self,
+        temp_credentials_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A payload swapped for a link between listing and chmod must not tighten the link target."""
+        manager = CredentialsManager(temp_credentials_dir)
+        victim_dir = tmp_path / "private_oauth" / "victim"
+        victim_dir.mkdir(parents=True)
+        victim_dir.chmod(0o755)
+        worker_credentials = worker_root_path(manager.storage_root, "worker-a") / "credentials"
+        manager.for_worker("worker-a")
+        swapped_entry = worker_credentials / "github_credentials.json"
+        swapped_entry.write_text("{}", encoding="utf-8")
+        swapped_entry.chmod(0o644)
+        list_entries = credentials_module._credentials_file_entries
+
+        def list_then_swap(directory_fd: int) -> list[tuple[str, os.stat_result]]:
+            entries = list_entries(directory_fd)
+            swapped_entry.unlink()
+            swapped_entry.symlink_to(victim_dir, target_is_directory=True)
+            return entries
+
+        monkeypatch.setattr(credentials_module, "_credentials_file_entries", list_then_swap)
+
+        manager.for_worker("worker-a")
+
+        assert stat.S_IMODE(victim_dir.stat().st_mode) == 0o755
+
+    def test_hardening_leaves_a_read_only_layer_to_its_owner(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A worker reading its read-only mirror must not fail because it cannot chmod it."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("openai", {"api_key": "shared-key"})
+        manager.get_credentials_path("openai").chmod(0o640)
+        temp_credentials_dir.chmod(0o750)
+
+        def read_only_chmod(_fd: int, _mode: int) -> None:
+            raise OSError(errno.EROFS, "Read-only file system")
+
+        monkeypatch.setattr(credentials_module.os, "fchmod", read_only_chmod)
+
+        assert CredentialsManager(temp_credentials_dir).load_credentials("openai") == {"api_key": "shared-key"}
+
+    def test_non_regular_payload_neither_blocks_nor_leaks_descriptors(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """A FIFO or directory planted as a payload must read as absent without holding fds."""
+        manager = CredentialsManager(temp_credentials_dir)
+        os.mkfifo(temp_credentials_dir / "fifo_credentials.json")
+        (temp_credentials_dir / "dir_credentials.json").mkdir()
+        open_descriptors = len(list(Path("/dev/fd").iterdir()))
+
+        for _attempt in range(20):
+            assert manager.load_credentials("fifo") is None
+            assert manager.load_credentials("dir") is None
+
+        assert len(list(Path("/dev/fd").iterdir())) == open_descriptors
+
+    def test_oversized_payload_is_not_read_into_memory(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """A payload padded past the size cap reads as unloadable instead of exhausting memory."""
+        manager = CredentialsManager(temp_credentials_dir)
+        with (temp_credentials_dir / "github_credentials.json").open("wb") as payload_file:
+            payload_file.truncate(64 * 1024 * 1024)
+
+        assert manager.load_credentials("github") is None
 
     def test_worker_store_never_follows_a_directory_swapped_mid_operation(
         self,

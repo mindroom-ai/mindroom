@@ -27,12 +27,7 @@ _durable_directory_identities_lock = Lock()
 def create_directory_durable(path: Path, *, mode: int) -> None:
     """Create one directory and durably publish it when directory fsync is available."""
     path.mkdir(mode=mode, parents=True, exist_ok=True)
-    stat = path.stat()
-    # Directories already published at this mode are left alone so a caller that only
-    # reads a directory it does not own (a read-only mount) is not forced to write.
-    if S_IMODE(stat.st_mode) != mode:
-        path.chmod(mode)
-        stat = path.stat()
+    stat = _apply_directory_mode(path, mode)
     identity = (stat.st_dev, stat.st_ino)
     with _durable_directory_identities_lock:
         if _durable_directory_identities.get(path) == identity:
@@ -45,6 +40,27 @@ def create_directory_durable(path: Path, *, mode: int) -> None:
         _durable_directory_identities.move_to_end(path)
         if len(_durable_directory_identities) > _MAX_DURABLE_DIRECTORY_IDENTITIES:
             _durable_directory_identities.popitem(last=False)
+
+
+def _apply_directory_mode(path: Path, mode: int) -> os.stat_result:
+    """Apply one directory mode without following a link that replaced the directory.
+
+    Directories under worker-mounted roots can be swapped for links by worker code, so the
+    mode is read and set through a descriptor that refuses a link at the final component.
+    A directory already at the mode is left alone, so a reader of a read-only mount is not
+    forced to write.
+    """
+    if not _DIRECTORY_FSYNC_SUPPORTED:
+        path.chmod(mode)
+        return path.stat()
+    directory_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        directory_stat = os.fstat(directory_fd)
+        if S_IMODE(directory_stat.st_mode) != mode:
+            os.fchmod(directory_fd, mode)
+        return directory_stat
+    finally:
+        os.close(directory_fd)
 
 
 def replace_file_durable(source: Path, target: Path) -> None:
