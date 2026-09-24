@@ -2916,7 +2916,7 @@
           "validation": null
         }
       ],
-      "consumes_workspace_paths": false,
+      "consumes_workspace_paths": true,
       "default_execution_target": "primary",
       "dependencies": [
         "e2b_code_interpreter"
@@ -2925,7 +2925,7 @@
       "display_name": "E2B Code Execution",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/e2b",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "agent",
       "function_names": [
         "download_chart_data",
         "download_file_from_sandbox",

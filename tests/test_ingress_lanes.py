@@ -27,7 +27,7 @@ from mindroom.dispatch_source import (
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
-from mindroom.matrix.thread_membership import ThreadMembershipLookupError
+from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from tests.bot_helpers import dispatch_reaction_durably
@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.coalescing_batch import PreparedTurn
     from mindroom.event_journal import EventJournalStore
     from mindroom.handled_turns import TurnRecord
@@ -554,6 +555,125 @@ async def test_unresolvable_non_command_text_still_rejects_ingress(tmp_path: Pat
 
     dispatch_mock.assert_not_awaited()
     assert not bot._turn_store.is_handled("$m1")
+
+
+def _unplaceable_event(event_id: str, msgtype: str, *, server_timestamp: int) -> nio.Event:
+    """Return a message whose relation names an event no one can fetch."""
+    content: dict[str, object] = {
+        "msgtype": msgtype,
+        "body": "look at this",
+        "m.relates_to": {"rel_type": "m.reference", "event_id": "$fabricated:localhost"},
+    }
+    if msgtype != "m.text":
+        content["url"] = "mxc://localhost/attachment"
+        content["info"] = {"mimetype": "audio/ogg" if msgtype == "m.audio" else "image/jpeg"}
+    return nio.RoomMessage.parse_event(
+        {
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": server_timestamp,
+            "type": "m.room.message",
+            "room_id": "!room:localhost",
+            "content": content,
+        },
+    )
+
+
+def _turn_controller_dispatcher(
+    bot: AgentBot,
+    room: nio.MatrixRoom,
+    journal_store: EventJournalStore,
+) -> JournalDispatcher:
+    """Return a journal dispatcher delivering message and media events to the bot's TurnController."""
+
+    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+        pass
+
+    return JournalDispatcher(
+        store=journal_store.principal("agent@lane"),
+        callbacks=JournalCallbacks(
+            on_message=bot._turn_controller.handle_text_event,
+            on_media=bot._turn_controller.handle_media_event,
+            on_reaction=cast("Callable", noop),
+            on_approval=cast("Callable", noop),
+            on_room_lifecycle=cast("Callable", noop),
+            on_redaction=cast("Callable", noop),
+            on_approval_continuation=AsyncMock(return_value=None),
+            source_has_live_owner=lambda _event_id: False,
+            turn_has_live_claim=bot._turn_store.has_live_turn_claim,
+        ),
+        room_for_id=lambda _room_id: room,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("msgtype", "kind"),
+    [("m.text", EventKind.MESSAGE), ("m.image", EventKind.MEDIA), ("m.audio", EventKind.MEDIA)],
+)
+async def test_unplaceable_event_settles_and_its_room_moves_on(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    msgtype: str,
+    kind: EventKind,
+) -> None:
+    """A relation target the homeserver will not serve ends the turn instead of failing it.
+
+    Failing it would put the event back at the head of its room's lane, where
+    it fails the same way on every retry while everything behind it waits.
+    """
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    resolved: list[str] = []
+
+    async def unplaceable(_room: nio.MatrixRoom, event: nio.Event) -> str | None:
+        resolved.append(event.event_id)
+        msg = "Related event $fabricated:localhost is unavailable"
+        raise RelatedEventUnavailableError(msg)
+
+    dispatcher = _turn_controller_dispatcher(bot, room, journal_store)
+    poison = _unplaceable_event("$poison", msgtype, server_timestamp=1_000)
+    later = _unplaceable_event("$later", "m.text", server_timestamp=2_000)
+
+    with (
+        patch.object(bot._conversation_resolver, "coalescing_thread_id", side_effect=unplaceable),
+        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as dispatch_mock,
+    ):
+        await admit_dispatch_event(dispatcher, room, poison, kind, EventClass.ACTIONABLE)
+        await admit_dispatch_event(dispatcher, room, later, EventKind.MESSAGE, EventClass.ACTIONABLE)
+        await dispatcher.drain_once()
+
+    assert resolved == ["$poison", "$later"]
+    assert not await dispatcher.store.pending(room_id=room.room_id)
+    assert not bot._turn_store.has_live_turn_claim("$poison")
+    dispatch_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transient_relation_lookup_failure_keeps_the_event_pending(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """A lookup that may answer next time leaves the event at the head of its lane for retry."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    dispatcher = _turn_controller_dispatcher(bot, room, journal_store)
+    event = _unplaceable_event("$message", "m.text", server_timestamp=1_000)
+
+    with (
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=ThreadMembershipLookupError("homeserver unavailable")),
+        ),
+        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as dispatch_mock,
+    ):
+        await admit_dispatch_event(dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
+        await dispatcher.drain_once()
+
+    assert [pending.event_id for pending in await dispatcher.store.pending(room_id=room.room_id)] == ["$message"]
+    assert not bot._turn_store.is_handled("$message")
+    dispatch_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1197,7 +1317,7 @@ async def test_lane_worker_failure_at_wait_phase_does_not_poison_lane() -> None:
 
 @pytest.mark.asyncio
 async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
-    """Follow-ups queued behind a response that fails still dispatch as the follow-up turn."""
+    """Follow-ups queued behind a response that fails still dispatch, one turn per requester."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first")
@@ -1260,15 +1380,14 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
 
         fail_response.set()
 
-        await _wait_for(lambda: len(generated) == 2)
-        assert "$f1" in generated[1][1]
-        assert "$f2" in generated[1][1]
+        await _wait_for(lambda: len(generated) == 3)
+        assert [source_event_id for source_event_id, _prompt in generated[1:]] == ["$f1", "$f2"]
         await runner.drain_inbox_responses()
 
 
 @pytest.mark.asyncio
 async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> None:
-    """Follow-ups queued behind a cancelled detached response still dispatch together."""
+    """Follow-ups queued behind a cancelled detached response still dispatch, one turn per requester."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     target = MessageTarget.resolve(room.room_id, "$thread", "$m0")
@@ -1317,8 +1436,9 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
         response_task.cancel()
         assert await runner.drain_inbox_responses() is True
 
-        await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$f1", "$f2"]])
-    assert calls[0].ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+        await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$f1"], ["$f2"]])
+    assert [batch.requester_user_id for batch in calls] == ["@alice:localhost", "@bob:localhost"]
+    assert all(batch.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND for batch in calls)
 
 
 @pytest.mark.asyncio
