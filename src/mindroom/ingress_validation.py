@@ -26,13 +26,10 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.event_info import reply_to_event_id_from_content
 from mindroom.matrix.media import is_audio_message_event
-from mindroom.relay_proof import relay_metadata_is_runtime_authored
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     import nio
 
     from mindroom.bot_runtime_view import BotRuntimeView
@@ -106,7 +103,6 @@ class IngressValidator:
                     sender_trusts_original_sender=self._should_trust_original_sender_metadata(
                         sender=sender,
                         source_kind=source_kind,
-                        content=content,
                     ),
                 )
                 requester_id = trusted_requester if trusted_requester is not None else sender
@@ -137,28 +133,13 @@ class IngressValidator:
         *,
         sender: str,
         source_kind: str | None,
-        content: Mapping[str, Any],
     ) -> bool:
         """Return whether original-sender metadata represents a trusted relay for this event."""
         sender_is_own_entity = sender == self.deps.matrix_id.full_id
         sender_agent_name = self.managed_entity_name_for_sender(sender)
         if sender_agent_name is None and not sender_is_own_entity:
             return False
-        if not self.original_sender_claim_is_runtime_authored(sender=sender, content=content):
-            return False
         return source_kind_allows_trusted_original_sender(source_kind)
-
-    def original_sender_claim_is_runtime_authored(self, *, sender: str, content: Mapping[str, Any]) -> bool:
-        """Return whether an original-sender claim carries this runtime's authorship proof.
-
-        Managed accounts also deliver model-authored content, so a claim to
-        speak for someone else is honoured only with the runtime's proof. A
-        claim that merely restates the transport sender names no other
-        identity, so in-process normalization needs no proof for it.
-        """
-        if content.get(ORIGINAL_SENDER_KEY) == sender:
-            return True
-        return relay_metadata_is_runtime_authored(content, self.deps.runtime_paths)
 
     @staticmethod
     def event_source_kind(event: DispatchEvent, content: dict[str, Any]) -> str | None:
@@ -202,21 +183,13 @@ class IngressValidator:
         if not self._should_trust_original_sender_metadata(
             sender=sender,
             source_kind=source_kind,
-            content=content,
         ):
             return None
         return original_sender
 
     def should_trust_internal_payload_metadata(self, event: DispatchEvent) -> bool:
         """Return whether internal payload keys on one event should be treated as authoritative."""
-        if not self.sender_is_trusted_for_ingress_metadata(event.sender):
-            return False
-        content = event.source.get("content") if isinstance(event.source, dict) else None
-        if not isinstance(content, dict):
-            return True
-        # An unproven original sender must not survive as payload metadata: a
-        # router relay would otherwise inherit it and re-stamp it as its own.
-        return self.original_sender_claim_is_runtime_authored(sender=event.sender, content=content)
+        return self.sender_is_trusted_for_ingress_metadata(event.sender)
 
     def is_trusted_internal_relay_event(self, event: DispatchEvent) -> bool:
         """Return whether one agent-authored relay should bypass user-turn coalescing."""

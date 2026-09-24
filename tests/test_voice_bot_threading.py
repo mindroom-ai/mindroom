@@ -31,7 +31,6 @@ from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.matrix.thread_membership import ThreadResolution
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.relay_proof import sign_relay_metadata
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -1441,7 +1440,6 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
             VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
         },
     )
-    sign_relay_metadata(echo_event.source["content"], bot.runtime_paths)
 
     with (
         patch.object(

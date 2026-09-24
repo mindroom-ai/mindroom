@@ -54,7 +54,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.relay_proof import sign_relay_metadata
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
@@ -741,7 +740,6 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
             },
         },
     )
-    sign_relay_metadata(event.source["content"], bot.runtime_paths)
     trusted_context = MessageContext(
         am_i_mentioned=True,
         is_thread=True,
@@ -2189,7 +2187,6 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
             },
         },
     )
-    sign_relay_metadata(event.source["content"], bot.runtime_paths)
 
     prechecked = await bot._turn_controller._precheck_dispatch_event(room, event)
 

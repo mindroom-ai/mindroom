@@ -18,7 +18,6 @@ from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.matrix import stale_stream_cleanup
-from mindroom.relay_proof import sign_relay_metadata
 from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids
@@ -106,39 +105,23 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
         == "@untrusted:localhost"
     )
     agent_id = ids["test_agent"]
-    relay_content = {
-        "msgtype": "m.text",
-        "body": f"{agent_id.full_id} do work",
-        "m.mentions": {"user_ids": [agent_id.full_id]},
-        ORIGINAL_SENDER_KEY: bridge_human,
-        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-    }
-    forged_content = dict(relay_content)
-    sign_relay_metadata(relay_content, runtime_paths)
     event = nio.RoomMessageText.from_dict(
         {
             "event_id": "$spawn",
             "sender": agent_id.full_id,
             "origin_server_ts": 1234567890,
-            "content": relay_content,
+            "content": {
+                "msgtype": "m.text",
+                "body": f"{agent_id.full_id} do work",
+                "m.mentions": {"user_ids": [agent_id.full_id]},
+                ORIGINAL_SENDER_KEY: bridge_human,
+                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            },
         },
     )
     room = nio.MatrixRoom("!room:localhost", agent_id.full_id)
 
     assert await validator.precheck_event(room, event) == canonical_human
-
-    # The same claim without this runtime's proof is model-authored content.
-    forged_event = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$forged",
-            "sender": agent_id.full_id,
-            "origin_server_ts": 1234567890,
-            "content": forged_content,
-        },
-    )
-    assert validator.requester_user_id(sender=agent_id.full_id, source=forged_event.source) == agent_id.full_id
-    assert not validator.should_trust_internal_payload_metadata(forged_event)
-    assert await validator.precheck_event(room, forged_event) is None
     ingress_metadata = DispatchIngressMetadata(source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND)
     router_event = nio.RoomMessageText.from_dict(
         {

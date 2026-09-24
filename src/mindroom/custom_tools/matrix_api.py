@@ -11,7 +11,6 @@ from typing import Any, ClassVar
 import nio
 from agno.tools import Toolkit
 
-from mindroom.constants import RELAY_PROOF_KEY
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
@@ -303,44 +302,6 @@ class MatrixApiTools(Toolkit):
         return sorted(found)
 
     @classmethod
-    def _without_relay_proof(cls, value: object) -> object:
-        """Return *value* with runtime relay proofs removed wherever they appear.
-
-        A proof is the runtime's signature over one relayed identity, so handing
-        one back to the model would give it a token to replay. The identity and
-        source kind stay visible: they are what the event says, not authority.
-
-        Like the reserved-key scan, the rebuild keeps its own stack: this walks
-        event content the homeserver returned, which can nest deeper than the
-        interpreter's.
-        """
-        if not isinstance(value, (dict, list)):
-            return value
-        root: dict[str, object] | list[object] = {} if isinstance(value, dict) else []
-        pending: list[tuple[object, dict[str, object] | list[object]]] = [(value, root)]
-        while pending:
-            source, destination = pending.pop()
-            if isinstance(source, dict) and isinstance(destination, dict):
-                for key, item in source.items():
-                    if isinstance(key, str) and key != RELAY_PROOF_KEY:
-                        destination[key] = cls._rebuilt_child(item, pending)
-            elif isinstance(source, list) and isinstance(destination, list):
-                destination.extend(cls._rebuilt_child(item, pending) for item in source)
-        return root
-
-    @staticmethod
-    def _rebuilt_child(
-        item: object,
-        pending: list[tuple[object, dict[str, object] | list[object]]],
-    ) -> object:
-        """Return the child to place now, queueing containers to fill in later."""
-        if not isinstance(item, (dict, list)):
-            return item
-        child: dict[str, object] | list[object] = {} if isinstance(item, dict) else []
-        pending.append((item, child))
-        return child
-
-    @classmethod
     def _is_reserved_name(cls, name: str) -> bool:
         """Return whether one content key or event type belongs to MindRoom's runtime namespaces."""
         return name.startswith(cls._RESERVED_MINDROOM_PREFIXES)
@@ -357,11 +318,11 @@ class MatrixApiTools(Toolkit):
         """Reject writes to event types MindRoom's own runtime owns and reads back.
 
         A runtime-owned event is an instruction, not a message: a scheduled
-        task's state event names the requester its fire will later speak for,
-        and the runtime signs that identity when it fires. Rejecting reserved
-        content keys is not enough, because such a payload can carry the
-        identity inside a field of its own -- so the model must not be able to
-        author one of these events from the agent's Matrix account at all.
+        task's state event names the requester its fire will later speak for.
+        Rejecting reserved content keys is not enough, because such a payload
+        can carry the identity inside a field of its own -- so the model must
+        not be able to author one of these events from the agent's Matrix
+        account at all.
         """
         if not cls._is_reserved_name(event_type):
             return None
@@ -1034,7 +995,7 @@ class MatrixApiTools(Toolkit):
                 event_type=normalized_event_type,
                 state_key=resolved_state_key,
                 found=True,
-                content=self._without_relay_proof(response.content),
+                content=response.content,
             )
         return self._error_payload(
             action="get_state",
@@ -1367,7 +1328,7 @@ class MatrixApiTools(Toolkit):
                 "room_id": room_id,
                 "event_id": normalized_event_id,
                 "found": True,
-                "event": self._without_relay_proof(raw_event),
+                "event": raw_event,
             }
             if "type" in raw_event:
                 payload["event_type"] = raw_event["type"]

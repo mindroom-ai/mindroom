@@ -13,7 +13,6 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
-    RELAY_PROOF_KEY,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
 )
@@ -24,7 +23,6 @@ from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, content
 from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.media import is_matrix_media_dispatch_event
-from mindroom.relay_proof import sign_relay_metadata
 from mindroom.routing import suggest_responder_for_message
 from mindroom.turn_origin import original_sender_for_router_handoff
 from mindroom.turn_record import canonicalize_turn_record
@@ -151,7 +149,6 @@ async def _send_router_relay_after_readiness_recheck(
     fallback_extra_content = dict(delivery_request.extra_content or {})
     fallback_extra_content.pop(ORIGINAL_SENDER_KEY, None)
     fallback_extra_content.pop(SOURCE_KIND_KEY, None)
-    fallback_extra_content.pop(RELAY_PROOF_KEY, None)
     fallback_request = replace(
         delivery_request,
         response_text=_ROUTER_TARGET_STARTING_TEXT if final_readiness is False else _ROUTER_TARGET_UNAVAILABLE_TEXT,
@@ -193,7 +190,6 @@ def _router_handoff_extra_content(
     if handoff_original_sender is not None:
         routed_extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
         routed_extra_content[ORIGINAL_SENDER_KEY] = handoff_original_sender
-    sign_relay_metadata(routed_extra_content, deps.runtime_paths)
     event_content = event.source.get("content") if isinstance(event.source, dict) else None
     if (
         deps.ingress.sender_is_trusted_for_ingress_metadata(event.sender)

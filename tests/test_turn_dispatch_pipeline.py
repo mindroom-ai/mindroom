@@ -104,7 +104,6 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids
-from tests.relay_helpers import signed_relay_content
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_hydrated_conversation, seed_thread_history
 from tests.turn_dispatch_helpers import dispatch_test_turn
@@ -1175,15 +1174,12 @@ class TestAgentBot(AgentBotTestBase):
                 "event_id": "$relay",
                 "sender": "@mindroom_router:localhost",
                 "origin_server_ts": 1234567890,
-                "content": signed_relay_content(
-                    {
-                        "msgtype": "m.text",
-                        "body": "@mindroom_calculator:localhost could you help with this?",
-                        ORIGINAL_SENDER_KEY: "@user:localhost",
-                        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-                    },
-                    config,
-                ),
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "@mindroom_calculator:localhost could you help with this?",
+                    ORIGINAL_SENDER_KEY: "@user:localhost",
+                    SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                },
             },
         )
 
@@ -1222,22 +1218,18 @@ class TestAgentBot(AgentBotTestBase):
 
     @staticmethod
     def _router_relay_event(
-        config: Config,
         *,
         sender: str = "@mindroom_router:localhost",
         reply_to: str | None = "$user_msg:localhost",
         is_falling_back: bool = False,
         body: str = "@mindroom_calculator:localhost could you help with this?",
     ) -> nio.RoomMessageText:
-        content: dict[str, Any] = signed_relay_content(
-            {
-                "msgtype": "m.text",
-                "body": body,
-                ORIGINAL_SENDER_KEY: "@user:localhost",
-                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            },
-            config,
-        )
+        content: dict[str, Any] = {
+            "msgtype": "m.text",
+            "body": body,
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        }
         if reply_to is not None:
             content["m.relates_to"] = {
                 "rel_type": "m.thread",
@@ -1267,7 +1259,7 @@ class TestAgentBot(AgentBotTestBase):
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.canonical_alias = None
-        event = self._router_relay_event(config)
+        event = self._router_relay_event()
 
         with (
             patch.object(
@@ -1302,12 +1294,11 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         validator = bot._ingress_validator
 
-        explicit_relay = self._router_relay_event(config)
-        fallback_relay = self._router_relay_event(config, reply_to="$latest:localhost", is_falling_back=True)
-        replyless_relay = self._router_relay_event(config, reply_to=None)
-        non_router_relay = self._router_relay_event(config, sender="@mindroom_general:localhost")
+        explicit_relay = self._router_relay_event()
+        fallback_relay = self._router_relay_event(reply_to="$latest:localhost", is_falling_back=True)
+        replyless_relay = self._router_relay_event(reply_to=None)
+        non_router_relay = self._router_relay_event(sender="@mindroom_general:localhost")
         auto_resume_relay = self._router_relay_event(
-            config,
             reply_to="$interrupted_bot_message:localhost",
             body=AUTO_RESUME_MESSAGE,
         )
@@ -1364,16 +1355,13 @@ class TestAgentBot(AgentBotTestBase):
                 "origin_server_ts": 1234567890,
                 "room_id": room.room_id,
                 "type": "m.room.message",
-                "content": signed_relay_content(
-                    {
-                        "msgtype": "m.text",
-                        "body": "@CalculatorAgent Campground opened",
-                        "m.mentions": {"user_ids": [ids["calculator"].full_id]},
-                        SOURCE_KIND_KEY: EXTERNAL_TRIGGER_SOURCE_KIND,
-                        ORIGINAL_SENDER_KEY: "@owner:localhost",
-                    },
-                    config,
-                ),
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "@CalculatorAgent Campground opened",
+                    "m.mentions": {"user_ids": [ids["calculator"].full_id]},
+                    SOURCE_KIND_KEY: EXTERNAL_TRIGGER_SOURCE_KIND,
+                    ORIGINAL_SENDER_KEY: "@owner:localhost",
+                },
             },
         )
 
@@ -1512,7 +1500,7 @@ class TestAgentBot(AgentBotTestBase):
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.members_synced = True
-        event = self._router_relay_event(config)
+        event = self._router_relay_event()
         ingress_started = asyncio.Event()
         release_ingress = asyncio.Event()
 
@@ -1693,7 +1681,7 @@ class TestAgentBot(AgentBotTestBase):
             body = "@person:localhost could you help with this?"
             mentioned_user_id = "@person:localhost"
             room.add_member(mentioned_user_id, "Person", None)
-        event = self._router_relay_event(config, body=body)
+        event = self._router_relay_event(body=body)
         event.source["content"]["m.mentions"] = {"user_ids": [mentioned_user_id]}
         prepared_event = PreparedIngress(
             sender=event.sender,
@@ -1758,7 +1746,7 @@ class TestAgentBot(AgentBotTestBase):
         else:
             body = "could you help with this?"
             mentioned_user_ids = []
-        event = self._router_relay_event(config, body=body)
+        event = self._router_relay_event(body=body)
         if mentioned_user_ids:
             event.source["content"]["m.mentions"] = {"user_ids": mentioned_user_ids}
         prepared_event = PreparedIngress(
@@ -1817,15 +1805,12 @@ class TestAgentBot(AgentBotTestBase):
                 "origin_server_ts": 1234567890,
                 "room_id": room.room_id,
                 "type": "m.room.message",
-                "content": signed_relay_content(
-                    {
-                        "msgtype": "m.text",
-                        "body": f"@mindroom_calculator:localhost {source_kind} says hello",
-                        SOURCE_KIND_KEY: source_kind,
-                        ORIGINAL_SENDER_KEY: "@user:localhost",
-                    },
-                    config,
-                ),
+                "content": {
+                    "msgtype": "m.text",
+                    "body": f"@mindroom_calculator:localhost {source_kind} says hello",
+                    SOURCE_KIND_KEY: source_kind,
+                    ORIGINAL_SENDER_KEY: "@user:localhost",
+                },
             },
         )
         prepared_event = PreparedIngress(

@@ -55,7 +55,6 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.relay_helpers import signed_relay_content
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -222,14 +221,11 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     event.event_id = "test_event"
     event.server_timestamp = 1234567890
     event.source = {
-        "content": signed_relay_content(
-            {
-                "body": "🎤 !schedule daily",
-                ORIGINAL_SENDER_KEY: "@alice:example.com",
-                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
-            },
-            bot.config,
-        ),
+        "content": {
+            "body": "🎤 !schedule daily",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
+            SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+        },
     }
 
     with (
@@ -340,21 +336,18 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
             "sender": "@mindroom_router:example.com",
             "origin_server_ts": 1234567890,
             "type": "m.room.message",
-            "content": signed_relay_content(
-                {
-                    "msgtype": "m.file",
-                    "body": "!schedule tomorrow [Message continues in attached file]",
-                    "info": {"mimetype": "application/json"},
-                    "io.mindroom.long_text": {
-                        "version": 2,
-                        "encoding": "matrix_event_content_json",
-                    },
-                    "url": "mxc://server/sidecar-relay",
-                    ORIGINAL_SENDER_KEY: "@alice:example.com",
-                    SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+            "content": {
+                "msgtype": "m.file",
+                "body": "!schedule tomorrow [Message continues in attached file]",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
                 },
-                bot.config,
-            ),
+                "url": "mxc://server/sidecar-relay",
+                ORIGINAL_SENDER_KEY: "@alice:example.com",
+                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+            },
         },
     )
 
@@ -1616,15 +1609,12 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
     assert VOICE_RAW_AUDIO_FALLBACK_KEY not in edit_request.extra_content
     assert handoff_request.target.reply_to_event_id == "$voice_event"
     assert handoff_request.response_text == "@home could you help with this?"
-    assert handoff_request.extra_content == signed_relay_content(
-        {
-            ORIGINAL_SENDER_KEY: "@alice:example.com",
-            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
-            VOICE_TRANSCRIPT_KEY: True,
-        },
-        bot.config,
-    )
+    assert handoff_request.extra_content == {
+        ORIGINAL_SENDER_KEY: "@alice:example.com",
+        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
+        VOICE_TRANSCRIPT_KEY: True,
+    }
     finalized_echo = bot._turn_store.finalized_visible_echo(event.event_id)
     assert finalized_echo is not None
     assert finalized_echo.event_id == "$voice_echo"
@@ -1828,15 +1818,12 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     assert request.target.resolved_thread_id == "$voice_event"
     assert request.target.resolved_thread_id == "$voice_event"
     assert request.response_text == "@home could you help with this?"
-    assert request.extra_content == signed_relay_content(
-        {
-            ORIGINAL_SENDER_KEY: "@alice:example.com",
-            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
-            VOICE_TRANSCRIPT_KEY: True,
-        },
-        bot.config,
-    )
+    assert request.extra_content == {
+        ORIGINAL_SENDER_KEY: "@alice:example.com",
+        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
+        VOICE_TRANSCRIPT_KEY: True,
+    }
     turn_store.record_turn.assert_called_once()
     record = turn_store.get_turn_record("$voice_event")
     assert record is not None
