@@ -20526,11 +20526,19 @@ Every tool declares how its own file access relates to this setting.
 | Tool class | Tools | Behavior |
 |---|---|---|
 | Path tools | `file`, `coding`, `attachments`, `matrix_message`, `gmail`, `google_drive`, `browser` uploads | Follow the agent's `file_access` |
-| Code-execution tools | `shell`, `python`, `docker`, `script`, `claude_agent` | Always `unrestricted`; authored config may only state `file_access: unrestricted` |
+| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `e2b`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `agentql`, `newspaper`, `slack`, `web_browser_tools`) | Always `unrestricted`, meaning not confined by `file_access`; only a worker isolates them, and authored config may only state `file_access: unrestricted` |
 | Other tools | Everything else | Take no local file paths |
 
-MindRoom logs a warning when an agent routes code tools to a worker but sets `file_access: unrestricted`, because its primary-process path tools can then read runtime secrets.
-The model sees the effective file access in its tool execution environment description.
+Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above carry it.
+MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
+The model sees the effective file access and the unconfined tools in its tool execution environment description.
+
+## Known gaps
+
+These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
+
+- The unconfined non-code tools listed above do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
+- SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
 
 ## Intentional behaviors
 
@@ -20539,7 +20547,7 @@ Do not report or "fix" these; they are deliberate.
 - Code-execution tools in the primary process can read, write, and upload anything the MindRoom process can reach.
 - No in-process path, command, or import filter is added to `shell`, `python`, or any other code-execution tool.
 - An operator who runs MindRoom without workers, for example inside a dedicated LXC container or VM, has chosen full trust; `file_access: unrestricted` matches that choice.
-- `file_access: unrestricted` is allowed together with worker routing; it logs a warning instead of failing.
+- `file_access: unrestricted`, or unconfined tools in the primary process, are allowed together with worker routing; they log a warning instead of failing.
 - Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
 - With `file_access: workspace`, the browser, attachments, `matrix_message`, Gmail, and Google Drive may still use every file in the agent workspace.
 - The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail and Google Drive take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.

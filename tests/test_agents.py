@@ -597,11 +597,11 @@ def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_acc
             unrestricted_tool_names=("python", "shell"),
         )
         assert expected in rendered
-        assert "- Always unrestricted (they run arbitrary programs): `python`, `shell`." in rendered
+        assert "- Not confined by file_access (only a worker isolates them): `python`, `shell`." in rendered
 
 
 def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(tmp_path: Path) -> None:
-    """No code-execution tools means no always-unrestricted line."""
+    """Without unconfined tools there is no unconfined-tools line."""
     rendered = _render_tool_execution_environment(
         runtime_paths=_runtime_paths(tmp_path),
         local_tool_names=("gmail",),
@@ -610,7 +610,7 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         file_access="workspace",
         unrestricted_tool_names=(),
     )
-    assert "Always unrestricted" not in rendered
+    assert "Not confined by file_access" not in rendered
 
 
 @patch("mindroom.agents.get_tool_by_name", side_effect=ImportError("dependency missing"))

@@ -13,6 +13,7 @@
       "description": "Open MindRoom Chat UI for the user: show the agent's worker browser in the Computer panel with open_panel(panel='computer'), open Settings, or show room members. Sends a UI request; does not navigate or control the user's local browser.",
       "display_name": "Chat UI",
       "docs_url": "https://docs.mindroom.chat/tools/chat-ui/",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "show_computer",
@@ -126,6 +127,7 @@
       "description": "Tool for interacting with Discord channels and servers",
       "display_name": "Discord",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/discord",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "delete_message",
@@ -158,6 +160,7 @@
       "description": "Invite the MindRoom router to the current Matrix room",
       "display_name": "Invite Router",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "invite_router"
@@ -184,6 +187,7 @@
       "description": "Low-level Matrix event, state, and room search operations (send_event, get_state, put_state, redact, get_event, search)",
       "display_name": "Matrix API",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "matrix_api"
@@ -209,6 +213,7 @@
       "description": "Read, send, edit, and react to messages in Matrix rooms and threads",
       "display_name": "Matrix Message",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
       "file_access": "agent",
       "function_names": [
         "matrix_message"
@@ -234,6 +239,7 @@
       "description": "Discover available agents and view Matrix room details, members, and conversation threads",
       "display_name": "Matrix Room",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "matrix_room"
@@ -320,6 +326,7 @@
       "description": "Turn text into speech and send it as a Matrix voice message",
       "display_name": "Matrix Voice Message",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "matrix_voice_message"
@@ -586,7 +593,8 @@
       "description": "Send messages and manage channels",
       "display_name": "Slack",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/slack",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "download_file",
         "get_channel_history",
@@ -840,6 +848,7 @@
       "description": "Send messages and media, manage messages, and read chat details via a Telegram bot",
       "display_name": "Telegram",
       "docs_url": "https://core.telegram.org/bots/api",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "delete_message",
@@ -877,6 +886,7 @@
       "description": "Mark conversation threads as resolved or reopen them",
       "display_name": "Thread Resolution",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "reopen_thread",
@@ -903,6 +913,7 @@
       "description": "Write or update a summary of a conversation thread",
       "display_name": "Thread Summary",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "set_thread_summary"
@@ -928,6 +939,7 @@
       "description": "Add, remove, and view tags on conversation threads",
       "display_name": "Thread Tags",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "list_thread_tags",
@@ -1088,6 +1100,7 @@
       "description": "SMS messaging and voice communication platform",
       "display_name": "Twilio",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/twilio",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_call_details",
@@ -1164,6 +1177,7 @@
       "description": "Video conferencing and messaging platform for teams",
       "display_name": "Webex",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/webex",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "list_rooms",
@@ -1359,6 +1373,7 @@
       "description": "Send text and template messages via WhatsApp Business API",
       "display_name": "WhatsApp Business",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/whatsapp",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "send_document",
@@ -1438,7 +1453,8 @@
       "description": "Apache Airflow DAG file management for workflow orchestration",
       "display_name": "Airflow",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/airflow",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "read_dag_file",
         "save_dag_file"
@@ -1489,6 +1505,7 @@
       "description": "Web scraping, crawling, data extraction, and web automation platform with ready-to-use Actors",
       "display_name": "Apify",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/apify",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "register_actor"
@@ -1563,6 +1580,7 @@
       "description": "Serverless function management and execution",
       "display_name": "AWS Lambda",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/aws_lambda",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "invoke_function",
@@ -1686,6 +1704,7 @@
       "description": "Manage Bitbucket repositories, pull requests, commits, and issues",
       "display_name": "Bitbucket",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/bitbucket",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "create_repository",
@@ -1840,6 +1859,7 @@
       "description": "Calendar scheduling and booking management",
       "display_name": "Cal.com",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/calcom",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "cancel_booking",
@@ -1869,6 +1889,7 @@
       "description": "Mathematical calculator with basic and advanced operations",
       "display_name": "Calculator",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/calculator",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "add",
@@ -1986,6 +2007,7 @@
       "description": "Voice AI services including text-to-speech and voice localization",
       "display_name": "Cartesia",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/cartesia",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "list_voices",
@@ -2194,6 +2216,7 @@
       "description": "Run persistent Claude coding sessions with tool-use and subagents",
       "display_name": "Claude Agent SDK",
       "docs_url": "https://platform.claude.com/docs/en/agent-sdk/python",
+      "executes_code": true,
       "file_access": "unrestricted",
       "function_names": [
         "claude_end_session",
@@ -2235,6 +2258,7 @@
       "description": "Find code, search across files, and make precise edits",
       "display_name": "Coding Tools",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "agent",
       "function_names": [
         "edit_file",
@@ -2267,6 +2291,7 @@
       "description": "Inspect and control the full MindRoom configuration, including agents, plugins, and authorization",
       "display_name": "Config Manager",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_info",
@@ -2357,6 +2382,7 @@
       "description": "Atlassian wiki platform for retrieving, creating, and updating pages",
       "display_name": "Confluence",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/confluence",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "create_page",
@@ -2496,6 +2522,7 @@
       "description": "Make HTTP requests to any external API with customizable authentication and parameters",
       "display_name": "Custom API",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/custom_api",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "make_request"
@@ -2738,6 +2765,7 @@
       "description": "Execute code in secure, remote sandbox environments",
       "display_name": "Daytona",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/daytona",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "change_directory",
@@ -2783,6 +2811,7 @@
       "description": "Container, image, volume, and network management",
       "display_name": "Docker",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/docker",
+      "executes_code": true,
       "file_access": "unrestricted",
       "function_names": [
         "build_image",
@@ -2829,6 +2858,7 @@
       "description": "Load and unload deferred tools for the current session",
       "display_name": "Dynamic Tools",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "list_tools",
@@ -2894,7 +2924,8 @@
       "description": "Code execution sandbox environment with Python, file operations, and web server capabilities",
       "display_name": "E2B Code Execution",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/e2b",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "download_chart_data",
         "download_file_from_sandbox",
@@ -3047,6 +3078,7 @@
       "description": "Text-to-speech and sound effect generation using AI voices",
       "display_name": "Eleven Labs",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/eleven_labs",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "generate_sound_effect",
@@ -3135,6 +3167,7 @@
       "description": "AI model serving platform for media generation (images and videos)",
       "display_name": "Fal",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/fal",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "generate_media",
@@ -3343,6 +3376,7 @@
       "description": "Read, write, list, and search files in the agent workspace",
       "display_name": "File Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/file",
+      "executes_code": false,
       "file_access": "agent",
       "function_names": [
         "delete_file",
@@ -3497,6 +3531,7 @@
       "description": "Generate JSON, CSV, PDF, DOCX, HTML, and text files from data",
       "display_name": "File Generation",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/file_generation",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "generate_code_file",
@@ -3553,6 +3588,7 @@
       "description": "Comprehensive financial data API for stocks, financial statements, SEC filings, and cryptocurrency",
       "display_name": "Financial Datasets API",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/financial_datasets",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_balance_sheets",
@@ -3700,6 +3736,7 @@
       "description": "Google AI API services for generating images and videos using Gemini models",
       "display_name": "Gemini",
       "docs_url": "https://docs.agno.com/tools/toolkits/models/gemini",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "generate_image",
@@ -3775,6 +3812,7 @@
       "description": "GIF search and integration",
       "display_name": "Giphy",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/giphy",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "search_gifs"
@@ -3825,6 +3863,7 @@
       "description": "Browse code and manage GitHub repositories, issues, and pull requests",
       "display_name": "GitHub",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/github",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "assign_issue",
@@ -3989,6 +4028,7 @@
       "description": "Query Google BigQuery - list tables, describe schemas, and run SQL queries",
       "display_name": "Google BigQuery",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_bigquery",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "describe_table",
@@ -4126,6 +4166,7 @@
       "description": "Tools for interacting with Google Maps services including place search, directions, geocoding, and more",
       "display_name": "Google Maps",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_maps",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "geocode_address",
@@ -4221,6 +4262,7 @@
       "description": "Read, create, and update Google Sheets spreadsheets",
       "display_name": "Google Sheets",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_sheets",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "create_sheet",
@@ -4358,7 +4400,8 @@
       "description": "Fast AI inference for audio transcription, translation, and text-to-speech",
       "display_name": "Groq",
       "docs_url": "https://docs.agno.com/tools/toolkits/models/groq",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "generate_speech",
         "transcribe_audio",
@@ -4506,6 +4549,7 @@
       "description": "Issue tracking and project management",
       "display_name": "Jira",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/jira",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "add_comment",
@@ -4548,6 +4592,7 @@
       "description": "Issue tracking and project management",
       "display_name": "Linear",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/linear",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "create_issue",
@@ -4686,6 +4731,7 @@
       "description": "3D content creation and video generation using Luma AI Dream Machine",
       "display_name": "Luma Labs",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/lumalabs",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "generate_video",
@@ -4809,6 +4855,7 @@
       "description": "AI model marketplace for generating images, videos, audio, and GIFs from text prompts",
       "display_name": "ModelsLabs",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/models_labs",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "generate_media"
@@ -4883,7 +4930,8 @@
       "description": "Process videos, extract audio, generate SRT caption files, and embed rich word-highlighted captions",
       "display_name": "MoviePy Video Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/moviepy",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "create_caption_clips",
         "create_srt",
@@ -5022,6 +5070,7 @@
       "description": "Query Neo4j graph databases - list labels, relationships, get schema, and run Cypher queries",
       "display_name": "Neo4j",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/neo4j",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_schema",
@@ -5207,7 +5256,8 @@
       "description": "AI-powered tools for transcription, image generation, and speech synthesis",
       "display_name": "OpenAI",
       "docs_url": "https://docs.agno.com/tools/toolkits/models/openai",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "generate_image",
         "generate_speech",
@@ -5232,6 +5282,7 @@
       "description": "Convenience bundle that implies shell, coding, browser, and other common tools",
       "display_name": "OpenClaw Compat",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [],
       "helper_text": "Implies: shell, coding, duckduckgo, website, browser, scheduler, matrix_message, attachments, matrix_room.",
@@ -5352,6 +5403,7 @@
       "description": "Weather data services from OpenWeatherMap API",
       "display_name": "OpenWeather",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/openweather",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "geocode_location",
@@ -5465,7 +5517,8 @@
       "description": "Query PostgreSQL databases - list tables, describe schemas, run SQL queries, and export data",
       "display_name": "PostgreSQL",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/postgres",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "describe_table",
         "export_table_to_path",
@@ -5532,6 +5585,7 @@
       "description": "Execute Python code, manage files, and install packages",
       "display_name": "Python Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/python",
+      "executes_code": true,
       "file_access": "unrestricted",
       "function_names": [
         "list_files",
@@ -5646,6 +5700,7 @@
       "description": "Step-by-step reasoning scratchpad with think and analyze tools for structured problem solving",
       "display_name": "Reasoning",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/reasoning",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "analyze",
@@ -5854,7 +5909,8 @@
       "description": "Query Amazon Redshift data warehouse - list tables, run SQL, and export results",
       "display_name": "Amazon Redshift",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/redshift",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "describe_table",
         "export_table_to_path",
@@ -5933,6 +5989,7 @@
       "description": "Generate images and videos using AI models on the Replicate platform",
       "display_name": "Replicate",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/replicate",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "generate_media"
@@ -6013,6 +6070,7 @@
       "description": "Run Python scripts in the background, monitor them, or cancel them",
       "display_name": "Background Scripts",
       "docs_url": null,
+      "executes_code": true,
       "file_access": "unrestricted",
       "function_names": [
         "start_script",
@@ -6041,6 +6099,7 @@
       "description": "Allow an agent to read and modify its own configuration",
       "display_name": "Self Config",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_own_config",
@@ -6151,6 +6210,7 @@
       "description": "Run terminal commands and scripts in the agent workspace",
       "display_name": "Shell Commands",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/shell",
+      "executes_code": true,
       "file_access": "unrestricted",
       "function_names": [
         "check_shell_command",
@@ -6203,6 +6263,7 @@
       "description": "Sleep utility for introducing delays and pauses in execution",
       "display_name": "Sleep",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/sleep",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "sleep"
@@ -6265,6 +6326,7 @@
       "description": "Project board management with Trello API integration",
       "display_name": "Trello",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/trello",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "create_board",
@@ -6381,7 +6443,8 @@
       "description": "Create bar charts, line charts, pie charts, scatter plots, and histograms using matplotlib",
       "display_name": "Visualization",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/visualization",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "create_bar_chart",
         "create_histogram",
@@ -6433,7 +6496,8 @@
       "description": "Open URLs in web browser tabs or windows",
       "display_name": "Web Browser Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/web-browser",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "open_page"
       ],
@@ -6531,6 +6595,7 @@
       "description": "Customer support platform for searching help center articles",
       "display_name": "Zendesk",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/zendesk",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "search_zendesk"
@@ -6617,6 +6682,7 @@
       "description": "Send emails using Amazon Simple Email Service",
       "display_name": "AWS SES",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/aws_ses",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "send_email"
@@ -6713,6 +6779,7 @@
       "description": "Send emails via SMTP (Gmail)",
       "display_name": "Email",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/email",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "email_user"
@@ -6838,6 +6905,7 @@
       "description": "Search, read, send, and organize email in Gmail",
       "display_name": "Gmail",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/gmail",
+      "executes_code": false,
       "file_access": "agent",
       "function_names": [
         "apply_label",
@@ -6938,6 +7006,7 @@
       "description": "Email delivery service for sending transactional emails",
       "display_name": "Resend",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/resend",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "send_email"
@@ -7000,6 +7069,7 @@
       "description": "Search tracks, manage playlists, get recommendations, and control playback on Spotify",
       "display_name": "Spotify",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/spotify",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "add_tracks_to_playlist",
@@ -7115,6 +7185,7 @@
       "description": "Extract video data, captions, and timestamps from YouTube videos",
       "display_name": "YouTube",
       "docs_url": "https://docs.agno.com/tools/toolkits/entertainment/youtube",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_video_timestamps",
@@ -7142,6 +7213,7 @@
       "description": "Add daily-cached installed and latest MindRoom release information to the agent system prompt",
       "display_name": "MindRoom Update Awareness",
       "docs_url": "https://docs.mindroom.chat/tools/#mindroom-update-awareness",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_mindroom_update_status"
@@ -7180,6 +7252,7 @@
       "description": "Inspect retained token usage without modifying session storage",
       "display_name": "Usage Statistics",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_my_usage",
@@ -7293,6 +7366,7 @@
       "description": "Get a link to manage this agent's passwords and API keys in Agent Vault",
       "display_name": "Agent Vault Access",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "request_vault_access"
@@ -7330,6 +7404,7 @@
       "description": "Request approval for temporary access to a blocked website or service",
       "display_name": "Network Access Requests",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "request_network_access"
@@ -7561,7 +7636,8 @@
       "description": "Access 1000+ integrations including Gmail, Salesforce, GitHub, and more",
       "display_name": "Composio",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/composio",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [],
       "helper_text": null,
       "icon": "FaConnectdevelop",
@@ -7585,6 +7661,7 @@
       "description": "Get a confirmation link to reset an account connection for this agent",
       "display_name": "OAuth Connections",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "reset_oauth_connection"
@@ -7660,6 +7737,7 @@
       "description": "Analyze sales data, products, orders, and customer insights from your Shopify store",
       "display_name": "Shopify",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/shopify",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_average_order_value",
@@ -7696,6 +7774,7 @@
       "description": "Find files attached to a conversation and make workspace files available as attachments",
       "display_name": "Attachments",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "agent",
       "function_names": [
         "get_attachment",
@@ -7725,6 +7804,7 @@
       "description": "Create a single-use script that wakes this agent when background work finishes",
       "display_name": "Callback Manager",
       "docs_url": "https://docs.mindroom.chat/agent-callbacks/",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "mint_callback"
@@ -7788,6 +7868,7 @@
       "description": "Manage tasks, spaces, and lists in ClickUp project management",
       "display_name": "ClickUp",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/clickup",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "create_task",
@@ -7817,6 +7898,7 @@
       "description": "Request context compaction before the next reply in this conversation scope",
       "display_name": "Context Compaction",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "compact_context"
@@ -7951,7 +8033,8 @@
       "description": "CSV file analysis and querying with SQL support",
       "display_name": "CSV Toolkit",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/csv",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "get_columns",
         "list_csv_files",
@@ -7977,6 +8060,7 @@
       "description": "Start allowed subagents, continue their conversations, and return their results",
       "display_name": "Subagents",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "run_subagent",
@@ -8014,6 +8098,7 @@
       "description": "Let the agent interact with desktop apps you explicitly allow",
       "display_name": "Matrix Desktop",
       "docs_url": "https://docs.mindroom.chat/tools/desktop/",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "desktop"
@@ -8101,7 +8186,8 @@
       "description": "In-memory analytical database for data processing and analysis",
       "display_name": "DuckDB",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/duckdb",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "create_fts_index",
         "create_table_from_path",
@@ -8151,6 +8237,7 @@
       "description": "Create, update, run, and inspect reusable multi-agent Dynamic Workflows",
       "display_name": "Dynamic Workflows",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "create_workflow",
@@ -8182,6 +8269,7 @@
       "description": "Create and manage signed external trigger endpoints",
       "display_name": "External Trigger Manager",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "create_trigger",
@@ -8240,6 +8328,7 @@
       "description": "View calendars and create or update events in Google Calendar",
       "display_name": "Google Calendar",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/googlecalendar",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "check_availability",
@@ -8319,6 +8408,7 @@
       "description": "Create, read, and edit documents through the connected user's Google Docs",
       "display_name": "Google Docs",
       "docs_url": "https://developers.google.com/workspace/docs/api/reference/rest",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "google_docs_create_document",
@@ -8424,6 +8514,7 @@
       "description": "Search, read, upload, and organize files in Google Drive",
       "display_name": "Google Drive",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_drive",
+      "executes_code": false,
       "file_access": "agent",
       "function_names": [
         "google_drive_list_files",
@@ -8579,6 +8670,7 @@
       "description": "Persistent memory system that stores, retrieves, searches, and manages user memories and context",
       "display_name": "Mem0 Memory",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/mem0",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "add_memory",
@@ -8606,6 +8698,7 @@
       "description": "Save, find, and update information the agent remembers",
       "display_name": "Agent Memory",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "add_memory",
@@ -8709,6 +8802,7 @@
       "description": "Create, update, and search pages in Notion databases",
       "display_name": "Notion",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/notion",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "create_page",
@@ -8845,6 +8939,7 @@
       "description": "Get stock prices, company news, price targets, and company profiles from OpenBB financial platform",
       "display_name": "OpenBB",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/openbb",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_company_news",
@@ -8911,7 +9006,8 @@
       "description": "Advanced data manipulation and analysis",
       "display_name": "Pandas",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/pandas",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "create_pandas_dataframe",
         "run_dataframe_operation"
@@ -8936,6 +9032,7 @@
       "description": "Share reports through public links that you can revoke",
       "display_name": "Report Publishing",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "publish_report",
@@ -8962,6 +9059,7 @@
       "description": "Schedule tasks and reminders, and manage upcoming runs",
       "display_name": "Scheduler",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "cancel_schedule",
@@ -9147,7 +9245,8 @@
       "description": "Database query and management tools for SQL databases",
       "display_name": "SQL Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/sql",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "describe_table",
         "list_tables",
@@ -9176,6 +9275,7 @@
       "description": "Choose which AI model responds in the current conversation thread",
       "display_name": "Thread Model",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "list_models",
@@ -9202,6 +9302,7 @@
       "description": "Track tasks, progress, and dependencies in a conversation thread",
       "display_name": "Todo",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "add_todo",
@@ -9246,6 +9347,7 @@
       "description": "Task management with Todoist - create, update, delete, and organize tasks and projects",
       "display_name": "Todoist",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/todoist",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "close_task",
@@ -9398,6 +9500,7 @@
       "description": "Get financial data and stock information from Yahoo Finance",
       "display_name": "Yahoo Finance",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/yfinance",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_analyst_recommendations",
@@ -9552,6 +9655,7 @@
       "description": "Memory system for storing, retrieving, and searching conversational data",
       "display_name": "Zep Memory",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/zep",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "add_zep_message",
@@ -9642,7 +9746,8 @@
       "description": "AI-powered web scraping and data extraction from websites",
       "display_name": "AgentQL",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/agentql",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "custom_scrape_website",
         "scrape_website"
@@ -9718,6 +9823,7 @@
       "description": "Search and read academic papers from ArXiv",
       "display_name": "ArXiv",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/arxiv",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "read_arxiv_papers",
@@ -9842,6 +9948,7 @@
       "description": "Search the web using Baidu search engine with Chinese language support",
       "display_name": "Baidu Search",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/baidusearch",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "baidu_search"
@@ -9952,6 +10059,7 @@
       "description": "Retrieve brand data including logos, colors, and fonts by domain or name",
       "display_name": "Brandfetch",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/brandfetch",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "asearch_by_brand",
@@ -10101,6 +10209,7 @@
       "description": "Web scraping, search engine queries, screenshots, and structured data extraction",
       "display_name": "BrightData",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/brightdata",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_screenshot",
@@ -10223,6 +10332,7 @@
       "description": "Control MindRoom's browser: browse websites, fill in forms, and capture screenshots. With worker routing, this controls the agent's worker browser. To let the user watch this worker browser, use chat_ui.open_panel(panel='computer'). The user's local browser requires the separately configured desktop target.",
       "display_name": "Browser",
       "docs_url": "https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
+      "executes_code": false,
       "file_access": "agent",
       "function_names": [
         "browser_control"
@@ -10259,6 +10369,7 @@
       "description": "Native Playwright browser tools in an isolated worker Computer",
       "display_name": "Browser MCP",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "browser_close",
@@ -10435,7 +10546,8 @@
       "description": "Browser automation and web scraping using headless browsers",
       "display_name": "Browserbase",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/browserbase",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "aclose_session",
         "aget_page_content",
@@ -10577,6 +10689,7 @@
       "description": "Web crawling and scraping using the Crawl4ai library",
       "display_name": "Crawl4AI",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/crawl4ai",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "crawl"
@@ -10723,6 +10836,7 @@
       "description": "Search engine for web search and news",
       "display_name": "DuckDuckGo",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/duckduckgo",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "web_search",
@@ -11038,6 +11152,7 @@
       "description": "Advanced AI-powered web search engine for research and content discovery",
       "display_name": "Exa",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/exa",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "exa_answer",
@@ -11188,6 +11303,7 @@
       "description": "Web scraping and crawling tool for extracting content from websites",
       "display_name": "Firecrawl",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/firecrawl",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "crawl_website",
@@ -11229,6 +11345,7 @@
       "description": "Find academic papers and publications on Google Scholar",
       "display_name": "Google Scholar",
       "docs_url": "https://github.com/scholarly-python-package/scholarly",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "search_google_scholar"
@@ -11363,6 +11480,7 @@
       "description": "Search web and news through DDGS with a requested Google backend and automatic fallback",
       "display_name": "Google Search",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/websearch",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "web_search",
@@ -11438,6 +11556,7 @@
       "description": "Get top stories and user details from Hacker News",
       "display_name": "Hacker News",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/hackernews",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_top_hackernews_stories",
@@ -11574,6 +11693,7 @@
       "description": "Web content reading and search using Jina AI Reader API",
       "display_name": "Jina Reader",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/jina_reader",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "read_url",
@@ -11661,6 +11781,7 @@
       "description": "Web search using Linkup API for real-time information",
       "display_name": "Linkup",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/linkup",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "web_search_with_linkup"
@@ -11736,7 +11857,8 @@
       "description": "Read and extract content from news articles using advanced web scraping",
       "display_name": "Newspaper",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/newspaper4k",
-      "file_access": "none",
+      "executes_code": false,
+      "file_access": "unrestricted",
       "function_names": [
         "get_article_data",
         "read_article"
@@ -11799,6 +11921,7 @@
       "description": "Powerful web scraping capabilities including SERP, Amazon product data, and universal web scraping",
       "display_name": "Oxylabs",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/oxylabs",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "get_amazon_product",
@@ -11900,6 +12023,7 @@
       "description": "Search and retrieve medical and life science literature from PubMed",
       "display_name": "PubMed",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/pubmed",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "search_pubmed"
@@ -12046,6 +12170,7 @@
       "description": "Extract structured data from webpages using AI and natural language prompts",
       "display_name": "ScrapeGraph",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/scrapegraph",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "crawl",
@@ -12122,6 +12247,7 @@
       "description": "Open source search engine for web, images, news, science, and specialized content",
       "display_name": "SearxNG",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/searxng",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "image_search",
@@ -12203,6 +12329,7 @@
       "description": "Google and YouTube search using SerpApi",
       "display_name": "SerpApi",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/serpapi",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "search_google",
@@ -12362,6 +12489,7 @@
       "description": "Search Google, news, academic papers, and scrape webpages using Serper API",
       "display_name": "Serper",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/serper",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "scrape_webpage",
@@ -12463,6 +12591,7 @@
       "description": "Web scraper and crawler that returns LLM-ready data",
       "display_name": "Spider",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/spider",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "crawl",
@@ -12791,6 +12920,7 @@
       "description": "Real-time web search API for retrieving current information",
       "display_name": "Tavily",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/tavily",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "extract_url_content",
@@ -13059,6 +13189,7 @@
       "description": "Extract text and metadata from web pages, crawl websites, and convert HTML to text",
       "display_name": "Trafilatura",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/trafilatura",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "crawl_website",
@@ -13171,6 +13302,7 @@
       "description": "Search and retrieve high-quality, royalty-free images from Unsplash",
       "display_name": "Unsplash",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/unsplash",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "download_photo",
@@ -13213,6 +13345,7 @@
       "description": "Web scraping and content extraction from websites",
       "display_name": "Website Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/website",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "add_website_to_knowledge",
@@ -13276,6 +13409,7 @@
       "description": "Search and retrieve information from Wikipedia",
       "display_name": "Wikipedia",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/wikipedia",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "search_wikipedia",
@@ -13339,6 +13473,7 @@
       "description": "Control and monitor smart home devices",
       "display_name": "Home Assistant",
       "docs_url": "https://www.home-assistant.io/integrations/",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "activate_scene",
@@ -13460,6 +13595,7 @@
       "description": "Social media platform for browsing, posting, and interacting with Reddit communities",
       "display_name": "Reddit",
       "docs_url": null,
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "create_post",
@@ -13577,6 +13713,7 @@
       "description": "Post tweets, send DMs, and search Twitter/X content",
       "display_name": "X (Twitter)",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/x",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "create_post",
@@ -13656,6 +13793,7 @@
       "description": "Video conferencing platform for scheduling and managing meetings",
       "display_name": "Zoom",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/zoom",
+      "executes_code": false,
       "file_access": "none",
       "function_names": [
         "delete_meeting",

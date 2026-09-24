@@ -289,7 +289,7 @@ def _validate_authored_file_access(
         if value == "unrestricted":
             return remaining
         msg = (
-            f"{path}: {tool_name} runs arbitrary programs, so its file access is always 'unrestricted'. "
+            f"{path}: {tool_name} is not confined by file_access, so its file access is always 'unrestricted'. "
             "Isolate it with worker_tools instead."
         )
         raise ToolConfigOverrideError(msg)

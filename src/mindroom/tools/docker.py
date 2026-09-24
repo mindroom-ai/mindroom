@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     description="Container, image, volume, and network management",
     category=ToolCategory.DEVELOPMENT,
     file_access=ToolFileAccess.UNRESTRICTED,
+    executes_code=True,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
     default_execution_target=ToolExecutionTarget.WORKER,

@@ -67,6 +67,7 @@ def _python_tools_runtime() -> tuple[Any, Any, Any, Any]:
     description="Execute Python code, manage files, and install packages",
     category=ToolCategory.DEVELOPMENT,
     file_access=ToolFileAccess.UNRESTRICTED,
+    executes_code=True,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,

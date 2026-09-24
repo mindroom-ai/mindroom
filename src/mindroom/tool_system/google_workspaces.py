@@ -153,6 +153,7 @@ def register_google_workspace_tools(workspace: GoogleWorkspaceConfig) -> None:
             default_execution_target=base.default_execution_target,
             consumes_workspace_paths=base.consumes_workspace_paths,
             file_access=base.file_access,
+            executes_code=base.executes_code,
             requires_room_context=base.requires_room_context,
             requires_primary_runtime=True,
             icon=base.icon,

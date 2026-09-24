@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.vendor_telemetry import disable_vendor_telemetry
 
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="composio",
+    file_access=ToolFileAccess.UNRESTRICTED,
     display_name="Composio",
     description="Access 1000+ integrations including Gmail, Salesforce, GitHub, and more",
     category=ToolCategory.INTEGRATIONS,

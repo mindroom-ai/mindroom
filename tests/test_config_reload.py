@@ -1494,8 +1494,8 @@ async def test_initialize_and_reload_warn_about_unrestricted_file_access_next_to
 ) -> None:
     """Startup and every applied reload must flag path tools that can bypass a worker-isolated shell."""
     warning = (
-        "Agent routes code tools to a worker but has file_access 'unrestricted'; "
-        "its primary-process path tools can read runtime secrets"
+        "Agent isolates code tools in a worker, but primary-process tools that are not confined "
+        "by file_access can read runtime secrets"
     )
 
     def write_config(agent_name: str) -> None:
@@ -1507,7 +1507,7 @@ async def test_initialize_and_reload_warn_about_unrestricted_file_access_next_to
                     "display_name": agent_name.title(),
                     "model": "default",
                     "rooms": ["lobby"],
-                    "tools": ["shell"],
+                    "tools": ["shell", "gmail"],
                     "worker_tools": ["shell"],
                     "file_access": "unrestricted",
                 },

@@ -1342,6 +1342,48 @@ def test_code_execution_tools_declare_unrestricted_file_access() -> None:
     """Tools that run arbitrary programs cannot be confined in-process."""
     for name in ("shell", "python", "docker", "script", "claude_agent"):
         assert TOOL_METADATA[name].file_access is ToolFileAccess.UNRESTRICTED, name
+        assert TOOL_METADATA[name].executes_code, name
+
+
+_UNCONFINED_LOCAL_FILE_TOOLS = (
+    "agentql",
+    "airflow",
+    "browserbase",
+    "composio",
+    "csv",
+    "duckdb",
+    "e2b",
+    "groq",
+    "moviepy_video_tools",
+    "newspaper",
+    "openai",
+    "pandas",
+    "postgres",
+    "redshift",
+    "slack",
+    "sql",
+    "visualization",
+    "web_browser_tools",
+)
+
+
+def test_tools_reaching_local_files_outside_file_access_are_declared_unrestricted() -> None:
+    """Tools whose queries, paths, or URLs reach local files without file_access confinement must say so."""
+    for name in _UNCONFINED_LOCAL_FILE_TOOLS:
+        metadata = TOOL_METADATA[name]
+        assert metadata.file_access is ToolFileAccess.UNRESTRICTED, name
+        assert not metadata.executes_code, name
+
+
+def test_only_code_execution_tools_execute_code() -> None:
+    """The executes_code flag stays independent of the file_access class."""
+    assert {name for name, metadata in TOOL_METADATA.items() if metadata.executes_code} == {
+        "claude_agent",
+        "docker",
+        "python",
+        "script",
+        "shell",
+    }
 
 
 def test_path_tools_follow_agent_file_access_and_receive_it() -> None:

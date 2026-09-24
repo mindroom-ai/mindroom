@@ -97,7 +97,7 @@ class ToolFileAccess(str, Enum):
 
     NONE = "none"  # takes no local file paths
     AGENT = "agent"  # follows the agent's file_access setting
-    UNRESTRICTED = "unrestricted"  # runs arbitrary programs; cannot be confined in-process, only by a worker
+    UNRESTRICTED = "unrestricted"  # not confined by file_access; only a worker isolates its local file access
 
 
 class ToolManagedInitArg(str, Enum):
@@ -167,6 +167,8 @@ class ToolMetadata:
     requires_primary_runtime: bool = False
     consumes_workspace_paths: bool = False
     file_access: ToolFileAccess = ToolFileAccess.NONE
+    # Runs arbitrary programs (shell, interpreters, containers); independent of the file_access class.
+    executes_code: bool = False
     requires_room_context: bool = False
     icon: str | None = None
     icon_color: str | None = None

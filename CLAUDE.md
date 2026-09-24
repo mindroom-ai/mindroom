@@ -147,7 +147,7 @@ Matrix sync callback
 | `personal_room_lifecycle.py` | Personal-room command and membership policy, target-service routing, reconciliation, and separate rejoin/cleanup retention projections |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `file_access.py` | Agent `file_access` resolution and the shared path authorization every path-taking tool opens files through |
-| `orchestration/config_warnings.py` | Startup and reload warnings for risky but allowed config choices (foreign homeserver authorities, unrestricted file access next to worker code tools) |
+| `orchestration/config_warnings.py` | Startup and reload warnings for risky but allowed config choices (foreign homeserver authorities, unconfined primary-process tools next to worker code tools) |
 | `tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval_execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
 | `approval_tools.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
@@ -532,6 +532,7 @@ The full model, the `file_access` setting, and the list of intentional behaviors
   Such an agent may read, write, and upload anything the primary process can reach, so restricting other primary-process tools for that agent protects nothing.
 - **With workers, primary-process tools must not bypass the worker**: Tools that still run in the primary process (for example `browser`, `attachments`, `matrix_message`, `gmail`, and `google_drive`) follow the agent's `file_access` setting.
   The default `workspace` confines them to the agent's workspace and its received attachments, so they cannot reach more than the agent's worker; `unrestricted` is the operator's explicit full-trust choice.
+  Tools that cannot yet be confined declare `file_access: unrestricted` in their metadata, which means not confined rather than executing code; code execution is a separate `executes_code` flag.
 - **Protect the primary from worker code**: Hardening against untrusted worker code is in scope, such as symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
 - **Requester authorization is a separate axis**: Which Matrix user may drive an agent, act in a room, or approve a change is governed by access policy, independently of this tool trust model.
 

@@ -911,7 +911,7 @@ def _render_tool_execution_environment(
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
     if unrestricted_tool_names:
         file_access_lines.append(
-            f"- Always unrestricted (they run arbitrary programs): {tool_list(unrestricted_tool_names)}.",
+            f"- Not confined by file_access (only a worker isolates them): {tool_list(unrestricted_tool_names)}.",
         )
 
     if not worker_routed_tool_names:

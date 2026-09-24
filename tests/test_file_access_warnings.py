@@ -1,4 +1,4 @@
-"""Tests for the warning about unrestricted file access next to worker-isolated code tools."""
+"""Tests for the warning about unconfined primary-process tools next to worker-isolated code tools."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _WARNING = (
-    "Agent routes code tools to a worker but has file_access 'unrestricted'; "
-    "its primary-process path tools can read runtime secrets"
+    "Agent isolates code tools in a worker, but primary-process tools that are not confined "
+    "by file_access can read runtime secrets"
 )
 
 
@@ -30,29 +30,45 @@ def _warnings(config: Config, runtime_paths: RuntimePaths) -> list[dict[str, obj
     return [log for log in logs if log["event"] == _WARNING]
 
 
-def _config(agent: dict[str, object]) -> Config:
-    return Config.model_validate({"agents": {"coder": {"display_name": "Coder", "tools": ["shell", "gmail"], **agent}}})
+def _config(tools: list[str], agent: dict[str, object]) -> Config:
+    return Config.model_validate({"agents": {"coder": {"display_name": "Coder", "tools": tools, **agent}}})
 
 
-def test_warns_for_unrestricted_agent_with_worker_routed_code_tools(tmp_path: Path) -> None:
-    """Unrestricted path tools next to a worker-isolated shell defeat the worker, so say so once."""
-    config = _config({"file_access": "unrestricted", "worker_tools": ["shell"]})
-
-    warnings = _warnings(config, _runtime_paths(tmp_path))
+@pytest.mark.parametrize(
+    ("tools", "agent", "unconfined"),
+    [
+        (["shell", "gmail"], {"file_access": "unrestricted", "worker_tools": ["shell"]}, ["gmail"]),
+        (["shell", "duckdb"], {"worker_tools": ["shell"]}, ["duckdb"]),
+    ],
+)
+def test_warns_when_worker_code_tools_sit_next_to_unconfined_primary_tools(
+    tmp_path: Path,
+    tools: list[str],
+    agent: dict[str, object],
+    unconfined: list[str],
+) -> None:
+    """Unrestricted path tools or unconfined primary tools next to a worker-isolated shell defeat the worker."""
+    warnings = _warnings(_config(tools, agent), _runtime_paths(tmp_path))
 
     assert len(warnings) == 1
     assert warnings[0]["agent"] == "coder"
     assert warnings[0]["worker_code_tools"] == ["shell"]
+    assert warnings[0]["unconfined_primary_tools"] == unconfined
 
 
 @pytest.mark.parametrize(
-    "agent",
+    ("tools", "agent"),
     [
-        {"file_access": "unrestricted", "worker_tools": []},
-        {"file_access": "workspace", "worker_tools": ["shell"]},
-        {"worker_tools": ["shell"]},
+        (["shell", "gmail"], {"worker_tools": ["shell"]}),
+        (["shell", "gmail"], {"file_access": "workspace", "worker_tools": ["shell"]}),
+        (["shell", "duckdb"], {"file_access": "unrestricted", "worker_tools": []}),
+        (["gmail", "duckdb"], {"file_access": "unrestricted", "worker_tools": ["gmail"]}),
     ],
 )
-def test_no_warning_when_path_tools_cannot_bypass_a_worker(tmp_path: Path, agent: dict[str, object]) -> None:
-    """Full-trust agents and workspace-confined agents are both consistent setups."""
-    assert _warnings(_config(agent), _runtime_paths(tmp_path)) == []
+def test_no_warning_when_primary_tools_cannot_bypass_a_worker(
+    tmp_path: Path,
+    tools: list[str],
+    agent: dict[str, object],
+) -> None:
+    """Confined primary tools, full-trust agents, and agents without worker code tools are consistent setups."""
+    assert _warnings(_config(tools, agent), _runtime_paths(tmp_path)) == []

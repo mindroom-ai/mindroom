@@ -257,6 +257,7 @@ def _handle_namespace(*, runtime_paths: RuntimePaths, base_dir: Path | None) -> 
     description="Run terminal commands and scripts in the agent workspace",
     category=ToolCategory.DEVELOPMENT,
     file_access=ToolFileAccess.UNRESTRICTED,
+    executes_code=True,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,
