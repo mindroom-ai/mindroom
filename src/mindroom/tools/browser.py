@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     icon_color="text-orange-500",
     dependencies=["playwright"],
     docs_url="https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
-    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
+    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS, ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT),
     config_fields=[
         ConfigField(
             name="output_dir",
