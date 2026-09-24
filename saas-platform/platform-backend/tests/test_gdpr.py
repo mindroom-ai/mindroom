@@ -22,37 +22,46 @@ LIFECYCLE_MIGRATIONS = pytest.mark.parametrize(
 )
 
 
+def function_definition(sql: str, name: str) -> str:
+    """Return one SECURITY DEFINER function definition from a migration."""
+    match = re.search(
+        rf"CREATE OR REPLACE FUNCTION {name}\(.*?\n\$\$ LANGUAGE plpgsql SECURITY DEFINER;", sql, re.DOTALL
+    )
+    assert match, f"{name} is not defined"
+    return match.group(0)
+
+
 @LIFECYCLE_MIGRATIONS
 def test_account_lifecycle_rpcs_are_executable_by_service_role_only(migration: Path) -> None:
-    """Only the service-role backend may call the RLS-bypassing account lifecycle RPCs."""
+    """Only the service-role backend may call the RLS-bypassing lifecycle RPCs or exec_sql."""
     sql = migration.read_text(encoding="utf-8")
 
-    assert "GRANT EXECUTE ON FUNCTION soft_delete_account TO authenticated, service_role;" not in sql
+    # Supabase's default privileges grant EXECUTE on new public functions directly to anon and
+    # authenticated, so revoking PUBLIC alone leaves /rest/v1/rpc/<name> open to both.
+    for function in (*ACCOUNT_LIFECYCLE_RPCS, "has_platform_privileges"):
+        assert f"REVOKE EXECUTE ON FUNCTION {function} FROM PUBLIC, anon, authenticated;" in sql
+        assert not re.search(rf"GRANT EXECUTE ON FUNCTION {function}\b[^;]*\b(PUBLIC|anon|authenticated)\b", sql)
     for rpc in ACCOUNT_LIFECYCLE_RPCS:
-        # PostgreSQL grants EXECUTE to PUBLIC on every new function, so without this revoke
-        # PostgREST exposes /rest/v1/rpc/<name> to anon and authenticated.
-        assert re.search(rf"REVOKE EXECUTE ON FUNCTION {rpc} FROM [^;]*PUBLIC", sql)
         assert f"GRANT EXECUTE ON FUNCTION {rpc} TO service_role;" in sql
-        assert not re.search(rf"GRANT EXECUTE ON FUNCTION {rpc} TO [^;]*\b(anon|authenticated)\b", sql)
+    assert "REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC, anon, authenticated;" in sql
+    assert not re.search(r"GRANT EXECUTE ON FUNCTION exec_sql\b[^;]*\b(PUBLIC|anon|authenticated)\b", sql)
 
 
 @LIFECYCLE_MIGRATIONS
-def test_account_lifecycle_rpcs_reject_unprivileged_callers(migration: Path) -> None:
-    """Each function refuses unauthorized callers itself, so a widened grant cannot bypass RLS."""
+def test_account_lifecycle_rpcs_refuse_callers_without_platform_privileges(migration: Path) -> None:
+    """Each RPC checks privileges before any write, so a widened grant cannot bypass RLS."""
     sql = migration.read_text(encoding="utf-8")
 
-    # The caller is privileged only as the service role, a platform admin, or a direct
-    # database session (migrations and operational tooling carry no PostgREST claims).
-    assert "CREATE OR REPLACE FUNCTION has_platform_privileges()" in sql
-    assert (
-        "    RETURN jwt_claims IS NULL\n        OR jwt_claims->>'role' = 'service_role'\n        OR is_admin();"
-    ) in sql
-    assert re.search(r"REVOKE EXECUTE ON FUNCTION has_platform_privileges FROM [^;]*PUBLIC", sql)
+    for rpc in ACCOUNT_LIFECYCLE_RPCS:
+        assert re.search(
+            r"\$\$\nBEGIN\n(\s*--[^\n]*\n)*\s*IF NOT has_platform_privileges\(\) THEN\n"
+            r"\s*RAISE EXCEPTION [^;]*USING ERRCODE = 'insufficient_privilege';",
+            function_definition(sql, rpc),
+        ), f"{rpc} must refuse unprivileged callers before its first statement"
 
-    # Soft delete additionally allows the owner of the targeted account.
-    assert "IF auth.uid() IS DISTINCT FROM target_account_id AND NOT has_platform_privileges() THEN" in sql
-    assert sql.count("IF NOT has_platform_privileges() THEN") == 2
-    assert sql.count("USING ERRCODE = 'insufficient_privilege'") == 3
+    # NOT NULL would skip the RAISE, so a claim set without a role such as '{}' must yield FALSE.
+    helper = function_definition(sql, "has_platform_privileges")
+    assert "jwt_claims->>'role' IS NOT DISTINCT FROM 'service_role'" in helper
 
 
 @pytest.fixture

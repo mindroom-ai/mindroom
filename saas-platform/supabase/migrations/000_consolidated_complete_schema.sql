@@ -328,8 +328,10 @@ RETURNS BOOLEAN AS $$
 DECLARE
     jwt_claims JSONB := NULLIF(current_setting('request.jwt.claims', TRUE), '')::JSONB;
 BEGIN
+    -- IS NOT DISTINCT FROM keeps the result non-NULL for claims without a role (e.g. '{}'),
+    -- because callers test NOT has_platform_privileges() and NOT NULL would skip their RAISE.
     RETURN jwt_claims IS NULL
-        OR jwt_claims->>'role' = 'service_role'
+        OR jwt_claims->>'role' IS NOT DISTINCT FROM 'service_role'
         OR is_admin();
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
@@ -345,11 +347,10 @@ CREATE OR REPLACE FUNCTION soft_delete_account(
     requested_by UUID DEFAULT NULL
 ) RETURNS VOID AS $$
 BEGIN
-    -- These statements bypass RLS, so refuse callers that neither own the target account
-    -- nor hold platform privileges, even if EXECUTE is ever granted more widely again.
-    IF auth.uid() IS DISTINCT FROM target_account_id AND NOT has_platform_privileges() THEN
-        RAISE EXCEPTION 'soft_delete_account requires account ownership or platform privileges'
-            USING ERRCODE = 'insufficient_privilege';
+    -- These statements bypass RLS, so deletion stays a platform operation even if EXECUTE is
+    -- ever granted more widely again; users go through the backend's confirmed GDPR flow.
+    IF NOT has_platform_privileges() THEN
+        RAISE EXCEPTION 'soft_delete_account requires platform privileges' USING ERRCODE = 'insufficient_privilege';
     END IF;
 
     -- Mark account as deleted
@@ -586,12 +587,13 @@ CREATE POLICY "Admins can manage all webhook events" ON webhook_events
     WITH CHECK (is_admin());
 
 -- Account lifecycle functions are SECURITY DEFINER and bypass RLS, so only the platform
--- backend may call them. PostgreSQL grants EXECUTE on new functions to PUBLIC, which would
--- otherwise expose them to anon and authenticated through PostgREST, so revoke that first.
-REVOKE EXECUTE ON FUNCTION has_platform_privileges FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION soft_delete_account FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION restore_account FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION hard_delete_account FROM PUBLIC;
+-- backend may call them. PostgreSQL grants EXECUTE on new functions to PUBLIC, and Supabase's
+-- default privileges grant it directly to anon and authenticated, which PostgREST would expose
+-- as /rest/v1/rpc/<name>, so revoke all three.
+REVOKE EXECUTE ON FUNCTION has_platform_privileges FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION soft_delete_account FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION restore_account FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION hard_delete_account FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION soft_delete_account TO service_role;
 GRANT EXECUTE ON FUNCTION restore_account TO service_role;
 GRANT EXECUTE ON FUNCTION hard_delete_account TO service_role;
@@ -623,7 +625,9 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC;
+-- Supabase's default privileges grant EXECUTE directly to anon and authenticated, so revoking
+-- PUBLIC alone would leave arbitrary SQL (and every lifecycle function) reachable over PostgREST.
+REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO service_role;
 
 REVOKE INSERT, UPDATE ON TABLE accounts FROM authenticated;

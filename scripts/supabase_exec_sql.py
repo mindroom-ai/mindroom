@@ -65,7 +65,7 @@ def run_sql(query: str) -> None:
             "    SECURITY DEFINER\n"
             "    SET search_path = public\n"
             "    AS $$ BEGIN EXECUTE query; END; $$;\n\n"
-            "    REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC;\n"
+            "    REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC, anon, authenticated;\n"
             "    GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO service_role;\n"
         )
         raise SystemExit(msg)
