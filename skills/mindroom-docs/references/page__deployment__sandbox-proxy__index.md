@@ -577,6 +577,8 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
 - Dedicated Docker and Kubernetes worker containers mount the root filesystem read-only, with a private writable `/tmp`.
   The image keeps `/app` writable by the runtime user so trusted primaries can install tool extras, but in a worker that would let tool code replace runner code or dependencies that the runner imports later or boots from after a restart.
   Worker tools install their extras into the worker's own virtualenv on the state mount instead.
+  The Kubernetes Agent Vault mint init container also runs read-only, with its own `/tmp` volume that the runner container never mounts; operator-supplied extra containers keep the security context they are configured with.
+  Shared sandbox runners, such as the `static_runner` sidecar and the Compose sandbox service, are not dedicated workers and are unchanged.
 - Kubernetes worker containers drop all capabilities, disable privilege escalation, and inherit the pod's
   `RuntimeDefault` seccomp policy. The optional main-container Localhost profile needed by runtimes that block
   Chromium's namespace sandbox is documented in [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/#browser-and-container-sandboxing).

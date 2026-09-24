@@ -66,6 +66,7 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     AGENT_VAULT_BOOTSTRAP_VOLUME_NAME,
     AGENT_VAULT_CA_VOLUME_NAME,
     AGENT_VAULT_MINT_CONTAINER_NAME,
+    AGENT_VAULT_MINT_TMP_VOLUME_NAME,
     AGENT_VAULT_TOKEN_VOLUME_NAME,
     SANDBOX_RUNNER_CONTAINER_NAME,
     WORKER_CONFIG_VOLUME_NAME,
@@ -125,10 +126,9 @@ _WORKER_EGRESS_PROXY_URL_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["proxy_url"]
 _WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
 _WORKER_EGRESS_PROXY_VAULT_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["vault"]
 _WORKER_EGRESS_PROXY_CA_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
-# HOME is kept on the init container's own ephemeral filesystem (not the shared
-# token volume) so the owner CLI session never lands on a volume the
-# agent-executing container can read. Only the minted proxy token is written to
-# the shared volume.
+# HOME is kept on the init container's own /tmp emptyDir (not the shared token
+# volume) so the owner CLI session never lands on a volume the agent-executing
+# container can read. Only the minted proxy token is written to the shared volume.
 _AGENT_VAULT_MINT_SCRIPT = """\
 set -eu
 export HOME=/tmp/agent-vault-mint-home
@@ -1024,8 +1024,13 @@ class KubernetesResourceManager:
                     "mountPath": _AGENT_VAULT_BOOTSTRAP_MOUNT_PATH,
                     "readOnly": True,
                 },
+                {"name": AGENT_VAULT_MINT_TMP_VOLUME_NAME, "mountPath": "/tmp"},  # noqa: S108
             ],
-            "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
+            "securityContext": {
+                "allowPrivilegeEscalation": False,
+                "readOnlyRootFilesystem": True,
+                "capabilities": {"drop": ["ALL"]},
+            },
         }
 
     def _agent_vault_main_env(self, *, worker_key: str) -> list[dict[str, object]]:
@@ -1052,6 +1057,7 @@ class KubernetesResourceManager:
         return [
             {"name": AGENT_VAULT_TOKEN_VOLUME_NAME, "emptyDir": {}},
             {"name": AGENT_VAULT_BOOTSTRAP_VOLUME_NAME, "secret": {"secretName": cfg.bootstrap_secret_name}},
+            {"name": AGENT_VAULT_MINT_TMP_VOLUME_NAME, "emptyDir": {}},
         ]
 
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:

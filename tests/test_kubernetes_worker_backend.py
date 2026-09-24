@@ -4873,9 +4873,14 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert mint_env["AGENT_VAULT_OWNER_EMAIL"] == "vault-owner@example.test"
     # The owner password (bootstrap secret) is mounted only on the init container.
     assert any(m["name"] == "agent-vault-bootstrap" for m in mint["volumeMounts"])
+    # The init container's root filesystem is read-only; its HOME lives on a /tmp
+    # emptyDir that only the init container mounts.
+    assert mint["securityContext"]["readOnlyRootFilesystem"] is True
+    assert {"name": "agent-vault-mint-tmp", "mountPath": "/tmp"} in mint["volumeMounts"]  # noqa: S108
 
     main = template_spec["containers"][0]
     assert all(m["name"] != "agent-vault-bootstrap" for m in main["volumeMounts"])
+    assert all(m["name"] != "agent-vault-mint-tmp" for m in main["volumeMounts"])
     assert any(m["name"] == "agent-vault-token" and m.get("readOnly") for m in main["volumeMounts"])
     main_env = {e["name"]: e.get("value") for e in main["env"]}
     expected_vault = descriptive_worker_id_for_key(worker_key, prefix="agent-vault")
@@ -4885,7 +4890,7 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert main_env["MINDROOM_WORKER_EGRESS_PROXY_CA_FILE"] == "/etc/agent-vault/ca.pem"
 
     volume_names = {v["name"] for v in template_spec["volumes"]}
-    assert {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca"} <= volume_names
+    assert {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca", "agent-vault-mint-tmp"} <= volume_names
 
     # No bridge/NetworkPolicy resources exist in this model.
     assert backend._resources._agent_vault_vault_name(worker_key) == expected_vault
