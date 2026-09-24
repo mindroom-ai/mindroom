@@ -27,7 +27,8 @@ END$$;
 -- PostgreSQL grants EXECUTE on new functions to PUBLIC, Supabase also grants it
 -- on new public functions to anon and authenticated, and PostgREST exposes every
 -- executable public function as /rest/v1/rpc/<name>. Functions created by this
--- role stay private until a GRANT below allows a specific role.
+-- role are not executable by PUBLIC, anon, or authenticated unless a GRANT below
+-- allows it.
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM anon, authenticated;
 

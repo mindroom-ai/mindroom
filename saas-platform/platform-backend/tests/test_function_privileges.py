@@ -18,13 +18,18 @@ DEFAULT_PRIVILEGE_REVOKES = (
     "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM anon, authenticated;",
 )
 
-CREATE_FUNCTION = re.compile(r"CREATE (?:OR REPLACE )?FUNCTION (?:public\.)?(\w+)", re.IGNORECASE)
-GRANT_EXECUTE = re.compile(r"GRANT EXECUTE ON FUNCTION\s+(.+?)\s+TO\s+(.+?);", re.IGNORECASE | re.DOTALL)
-REVOKE_EXECUTE = re.compile(r"REVOKE EXECUTE ON FUNCTION\s+(.+?)\s+FROM\s+(.+?);", re.IGNORECASE | re.DOTALL)
+CREATE_FUNCTION = re.compile(r'CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:"?public"?\.)?"?(\w+)', re.IGNORECASE)
+# Covers single-object grants, schema-wide grants, and default-privilege grants.
+GRANT_EXECUTE = re.compile(
+    r"GRANT\s+(?:EXECUTE|ALL(?:\s+PRIVILEGES)?)\s+ON\s+"
+    r"(?:FUNCTIONS?|ROUTINES?|PROCEDURES?|ALL\s+(?:FUNCTIONS|ROUTINES|PROCEDURES)\s+IN\s+SCHEMA)"
+    r"(?:\s+(.+?))?\s+TO\s+(.+?);",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _names(sql_list: str) -> set[str]:
-    without_arguments = re.sub(r"\([^)]*\)", "", sql_list)
+    without_arguments = re.sub(r"\([^)]*\)", "", sql_list).replace('"', "")
     return {name.strip().lower().removeprefix("public.") for name in without_arguments.split(",")}
 
 
@@ -38,20 +43,15 @@ def test_baseline_migration_makes_functions_private_before_creating_them() -> No
 
 
 def test_function_execute_migration_hardens_existing_databases() -> None:
-    """Existing databases drop exec_sql and lose end-user EXECUTE on every baseline function."""
+    """Existing databases drop exec_sql, lose end-user EXECUTE on every function, and verify the result."""
     sql = FUNCTION_EXECUTE_MIGRATION_SQL.read_text(encoding="utf-8")
     assert "DROP FUNCTION IF EXISTS exec_sql(TEXT);" in sql
+    assert "REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC, anon, authenticated;" in sql
     for statement in DEFAULT_PRIVILEGE_REVOKES:
         assert statement in sql
-
-    revoked = {
-        name
-        for functions, roles in REVOKE_EXECUTE.findall(sql)
-        if _names(roles) >= END_USER_ROLES
-        for name in _names(functions)
-    }
-    baseline_sql = BASELINE_MIGRATION_SQL.read_text(encoding="utf-8")
-    assert {name.lower() for name in CREATE_FUNCTION.findall(baseline_sql)} <= revoked
+    assert "has_function_privilege('anon', p.oid, 'EXECUTE')" in sql
+    assert "has_function_privilege('authenticated', p.oid, 'EXECUTE')" in sql
+    assert "RAISE EXCEPTION" in sql
 
 
 def test_migrations_grant_end_users_only_allow_listed_functions() -> None:
@@ -61,4 +61,4 @@ def test_migrations_grant_end_users_only_allow_listed_functions() -> None:
         assert "exec_sql" not in {name.lower() for name in CREATE_FUNCTION.findall(sql)}, path.name
         for functions, roles in GRANT_EXECUTE.findall(sql):
             if _names(roles) & END_USER_ROLES:
-                assert _names(functions) <= END_USER_FUNCTIONS, path.name
+                assert functions and _names(functions) <= END_USER_FUNCTIONS, path.name
