@@ -20020,6 +20020,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`knowledge/legacy_metadata.py`][knowledge-legacy] | [Knowledge indexing tests][knowledge-indexing-tests] use independently written metadata from each field boundary and check preservation, nonmutation, repeated normalization, and corpus/query compatibility. |
 | [`matrix/legacy_state.py`][matrix-legacy-state] and [`matrix/users.py`][matrix-users] | [Matrix identity][matrix-identity-tests] and [agent manager][matrix-agent-tests] tests preserve durable account state, verify stable reloads, and exercise the missing-request fallback without network registration. |
 | [`config/legacy_access.py`][access-legacy] and [`config/legacy_fields.py`][config-legacy] | [Access migration tests][access-migration-tests] cover validated conversion, exact backup bytes, stable publication, and rejection paths; [configuration tests][agent-config-tests] cover every directed retired-field error. |
+| [`tool_system/metadata.py`][tool-metadata] | [Tool metadata tests][tool-metadata-tests] cover the directed `restrict_to_base_dir` rejection for the `file`, `coding`, and `python` tools. |
 | [`legacy_private_storage.py`][private-legacy] and [`legacy_private_storage_aliases.py`][private-legacy-aliases] | [Private-storage tests][private-storage-tests] cover verified owner relocation, content preservation, historical aliases, and tamper rejection. |
 | [`oauth/legacy_credentials.py`][oauth-legacy-credentials] and [`oauth/credential_store.py`][oauth-store] | [OAuth store tests][oauth-store-tests] cover literal SQLite bindings, publication normalization, the removed JSON reader, reconnect disposition, and inert old files. |
 | [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
@@ -20102,6 +20103,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | C10 | Tiny retained default | [`cli/owner.py`][cli-owner] replaces both old and current owner placeholders during pairing. |
 | C11 | Current behavior | [`constants.py`][constants] owns current config, environment, and path selection without relocating data. |
 | C12 | Current behavior | [`cli/local_stack.py`][local-stack] retains existing local-chat flags and container names. |
+| C13 | Tiny retained default | [`tool_system/metadata.py`][tool-metadata] rejects the retired per-tool `restrict_to_base_dir` override with guidance to `agents.<name>.file_access` or `defaults.file_access`; it stays beside authored-override validation because tool validation does not depend on the config package. |
 | A1 | Current behavior | [`credentials.py`][credentials] uses JSON, including its encrypted envelope, for generic services. |
 | A2 | Current behavior | [`credentials_sync.py`][credentials-sync] treats missing `_source` as manually owned instead of overwriting it from the environment. |
 | A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
@@ -20260,6 +20262,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [streaming]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/streaming.py
 [access-migration-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_access_migration.py
 [agent-config-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_agents.py
+[tool-metadata-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_tools_metadata.py
 [agent-runs-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_agent_storage_runs.py
 [approval-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_tool_approval.py
 [cli-connect-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_cli_connect.py
@@ -20353,6 +20356,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, and leaves temporary audio after encoding failures. | Use a portable font default, forward styles, preserve complete glyph bounds, advance wrapped words, and clean owned audio files on every exit; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; regressions in `tests/test_moviepy_video_tools.py`, `tests/test_moviepy_caption_layout.py`, and `tests/test_moviepy_caption_output.py`. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
+| FileTools content search relativizes hits and exclusions against `base_dir`, so it cannot search other directories. | Tracking gap: accept an absolute search directory outside `base_dir` and report absolute hit paths; no matching issue or PR identified. | `tools/file.py`; unrestricted outside-directory coverage in `tests/test_coding_tools.py`. |
 | Concise PubMed output drops title/year when the abstract is short or absent. | Keep identifying metadata independent of summary truncation. | `tools/pubmed.py`; real parsing/formatting tests cover short, absent, and long abstracts in both output modes. |
 | Luma video creation omits the required model argument in both public methods. | Tracking gap: no matching upstream issue or fix has been verified; pass a configurable model on both creation paths. | `tools/lumalabs.py`; real factory and SDK transport coverage in `tests/test_lumalabs_tool.py`. |
 | Todoist project discovery treats SDK pages as individual projects. | Flatten project pages and serialize SDK date fields safely. | `tools/todoist.py`; project discovery tests cover multiple pages, empty results, and provider errors. |
@@ -20429,6 +20433,7 @@ Small owner-adjacent boundaries use the same source records:
 | Owner | Agno adaptation | Retained application behavior |
 | --- | --- | --- |
 | `knowledge/collections.py` | Operator-aware scoped deletion and probing ambiguous collection-deletion outcomes. | Source batching, collection ownership, client closure, and storage reclamation. |
+| `tools/file.py` | Unrestricted outside-directory content search through a shallow copy rooted at the searched directory, with hits rewritten to absolute paths. | Workspace-mode refusal, blocked-path messages, and Agno's inside-workspace search remain unchanged. |
 | `tools/pubmed.py` | Concise article formatting that retains title/year at every abstract length. | Existing result-limit behavior, XML parsing, expanded output, and fetch-error text. |
 | `tools/todoist.py` | Page flattening and SDK project serialization for `get_projects`. | Existing credential construction, registered operations, and structured provider errors. |
 | `custom_tools/google_calendar.py` | Broad construction-time scope markers alongside granular credentials. | OAuth scope selection, credential ownership, and tool permissions. |

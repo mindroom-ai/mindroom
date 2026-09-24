@@ -312,6 +312,12 @@ def _validate_authored_overrides(
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
+    # LEGACY_COMPAT: Retired per-tool restrict_to_base_dir override.
+    # Legacy format: file, coding, and python tool entries accepted an authored boolean restrict_to_base_dir.
+    # Last legacy release: v2026.9.277 (latest tag, still shipping the ConfigField); replacement: the unreleased
+    # agents.<name>.file_access and defaults.file_access settings removed the field.
+    # Handling: Reject it on every tool with guidance to the agent or defaults file_access setting.
+    # Coverage: tests/test_tools_metadata.py::test_restrict_to_base_dir_is_rejected_with_file_access_hint.
     if "restrict_to_base_dir" in overrides:
         path = _override_path(tool_name, "restrict_to_base_dir", config_path_prefix=config_path_prefix)
         msg = f"{path} was removed; use agents.<name>.file_access or defaults.file_access."

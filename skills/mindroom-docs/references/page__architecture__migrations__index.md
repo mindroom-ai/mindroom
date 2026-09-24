@@ -84,6 +84,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`knowledge/legacy_metadata.py`][knowledge-legacy] | [Knowledge indexing tests][knowledge-indexing-tests] use independently written metadata from each field boundary and check preservation, nonmutation, repeated normalization, and corpus/query compatibility. |
 | [`matrix/legacy_state.py`][matrix-legacy-state] and [`matrix/users.py`][matrix-users] | [Matrix identity][matrix-identity-tests] and [agent manager][matrix-agent-tests] tests preserve durable account state, verify stable reloads, and exercise the missing-request fallback without network registration. |
 | [`config/legacy_access.py`][access-legacy] and [`config/legacy_fields.py`][config-legacy] | [Access migration tests][access-migration-tests] cover validated conversion, exact backup bytes, stable publication, and rejection paths; [configuration tests][agent-config-tests] cover every directed retired-field error. |
+| [`tool_system/metadata.py`][tool-metadata] | [Tool metadata tests][tool-metadata-tests] cover the directed `restrict_to_base_dir` rejection for the `file`, `coding`, and `python` tools. |
 | [`legacy_private_storage.py`][private-legacy] and [`legacy_private_storage_aliases.py`][private-legacy-aliases] | [Private-storage tests][private-storage-tests] cover verified owner relocation, content preservation, historical aliases, and tamper rejection. |
 | [`oauth/legacy_credentials.py`][oauth-legacy-credentials] and [`oauth/credential_store.py`][oauth-store] | [OAuth store tests][oauth-store-tests] cover literal SQLite bindings, publication normalization, the removed JSON reader, reconnect disposition, and inert old files. |
 | [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
@@ -166,6 +167,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | C10 | Tiny retained default | [`cli/owner.py`][cli-owner] replaces both old and current owner placeholders during pairing. |
 | C11 | Current behavior | [`constants.py`][constants] owns current config, environment, and path selection without relocating data. |
 | C12 | Current behavior | [`cli/local_stack.py`][local-stack] retains existing local-chat flags and container names. |
+| C13 | Tiny retained default | [`tool_system/metadata.py`][tool-metadata] rejects the retired per-tool `restrict_to_base_dir` override with guidance to `agents.<name>.file_access` or `defaults.file_access`; it stays beside authored-override validation because tool validation does not depend on the config package. |
 | A1 | Current behavior | [`credentials.py`][credentials] uses JSON, including its encrypted envelope, for generic services. |
 | A2 | Current behavior | [`credentials_sync.py`][credentials-sync] treats missing `_source` as manually owned instead of overwriting it from the environment. |
 | A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
@@ -324,6 +326,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [streaming]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/streaming.py
 [access-migration-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_access_migration.py
 [agent-config-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_agents.py
+[tool-metadata-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_tools_metadata.py
 [agent-runs-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_agent_storage_runs.py
 [approval-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_tool_approval.py
 [cli-connect-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_cli_connect.py

@@ -1539,7 +1539,8 @@ class TestGitMetadataWrites:
         base = tmp_path / "ws"
         (base / ".git").mkdir(parents=True)
         tools = CodingTools(base_dir=str(base), file_access="unrestricted")
-        assert "Error" in tools.write_file(".git/config", "[core]")
+        assert "Git metadata" in tools.write_file(".git/config", "[core]")
+        assert not (base / ".git" / "config").exists()
 
     def test_coding_tools_block_git_metadata_writes(self, tmp_path: Path, git_config: Path) -> None:
         """write_file and edit_file refuse .git paths."""

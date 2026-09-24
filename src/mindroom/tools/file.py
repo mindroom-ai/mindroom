@@ -260,13 +260,24 @@ class _MindRoomFileTools(AgnoFileTools):
             return super().search_content(query, directory, limit)
         if not search_dir.is_dir():
             return f"Error: '{directory}' is not a directory"
+        # AGNO_COMPAT: FileTools.search_content cannot search outside base_dir.
+        # Reason: Agno 3.0.9 relativizes every hit and exclusion check against
+        # self.base_dir, so unrestricted agents cannot search other directories.
+        # Searching a shallow copy rooted at the target relies on that method
+        # deriving all state from self.base_dir.
+        # Upstream issue: Tracking gap; no matching issue for a search root
+        # independent of base_dir has been identified.
+        # Upstream PR: None identified.
+        # Remove when: Agno accepts an absolute search directory outside base_dir
+        # and reports absolute hit paths; keep the workspace-mode refusal and
+        # exclusion matching relative to the searched directory.
+        # Coverage: tests/test_coding_tools.py::TestFileToolFileAccess::test_file_tool_search_content_searches_outside_directories_when_unrestricted.
         rooted = copy.copy(self)
         rooted.base_dir = search_dir
         result = AgnoFileTools.search_content(rooted, query, None, limit)
-        try:
-            payload = json.loads(result)
-        except json.JSONDecodeError:
+        if result.startswith("Error"):
             return result
+        payload = json.loads(result)
         for match in payload["files"]:
             match["file"] = str(search_dir / match["file"])
         return json.dumps(payload, indent=2)
