@@ -6666,6 +6666,11 @@ extract_metadata_only("https://matrix.org/blog/")
 #### Notes
 
 - `trafilatura` is the strongest no-key option when you want more than a plain page read.
+- Server-side `trafilatura` downloads accept only HTTP(S) URLs whose resolved targets are public Internet addresses.
+- Private, loopback, link-local, multicast, reserved, and metadata-style targets are rejected with an error result before any connection is made.
+- Redirects, `robots.txt`, meta-refresh targets, and links discovered while crawling are validated the same way.
+- `crawl_website()` stops with that error when the crawler reaches a blocked target, while `extract_content=True` reports each blocked page individually.
+- Pages are downloaded uncompressed, and a server that answers with a compressed body is treated as a failed download.
 - `crawl_website()` depends on Trafilatura spider support in the runtime, so verify the crawler function exists if crawling matters to your workflow.
 - For news-article specific extraction with titles, authors, and summaries, `newspaper` can be a better fit.
 
@@ -9092,7 +9097,9 @@ It never infers thread IDs, event IDs, or state keys from thread context, so cal
 `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs.
 Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
+A dangerous write also requires the human requester, or one of their configured bridge aliases, to be joined to the target room with room admin power (power level 100), so the model's flag alone never authorizes it.
 Hard-blocked state event types like `m.room.create` remain blocked.
+The `com.mindroom.*` and `io.mindroom.*` namespaces are reserved for runtime metadata: `content` may not set keys in them at any depth, and `send_event` and `put_state` may not write event types in them.
 `search` is read-only, scopes results to one room via `room_id`, uses the top-level `limit` parameter, and rejects `filter.limit`.
 When `event_context={"include_profile": true}` is requested, returned context preserves `profile_info` for matching senders.
 
@@ -12072,7 +12079,8 @@ Use `dynamic_workflow_run` to publish a completed Dynamic Workflow HTML report.
 Use `static_site` to publish a copied workspace directory that contains `index.html` and optional CSS, JavaScript, images, fonts, or JSON assets.
 A `static_site` source path may also point at one workspace HTML file, which is copied and served as `index.html`.
 The static site source path is workspace-relative and the published copy is stored under `MINDROOM_STORAGE_PATH/report_publishing/artifacts/<slug>/`.
-A static site snapshot may contain at most 200 files and 10 MiB of total data, and publishing fails with an explanatory error beyond either limit.
+A static site snapshot may contain at most 200 files, 200 directories nested at most 32 levels deep, and 10 MiB of total data, and publishing fails with an explanatory error beyond any of those limits.
+The snapshot copies only regular files, reading every entry through no-follow directory descriptors below the workspace root, so a symlink, a special file, or an entry swapped while the copy runs fails the publish instead of leaking the link target.
 Static site links serve under the trailing-slash form `/reports/public/<slug>/`, and the slash-less form redirects there so relative asset URLs resolve.
 JavaScript is allowed for static sites, but the public route serves static sites with a sandbox CSP that omits `allow-same-origin` and sets `connect-src 'none'`.
 That means scripts can drive local page interactivity, but they cannot act as logged-in MindRoom dashboard code or call MindRoom APIs.
@@ -16678,6 +16686,12 @@ When all participating team members use the `file` backend, team file memory is 
 - `agents/<agent>/memory_files/team_<sorted_members>/MEMORY.md`
 - `agents/<agent>/memory_files/team_<sorted_members>/memory/YYYY-MM-DD.md`
 
+Memory files must be plain regular files inside that scope directory, because agent tools can write to it.
+The file backend skips symlinks, FIFOs, device nodes, and anything under a symlinked directory when it reads entries for the prompt preload, keyword search, and listing, and it rejects them when it writes, so an entry planted inside the scope directory cannot redirect MindRoom to another file.
+Each memory file is read up to 1 MiB; a larger file is truncated at its last complete line for reads, and updates of a truncated or non-UTF-8 file fail with an error so the rest of the file survives.
+A scan examines at most 4096 entries under `memory/`, reads at most 16 MiB, and descends at most 8 directory levels below `memory/`.
+Semantic search indexes the same files through the knowledge-base listing, which applies its own symlink rules.
+
 ## File Auto-Flush Worker
 
 When the effective backend is `file` for at least one agent, you can enable background auto-flush:
@@ -18984,6 +18998,7 @@ An explicit `members_of_rooms: []` disables inferred room grants.
 
 MindRoom resolves aliases before administrator and static-user matching.
 Internal MindRoom identities bypass responder restrictions because they are system participants.
+A team's `access` authorizes requests to the team as a whole: a requester the team admits reaches every member agent through that team, even members whose own `access` would not admit them directly.
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
 The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
@@ -19332,7 +19347,7 @@ Restart MindRoom after changing these environment settings.
 Mapped identities must be concrete human Matrix user IDs, and `authorization.aliases` resolves bridge identities to their canonical requester.
 The request body's `user` field and requester headers cannot override this identity.
 
-Mapped callers only see and invoke models allowed by the existing responder access policy, including every member of a selected team.
+Mapped callers only see and invoke models allowed by the existing responder access policy; a team model is decided by the team's own `access`, which grants its member agents for that request.
 Auto-routing uses the same permitted agents.
 `run_subagent` checks both the caller agent's `delegate_to` list and the requester's access to each target, and propagates the requester into nested runs and their metadata.
 Grant access with `agents.<name>.access.users`, administrator membership, or a ready managed `members_of_rooms` membership snapshot.
@@ -20267,6 +20282,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/script_runs/legacy_recovery.py`][script-legacy-recovery] and [`src/mindroom/workers/backends/kubernetes.py`][kubernetes-worker-backend] | Script-runtime startup encounters an unversioned recovery signature or a v2 digest from before the optional seccomp or RuntimeClass fields. | Only an exact recomputation permits migration; pre-seccomp workers require an unset current seccomp policy, an unset RuntimeClass retains the pre-RuntimeClass digest bytes, and the current store owns atomic signature replacement and rejects concurrent revocation or signature changes. |
 | [`src/mindroom/legacy_attachments.py`][legacy-attachments] | `load_attachment` finds a record whose `local_path` is outside the current `incoming_media/` directory. | A no-follow walk from the filesystem root and the recorded SHA-256 gate a capped retained copy; the owner rewrites the record atomically and rejects anything unverifiable. |
 | [`src/mindroom/desktop/legacy_command_journal.py`][desktop-legacy-journal] | The desktop SQLite journal finds JSON v1 receipts during its one-time import. | Historical validation stays isolated; the journal retains file permissions, atomic import, replay tombstones, response delivery state, sequence maxima, and admission capacity. |
+| [`src/mindroom/workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | Docker worker backend startup finds a worker whose lifecycle record is still inside its bind-mounted state root. | Only the worker key is read, without following links, and only when its digest-bound directory name matches; the backend writes a fresh idle control record, never trusts other in-mount fields, and still addresses containers only by the key-derived name and ownership labels. |
 
 ## Python provenance and regression coverage
 
@@ -20301,6 +20317,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`session_storage_preflight.py`][session-preflight] | [Session recovery tests][session-recovery-tests] cover schema-based archive, locks, rollback recovery, unrelated tables, current corruption, and byte preservation without inventing one release cutoff. |
 | [`legacy_attachments.py`][legacy-attachments] | [Attachment tests][attachment-tests] cover verified adoption and record rewrite, independence from later source swaps, and rejection of planted leaf or ancestor links, changed bytes, and missing digests. |
 | [`desktop/legacy_command_journal.py`][desktop-legacy-journal] | [Desktop journal tests][desktop-journal-tests] cover bodyless started receipts, retained sequence high-watermarks, deferred response replay, repeated opens, and independent current admission capacity. |
+| [`workers/backends/legacy_docker_worker_metadata.py`][legacy-docker-worker-metadata] | [Docker worker tests][docker-worker-tests] adopt a released in-mount record for listing, idle cleanup, and retirement while ignoring its container fields, and skip foreign-key, symlinked, and malformed records. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
 
 This index intentionally excludes current authoring shorthands, protocol adapters, recovery rules, and caches that tolerate unknown versions because those are active interfaces rather than evidence of a retired native writer.
@@ -20468,6 +20485,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [desktop-journal-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_desktop_command_journal.py
 [attachment-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_attachments.py
 [desktop-protocol]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/desktop/protocol.py
+[docker-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_docker_worker_backend.py
 [egress-policy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/egress/policy.py
 [event-info]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/event_info.py
 [handled]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/handled_turns.py
@@ -20487,6 +20505,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [legacy-approval]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_approval_payloads.py
 [legacy-attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_attachments.py
 [legacy-approval-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_approval_recovery.py
+[legacy-docker-worker-metadata]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/legacy_docker_worker_metadata.py
 [legacy-delivery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_delivery_payloads.py
 [legacy-handled]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_handled_turns.py
 [legacy-openai]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_openai_tool_replay.py
@@ -20668,6 +20687,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Function schema postprocessors are lost or misbound during copying/preparation. | Add a supported postprocessor that survives copies and runs after schema preparation. | `tool_system/agno_compat_function_schema.py`. |
 | Google authentication requires private resolver and Function entrypoint replacement. | Propose injectable credential resolution and an entrypoint middleware hook. | `oauth/agno_compat_google_auth.py`. |
 | WebsiteReader does not expose fetch, redirect, and crawl-admission hooks. | Propose a replaceable fetch path and explicit crawl-policy callbacks. | `custom_tools/agno_compat_website_reader.py`. |
+| TrafilaturaTools extraction and crawling download through fixed module-level fetchers, and Trafilatura's spider has no fetch hook. | Tracking gap: accept a caller-supplied fetcher for extraction, batch extraction, and every crawler download; no matching issue or PR identified. | `tools/agno_compat_trafilatura.py`; loopback, metadata, redirect, DNS-rebind, and crawl coverage in `tests/test_trafilatura_tool.py`. |
 | GithubTools serializes provider failures and logs provider detail through fixed message formats. | Expose typed errors; separately provide structured logging or a redaction hook. | `custom_tools/agno_compat_github_errors.py`. |
 | ReplicateTools checks its API key but calls an independent SDK default client. | Bind SDK requests to the toolkit key and expose client lifetime ownership while preserving media results. | `custom_tools/agno_compat_replicate.py`. |
 | AgentQLTools stores its resolved key without handing it to AgentQL queries. | Tracking gap: pass the resolved key through a per-request or per-page SDK credential API; no matching issue or PR identified. | `custom_tools/agno_compat_agentql.py`; concurrent stored-key requests and an unrelated SDK call in `tests/test_agentql_tools.py`. |
@@ -20705,6 +20725,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_claude.py` | Claude sampling and terminal metadata adaptation. | `claude_compat.py` retains typed refusal and native-compaction behavior. |
 | `agno_compat_vertex_claude_tools.py` | Non-mutating removal of unsupported provider-level strict flags before Agno tool formatting. | `vertex_claude_compat.py` retains context fitting, token counting, and native checkpoint policy. |
 | `custom_tools/agno_compat_website_reader.py` | Private crawl queue, visited state and copied loop with owner callbacks. | `custom_tools/website.py` retains server-fetch and redirect validation, exact-host rules, extraction, budgets, results, and sanitized logging. |
+| `tools/agno_compat_trafilatura.py` | Replaces the Agno and Trafilatura spider download bindings with fetchers that request uncompressed bodies and validate every URL, redirect hop, and dialed address within Trafilatura's timeout, redirect, and size limits. | `tools/trafilatura.py` installs the guard before returning the toolkit; upstream extraction, crawling, and result formats are unchanged. |
 | `custom_tools/agno_compat_github_errors.py` | Capture of typed failures across serialized Agno results and prefix/logger binding. | `custom_tools/github.py` retains credential ownership and refresh, PyGithub requester policy, OAuth recovery, and sanitized output/log messages. |
 | `custom_tools/agno_compat_replicate.py` | Copied media-call boundary with a credential-bound Replicate client, inherited output parsing, and private SDK transport cleanup. | `tool_system/metadata.py` retains scoped credential resolution; `tools/replicate.py` retains lazy registration, and the adapter closes each request client after consuming outputs. |
 | `custom_tools/agno_compat_agentql.py` | AgentQL 1.18.1 private page/query dispatch with an explicit request key, plus lossless Agno custom-result formatting. | `tools/agentql.py` retains lazy registration and browser compatibility; `tool_system/metadata.py` retains scoped credential resolution. SDK page readiness, query parameters, HTTP failure and timeout mapping, and per-call browser cleanup remain intact. Redirect rejection and unwrapped successful-response JSON errors deliberately differ from AgentQL 1.18.1. |
@@ -20827,6 +20848,8 @@ Do not report or "fix" these; they are deliberate.
 - `register_attachment` copies the file's current bytes into managed attachment storage, so later edits or replacement of the source file never change what the attachment sends.
 - `mindroom_output_path`, attachment saves, Google Drive downloads, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
+- A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
+- Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 
 ## Reviewing security findings
 
@@ -22783,6 +22806,8 @@ Control-plane-only sections that a worker never reads are cleared from that snap
 Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope: user_agent` snapshot only that agent's projected context files and assigned knowledge bases.
 `worker_scope: user` intentionally shares one worker across multiple agents, so it keeps the broader shared projection for that worker.
 Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.
+Everything under that state root is writable by the code running inside the container, so MindRoom keeps each worker's lifecycle record in a control directory beside the worker roots that is never mounted into a container.
+Worker containers are addressed by a name derived from the worker key, and MindRoom only starts, stops, or removes a container that carries its own worker labels and worker-key environment.
 MindRoom also masks config-adjacent `.env` inside the worker container, so the raw file is not mounted into the worker.
 Proxied `shell` receives a filtered system environment plus explicitly allowed process-env passthrough; `python` receives only allowed runtime names from the process and config-adjacent `.env`.
 Neither inherits arbitrary `.env` values; see [Shell env and PATH](#shell-env-and-path) for explicit passthrough and request-environment controls.
@@ -23551,9 +23576,10 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
   --set anthropic_key="your-key" \
   --set openrouter_key="your-key" \
   --set supabaseUrl="https://your-project.supabase.co" \
-  --set supabaseAnonKey="your-anon-key" \
-  --set supabaseServiceKey="your-service-key"
+  --set supabaseAnonKey="your-anon-key"
 ```
+
+Never give an instance the Supabase service-role key; the runtime authenticates with the anon key only.
 
 Only enable trusted upstream auth when the instance is behind a verified access layer that strips client-supplied copies of those headers and injects authenticated values itself:
 
@@ -23778,6 +23804,11 @@ Its `env` values shape is a map with `extra` and `envFrom`, not the list shown a
 For production SaaS instance provisioning, the instance chart is rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`.
 After Helm completes, the platform backend applies `mindroom-api-keys-{instance_id}` directly with Kubernetes so legacy chart-managed Secret pruning cannot remove it.
 Tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
+Tenant workloads are untrusted, so the instance Secret holds only instance-scoped credentials and never the platform's Supabase service-role key.
+The sandbox proxy token is random per instance.
+Each provision removes Secret keys the provisioner no longer writes, because `kubectl apply` keeps keys dropped from `stringData`.
+Upgrading from releases that copied platform credentials into instance Secrets requires rotating the Supabase service-role key and any platform provider keys copied by `cluster/scripts/update-api-keys.sh`, then re-provisioning every instance with `POST /system/provision` and its `instance_id`.
+Standalone chart installs that set the retired `supabaseServiceKey` value keep that key in the chart-created Secret until it is deleted manually.
 
 ## Ingress
 

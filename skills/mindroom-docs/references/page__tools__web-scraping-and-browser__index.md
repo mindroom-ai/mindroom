@@ -190,6 +190,11 @@ extract_metadata_only("https://matrix.org/blog/")
 #### Notes
 
 - `trafilatura` is the strongest no-key option when you want more than a plain page read.
+- Server-side `trafilatura` downloads accept only HTTP(S) URLs whose resolved targets are public Internet addresses.
+- Private, loopback, link-local, multicast, reserved, and metadata-style targets are rejected with an error result before any connection is made.
+- Redirects, `robots.txt`, meta-refresh targets, and links discovered while crawling are validated the same way.
+- `crawl_website()` stops with that error when the crawler reaches a blocked target, while `extract_content=True` reports each blocked page individually.
+- Pages are downloaded uncompressed, and a server that answers with a compressed body is treated as a failed download.
 - `crawl_website()` depends on Trafilatura spider support in the runtime, so verify the crawler function exists if crawling matters to your workflow.
 - For news-article specific extraction with titles, authors, and summaries, `newspaper` can be a better fit.
 

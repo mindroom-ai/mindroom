@@ -32,6 +32,12 @@ def _snapshot(path: Path) -> dict[str, bytes]:
     return {str(item.relative_to(path)): item.read_bytes() for item in path.rglob("*") if item.is_file()}
 
 
+def _untouched_identity(path: Path) -> tuple[int, ...]:
+    """Return the stat fields a rewrite or replacement would change; reads may still advance atime."""
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_mode, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
 def test_install_complete_tree_and_native_receipt(tmp_path: Path) -> None:
     """The installed tree must contain nested sources and load with its own environment."""
     source = _bundle(tmp_path / "source")
@@ -54,9 +60,9 @@ def test_unchanged_bundle_keeps_active_and_previous(tmp_path: Path) -> None:
     (source / "prompts/helper.md").write_text("Second prompt")
     install_config_bundle(source, target, process_env={})
     previous = _snapshot(tmp_path / "active.previous")
-    stat = target.stat()
+    identity = _untouched_identity(target)
     assert install_config_bundle(source, target, process_env={}).status == "unchanged"
-    assert target.stat() == stat
+    assert _untouched_identity(target) == identity
     assert _snapshot(tmp_path / "active.previous") == previous
 
 
@@ -155,11 +161,11 @@ def test_new_revision_validates_and_updates_identical_tree_without_rotation(tmp_
     source = _bundle(tmp_path / "source")
     target = tmp_path / "active"
     install_config_bundle(source, target, revision="one", process_env={})
-    config_stat = (target / "config.yaml").stat()
+    config_identity = _untouched_identity(target / "config.yaml")
     assert install_config_bundle(source, target, initialize_only=True, revision="two", process_env={}).status == (
         "unchanged"
     )
-    assert (target / "config.yaml").stat() == config_stat
+    assert _untouched_identity(target / "config.yaml") == config_identity
     assert not (tmp_path / "active.previous").exists()
     assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "two"
 
