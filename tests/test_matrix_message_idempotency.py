@@ -308,6 +308,26 @@ async def test_cancellation_after_acceptance_preserves_pending_send(
     assert transport.attempts[0] == transport.attempts[1]
 
 
+async def test_claim_denies_room_the_requester_has_not_joined(
+    context: ToolRuntimeContext,
+    transport: MatrixTransport,
+) -> None:
+    """The claim re-check must refuse a target room the requester does not belong to."""
+    room_id = "!other:localhost"
+    context.client.rooms[room_id] = nio.MatrixRoom(room_id, context.client.user_id)
+    cast("AsyncMock", context.client.joined_members).return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(user_id="@victim:localhost", display_name="Victim", avatar_url=None)],
+        room_id=room_id,
+    )
+    with (
+        tool_runtime_context(context),
+        pytest.raises(durable.MatrixMessageIdempotencyError, match="Not authorized to send to the target room"),
+    ):
+        async with durable.claim_matrix_message_send(context, room_id, "unjoined"):
+            pass  # pragma: no cover - the claim must refuse before yielding
+    assert transport.attempts == []
+
+
 async def test_room_alias_reuses_receipt(context: ToolRuntimeContext, transport: MatrixTransport) -> None:
     """Room names and resolved IDs must address the same receipt scope."""
     state = MatrixState()
@@ -346,6 +366,10 @@ async def test_distinct_scopes_do_not_share_receipts(
     else:
         room_id = "!other:localhost"
         context.client.rooms[room_id] = nio.MatrixRoom(room_id, context.client.user_id)
+        cast("AsyncMock", context.client.joined_members).return_value = nio.JoinedMembersResponse(
+            members=[nio.RoomMember(user_id="@alice:localhost", display_name="Alice", avatar_url=None)],
+            room_id=room_id,
+        )
     with tool_runtime_context(changed):
         second = json.loads(
             await MatrixMessageTools().matrix_message(message="second", room_id=room_id, idempotency_key="scoped"),

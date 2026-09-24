@@ -1744,6 +1744,99 @@ def test_base_files_endpoint_still_returns_sizes_and_timestamps(tmp_path: Path) 
     assert payload["files"][0]["modified"]
 
 
+def _committed_git_checkout(path: Path) -> None:
+    path.mkdir()
+    (path / "doc.md").write_text("body", encoding="utf-8")
+    for args in (
+        ("init", "-b", "main"),
+        ("add", "doc.md"),
+        ("-c", "user.email=tests@example.com", "-c", "user.name=MindRoom Tests", "commit", "-m", "doc"),
+    ):
+        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+
+
+def test_dashboard_git_listing_never_runs_checkout_fsmonitor(tmp_path: Path) -> None:
+    """Dashboard reads must not run a program the checkout's own Git config names.
+
+    A shared checkout may live in an agent workspace, where agent tools can write
+    ``.git/config``, while the dashboard lists it from the primary process.
+    """
+    docs_path = tmp_path / "docs"
+    _committed_git_checkout(docs_path)
+    marker = tmp_path / "fsmonitor-ran"
+    hook = tmp_path / "fsmonitor-hook"
+    hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n", encoding="utf-8")
+    hook.chmod(0o755)
+    subprocess.run(["git", "config", "core.fsmonitor", str(hook)], cwd=docs_path, check=True, capture_output=True)
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
+    runtime_paths = runtime_paths_for(config)
+
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    client = TestClient(main.app)
+    bases = client.get("/api/knowledge/bases")
+    files = client.get("/api/knowledge/bases/docs/files")
+    status = client.get("/api/knowledge/bases/docs/status")
+
+    assert bases.status_code == files.status_code == status.status_code == 200
+    assert [entry["path"] for entry in files.json()["files"]] == ["doc.md"]
+    assert status.json()["git"]["repo_present"] is True
+    assert not marker.exists()
+
+
+def test_git_listing_runs_git_without_caller_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Listing must not hand the primary process' secrets or relative PATH entries to Git."""
+    docs_path = tmp_path / "docs"
+    _committed_git_checkout(docs_path)
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
+    monkeypatch.setenv("MINDROOM_API_KEY", "dashboard-secret")
+    monkeypatch.setenv("PATH", os.pathsep.join(["relative-bin", os.environ["PATH"]]))
+    original_run = subprocess.run
+    envs: list[dict[str, str]] = []
+
+    def _recording_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        envs.append(cast("dict[str, str]", kwargs["env"]))
+        return original_run(*args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(knowledge_file_listing_module.subprocess, "run", _recording_run)
+
+    assert list_git_tracked_knowledge_files(config, "docs", docs_path) == [docs_path.resolve() / "doc.md"]
+    assert len(envs) == 2
+    allowed_names = {
+        "PATH",
+        "GIT_ALLOW_PROTOCOL",
+        "GIT_NO_LAZY_FETCH",
+        *knowledge_file_listing_module._GIT_CONFIG_LOCATION_ENV,
+    }
+    for env in envs:
+        assert set(env) <= allowed_names
+        assert env["GIT_ALLOW_PROTOCOL"] == ""
+        assert all(Path(entry).is_absolute() for entry in env["PATH"].split(os.pathsep))
+
+
+def test_read_only_git_refuses_transports_that_checkout_config_allows(tmp_path: Path) -> None:
+    """Checkout config re-allowing a protocol must not open a transport during listing."""
+    remote = tmp_path / "remote"
+    _committed_git_checkout(remote)
+    docs_path = tmp_path / "docs"
+    _committed_git_checkout(docs_path)
+    subprocess.run(["git", "config", "protocol.file.allow", "always"], cwd=docs_path, check=True, capture_output=True)
+
+    result = knowledge_file_listing_module._run_read_only_git(
+        docs_path,
+        ["ls-remote", remote.resolve().as_uri()],
+        timeout=10.0,
+    )
+
+    assert result.returncode != 0
+    assert "not allowed" in result.stderr
+
+
 def test_directory_guard_rejects_parent_traversal(tmp_path: Path) -> None:
     """The guard must reject "..", which pathlib's lexical ``relative_to`` lets through.
 

@@ -91,6 +91,7 @@ Restrict access to both the instance Secret and every retained Helm release Secr
 Deleting the local file or changing future values does not remove credentials from older Helm release revisions.
 The chart passes the same token to the runtime and sandbox runner; the default file and shell tools need it to acquire the static runner.
 The provisioner supplies this token automatically, while a direct install must provide it.
+Browser dashboard login through the platform also needs `platformSsoSecret` set to the key the platform derives for that instance; without it the instance accepts only Supabase bearer tokens.
 
 ```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
@@ -103,9 +104,10 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
   --set anthropic_key="your-key" \
   --set openrouter_key="your-key" \
   --set supabaseUrl="https://your-project.supabase.co" \
-  --set supabaseAnonKey="your-anon-key" \
-  --set supabaseServiceKey="your-service-key"
+  --set supabaseAnonKey="your-anon-key"
 ```
+
+Never give an instance the Supabase service-role key; the runtime authenticates with the anon key only.
 
 Only enable trusted upstream auth when the instance is behind a verified access layer that strips client-supplied copies of those headers and injects authenticated values itself:
 
@@ -330,6 +332,11 @@ Its `env` values shape is a map with `extra` and `envFrom`, not the list shown a
 For production SaaS instance provisioning, the instance chart is rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`.
 After Helm completes, the platform backend applies `mindroom-api-keys-{instance_id}` directly with Kubernetes so legacy chart-managed Secret pruning cannot remove it.
 Tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
+Tenant workloads are untrusted, so the instance Secret holds only instance-scoped credentials and never the platform's Supabase service-role key.
+The sandbox proxy token is random per instance.
+Each provision removes Secret keys the provisioner no longer writes, because `kubectl apply` keeps keys dropped from `stringData`.
+Upgrading from releases that copied platform credentials into instance Secrets requires rotating the Supabase service-role key and any platform provider keys copied by `cluster/scripts/update-api-keys.sh`, then re-provisioning every instance with `POST /system/provision` and its `instance_id`.
+Standalone chart installs that set the retired `supabaseServiceKey` value keep that key in the chart-created Secret until it is deleted manually.
 
 ## Ingress
 
