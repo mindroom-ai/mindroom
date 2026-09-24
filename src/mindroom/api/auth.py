@@ -1013,21 +1013,15 @@ def require_same_origin(
         raise HTTPException(403, detail, headers=headers)
 
 
-def _has_browser_fetch_metadata(request: Request) -> bool:
-    """Return whether a browser labeled this request with the origin metadata the mutation guard checks."""
-    return "origin" in request.headers or "sec-fetch-site" in request.headers
-
-
 def _require_browser_mutation_origin(
     request: Request,
     settings: _ApiAuthSettings,
     validated_authorization: str | None = None,
 ) -> None:
-    if request.method in {"GET", "HEAD", "OPTIONS", "TRACE"}:
-        return
-    # A bearer marks a deliberate API client only when no browser sent the request;
-    # an intermediary that attaches a bearer to browser traffic must not bypass this guard.
-    if _extract_bearer_token(validated_authorization) is not None and not _has_browser_fetch_metadata(request):
+    if (
+        request.method in {"GET", "HEAD", "OPTIONS", "TRACE"}
+        or _extract_bearer_token(validated_authorization) is not None
+    ):
         return
     origin = _dashboard_origin(request, settings)
     if origin is None:

@@ -57,7 +57,7 @@ export default defineConfig({
   },
   server: {
     port: frontendPort,
-    allowedHosts: [".mindroom.chat"],
+    allowedHosts: [".nijho.lt", ".local", ".mindroom.chat"],
     headers: {
       "X-Frame-Options": "DENY",
       "Content-Security-Policy": "frame-ancestors 'none'",
@@ -71,8 +71,8 @@ export default defineConfig({
             proxy.on("proxyReq", (proxyReq, req) => {
               if (!req.headers.authorization && isOperatorRequest(req)) {
                 proxyReq.setHeader("Authorization", `Bearer ${apiKey}`);
-                // The proxy is now the API client, so the backend must not compare
-                // the dev server's origin with its own and reject the operator.
+                // The proxy is now the API client, so drop the browser's origin
+                // metadata instead of forwarding the dev server's origin upstream.
                 proxyReq.removeHeader("Origin");
                 proxyReq.removeHeader("Sec-Fetch-Site");
               }

@@ -257,7 +257,7 @@ docker-build-saas-backend:
 # Core MindRoom dev
 # Start core MindRoom frontend (dev)
 start-frontend-dev:
-    cd frontend && bun install && bun run dev -- --port 3003
+    cd frontend && bun install && bun run dev -- --host 0.0.0.0 --port 3003
 
 # Start core MindRoom runtime (dev)
 start-mindroom-dev:
