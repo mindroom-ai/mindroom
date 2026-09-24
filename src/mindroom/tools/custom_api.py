@@ -9,7 +9,7 @@ import httpx
 
 from mindroom.redaction import redact_sensitive_data
 from mindroom.server_fetch_url import ServerFetchHTTPTransport, validate_server_fetch_url
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="custom_api",
+    file_access=ToolFileAccess.NONE,
     display_name="Custom API",
     description="Make HTTP requests to any external API with customizable authentication and parameters",
     category=ToolCategory.DEVELOPMENT,

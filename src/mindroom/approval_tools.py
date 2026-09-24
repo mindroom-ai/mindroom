@@ -10,6 +10,7 @@ from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agno_compat_approval import append_denied_tool_result, before_tool_lookup
+from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
 from mindroom.mcp.toolkit import require_mcp_server_manager
@@ -30,7 +31,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 
 def toolkit_owners_for_agents(agents: Sequence[Agent]) -> dict[tuple[str, str], str | None]:
@@ -179,6 +181,7 @@ async def required_approval_tool_names(
         agent_name=agent_name,
         config=config,
         loaded_tools=[entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs],
+        session_id=execution_identity.session_id,
         include_matrix_room_runtime_tools=execution_identity.room_id is not None,
     )
     permitted = {entry.authored_name or entry.name: entry for entry in surface.runtime_tool_configs}
@@ -207,3 +210,49 @@ async def required_approval_tool_names(
                 execution_identity=execution_identity,
             )
     return tuple(required)
+
+
+async def authorize_prepared_tool_call(
+    binding: PreparedAgentToolBinding,
+    *,
+    expected_worker_target: ResolvedWorkerTarget,
+) -> None:
+    """Recheck live or recovered CLI dispatch against its original prepared authority.
+
+    The catalog's toolkits were resolved from ``context.config``. Requiring the
+    current config to equal it keeps every config-derived toolkit assignment
+    valid, so only live membership, worker routing, and function filters change.
+    Recovery restores configured toolkits through ``required_approval_tool_names``
+    before rebuilding the Agent.
+    """
+    catalog = binding.catalog
+    context = catalog.runtime_context
+    config = context.current_config
+    # Reserved namespace is assigned only to functions produced by this Agent's
+    # effective tool preparation. Never accept a binding the catalog does not
+    # own or use the namespace to bypass current config/membership/worker checks.
+    if binding.key.toolkit == "agent" and (
+        not catalog.owns(binding)
+        or catalog.agent.id != context.agent_name
+        or binding.function.name != binding.key.function
+        or binding.function.owning_toolkit is not None
+        or context.agent_name not in config.agents
+    ):
+        msg = "Generated CLI function no longer belongs to its prepared Agent"
+        raise PermissionError(msg)
+    if (
+        config != context.config
+        or context.resolve_worker_target() != expected_worker_target
+        or not is_sender_allowed_for_entity_replies_in_room(
+            context.requester_id,
+            (context.agent_name,),
+            config,
+            context.room_id,
+            context.runtime_paths,
+            context.require_agent_reply_memberships(),
+            require_resolved_membership=True,
+        )
+        or (context.tool_function_filter is not None and not context.tool_function_filter(binding.function))
+    ):
+        msg = "Current authorization no longer permits this prepared CLI call"
+        raise PermissionError(msg)

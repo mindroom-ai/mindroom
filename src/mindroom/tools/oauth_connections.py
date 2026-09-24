@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolManagedInitArg, ToolStatus
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="oauth_connections",
+    file_access=ToolFileAccess.NONE,
     display_name="OAuth Connections",
     description="Get a confirmation link to reset an account connection for this agent",
     category=ToolCategory.INTEGRATIONS,

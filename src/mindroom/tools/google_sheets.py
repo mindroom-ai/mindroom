@@ -8,6 +8,7 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="google_sheets",
+    file_access=ToolFileAccess.NONE,
     display_name="Google Sheets",
     description="Read, create, and update Google Sheets spreadsheets",
     category=ToolCategory.DEVELOPMENT,

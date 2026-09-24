@@ -132,12 +132,15 @@ class TestProvisionerCommandValidation:
         assert "sandbox_proxy_token" not in set_args
         assert "credentials_encryption_key" not in set_args
         assert "matrix_registration_shared_secret" not in set_args
+        assert "platform_sso_secret" not in set_args
         assert set_file_args == {}
 
         secret_data = captured_secret_manifests[0]["stringData"]
         assert secret_data["sandbox_proxy_token"]
         assert secret_data["credentials_encryption_key"]
         assert secret_data["matrix_registration_shared_secret"]
+        assert secret_data["platform_sso_secret"]
+        assert secret_data["platform_sso_secret"] != secret_data["matrix_registration_shared_secret"]
         assert operations == ["helm", "secret"]
 
     def test_instance_secrets_are_stable_and_instance_scoped(self):
@@ -152,10 +155,13 @@ class TestProvisionerCommandValidation:
             second = provisioner_module._instance_credentials_encryption_key("123")
             other = provisioner_module._instance_credentials_encryption_key("456")
             registration_secret = provisioner_module._instance_matrix_registration_shared_secret("123")
+            platform_sso_secret = provisioner_module.instance_platform_sso_secret("123")
+            other_platform_sso_secret = provisioner_module.instance_platform_sso_secret("456")
 
         assert first == second
         assert first != other
         assert first != registration_secret
+        assert platform_sso_secret not in {first, registration_secret, other_platform_sso_secret}
         assert len(base64.urlsafe_b64decode(f"{first}=")) == 32
         assert len(base64.urlsafe_b64decode(f"{registration_secret}=")) == 32
 
@@ -201,6 +207,7 @@ class TestProvisionerCommandValidation:
             patch.multiple(
                 "backend.services.provisioner_service",
                 PROVISIONER_API_KEY="test-key",
+                PLATFORM_DOMAIN="platform.example.test",
                 INSTANCE_BASE_DOMAIN="local",
                 INSTANCE_STORAGE_CLASS_NAME="standard",
                 INSTANCE_MINDROOM_IMAGE="ghcr.io/mindroom-ai/mindroom:latest",
@@ -254,6 +261,7 @@ class TestProvisionerCommandValidation:
                 set_file_args[key] = value
 
         assert set_args["baseDomain"] == "local"
+        assert set_args["platformDomain"] == "platform.example.test"
         assert set_args["storageClassName"] == "standard"
         assert set_args["mindroom_image"] == "ghcr.io/mindroom-ai/mindroom:latest"
         assert set_args["mindroom_image_pull_policy"] == "IfNotPresent"

@@ -1,13 +1,12 @@
-"""E2B sandbox toolkit whose local file transfers stay inside the agent workspace."""
+"""E2B sandbox toolkit whose uploads follow ``file_access`` and whose downloads stay in the agent workspace."""
 
 from __future__ import annotations
 
 import base64
 import json
-import os
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, override
+from typing import TYPE_CHECKING, Any, override
 
 from agno.agent import Agent  # noqa: TC002  # resolved by Agno function schema introspection
 from agno.team.team import Team  # noqa: TC002  # resolved by Agno function schema introspection
@@ -15,11 +14,11 @@ from agno.tools.e2b import E2BTools
 from agno.tools.function import ToolResult
 
 from mindroom.atomic_file import atomic_write_file_at
-from mindroom.path_confinement import (
-    open_directory_within_root,
-    open_regular_file_within_root,
-    resolve_path_within_root,
-)
+from mindroom.file_access import resolve_agent_file
+from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
+
+if TYPE_CHECKING:
+    from mindroom.config.models import FileAccess
 
 
 def _write_within_root(root: Path, relative: Path, payload: bytes | bytearray) -> None:
@@ -32,11 +31,14 @@ def _write_within_root(root: Path, relative: Path, payload: bytes | bytearray) -
 
 
 class MindRoomE2BTools(E2BTools):
-    """Resolve every local path of the E2B file transfers inside the agent workspace.
+    """Confine the local paths of the E2B file transfers.
 
-    Local paths must be workspace-relative without ``..``; links that leave the
-    workspace are rejected. Reads and writes use descriptors pinned below the
-    workspace, so a link swapped in after resolution cannot redirect them.
+    Uploads follow the agent's ``file_access``: ``workspace`` confines them to the
+    agent workspace, ``unrestricted`` allows any regular file MindRoom can read.
+    Downloads always land inside the workspace at workspace-relative paths without
+    ``..``; links that leave the workspace are rejected. Reads and writes use
+    descriptors pinned below their root, so a link swapped in after resolution
+    cannot redirect them.
     """
 
     def __init__(
@@ -46,9 +48,11 @@ class MindRoomE2BTools(E2BTools):
         sandbox_options: dict[str, Any] | None = None,
         *,
         tool_output_workspace_root: Path | None = None,
+        file_access: FileAccess = "workspace",
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         self._workspace_root = tool_output_workspace_root
+        self._file_access = file_access
         super().__init__(api_key=api_key, timeout=timeout, sandbox_options=sandbox_options, **kwargs)
 
     def _workspace_location(self, path: str) -> tuple[Path, Path]:
@@ -68,10 +72,10 @@ class MindRoomE2BTools(E2BTools):
 
     @override
     def upload_file(self, file_path: str, sandbox_path: str | None = None) -> str:
-        """Upload a file from the agent workspace to the E2B sandbox.
+        """Upload a local file to the E2B sandbox.
 
         Args:
-            file_path (str): Workspace-relative path of the local file
+            file_path (str): Local file path; with ``file_access: workspace`` it must be inside the agent workspace
             sandbox_path (str, optional): Destination path in the sandbox. Defaults to the same filename.
 
         Returns:
@@ -79,11 +83,13 @@ class MindRoomE2BTools(E2BTools):
 
         """
         try:
-            root, relative = self._workspace_location(file_path)
-            with (
-                open_regular_file_within_root(root, relative) as descriptor,
-                os.fdopen(descriptor, "rb", closefd=False) as file,
-            ):
+            authorized = resolve_agent_file(
+                file_path,
+                workspace_root=self._workspace_root,
+                file_access=self._file_access,
+                field_name="E2B upload",
+            )
+            with authorized.open() as file:
                 file_in_sandbox = self.sandbox.files.write(sandbox_path or Path(file_path).name, file)
         except Exception as e:
             return json.dumps({"status": "error", "message": f"Error uploading file: {e}"})

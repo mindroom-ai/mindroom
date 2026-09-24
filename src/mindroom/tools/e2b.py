@@ -8,6 +8,7 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="e2b",
+    file_access=ToolFileAccess.AGENT,
     requires_primary_runtime=True,
     consumes_workspace_paths=True,
     display_name="E2B Code Execution",
@@ -51,7 +53,7 @@ if TYPE_CHECKING:
             default=None,
         ),
     ],
-    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,),
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["e2b_code_interpreter"],
     docs_url="https://docs.agno.com/tools/toolkits/others/e2b",
     function_names=(

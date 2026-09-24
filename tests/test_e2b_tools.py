@@ -217,15 +217,15 @@ def test_upload_rejects_file_swapped_to_link_after_resolution(
     """A file swapped for an outward link after resolution cannot redirect an upload."""
     (workspace / "report.csv").write_bytes(b"a,b\n")
     tool = make_tool(workspace)
-    resolve = e2b_module.resolve_path_within_root
+    resolve = e2b_module.resolve_agent_file
 
-    def resolve_then_swap(root: Path, path: Path, **kwargs: object) -> Path:
-        resolved = resolve(root, path, **kwargs)
+    def resolve_then_swap(*args: object, **kwargs: object) -> object:
+        authorized = resolve(*args, **kwargs)
         (workspace / "report.csv").unlink()
         (workspace / "report.csv").symlink_to(outside / "secret.env")
-        return resolved
+        return authorized
 
-    monkeypatch.setattr(e2b_module, "resolve_path_within_root", resolve_then_swap)
+    monkeypatch.setattr(e2b_module, "resolve_agent_file", resolve_then_swap)
 
     assert "Error uploading file" in _error(tool.upload_file("report.csv"))
     assert _files(tool).stored == {}
@@ -236,7 +236,7 @@ def test_transfers_require_workspace(make_tool: Callable[[Path | None], MindRoom
     tool = make_tool(None)
     _files(tool).stored["/tmp/x"] = b"payload"  # noqa: S108
 
-    assert "require an agent workspace" in _error(tool.upload_file("report.csv"))
+    assert "requires an agent workspace" in _error(tool.upload_file("report.csv"))
     assert "require an agent workspace" in _error(tool.download_file_from_sandbox("/tmp/x"))  # noqa: S108
     assert _files(tool).reads == []
 
