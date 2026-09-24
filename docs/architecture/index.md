@@ -181,7 +181,7 @@ Tach visibility rules keep compatibility internals behind their owning boundarie
    Ordinary text completes an utterance and dispatches immediately; adaptive text waits its configured quiet period.
    Later adaptive text cannot extend an earlier immediate text's wait.
    A live batch ending in media waits for more attachments or a trailing caption.
-   Follow-up backlogs queued behind an active response flush as one combined turn at idle; conversations never wait on each other.
+   Follow-up backlogs queued behind an active response flush at idle in receipt order, one combined turn per consecutive same-requester run, so no sender's messages execute under another sender's identity; conversations never wait on each other.
 4. **The turn is planned**: `turn_policy.py` decides to ignore, route, or respond; a direct responder is resolved when one eligible agent or team remains, otherwise the router selects among candidates
 5. **Selected entity processes** the message via `response_runner.py` and the Agno runtime, executing tools as needed
 6. **Response is delivered** through `delivery_gateway.py`, which owns Matrix send/edit/finalization while `streaming.py` owns progressive response state
