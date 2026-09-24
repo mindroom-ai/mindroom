@@ -14,6 +14,7 @@ from agno.session.team import TeamSession
 from agno.team import Team as AgnoTeam
 
 from mindroom.agent_storage import get_team_session
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.dispatch_source import (
@@ -811,7 +812,7 @@ class TestAgentBot(AgentBotTestBase):
                 "responder_availability",
                 return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
             ),
-            patch("mindroom.bot.resolve_configured_team", return_value=resolution),
+            patch("mindroom.turn_policy.resolve_configured_team", return_value=resolution),
             patch.object(bot._response_runner, "generate_team_response_helper", new=generate_team_response),
         ):
             delivery_resolution = await bot._run_regenerated_response(
@@ -838,6 +839,75 @@ class TestAgentBot(AgentBotTestBase):
             "resolution_reason": "No team available",
         }
         assert call.args[0].existing_event_id == "$existing"
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
+    @pytest.mark.parametrize(
+        "resolution_reason",
+        [None, "Team 'support_team' includes agent 'general' that is not available to you in this room."],
+    )
+    async def test_configured_team_turn_requires_every_member_access(
+        self,
+        tmp_path: Path,
+        resolution_reason: str | None,
+    ) -> None:
+        """A team grant must never materialize a member whose own access denies the requester."""
+        config = _configured_team_test_config(tmp_path)
+        config.teams["support_team"].access = ResponderAccessConfig(users=["@user:localhost"])
+        config.agents["general"].access = ResponderAccessConfig(users=["@owner:localhost"])
+        runtime_paths = runtime_paths_for(config)
+        bot = make_test_team_bot(
+            _configured_team_user(config, runtime_paths),
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_mode="coordinate",
+        )
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
+        team_run = AsyncMock(side_effect=AssertionError("restricted member materialized"))
+        send_message = AsyncMock(side_effect=delivered_matrix_side_effect("$reason"))
+        suppressed = AsyncMock()
+
+        with (
+            patch("mindroom.delivery_gateway.send_message_outcome", new=send_message),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response=team_run,
+            ),
+        ):
+            result = await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="Summarize the restricted knowledge base.",
+                    response_envelope=request_envelope(
+                        prompt="Summarize the restricted knowledge base.",
+                        agent_name=bot.agent_name,
+                    ),
+                    on_source_turn_suppressed=suppressed,
+                ),
+                team_agents=[entity_ids(config, runtime_paths)["general"]],
+                team_mode="coordinate",
+                resolution_reason=resolution_reason,
+            )
+
+        team_run.assert_not_awaited()
+        if resolution_reason is None:
+            assert result is None
+            suppressed.assert_awaited_once()
+            send_message.assert_not_awaited()
+        else:
+            # The rejection materializes no member, so the team's own grant may deliver it.
+            assert _handled_response_event_id(result) == "$reason"
+            suppressed.assert_not_awaited()
+            assert send_message.await_args.args[2]["m.new_content"]["body"] == resolution_reason
 
     @pytest.mark.asyncio
     async def test_configured_team_response_resolves_current_member_identity(
@@ -879,9 +949,12 @@ class TestAgentBot(AgentBotTestBase):
             config_arg: Config,
             runtime_paths_arg: RuntimePaths,
             *,
+            sender_visible_members: list[Any] | None,
             materializable_agent_names: set[str] | None = None,
         ) -> TeamResolution:
             assert team_name == "support_team"
+            assert sender_visible_members is not None
+            assert [member.full_id for member in sender_visible_members] == [current_member.full_id]
             assert mode is TeamMode.COORDINATE
             assert config_arg is config
             assert runtime_paths_arg == runtime_paths
@@ -910,7 +983,7 @@ class TestAgentBot(AgentBotTestBase):
                 "responder_availability",
                 return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
             ),
-            patch("mindroom.bot.resolve_configured_team", side_effect=capture_resolve_configured_team),
+            patch("mindroom.turn_policy.resolve_configured_team", side_effect=capture_resolve_configured_team),
             patch.object(bot._response_runner, "generate_team_response_helper", new=generate_team_response),
         ):
             result = await bot._run_regenerated_response(
@@ -1006,7 +1079,7 @@ class TestAgentBot(AgentBotTestBase):
                 "responder_availability",
                 return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
             ),
-            patch("mindroom.bot.resolve_configured_team", return_value=resolution),
+            patch("mindroom.turn_policy.resolve_configured_team", return_value=resolution),
             patch.object(bot._response_runner, "generate_team_response_helper", new=AsyncMock(side_effect=fail_helper)),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
@@ -1111,7 +1184,7 @@ class TestAgentBot(AgentBotTestBase):
                 "responder_availability",
                 return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
             ),
-            patch("mindroom.bot.resolve_configured_team", return_value=resolution),
+            patch("mindroom.turn_policy.resolve_configured_team", return_value=resolution),
             patch.object(
                 bot._response_runner,
                 "generate_team_response_helper",
@@ -1237,7 +1310,7 @@ class TestAgentBot(AgentBotTestBase):
                 "responder_availability",
                 return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
             ),
-            patch("mindroom.bot.resolve_configured_team", return_value=resolution),
+            patch("mindroom.turn_policy.resolve_configured_team", return_value=resolution),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(side_effect=fake_send_streaming_response),

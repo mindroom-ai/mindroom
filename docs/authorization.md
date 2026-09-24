@@ -142,6 +142,12 @@ Every interaction after joining still uses the responder rules above.
 
 The same responder gate covers text, media, calls, reactions, approval actors, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled resumes.
 
+A configured team requires the requester to satisfy the team's `access` and the `access` of every member agent.
+Team access never widens a member's access: when any member denies the requester, the team bot replies with a rejection that names the unavailable member and runs no member.
+The same member check applies again before each team run starts and before a team's approved tool calls resume.
+Member access keeps its own defaults, so a member without an `access` block still admits only members of that agent's own managed `rooms`.
+Ad-hoc teams formed by mentioning several agents follow the same rule for each mentioned agent.
+
 ## Requester identity and private state
 
 MindRoom resolves a trusted inbound requester through `authorization.aliases` before selecting requester-owned state.

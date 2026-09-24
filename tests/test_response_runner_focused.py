@@ -3184,17 +3184,25 @@ async def test_ready_approval_replay_rechecks_current_authorization(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Path) -> None:
+@pytest.mark.parametrize("owner", ["general", "helpers"], ids=["ad_hoc", "configured"])
+async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Path, owner: str) -> None:
     """A ready team continuation must not resume after one member loses access."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     await _admit_approval_source(runner.deps.approval_store)
+    # A configured team's own grant must not stand in for its members' access.
+    runner.deps.runtime.config.teams["helpers"] = TeamConfig(
+        display_name="Helpers",
+        role="Help users",
+        agents=["general", "worker"],
+        access=ResponderAccessConfig(users=["@user:localhost"]),
+    )
     continuation = ApprovalContinuation(
         approval_id="approval-team-member-revoked",
         run_id="run-paused",
         session_id="session-1",
         entity_kind="team",
-        entity_name="general",
+        entity_name=owner,
         room_id=request.room_id,
         thread_id=request.thread_id,
         requester_id="@user:localhost",

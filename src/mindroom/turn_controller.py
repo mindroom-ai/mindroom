@@ -1938,7 +1938,11 @@ class TurnController:
         if room.room_id != dispatch.target.room_id:
             msg = "Prepared dispatch target room does not match the Matrix room"
             raise ValueError(msg)
-        action = self.deps.turn_policy.effective_response_action(action)
+        action = self.deps.turn_policy.effective_response_action(
+            action,
+            requester_user_id=dispatch.requester_user_id,
+            room_id=room.room_id,
+        )
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
         if dispatch_timing is not None:
             dispatch_timing.note(response_action_kind=action.kind)

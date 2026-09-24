@@ -63,12 +63,14 @@ def _configured_team_is_materializable(
     registry = entity_identity_registry(config, runtime_paths)
     team_agents = [registry.current_id(agent_name) for agent_name in team_config.agents]
     configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
+    # Liveness only: the team bot checks every member's access against the requester.
     team_resolution = resolve_configured_team(
         team_name,
         team_agents,
         configured_mode,
         config,
         runtime_paths,
+        sender_visible_members=None,
         materializable_agent_names=materializable_agent_names,
     )
     return team_resolution.outcome is TeamOutcome.TEAM

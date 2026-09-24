@@ -77,7 +77,7 @@ from mindroom.runtime_shutdown import (
     restart_reason_category_for,
 )
 from mindroom.stop import StopManager
-from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
+from mindroom.teams import TeamMode, TeamOutcome
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_approval import is_process_active_approval_card
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
@@ -2912,20 +2912,19 @@ class TeamBot(AgentBot):
         )
 
         configured_mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
-        availability = self._turn_policy.responder_availability()
-        team_resolution = resolve_configured_team(
-            self.agent_name,
-            self.current_configured_team_agents(),
+        team_agents = self.current_configured_team_agents()
+        team_resolution = self._turn_policy.resolve_configured_team_for_requester(
+            team_agents,
             configured_mode,
-            self.config,
-            self.runtime_paths,
-            materializable_agent_names=availability.materializable_agent_names,
+            requester_user_id=request.response_envelope.requester_id,
+            room_id=request.room_id,
+            availability=self._turn_policy.responder_availability(),
         )
         if team_resolution.outcome is not TeamOutcome.TEAM:
             assert team_resolution.reason is not None
             return await self._response_runner.generate_team_response_helper(
                 request,
-                team_agents=self.current_configured_team_agents(),
+                team_agents=team_agents,
                 team_mode=configured_mode.value,
                 resolution_reason=team_resolution.reason,
             )

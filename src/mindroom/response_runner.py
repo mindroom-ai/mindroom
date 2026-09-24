@@ -310,13 +310,10 @@ def _materialize_matrix_run_metadata(
 
 
 def _reply_authorization_entity_names(
-    config: Config,
     owner_entity_name: str,
     team_member_names: Sequence[str],
 ) -> tuple[str, ...]:
-    """Return the policy entities governing one agent or team execution."""
-    if owner_entity_name in config.teams:
-        return (owner_entity_name,)
+    """Return the owner and every materialized member whose access must admit the requester."""
     return tuple(dict.fromkeys((owner_entity_name, *team_member_names)))
 
 
@@ -2654,11 +2651,7 @@ class ResponseRunner:
                 return event_id
             if not is_sender_allowed_for_entity_replies_in_room(
                 owned.requester_id,
-                _reply_authorization_entity_names(
-                    self.deps.runtime.config,
-                    owned.entity_name,
-                    owned.team_member_names,
-                ),
+                _reply_authorization_entity_names(owned.entity_name, owned.team_member_names),
                 self.deps.runtime.config,
                 owned.room_id,
                 self.deps.runtime_paths,
@@ -3237,11 +3230,7 @@ class ResponseRunner:
     ) -> bool:
         """Recheck one requester after serialized lifecycle admission."""
         requester_id = request.response_envelope.requester_id
-        entity_names = _reply_authorization_entity_names(
-            self.deps.runtime.config,
-            self.deps.agent_name,
-            reply_entity_names,
-        )
+        entity_names = _reply_authorization_entity_names(self.deps.agent_name, reply_entity_names)
         if is_sender_allowed_for_entity_replies_in_room(
             requester_id,
             entity_names,
@@ -3932,7 +3921,8 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=session_scope,
             execution_identity=retry_execution_identity,
-            reply_entity_names=tuple(agent_names),
+            # A resolution-reason reply materializes no member, so only the owner's access governs it.
+            reply_entity_names=() if team_request.resolution_reason is not None else tuple(agent_names),
         )
         if admitted_request is None:
             return None

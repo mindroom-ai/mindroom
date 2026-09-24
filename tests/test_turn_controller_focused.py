@@ -318,8 +318,14 @@ class _SpyTurnPolicy:
     def adaptive_participation(self, **kwargs: Any) -> Any:  # noqa: ANN401
         return self.inner.adaptive_participation(**kwargs)
 
-    def effective_response_action(self, action: ResponseAction) -> ResponseAction:
-        return self.inner.effective_response_action(action)
+    def effective_response_action(
+        self,
+        action: ResponseAction,
+        *,
+        requester_user_id: str,
+        room_id: str,
+    ) -> ResponseAction:
+        return self.inner.effective_response_action(action, requester_user_id=requester_user_id, room_id=room_id)
 
     async def plan_turn(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         self.plan_turn_calls += 1

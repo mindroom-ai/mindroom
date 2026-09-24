@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from mindroom.authorization import (
     ReplyMembershipPendingError,
     classify_responder_candidates_from_cached_room,
+    classify_responders_for_sender,
     is_sender_allowed_for_agent_reply_in_room,
 )
 from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, ROUTER_AGENT_NAME, RuntimePaths
@@ -550,9 +551,50 @@ class TurnPolicy:
             rejection_message=form_team.reason,
         )
 
+    def resolve_configured_team_for_requester(
+        self,
+        team_members: list[MatrixID],
+        mode: TeamMode,
+        *,
+        requester_user_id: str,
+        room_id: str,
+        availability: _ResponderAvailability,
+    ) -> TeamResolution:
+        """Resolve this configured team with every member's own access checked against the requester.
+
+        A proven member denial rejects the team, while an unresolved member grant
+        retries instead of starting a team run.
+        """
+        member_permissions = classify_responders_for_sender(
+            team_members,
+            requester_user_id,
+            room_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            self.deps.agent_reply_memberships,
+        )
+        team_resolution = resolve_configured_team(
+            self.deps.agent_name,
+            team_members,
+            mode,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            sender_visible_members=[*member_permissions.allowed, *member_permissions.pending],
+            materializable_agent_names=availability.materializable_agent_names,
+        )
+        pending_ids = {member.full_id for member in member_permissions.pending}
+        if team_resolution.outcome is TeamOutcome.TEAM and any(
+            member.full_id in pending_ids for member in team_resolution.eligible_members
+        ):
+            raise ReplyMembershipPendingError
+        return team_resolution
+
     def _configured_team_response_action(
         self,
         availability: _ResponderAvailability,
+        *,
+        requester_user_id: str,
+        room_id: str,
     ) -> ResponseAction | None:
         """Return the configured-team response action for this bot when it represents a team."""
         team_config = self.deps.runtime.config.teams.get(self.deps.agent_name)
@@ -561,13 +603,12 @@ class TurnPolicy:
         configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         team_agents = [registry.current_id(agent_name) for agent_name in team_config.agents]
-        team_resolution = resolve_configured_team(
-            self.deps.agent_name,
+        team_resolution = self.resolve_configured_team_for_requester(
             team_agents,
             configured_mode,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            materializable_agent_names=availability.materializable_agent_names,
+            requester_user_id=requester_user_id,
+            room_id=room_id,
+            availability=availability,
         )
         if team_resolution.outcome is TeamOutcome.TEAM:
             return ResponseAction(kind="team", form_team=team_resolution)
@@ -579,11 +620,21 @@ class TurnPolicy:
             )
         return None
 
-    def effective_response_action(self, action: ResponseAction) -> ResponseAction:
+    def effective_response_action(
+        self,
+        action: ResponseAction,
+        *,
+        requester_user_id: str,
+        room_id: str,
+    ) -> ResponseAction:
         """Apply configured-team execution behavior before running one response action."""
         if action.kind != "individual":
             return action
-        configured_team_action = self._configured_team_response_action(self.responder_availability())
+        configured_team_action = self._configured_team_response_action(
+            self.responder_availability(),
+            requester_user_id=requester_user_id,
+            room_id=room_id,
+        )
         return configured_team_action or action
 
     def _explicit_configured_team_rejection_action(
@@ -591,6 +642,9 @@ class TurnPolicy:
         context: MessageContext,
         sender_visible_responders: list[MatrixID],
         availability: _ResponderAvailability,
+        *,
+        requester_user_id: str,
+        room_id: str,
     ) -> ResponseAction | None:
         """Return the explicit configured-team rejection action for this live team bot."""
         if self.deps.agent_name not in self.deps.runtime.config.teams:
@@ -606,7 +660,11 @@ class TurnPolicy:
         if team_matrix_id.full_id not in sender_visible_ids:
             return None
 
-        configured_team_action = self._configured_team_response_action(availability)
+        configured_team_action = self._configured_team_response_action(
+            availability,
+            requester_user_id=requester_user_id,
+            room_id=room_id,
+        )
         if configured_team_action is None or configured_team_action.kind != "reject":
             return None
         return configured_team_action
@@ -819,6 +877,8 @@ class TurnPolicy:
             context,
             candidates.allowed,
             availability,
+            requester_user_id=requester_user_id,
+            room_id=room.room_id,
         )
         if (
             context.planning_thread_history_unavailable

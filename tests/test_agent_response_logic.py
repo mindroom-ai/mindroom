@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mindroom.authorization import ResponderCandidatePermissions
+from mindroom.authorization import ReplyMembershipPendingError, ResponderCandidatePermissions
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
@@ -32,6 +32,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamMode, TeamOutcome, TeamResolution
 from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread, is_router_only_agent_mention
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _ResponderAvailability
+from tests.access_schema_support import unresolved_membership_index
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
 )
@@ -45,12 +46,60 @@ from tests.conftest import (
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
+if TYPE_CHECKING:
+    from mindroom.matrix.identity import MatrixID
+
 
 def _bind_runtime_config(config: Config, runtime_root: Path | None = None) -> Config:
     runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
     bound_config = bind_runtime_paths(config, runtime_paths)
     persist_entity_accounts(bound_config, runtime_paths_for(bound_config))
     return bound_config
+
+
+def _ops_team_policy(
+    beta: AgentConfig,
+    *,
+    team_users: list[str],
+    unresolved_memberships: bool = False,
+) -> tuple[TurnPolicy, dict[str, MatrixID]]:
+    """Build the turn policy for configured team ``ops`` whose ``alpha`` member admits ``team_users``."""
+    config = _bind_runtime_config(
+        Config(
+            agents={
+                "alpha": AgentConfig(display_name="Alpha", access=ResponderAccessConfig(users=team_users)),
+                "beta": beta,
+            },
+            teams={
+                "ops": TeamConfig(
+                    display_name="Ops",
+                    role="Operations",
+                    agents=["alpha", "beta"],
+                    access=ResponderAccessConfig(users=team_users),
+                ),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        ),
+    )
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(config, runtime_paths)
+    runtime = MagicMock()
+    runtime.config = config
+    runtime.orchestrator = None
+    deps_kwargs: dict[str, Any] = {}
+    if unresolved_memberships:
+        deps_kwargs["agent_reply_memberships"] = unresolved_membership_index(config)
+    policy = TurnPolicy(
+        make_test_turn_policy_deps(
+            runtime=runtime,
+            logger=MagicMock(),
+            runtime_paths=runtime_paths,
+            agent_name="ops",
+            matrix_id=ids["ops"],
+            **deps_kwargs,
+        ),
+    )
+    return policy, ids
 
 
 def _message(
@@ -677,11 +726,79 @@ class TestAgentResponseLogic:
             rejection_message="Team request includes no available members.",
         )
 
-        effective_action = policy.effective_response_action(rejection)
+        effective_action = policy.effective_response_action(
+            rejection,
+            requester_user_id="@user:localhost",
+            room_id="!room:localhost",
+        )
 
         assert effective_action is rejection
         assert effective_action.kind == "reject"
         assert effective_action.rejection_message == "Team request includes no available members."
+
+    @pytest.mark.usefixtures("enforce_turn_authorization")
+    def test_configured_team_rejects_requester_denied_by_member_access(self) -> None:
+        """A team grant must not let a requester drive a member whose own access denies them."""
+        alice = "@alice:localhost"
+        mallory = "@mallory:localhost"
+        policy, ids = _ops_team_policy(
+            AgentConfig(display_name="Beta", access=ResponderAccessConfig(users=[alice])),
+            team_users=[alice, mallory],
+        )
+        mention = MessageContext(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[ids["ops"]],
+            has_non_agent_mentions=False,
+        )
+        expected_rejection = "Team 'ops' includes agent 'beta' that is not available to you in this room."
+
+        # The team's own grant still admits mallory at ingress, so the rejection is visible.
+        assert policy.can_reply_to_sender_in_room(mallory, "!room:localhost")
+        denied = policy.effective_response_action(
+            ResponseAction(kind="individual"),
+            requester_user_id=mallory,
+            room_id="!room:localhost",
+        )
+        explicit_denied = policy._explicit_configured_team_rejection_action(
+            mention,
+            [ids["ops"]],
+            policy.responder_availability(),
+            requester_user_id=mallory,
+            room_id="!room:localhost",
+        )
+        allowed = policy.effective_response_action(
+            ResponseAction(kind="individual"),
+            requester_user_id=alice,
+            room_id="!room:localhost",
+        )
+
+        assert denied.kind == "reject"
+        assert denied.rejection_message == expected_rejection
+        assert explicit_denied is not None
+        assert explicit_denied.rejection_message == expected_rejection
+        assert allowed.kind == "team"
+        assert allowed.form_team is not None
+        assert allowed.form_team.eligible_members == [ids["alpha"], ids["beta"]]
+
+    @pytest.mark.usefixtures("enforce_turn_authorization")
+    def test_configured_team_retries_unresolved_member_access(self) -> None:
+        """An unresolved member grant must retry instead of starting a configured team run."""
+        alice = "@alice:localhost"
+        policy, _ids = _ops_team_policy(
+            AgentConfig(display_name="Beta", rooms=["grant"]),
+            team_users=[alice],
+            unresolved_memberships=True,
+        )
+
+        with pytest.raises(ReplyMembershipPendingError):
+            policy.effective_response_action(
+                ResponseAction(kind="individual"),
+                requester_user_id=alice,
+                room_id="!room:localhost",
+            )
 
     @pytest.mark.usefixtures("enforce_turn_authorization")
     def test_mentioned_agent_access_supports_domain_pattern(self) -> None:

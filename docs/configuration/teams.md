@@ -94,7 +94,7 @@ teams:
 | `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
 | `rooms` | No | `[]` | List of room names the team responds in |
 | `accept_invites` | No | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID after human-only alias resolution; non-human accounts retain their exact transport ID |
-| `access` | No | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this team's own managed `rooms`. See [Authorization](../authorization.md) |
+| `access` | No | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this team's own managed `rooms`. Requesters must also satisfy every member agent's own `access`. See [Authorization](../authorization.md) |
 | `model` | No | `default` | Model used for team coordination and synthesis |
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
 | `num_history_messages` | No | `defaults.num_history_messages` | Max messages from team-scoped history replayed into the next run |
@@ -108,6 +108,11 @@ Private agents, and agents whose delegation closure reaches private agents, are 
 
 Invitation acceptance is independent from team conversation access.
 After joining, the team applies its ordinary `access` policy to every interaction.
+
+Adding an agent to a team never widens that agent's `access`.
+A requester must satisfy the team's `access` and the `access` of every member agent, including each member's default grant from its own managed `rooms`.
+When any member denies the requester, the team replies with a rejection naming that member instead of running.
+Keep team `access` no broader than the narrowest member policy, or give members matching `access`, so everyone the team admits can use it.
 
 `num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings.
 When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.

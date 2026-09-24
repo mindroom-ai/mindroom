@@ -346,6 +346,37 @@ class ResponderCandidatePermissions:
     pending: list[MatrixID]
 
 
+def classify_responders_for_sender(
+    responders: Iterable[MatrixID],
+    sender_id: str,
+    room_id: str | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+) -> ResponderCandidatePermissions:
+    """Split responders into proven and unresolved grants for one sender, dropping denials."""
+    registry = entity_identity_registry(config, runtime_paths)
+    allowed: list[MatrixID] = []
+    pending: list[MatrixID] = []
+    for responder in responders:
+        name = registry.current_entity_name_for_user_id(responder.full_id, include_router=False)
+        if name is None:
+            continue
+        decision = _responder_reply_authorization(
+            sender_id,
+            name,
+            room_id,
+            config,
+            runtime_paths,
+            membership_index,
+        )
+        if decision is _ReplyAuthorizationDecision.ALLOWED:
+            allowed.append(responder)
+        elif decision is _ReplyAuthorizationDecision.PENDING:
+            pending.append(responder)
+    return ResponderCandidatePermissions(allowed, pending)
+
+
 def classify_responder_candidates_from_cached_room(
     room: nio.MatrixRoom,
     sender_id: str,
@@ -363,28 +394,17 @@ def classify_responder_candidates_from_cached_room(
     discovery_complete = responders is not None or room_membership_is_complete(room)
     if responders is None:
         responders = get_available_responders_in_room(room, config, runtime_paths)
-    registry = entity_identity_registry(config, runtime_paths)
-    allowed: list[MatrixID] = []
-    pending: list[MatrixID] = []
-    for responder in responders:
-        name = registry.current_entity_name_for_user_id(responder.full_id, include_router=False)
-        if name is None:
-            continue
-        decision = _responder_reply_authorization(
-            sender_id,
-            name,
-            room.room_id,
-            config,
-            runtime_paths,
-            membership_index,
-        )
-        if decision is _ReplyAuthorizationDecision.ALLOWED:
-            allowed.append(responder)
-        elif decision is _ReplyAuthorizationDecision.PENDING:
-            pending.append(responder)
-    if require_complete_discovery and not allowed and not discovery_complete:
+    permissions = classify_responders_for_sender(
+        responders,
+        sender_id,
+        room.room_id,
+        config,
+        runtime_paths,
+        membership_index,
+    )
+    if require_complete_discovery and not permissions.allowed and not discovery_complete:
         raise ReplyMembershipPendingError
-    return ResponderCandidatePermissions(allowed, pending)
+    return permissions
 
 
 def responder_candidate_entities_from_cached_room(

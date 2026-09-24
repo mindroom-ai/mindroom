@@ -1633,16 +1633,23 @@ def resolve_configured_team(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
+    sender_visible_members: list[MatrixID] | None,
     materializable_agent_names: set[str] | None = None,
 ) -> TeamResolution:
-    """Resolve one configured team while preserving the exact configured membership."""
+    """Resolve one configured team while preserving the exact configured membership.
+
+    ``sender_visible_members`` lists the members whose own access admits the
+    requester; every other member is hidden from the sender and rejects the team.
+    ``None`` skips requester checks and is only valid for requester-independent
+    availability questions.
+    """
     requested_members = _filter_team_request_members(team_members, config, runtime_paths)
     member_statuses = _evaluate_team_members(
         requested_members,
         config,
         runtime_paths,
         room=None,
-        sender_visible_responders=None,
+        sender_visible_responders=sender_visible_members,
         materializable_agent_names=materializable_agent_names,
         allow_direct_private_agents=False,
     )
