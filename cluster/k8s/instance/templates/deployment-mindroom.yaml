@@ -17,6 +17,9 @@
 {{- if and (eq $workerBackend "kubernetes") (ne $storageAccessMode "ReadWriteMany") (eq $controlPlaneNodeName "") -}}
 {{- fail "workerBackend=kubernetes with shared storage requires either storageAccessMode=ReadWriteMany or controlPlaneNodeName to keep the control plane and workers on one node" -}}
 {{- end -}}
+{{- if and (or .Values.supabaseUrl .Values.supabaseAnonKey) (not (.Values.accountId | default "" | toString | trim)) -}}
+{{- fail "accountId is required when supabaseUrl or supabaseAnonKey is set; it binds Supabase dashboard auth to the instance owner" -}}
+{{- end -}}
 {{- if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.userIdHeader | default "")) -}}
 {{- fail "trustedUpstreamAuth.userIdHeader is required when trustedUpstreamAuth.enabled=true" -}}
 {{- end -}}

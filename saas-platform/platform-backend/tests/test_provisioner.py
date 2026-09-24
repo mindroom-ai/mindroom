@@ -841,7 +841,7 @@ class TestProvisionerEndpoints:
         # Setup
         mock_supabase.table().update().eq().execute.return_value = Mock(data=[])
 
-        provision_data = {"instance_id": "999"}  # Non-existent
+        provision_data = {"instance_id": "999", "account_id": "acc_test_123"}  # Non-existent
 
         # Make request
         response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)

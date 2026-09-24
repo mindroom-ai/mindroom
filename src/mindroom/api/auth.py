@@ -572,6 +572,15 @@ def _supabase_auth_error_class() -> type[Exception]:
     return cast("type[Exception]", importlib.import_module("supabase_auth.errors").AuthError)
 
 
+def _required_supabase_account_id(settings: _ApiAuthSettings) -> str:
+    """Return the instance owner's account ID, failing closed when Supabase auth has no owner binding."""
+    # Every user of the shared Supabase project has a valid token, so ACCOUNT_ID is the only owner binding.
+    account_id = settings.account_id
+    if account_id is None or not account_id.strip():
+        raise HTTPException(status_code=500, detail="Supabase auth is enabled but ACCOUNT_ID is not set")
+    return account_id
+
+
 def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseUserProtocol | None:
     """Validate a Supabase access token and return the authenticated user."""
     if auth_state.supabase_auth is None:
@@ -987,6 +996,7 @@ async def authenticate_user(
         request.scope["auth_user"] = auth_user
         return auth_user
 
+    account_id = _required_supabase_account_id(auth_state.settings)
     token = _get_request_token(
         request,
         authorization,
@@ -999,7 +1009,7 @@ async def authenticate_user(
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    if auth_state.settings.account_id and user.id != auth_state.settings.account_id:
+    if user.id != account_id:
         raise HTTPException(status_code=403, detail="Forbidden")
 
     _require_browser_mutation_origin(request, auth_state.settings, authorization)
