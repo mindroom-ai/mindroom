@@ -1437,6 +1437,7 @@ visibility = ["mindroom.api.sandbox_runner"]
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.agent_policy",
     "mindroom.path_confinement",
     "mindroom.media_delivery",
     "mindroom.tool_system.worker_media",
@@ -4838,6 +4839,7 @@ expose = [
     "unsupported_team_agent_message",
     "resolve_agent_policy_index",
     "resolve_private_knowledge_base_agent",
+    "user_scope_shared_agent_names",
 ]
 from = ["mindroom.agent_policy"]
 

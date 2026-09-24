@@ -7,6 +7,7 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
     resolve_agent_policy_index,
     resolve_private_knowledge_base_agent,
+    user_scope_shared_agent_names,
 )
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -53,6 +54,24 @@ def test_resolve_agent_policy_inherits_default_worker_scope_without_private_work
     assert policy.scope_source == "defaults.worker_scope"
     assert policy.private_workspace_enabled is False
     assert policy.private_agent_knowledge_enabled is False
+
+
+def test_user_scope_shared_agent_names_excludes_other_scopes_and_private_agents() -> None:
+    """Only non-private agents resolving to worker_scope=user belong to a user worker's shared roots."""
+    seeds = build_agent_policy_seeds(
+        {
+            "inherits_user": AgentConfig(display_name="Inherits User"),
+            "explicit_user": AgentConfig(display_name="Explicit User", worker_scope="user"),
+            "shared": AgentConfig(display_name="Shared", worker_scope="shared"),
+            "per_pair": AgentConfig(display_name="Per Pair", worker_scope="user_agent"),
+            "private_user": AgentConfig(display_name="Private User", private={"per": "user"}),
+        },
+        default_worker_scope="user",
+    )
+
+    names = user_scope_shared_agent_names(resolve_agent_policy_index(seeds).policies)
+
+    assert names == frozenset({"inherits_user", "explicit_user"})
 
 
 def test_resolve_agent_policy_index_marks_private_team_ineligibility() -> None:

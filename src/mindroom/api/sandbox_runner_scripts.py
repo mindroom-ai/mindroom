@@ -419,12 +419,20 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
     python_executable, base_environment, _cwd = sandbox_exec.resolve_subprocess_worker_context(prepared.paths)
     if python_executable is None or base_environment is None:
         return SandboxScriptRunResponse(ok=False, error="Worker Python runtime is unavailable.", failure_kind="worker")
-    execution_environment = sandbox_exec.request_execution_env("python", None, app_runtime_paths(request.app))
+    runtime_paths = app_runtime_paths(request.app)
+    execution_environment = sandbox_exec.request_execution_env("python", None, runtime_paths)
     try:
         sandbox_env_assembly.build_request_execution_env(
             request_workspace=workspace,
             prepared=prepared,
             execution_env=execution_environment,
+            apply_workspace_env_hook=sandbox_worker_prep.workspace_env_hook_allowed(
+                workspace,
+                worker_key=payload.state_scope_worker_key or payload.worker_key,
+                worker_scope=None,
+                prepared=prepared,
+                runtime_paths=runtime_paths,
+            ),
         )
     except sandbox_exec.WorkspaceEnvHookError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

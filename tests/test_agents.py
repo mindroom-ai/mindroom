@@ -2729,7 +2729,7 @@ def test_resolve_worker_key_encodes_tenant_parts_that_would_break_round_tripping
 
 
 def test_visible_state_roots_for_user_worker_include_private_instance_namespace(tmp_path: Path) -> None:
-    """User workers should see shared agent roots plus their own private-instance namespace."""
+    """User workers should see only user-scope agent roots plus their own private-instance namespace."""
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",
@@ -2743,9 +2743,22 @@ def test_visible_state_roots_for_user_worker_include_private_instance_namespace(
     worker_key = resolve_worker_key("user", identity)
 
     assert worker_key is not None
-    assert visible_state_roots_for_worker_key(tmp_path, worker_key) == (
-        shared_storage_root(tmp_path) / "agents",
+    assert visible_state_roots_for_worker_key(
+        tmp_path,
+        worker_key,
+        user_scope_agent_names=frozenset({"general", "coder"}),
+    ) == (
+        agent_state_root_path(tmp_path, "coder"),
+        agent_state_root_path(tmp_path, "general"),
         private_instance_scope_root_path(tmp_path, worker_key),
+    )
+    assert visible_state_roots_for_worker_key(tmp_path, worker_key) == (
+        private_instance_scope_root_path(tmp_path, worker_key),
+    )
+    assert shared_storage_root(tmp_path) / "agents" not in visible_state_roots_for_worker_key(
+        tmp_path,
+        worker_key,
+        user_scope_agent_names=frozenset({"general"}),
     )
 
 

@@ -17,7 +17,9 @@ from mindroom.path_confinement import resolve_path_within_root
 from mindroom.private_storage_paths import resolve_private_scope_path
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
+    private_instance_scope_root_path,
     requires_explicit_private_agent_visibility,
+    resolved_worker_key_scope,
     visible_state_roots_for_worker_key,
     worker_dir_name,
 )
@@ -39,6 +41,7 @@ logger = get_logger(__name__)
 
 _MAX_LEASE_TTL_SECONDS = 3600
 DEFAULT_LEASE_TTL_SECONDS = 60
+_REQUESTER_ISOLATED_SCOPES = frozenset({"user", "user_agent"})
 
 
 @dataclass
@@ -222,6 +225,7 @@ def _resolve_worker_base_dir(
     worker_key: str,
     requested_base_dir: object | None,
     private_agent_names: frozenset[str] = frozenset(),
+    user_scope_agent_names: frozenset[str] = frozenset(),
 ) -> Path:
     """Resolve the effective base_dir inside shared storage or the worker root."""
     shared_root = storage_root.resolve()
@@ -235,6 +239,7 @@ def _resolve_worker_base_dir(
         storage_root,
         worker_key,
         private_agent_names=private_agent_names,
+        user_scope_agent_names=user_scope_agent_names,
     )
     raw_path = Path(requested_base_dir).expanduser()
     if raw_path.is_absolute():
@@ -291,6 +296,7 @@ def prepare_worker_request(
     tool_init_overrides: dict[str, object],
     runtime_paths: RuntimePaths,
     private_agent_names: frozenset[str] | None = None,
+    user_scope_agent_names: frozenset[str] = frozenset(),
     runner_token: str | None = None,
 ) -> PreparedWorkerRequest:
     """Prepare one worker-backed request for execution."""
@@ -317,6 +323,7 @@ def prepare_worker_request(
                 worker_key,
                 tool_init_overrides.get("base_dir"),
                 private_agent_names=_explicit_private_agent_names(worker_key, private_agent_names),
+                user_scope_agent_names=user_scope_agent_names,
             ),
         }
     except (FileNotFoundError, TypeError, ValueError) as exc:
@@ -335,6 +342,7 @@ def resolve_prepared_worker_request(
     tool_init_overrides: dict[str, object],
     runtime_paths: RuntimePaths,
     private_agent_names: frozenset[str] | None = None,
+    user_scope_agent_names: frozenset[str] = frozenset(),
     prepared_worker: PreparedWorkerRequest | None,
     runner_token: str | None = None,
 ) -> PreparedWorkerRequest | None:
@@ -346,8 +354,38 @@ def resolve_prepared_worker_request(
         tool_init_overrides=tool_init_overrides,
         runtime_paths=runtime_paths,
         private_agent_names=private_agent_names,
+        user_scope_agent_names=user_scope_agent_names,
         runner_token=runner_token,
     )
+
+
+def workspace_env_hook_allowed(
+    workspace: Path,
+    *,
+    worker_key: str | None,
+    worker_scope: str | None,
+    prepared: PreparedWorkerRequest | None,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether one request may source `<workspace>/.mindroom/worker-env.sh`.
+
+    Requester-isolated runtimes (`user`, `user_agent`) carry that requester's
+    proxy identity and leased credentials, so they only source hooks from state
+    no other requester can write: the worker's own workspace or the requester's
+    private-instance namespace.
+    Canonical non-private agent workspaces are writable by every requester's
+    runtime for that agent, so their hooks are ignored in these runtimes.
+    """
+    key_scope = resolved_worker_key_scope(worker_key) if worker_key is not None else None
+    if not {key_scope, worker_scope} & _REQUESTER_ISOLATED_SCOPES:
+        return True
+    if worker_key is None:
+        return False
+    owned_roots = [private_instance_scope_root_path(sandbox_exec.runner_storage_root(runtime_paths), worker_key)]
+    if prepared is not None:
+        owned_roots.append(prepared.paths.workspace)
+    resolved_workspace = workspace.expanduser().resolve()
+    return any(resolved_workspace.is_relative_to(root.expanduser().resolve()) for root in owned_roots)
 
 
 def record_worker_failure(

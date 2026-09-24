@@ -519,6 +519,8 @@ The runner sources this script with `bash` after applying the workspace home con
 - For shared and unscoped agents that means `agents/<agent>/workspace/.mindroom/worker-env.sh`.
 - For private agents that means `private_instances/<scope>/<agent>/workspace/.mindroom/worker-env.sh`.
 - For `worker_scope: user`, the hook follows the per-request workspace, so one shared user runtime can pick up different hooks as it works in different agent workspaces.
+- Requester-isolated runtimes (`user`, `user_agent`, and background scripts) only source a hook when the workspace is inside that requester's `private_instances/<scope>/` namespace or the worker's own scratch workspace.
+  A hook in a non-private agent's `agents/<agent>/workspace` is ignored in these runtimes because every requester's runtime for that agent can write it, and sourcing it would run another requester's code with this requester's proxy identity and leased credentials.
 - For unkeyed static-sidecar proxy calls (no `worker_key`), the hook is discovered from `tool_init_overrides["base_dir"]` only when that value is an absolute path; relative strings are ignored on this path because there is no canonical workspace root to resolve them against.
 
 **Semantics:**
@@ -574,7 +576,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their prior launch settings and compatible identities.
 - With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
-- With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
+- With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode mounts the directories of every non-private `worker_scope: user` agent plus the user's own private-instance namespace, since it shares one runtime across those agents, and never mounts agents on other scopes.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
 ### Sandbox-runner API endpoints

@@ -206,7 +206,7 @@ The hosted instance worker-manager Role does not grant broad Secret API access i
 > [!WARNING]
 > **Filesystem isolation depends on `worker_scope`.**
 > With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's storage directory — this is the strongest isolation available.
-> With `user`, the worker can see all agents' storage because it shares one runtime across multiple agents for a single user.
+> With `user`, the worker can see the storage of every non-private `worker_scope: user` agent because it shares one runtime across those agents for a single user; it never mounts agents on other scopes.
 > Use `user_agent` for per-agent filesystem isolation.
 
 ### Knowledge Source Visibility
