@@ -720,24 +720,22 @@ def visible_state_roots_for_worker_key(
     worker_key: str,
     *,
     private_agent_names: frozenset[str] = frozenset(),
-    user_scope_agent_names: frozenset[str] = frozenset(),
 ) -> tuple[Path, ...]:
     """Return the canonical durable state roots a worker key is allowed to see by default.
 
     Shared agent roots remain canonical for normal agents.
     Private-instance roots live under a separate shared-storage namespace keyed by
     worker scope so they are durable without becoming worker-owned state.
-    `user` acts as a per-requester multi-agent workstation, so it sees the shared
-    roots of `user_scope_agent_names` (the non-private agents that resolve to
-    `worker_scope: user`) plus its own private-instance namespace, and never
-    the roots of agents on other scopes.
+    `user` intentionally sees the shared `agents/` tree plus its own
+    private-instance namespace because it acts as a per-requester multi-agent
+    workstation.
     """
     scope = resolved_worker_key_scope(worker_key)
     if scope is None:
         return ()
     if scope == "user":
         return (
-            *(agent_state_root_path(base_storage_path, agent_name) for agent_name in sorted(user_scope_agent_names)),
+            shared_storage_root(base_storage_path) / "agents",
             private_instance_scope_root_path(base_storage_path, worker_key),
         )
 

@@ -2936,49 +2936,9 @@ def test_kubernetes_backend_prepares_mirror_before_applying_deployment(tmp_path:
     assert mirror_states == [(False, True)]
 
 
-def test_kubernetes_backend_user_scope_mounts_only_user_scope_agent_roots(tmp_path: Path) -> None:
-    """User-scope workers must not mount the agents tree or agent roots on other scopes."""
-    storage_root = tmp_path / "storage"
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """
-agents:
-  alpha:
-    display_name: Alpha
-    role: Alpha test
-    model: default
-    worker_scope: user
-  beta:
-    display_name: Beta
-    role: Beta test
-    model: default
-    worker_scope: shared
-  gamma:
-    display_name: Gamma
-    role: Gamma test
-    model: default
-  delta:
-    display_name: Delta
-    role: Delta test
-    model: default
-    worker_scope: user_agent
-  epsilon:
-    display_name: Epsilon
-    role: Epsilon test
-    model: default
-    private:
-      per: user
-models:
-  default:
-    provider: openai
-    id: gpt-6-astra
-router:
-  model: default
-""".lstrip(),
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
-    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+def test_kubernetes_backend_mounts_broad_agents_tree_for_user_scope() -> None:
+    """User-scope workers should see shared agents plus their own private-instance namespace."""
+    backend, apps_api, _core_api = _backend()
     worker_key = "v1:tenant-123:user:@alice:example.org"
 
     backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
@@ -2989,12 +2949,7 @@ router:
     expected_worker_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
     expected_private_root = f"/app/worker/private_instances/{worker_dir_name(worker_key)}"
 
-    agent_mounts = {
-        path: sub_path
-        for path, sub_path in mount_paths.items()
-        if path.startswith("/app/worker/agents") or (sub_path or "").startswith("agents")
-    }
-    assert agent_mounts == {"/app/worker/agents/alpha": "agents/alpha"}
+    assert mount_paths["/app/worker/agents"] == "agents"
     assert mount_paths[expected_private_root] == f"private_instances/{worker_dir_name(worker_key)}"
     assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key)}"
     assert "/app/worker/credentials" not in mount_paths

@@ -114,8 +114,6 @@ def _main(argv: list[str]) -> int:
         _validate_source_digest(source_path)
         os.environ.pop(_CONTROL_STATE_PATH_ENV, None)
         signal.signal(signal.SIGTERM, _handle_sigterm)
-        # Launched with `-P`: workspace modules stay importable without shadowing installed ones.
-        sys.path.append(str(workspace_root))
         runpy.run_path(str(source_path), run_name="__main__")
     finally:
         sys.stdout.flush()

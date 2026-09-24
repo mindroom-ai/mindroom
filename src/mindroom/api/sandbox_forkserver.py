@@ -528,11 +528,9 @@ def _run_child_request(
         os.environ.update(request.env)
     if request.cwd is not None:
         os.chdir(request.cwd)
-    # Keep request-workspace modules importable like a spawn-per-call child, but
-    # after installed and standard-library modules: the workspace may be written
-    # by other requesters, so it must not shadow modules this child imports lazily.
-    # The runner template drops its own baked cwd entry at startup.
-    sys.path.append(str(Path.cwd()))
+    # `python -m` prepends the effective cwd to sys.path; mirror that for the
+    # request cwd (the runner template drops its own baked entry at startup).
+    sys.path.insert(0, str(Path.cwd()))
     returncode, stdout_text, stderr_text = run_payload(request.envelope)
     conn.settimeout(_CHILD_RESPONSE_WRITE_TIMEOUT_SECONDS)
     _send_json(conn, {"returncode": returncode, "stdout": stdout_text, "stderr": stderr_text})

@@ -423,8 +423,8 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
         assert response.ok is True
         assert response.result == "explicit-value"
 
-        # Spawn-per-call parity: the request cwd stays on sys.path (after installed
-        # modules), so python-tool code can import modules saved into its workspace.
+        # Spawn-per-call parity: `python -m` puts the request cwd on sys.path,
+        # so python-tool code can import modules saved into its workspace.
         (workdir / "helper.py").write_text('VALUE = "helper-value"\n', encoding="utf-8")
         response = sandbox_runner_module._execute_request_subprocess_sync(
             sandbox_runner_module.SandboxRunnerExecuteRequest(
@@ -513,51 +513,3 @@ def test_forkserver_startup_failure_falls_back_to_spawn_per_call(
 
     assert response.ok is True
     assert response.result == "spawned"
-
-
-@pytest.mark.parametrize("execution_mode", ["forkserver", "subprocess"])
-def test_workspace_modules_cannot_shadow_installed_modules_in_tool_child(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    execution_mode: str,
-) -> None:
-    """A shared agent workspace must not inject code into the credentialed tool child through sys.path."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "storage",
-        process_env={"MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": execution_mode},
-    )
-    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
-    workspace = tmp_path / "shared-agent-workspace"
-    marker = tmp_path / "planted-code-ran"
-    planted = f"open({str(marker)!r}, 'w').close()\n"
-    (workspace / "mindroom").mkdir(parents=True)
-    (workspace / "mindroom" / "__init__.py").write_text(planted, encoding="utf-8")
-    (workspace / "tabnanny.py").write_text(planted, encoding="utf-8")
-    (workspace / "helper.py").write_text('VALUE = "helper-value"\n', encoding="utf-8")
-    manager = _SandboxForkserver()
-    monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: manager)
-    try:
-        response = sandbox_runner_module._execute_request_subprocess_sync(
-            sandbox_runner_module.SandboxRunnerExecuteRequest(
-                tool_name="python",
-                function_name="run_python_code",
-                args=["import tabnanny, helper\nresult = [tabnanny.__file__, helper.VALUE]", "result"],
-                kwargs={},
-                execution_env={"MINDROOM_AGENT_WORKSPACE": str(workspace)},
-            ),
-            runtime_paths,
-            config,
-        )
-    finally:
-        manager.shutdown()
-
-    assert response.ok is True, response
-    assert not marker.exists()
-    assert str(workspace / "tabnanny.py") not in str(response.result)
-    assert "helper-value" in str(response.result)

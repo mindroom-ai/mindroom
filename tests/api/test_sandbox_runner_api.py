@@ -86,7 +86,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.worker_routing import WorkerScope
 
 SANDBOX_TOKEN = "secret-token"  # noqa: S105
 SANDBOX_HEADERS = {"x-mindroom-sandbox-token": SANDBOX_TOKEN}
@@ -3638,12 +3637,12 @@ def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_
     assert saved_file.read_text(encoding="utf-8") == "hello"
 
 
-def test_sandbox_runner_user_scope_rejects_base_dir_of_agent_outside_user_scope(
+def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """User-scoped workers must not address agents that do not resolve to worker_scope=user."""
+    """User-scoped workers intentionally allow base_dir anywhere under the shared agents tree."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
@@ -3667,9 +3666,9 @@ def test_sandbox_runner_user_scope_rejects_base_dir_of_agent_outside_user_scope(
             },
         )
 
-    assert response.status_code == 400
-    assert "allowed state roots" in response.json()["detail"]
-    assert not (storage_root / "agents" / "other").exists()
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert (storage_root / "agents" / "other" / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
 
 
 def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
@@ -6114,203 +6113,6 @@ def test_workspace_env_hook_user_agent_routed_request_uses_prepared_private_base
     )
 
     assert workspace == private_workspace
-
-
-def _requester_identity(requester_id: str, agent_name: str) -> ToolExecutionIdentity:
-    return ToolExecutionIdentity(
-        channel="matrix",
-        agent_name=agent_name,
-        requester_id=requester_id,
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-        tenant_id="tenant-123",
-    )
-
-
-def _prepared_local_worker(
-    worker_key: str,
-    worker_root: Path,
-    *,
-    base_dir: Path,
-) -> sandbox_worker_prep_module.PreparedWorkerRequest:
-    return sandbox_worker_prep_module.PreparedWorkerRequest(
-        handle=WorkerHandle(
-            worker_id=worker_dir_name(worker_key),
-            worker_key=worker_key,
-            endpoint="/api/sandbox-runner/execute",
-            auth_token=SANDBOX_TOKEN,
-            status="ready",
-            backend_name="local",
-            last_used_at=0.0,
-            created_at=0.0,
-        ),
-        paths=local_workers_module.local_worker_state_paths_for_root(worker_root),
-        runtime_overrides={"base_dir": base_dir},
-    )
-
-
-@pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
-def test_requester_isolated_worker_ignores_hook_planted_in_shared_agent_workspace(
-    tmp_path: Path,
-    worker_scope: WorkerScope,
-) -> None:
-    """Another requester's hook in a shared agent workspace must not run in this requester's runtime."""
-    storage_root = tmp_path / "storage"
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=storage_root,
-        process_env={},
-    )
-    config = Config.validate_with_runtime(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-            "agents": {
-                "general": {
-                    "display_name": "General",
-                    "memory_backend": "file",
-                    "worker_scope": worker_scope,
-                },
-            },
-            "router": {"model": "default"},
-        },
-        runtime_paths,
-    )
-    shared_workspace = agent_workspace_root_path(storage_root, "general")
-    shared_workspace.mkdir(parents=True)
-    # Planted by requester U through its own worker's writable agent mount.
-    _write_workspace_env_hook(
-        shared_workspace,
-        'touch "$PWD/planted-hook-ran"\nexport PLANTED_BY_OTHER_REQUESTER=1\nexport LD_PRELOAD=/tmp/evil.so\n',
-    )
-    victim = _requester_identity("@victim:example.org", "general")
-    worker_key = resolve_worker_key(worker_scope, victim, agent_name="general")
-    assert worker_key is not None
-    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
-        tool_name="shell",
-        function_name="run_shell_command",
-        worker_key=worker_key,
-        worker_scope=worker_scope,
-        routing_agent_name="general",
-        execution_identity=asdict(victim),
-        private_agent_names=[] if worker_scope == "user_agent" else None,
-        tool_init_overrides={"base_dir": "agents/general/workspace"},
-        execution_env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
-    )
-
-    prepared_request = sandbox_runner_module._prepare_execute_request(
-        request,
-        runtime_paths,
-        _prepared_local_worker(worker_key, tmp_path / "victim-worker", base_dir=shared_workspace.resolve()),
-        config=config,
-    )
-
-    assert not (shared_workspace / "planted-hook-ran").exists()
-    assert "PLANTED_BY_OTHER_REQUESTER" not in prepared_request.execution_env
-    assert "LD_PRELOAD" not in prepared_request.execution_env
-    assert prepared_request.execution_env["HOME"] == str(shared_workspace.resolve())
-
-
-def test_workspace_env_hook_ownership_for_requester_isolated_runtimes(tmp_path: Path) -> None:
-    """Per-requester runtimes only source hooks from state that no other requester can write."""
-    storage_root = tmp_path / "storage"
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=storage_root,
-        process_env={},
-    )
-    alice = _requester_identity("@alice:example.org", "general")
-    bob = _requester_identity("@bob:example.org", "general")
-    user_key = resolve_worker_key("user", alice)
-    user_agent_key = resolve_worker_key("user_agent", alice, agent_name="general")
-    bob_user_key = resolve_worker_key("user", bob)
-    assert user_key is not None
-    assert user_agent_key is not None
-    assert bob_user_key is not None
-    shared_workspace = agent_workspace_root_path(storage_root, "general")
-    own_private_workspace = private_instance_scope_root_path(storage_root, user_key) / "mind" / "workspace"
-    other_private_workspace = private_instance_scope_root_path(storage_root, bob_user_key) / "mind" / "workspace"
-    for path in (shared_workspace, own_private_workspace, other_private_workspace):
-        path.mkdir(parents=True)
-    linked_workspace = private_instance_scope_root_path(storage_root, user_key) / "linked"
-    linked_workspace.symlink_to(shared_workspace)
-    prepared = _prepared_local_worker(user_key, tmp_path / "alice-worker", base_dir=shared_workspace)
-    prepared.paths.workspace.mkdir(parents=True)
-
-    def allowed(
-        workspace: Path,
-        worker_key: str | None,
-        *,
-        worker_scope: str | None = None,
-        prepared_worker: sandbox_worker_prep_module.PreparedWorkerRequest | None = None,
-    ) -> bool:
-        return sandbox_worker_prep_module.workspace_env_hook_allowed(
-            workspace,
-            worker_key=worker_key,
-            worker_scope=worker_scope,
-            prepared=prepared_worker,
-            runtime_paths=runtime_paths,
-        )
-
-    assert not allowed(shared_workspace, user_key, prepared_worker=prepared)
-    assert not allowed(shared_workspace, user_agent_key)
-    linked_private_root = private_instance_scope_root_path(storage_root, user_agent_key)
-    linked_private_root.symlink_to(shared_workspace.parent)
-    assert not allowed(linked_private_root / "workspace", user_agent_key)
-    assert not allowed(linked_workspace, user_key)
-    assert not allowed(other_private_workspace, user_key)
-    assert not allowed(shared_workspace, None, worker_scope="user")
-    assert allowed(own_private_workspace, user_key)
-    assert allowed(prepared.paths.workspace, user_key, prepared_worker=prepared)
-    assert allowed(shared_workspace, "v1:tenant-123:shared:general")
-    assert allowed(shared_workspace, "v1:tenant-123:unscoped:general")
-    assert allowed(shared_workspace, None)
-
-
-def test_user_worker_base_dir_rejects_agents_on_other_scopes(tmp_path: Path) -> None:
-    """A user worker may address its user-scope agents' roots but not agents on other scopes."""
-    storage_root = tmp_path / "storage"
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=storage_root,
-        process_env={},
-    )
-    config = Config.validate_with_runtime(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-            "agents": {
-                "coder": {"display_name": "Coder", "worker_scope": "user"},
-                "ops": {"display_name": "Ops", "worker_scope": "shared"},
-            },
-            "router": {"model": "default"},
-        },
-        runtime_paths,
-    )
-    user_key = resolve_worker_key("user", _requester_identity("@alice:example.org", "coder"))
-    assert user_key is not None
-    paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "alice-worker")
-    user_scope_agent_names = sandbox_runner_module._user_scope_agent_names(config)
-
-    assert user_scope_agent_names == frozenset({"coder"})
-    assert (
-        sandbox_worker_prep_module._resolve_worker_base_dir(
-            paths,
-            storage_root,
-            user_key,
-            "agents/coder/workspace",
-            user_scope_agent_names=user_scope_agent_names,
-        )
-        == (storage_root / "agents" / "coder" / "workspace").resolve()
-    )
-    with pytest.raises(ValueError, match="allowed state roots"):
-        sandbox_worker_prep_module._resolve_worker_base_dir(
-            paths,
-            storage_root,
-            user_key,
-            "agents/ops/workspace",
-            user_scope_agent_names=user_scope_agent_names,
-        )
 
 
 def test_request_preparation_failure_response_marks_request_errors_as_tool_failures() -> None:

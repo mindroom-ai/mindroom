@@ -342,7 +342,7 @@ The Kubernetes provider is implemented against the worker backend contract intro
 The current implementation creates dedicated worker Deployments and Services, propagates the shared sandbox token, and waits for readiness before returning a worker handle.
 The current implementation already provisions dedicated worker Deployments and Services and routes them through the canonical agent-state model.
 For `shared`, `user_agent`, and unscoped dedicated execution, the Kubernetes backend now mounts only the addressed agent root plus the worker runtime root.
-`user` intentionally remains broader as a multi-agent workstation mode, but only mounts the roots of non-private `worker_scope: user` agents plus the requester's private-instance namespace.
+`user` intentionally remains broader and mounts the shared `agents/` tree as a multi-agent workstation mode.
 Idle cleanup currently scales workers to zero while preserving state and deletes the per-worker Service.
 The long-term architecture may still move this behavior behind an external controller, but that is no longer a prerequisite for shipping the current provider model.
 Each Kubernetes worker still needs durable runtime storage for caches plus access to the canonical state roots it executes against, as well as an authenticated internal endpoint.

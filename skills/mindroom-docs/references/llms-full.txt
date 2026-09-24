@@ -2836,19 +2836,15 @@ Isolation depends on the worker backend:
 
 - **Kubernetes dedicated workers** (`shared`, `user_agent`, unscoped): the runtime can only see its own agent's storage directory plus its worker-local scratch space.
   This is the strongest isolation available today.
-- **Kubernetes dedicated workers** (`user`): the runtime can see the storage of every non-private agent that resolves to `worker_scope: user`, plus that user's own private-instance namespace, because `user` mode intentionally shares one runtime across that user's agents.
-  It never mounts the storage of agents on `shared`, `user_agent`, or unscoped execution, but it does mount every `worker_scope: user` agent even when the requester is not allowed to use all of them.
+- **Kubernetes dedicated workers** (`user`): the runtime can see all agents' storage, because `user` mode intentionally shares one runtime across multiple agents for a single user.
   Treat this as a shared workstation.
 - **Shared-runner and local backends**: no hard filesystem boundary today, regardless of scope.
 
 Use `user_agent` if you need per-agent filesystem isolation.
-A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` runtimes, so files one requester leaves there (for example Git config under the workspace `HOME`) are seen by the others.
-Use `private` agents when requesters must not share workspace state.
 
 For per-workspace env that an agent can edit (PATH, package indexes, npm cache locations, etc.), drop a `.mindroom/worker-env.sh` script in the agent workspace; MindRoom sources it before each worker-routed `shell` or `python` request.
 MindRoom-owned workspace identity, cache, and virtualenv env names are reasserted after the hook, so hooks cannot redirect `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, or `VIRTUAL_ENV`.
-Requester-isolated runtimes (`user` and `user_agent`) only source a hook from the requester's private-instance workspace or the worker's own scratch workspace, so a hook in a non-private agent's shared `agents/<agent>/workspace` is ignored there.
-With `worker_scope: user`, the same runtime can move between several private agent workspaces, and the hook is discovered from the current request's workspace — different private agents get different overlays automatically.
+With `worker_scope: user`, the same runtime can move between several agent workspaces, and the hook is discovered from the current request's workspace — different agents get different overlays automatically.
 See [Workspace env hook](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh) for filename, filtering, and failure semantics.
 
 ### Where Agent Data Lives
@@ -4899,7 +4895,6 @@ list_files()
 - If you need runtime-scoped environment isolation, rely on worker-routed execution instead of assuming in-process Python emulation is a security boundary.
 - Worker-routed `python` execution also receives `.mindroom/worker-env.sh` overlay env via `os.environ` (e.g., `PIP_INDEX_URL`). See "Workspace env hook" in `docs/deployment/sandbox-proxy.md`.
 - Workspace identity, worker cache, and virtualenv env names remain controlled by MindRoom, so hooks cannot redirect `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, or `VIRTUAL_ENV`.
-- Worker-routed `python` code and background scripts can import modules saved in the workspace, but installed and standard-library modules take precedence over same-named workspace files, and user site-packages under the workspace `HOME` are not loaded.
 
 ## [`coding`]
 
@@ -23103,9 +23098,7 @@ The runner sources this script with `bash` after applying the workspace home con
 - For agent-routed worker requests, the hook lives at the resolved agent workspace root as `.mindroom/worker-env.sh`.
 - For shared and unscoped agents that means `agents/<agent>/workspace/.mindroom/worker-env.sh`.
 - For private agents that means `private_instances/<scope>/<agent>/workspace/.mindroom/worker-env.sh`.
-- For `worker_scope: user`, the hook follows the per-request workspace, so one shared user runtime can pick up different hooks as it works in different private agent workspaces.
-- Requester-isolated runtimes (`user`, `user_agent`, and background scripts) only source a hook when the workspace is inside that requester's `private_instances/<scope>/` namespace or the worker's own scratch workspace.
-  A hook in a non-private agent's `agents/<agent>/workspace` is ignored in these runtimes because every requester's runtime for that agent can write it, and sourcing it would run another requester's code with this requester's proxy identity and leased credentials.
+- For `worker_scope: user`, the hook follows the per-request workspace, so one shared user runtime can pick up different hooks as it works in different agent workspaces.
 - For unkeyed static-sidecar proxy calls (no `worker_key`), the hook is discovered from `tool_init_overrides["base_dir"]` only when that value is an absolute path; relative strings are ignored on this path because there is no canonical workspace root to resolve them against.
 
 **Semantics:**
@@ -23161,7 +23154,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their prior launch settings and compatible identities.
 - With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
-- With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode mounts the directories of every non-private `worker_scope: user` agent plus the user's own private-instance namespace, since it shares one runtime across those agents, and never mounts agents on other scopes.
+- With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
 ### Sandbox-runner API endpoints
@@ -23694,7 +23687,7 @@ The hosted instance worker-manager Role does not grant broad Secret API access i
 > [!WARNING]
 > **Filesystem isolation depends on `worker_scope`.**
 > With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's storage directory — this is the strongest isolation available.
-> With `user`, the worker can see the storage of every non-private `worker_scope: user` agent because it shares one runtime across those agents for a single user; it never mounts agents on other scopes.
+> With `user`, the worker can see all agents' storage because it shares one runtime across multiple agents for a single user.
 > Use `user_agent` for per-agent filesystem isolation.
 
 ### Knowledge Source Visibility

@@ -23,7 +23,6 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants, shell_supervisor, yaml_io
-from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index, user_scope_shared_agent_names
 from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_forkserver, sandbox_protocol, sandbox_worker_prep
 from mindroom.api.computer_browser_binding import select_browser_provider
 from mindroom.api.worker_responses import (
@@ -711,12 +710,6 @@ async def _run_toolkit_entrypoint(
         await _maybe_await(toolkit.close())
 
 
-def _user_scope_agent_names(config: Config) -> frozenset[str]:
-    """Return the non-private agents whose shared roots a `user` worker may address in this runner's config."""
-    seeds = build_agent_policy_seeds(config.agents, default_worker_scope=config.defaults.worker_scope)
-    return user_scope_shared_agent_names(resolve_agent_policy_index(seeds).policies)
-
-
 def _runtime_paths_for_runner_agent_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     """Return runtime paths rooted at the shared storage visible to this runner."""
     shared_storage_root = sandbox_exec.runner_storage_root(runtime_paths)
@@ -1007,35 +1000,24 @@ def _prepare_execute_request(
             runtime_paths,
             extra_env_passthrough=request.extra_env_passthrough,
         )
-    config = config or _runtime_config_or_empty(runtime_paths)
     prepared = sandbox_worker_prep.resolve_prepared_worker_request(
         worker_key=request.worker_key,
         tool_init_overrides=request.tool_init_overrides,
         runtime_paths=runtime_paths,
         private_agent_names=_freeze_private_agent_names(request.private_agent_names),
-        user_scope_agent_names=_user_scope_agent_names(config),
         prepared_worker=prepared_worker,
         runner_token=runner_token,
     )
     execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
+    config = config or _runtime_config_or_empty(runtime_paths)
     request_workspace = _resolve_request_workspace(request, prepared, runtime_paths=runtime_paths, config=config)
-    source_workspace_env_hook = apply_workspace_env_hook and (
-        request_workspace is None
-        or sandbox_worker_prep.workspace_env_hook_allowed(
-            request_workspace,
-            worker_key=request.worker_key,
-            worker_scope=request.worker_scope,
-            prepared=prepared,
-            runtime_paths=runtime_paths,
-        )
-    )
     try:
         env_result = sandbox_env_assembly.build_request_execution_env(
             request_workspace=request_workspace,
             prepared=prepared,
             execution_env=execution_env,
             apply_workspace_home_contract=apply_workspace_home_contract,
-            apply_workspace_env_hook=source_workspace_env_hook,
+            apply_workspace_env_hook=apply_workspace_env_hook,
         )
     except sandbox_exec.WorkspaceEnvHookError as exc:
         raise sandbox_worker_prep.WorkerRequestPreparationError(
@@ -1501,9 +1483,6 @@ def _run_subprocess_worker_payload(payload: str) -> tuple[int, str, str]:
 
 
 def _run_subprocess_worker() -> int:
-    # Started with `-P`: keep workspace modules importable without letting them
-    # shadow installed or standard-library modules.
-    sys.path.append(str(Path.cwd()))
     exit_code, tool_output, marked_response = _run_subprocess_worker_payload(sys.stdin.read())
     # Flush captured tool output to real stdout (informational only), then
     # write the response JSON to stderr after the marker.
@@ -1530,7 +1509,7 @@ def _run_forkserver_template() -> int:
     import mindroom.tools  # noqa: F401, PLC0415
 
     # `python -m` prepended the runner's cwd to sys.path at template startup;
-    # fork children append their own request cwd instead, matching what a
+    # fork children prepend their own request cwd instead, matching what a
     # spawn-per-call child started in that cwd would see.
     with suppress(ValueError):
         sys.path.remove(str(Path.cwd()))
@@ -1742,7 +1721,6 @@ async def view_file_in_worker(
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
                 private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
-                user_scope_agent_names=_user_scope_agent_names(config),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
@@ -1963,7 +1941,6 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
                 private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
-                user_scope_agent_names=_user_scope_agent_names(config),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
