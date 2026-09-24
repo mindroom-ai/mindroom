@@ -385,6 +385,7 @@ It never infers thread IDs, event IDs, or state keys from thread context, so cal
 Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
 Hard-blocked state event types like `m.room.create` remain blocked.
+The `com.mindroom.*` and `io.mindroom.*` namespaces are reserved for runtime metadata: `content` may not set keys in them at any depth, and `send_event` and `put_state` may not write event types in them.
 `search` is read-only, scopes results to one room via `room_id`, uses the top-level `limit` parameter, and rejects `filter.limit`.
 When `event_context={"include_profile": true}` is requested, returned context preserves `profile_info` for matching senders.
 
