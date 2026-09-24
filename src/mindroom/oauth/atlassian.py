@@ -1,9 +1,11 @@
-"""Atlassian Cloud OAuth 2.0 (3LO) provider, and the scopes each Jira and Confluence function calls."""
+"""Atlassian Cloud OAuth 2.0 (3LO) provider, the scopes each Jira and Confluence function calls, and site pins."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlsplit
 
 from mindroom.oauth.providers import OAuthProvider
 
@@ -13,6 +15,7 @@ if TYPE_CHECKING:
 AtlassianProduct = Literal["jira", "confluence"]
 ATLASSIAN_PRODUCTS: tuple[AtlassianProduct, ...] = ("jira", "confluence")
 _ATLASSIAN_CLIENT_CONFIG_SERVICE = "atlassian_oauth_client"
+_CLOUD_ID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +101,37 @@ def atlassian_product_scopes(product: AtlassianProduct) -> frozenset[str]:
     return frozenset(
         scope for function in _ATLASSIAN_FUNCTIONS if function.product == product for scope in function.scopes
     )
+
+
+def normalize_site_url(value: str) -> str:
+    """Return the HTTPS origin of an Atlassian site URL such as https://example.atlassian.net/wiki."""
+    try:
+        parts = urlsplit(value.strip())
+        port = parts.port
+    except ValueError:
+        msg = "site_url must be an https:// URL"
+        raise ValueError(msg) from None
+    if (
+        parts.scheme.lower() != "https"
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+    ):
+        msg = "site_url must be an https:// URL without credentials, query, or fragment"
+        raise ValueError(msg)
+    host = parts.hostname.lower()
+    return f"https://{host}" if port in (None, 443) else f"https://{host}:{port}"
+
+
+def normalize_cloud_id(value: str) -> str:
+    """Return a canonical Atlassian cloud ID, which is a UUID."""
+    cloud_id = value.strip().lower()
+    if not _CLOUD_ID_PATTERN.fullmatch(cloud_id):
+        msg = "cloud_id must be an Atlassian cloud ID (a UUID)"
+        raise ValueError(msg)
+    return cloud_id
 
 
 def atlassian_oauth_provider(

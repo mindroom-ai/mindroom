@@ -16,6 +16,7 @@ from urllib.parse import unquote, urljoin, urlsplit
 import httpx
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
+from mindroom.oauth.atlassian import normalize_cloud_id, normalize_site_url
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
@@ -32,7 +33,6 @@ _MAX_DOWNLOAD_REDIRECTS = 3
 _DOWNLOAD_DEADLINE_SECONDS = 120.0
 # Any media type, but no content coding, so the byte limit counts the bytes actually received.
 _DOWNLOAD_HEADERS = {"Accept": "*/*", "Accept-Encoding": "identity"}
-_CLOUD_ID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 _MAX_ERROR_MESSAGES = 5
 _MAX_ERROR_MESSAGE_CHARS = 300
@@ -106,37 +106,6 @@ class _AtlassianDownload:
     content: bytes
     content_type: str | None
     content_disposition: str | None
-
-
-def normalize_site_url(value: str) -> str:
-    """Return the HTTPS origin of an Atlassian site URL such as https://example.atlassian.net/wiki."""
-    try:
-        parts = urlsplit(value.strip())
-        port = parts.port
-    except ValueError:
-        msg = "site_url must be an https:// URL"
-        raise ValueError(msg) from None
-    if (
-        parts.scheme.lower() != "https"
-        or not parts.hostname
-        or parts.username is not None
-        or parts.password is not None
-        or parts.query
-        or parts.fragment
-    ):
-        msg = "site_url must be an https:// URL without credentials, query, or fragment"
-        raise ValueError(msg)
-    host = parts.hostname.lower()
-    return f"https://{host}" if port in (None, 443) else f"https://{host}:{port}"
-
-
-def normalize_cloud_id(value: str) -> str:
-    """Return a canonical Atlassian cloud ID, which is a UUID."""
-    cloud_id = value.strip().lower()
-    if not _CLOUD_ID_PATTERN.fullmatch(cloud_id):
-        msg = "cloud_id must be an Atlassian cloud ID (a UUID)"
-        raise ValueError(msg)
-    return cloud_id
 
 
 def _new_http_client() -> httpx.AsyncClient:
@@ -217,7 +186,11 @@ def _site_from_resource(resource: object) -> AtlassianSite | None:
         return None
     resource = cast("dict[str, object]", resource)
     raw_cloud_id = resource.get("id")
-    if not isinstance(raw_cloud_id, str) or not _CLOUD_ID_PATTERN.fullmatch(raw_cloud_id.lower()):
+    if not isinstance(raw_cloud_id, str):
+        return None
+    try:
+        cloud_id = normalize_cloud_id(raw_cloud_id)
+    except ValueError:
         return None
     raw_url = resource.get("url")
     try:
@@ -227,7 +200,7 @@ def _site_from_resource(resource: object) -> AtlassianSite | None:
     name = resource.get("name")
     scopes = resource.get("scopes")
     return AtlassianSite(
-        cloud_id=raw_cloud_id.lower(),
+        cloud_id=cloud_id,
         url=url,
         name=name if isinstance(name, str) else None,
         scopes=frozenset(scope for scope in scopes if isinstance(scope, str))

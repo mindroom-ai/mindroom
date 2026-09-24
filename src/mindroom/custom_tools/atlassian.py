@@ -26,8 +26,6 @@ from mindroom.custom_tools.atlassian_client import (
     AtlassianSitePin,
     accessible_sites,
     download,
-    normalize_cloud_id,
-    normalize_site_url,
     request_json,
     select_site,
 )
@@ -40,6 +38,8 @@ from mindroom.oauth.atlassian import (
     atlassian_function_names,
     atlassian_oauth_provider,
     atlassian_product_scopes,
+    normalize_cloud_id,
+    normalize_site_url,
 )
 from mindroom.oauth.client import active_oauth_credential_context
 from mindroom.oauth.credential_lifecycle import (

@@ -11,12 +11,13 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from mindroom.custom_tools.atlassian_client import normalize_cloud_id, normalize_site_url
 from mindroom.oauth.atlassian import (
     ATLASSIAN_PRODUCTS,
     AtlassianProduct,
     atlassian_function_names,
     atlassian_oauth_provider,
+    normalize_cloud_id,
+    normalize_site_url,
 )
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.registration import register_tool_with_metadata
