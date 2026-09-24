@@ -232,6 +232,61 @@ def _list(client: TestClient, token: str | None = None, **headers: str) -> httpx
     )
 
 
+@pytest.mark.parametrize("personal_agent", ["personal", "my_assistant"])
+def test_initialize_identifies_configured_personal_agent(
+    gateway_app: FastAPI,
+    signed_headers: Callable[[str], dict[str, str]],
+    personal_agent: str,
+) -> None:
+    """Clients receive the configured identity and can begin unscoped discovery."""
+    snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
+    assert snapshot.runtime_config is not None
+    snapshot.runtime_config.agents[personal_agent] = snapshot.runtime_config.agents.pop("personal")
+    snapshot.config_data = snapshot.runtime_config.model_dump()
+    snapshot.runtime_paths = replace(
+        snapshot.runtime_paths,
+        process_env={**snapshot.runtime_paths.process_env, "MINDROOM_CONNECTIONS_AGENT": personal_agent},
+    )
+    with TestClient(gateway_app, base_url=ORIGIN, follow_redirects=False) as client:
+        token = _exchange(client, *_code(client, signed_headers("alice"))).json()["access_token"]
+        headers = {**MCP_HEADERS, "Authorization": f"Bearer {token}"}
+        initialized = client.post(
+            "/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"},
+                },
+            },
+        )
+        assert initialized.status_code == 200
+        instructions = initialized.json()["result"]["instructions"]
+        assert json.dumps(personal_agent) in instructions
+        assert ORIGIN + "/connections" in instructions
+
+        discovered = client.post(
+            "/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "search_tools", "arguments": {}},
+            },
+        )
+        assert discovered.status_code == 200
+        result = discovered.json()["result"]
+        assert not result["isError"]
+        tools = result["structuredContent"]["results"]
+        assert tools
+        assert {tool["agent"] for tool in tools} == {personal_agent}
+
+
 @pytest.mark.parametrize("agent", ["personal", "Personal", "private-unknown-agent-marker", None])
 @pytest.mark.parametrize("clear_selection", [False, True])
 def test_agent_selection_diagnostics(
