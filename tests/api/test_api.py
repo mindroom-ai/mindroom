@@ -3846,7 +3846,7 @@ def test_cookie_mutations_require_browser_origin(
     headers: dict[str, str],
     expected: int,
 ) -> None:
-    """Only a validated bearer credential can bypass the browser mutation guard."""
+    """Only a validated bearer credential without browser metadata can bypass the browser mutation guard."""
     api_key_client.cookies.set("mindroom_api_key", "test-key")
     response = api_key_client.post("/api/config/load", headers=headers)
     assert response.status_code == expected, response.text

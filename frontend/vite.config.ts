@@ -21,9 +21,11 @@ const apiKey =
   rootEnv.MINDROOM_API_KEY ||
   userEnv.MINDROOM_API_KEY;
 
-// The proxy acts for the operator with that key, so it only attaches it to requests
-// from this machine that name the dev server by a loopback host (defeating DNS
-// rebinding) and carry no cross-site fetch metadata (defeating other browser tabs).
+// The proxy acts for the operator with that key, so it only attaches it to direct
+// loopback connections (no tunnel or reverse proxy forwarding) that name the dev
+// server by a loopback host (defeating DNS rebinding) and carry no cross-site
+// fetch metadata (defeating other browser tabs). Framing is denied below so another
+// site cannot drive the dashboard from an iframe that passes as same-origin.
 const loopbackHost = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/;
 
 function isOperatorRequest(req: IncomingMessage): boolean {
@@ -35,6 +37,8 @@ function isOperatorRequest(req: IncomingMessage): boolean {
     (peer === "::1" ||
       peer.startsWith("127.") ||
       peer.startsWith("::ffff:127.")) &&
+    req.headers["x-forwarded-for"] === undefined &&
+    req.headers.forwarded === undefined &&
     loopbackHost.test(host) &&
     (fetchSite === undefined ||
       fetchSite === "same-origin" ||
@@ -54,6 +58,10 @@ export default defineConfig({
   server: {
     port: frontendPort,
     allowedHosts: [".mindroom.chat"],
+    headers: {
+      "X-Frame-Options": "DENY",
+      "Content-Security-Policy": "frame-ancestors 'none'",
+    },
     proxy: {
       "/api": {
         target: `http://localhost:${mindroomPort}`,
