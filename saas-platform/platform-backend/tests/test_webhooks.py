@@ -1,11 +1,24 @@
 """Comprehensive HTTP API tests for webhook endpoints."""
 
+import hashlib
+import hmac
+import json
+import time
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import stripe
 from backend.pricing import get_stripe_price_id
 from fastapi.testclient import TestClient
+
+_WEBHOOK_SECRET = "whsec_test_secret"  # noqa: S105
+
+
+def _signed_headers(body: bytes, secret: str) -> dict[str, str]:
+    """Build a Stripe-Signature header the way Stripe signs webhook payloads."""
+    timestamp = int(time.time())
+    signature = hmac.new(secret.encode(), f"{timestamp}.{body.decode()}".encode(), hashlib.sha256).hexdigest()
+    return {"Stripe-Signature": f"t={timestamp},v1={signature}"}
 
 
 class TestWebhookEndpoints:
@@ -17,6 +30,12 @@ class TestWebhookEndpoints:
         from main import app  # noqa: PLC0415
 
         return TestClient(app)
+
+    @pytest.fixture(autouse=True)
+    def webhook_secret(self):
+        """Configure a webhook secret so requests reach signature verification."""
+        with patch("backend.routes.webhooks.STRIPE_WEBHOOK_SECRET", _WEBHOOK_SECRET):
+            yield
 
     @pytest.fixture
     def mock_stripe_signature(self):
@@ -107,6 +126,58 @@ class TestWebhookEndpoints:
         response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "invalid_sig"})
         assert response.status_code == 400
         assert response.json()["detail"] == "Invalid signature"
+
+    def _subscription_event_body(self) -> bytes:
+        """Serialize a subscription event granting a paid tier."""
+        event = {
+            "id": "evt_test_subscription",
+            "object": "event",
+            "type": "customer.subscription.created",
+            "data": {"object": self._create_subscription_data(tier="pro")},
+        }
+        return json.dumps(event).encode()
+
+    def test_webhook_rejects_events_without_configured_secret(self, client: TestClient, mock_supabase: MagicMock):
+        """An empty secret must not let anyone sign events with an empty HMAC key."""
+        body = self._subscription_event_body()
+
+        with patch("backend.routes.webhooks.STRIPE_WEBHOOK_SECRET", ""):
+            response = client.post("/webhooks/stripe", content=body, headers=_signed_headers(body, ""))
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Webhook not configured"
+        mock_supabase.table.assert_not_called()
+
+    @pytest.mark.parametrize(("signing_secret", "status_code"), [(_WEBHOOK_SECRET, 200), ("", 400)])
+    def test_webhook_verifies_real_stripe_signature(
+        self, client: TestClient, mock_supabase: MagicMock, signing_secret: str, status_code: int
+    ):
+        """Only events signed with the configured secret reach the handlers."""
+        body = self._subscription_event_body()
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
+        mock_supabase.table.reset_mock()
+
+        response = client.post("/webhooks/stripe", content=body, headers=_signed_headers(body, signing_secret))
+
+        assert response.status_code == status_code
+        if status_code == 200:
+            assert response.json() == {"received": True, "error": None}
+            mock_supabase.table.assert_any_call("subscriptions")
+        else:
+            mock_supabase.table.assert_not_called()
+
+    @pytest.mark.parametrize(("webhook_secret", "stripe_ok"), [("", False), (_WEBHOOK_SECRET, True)])
+    def test_health_reports_missing_webhook_secret(self, client: TestClient, webhook_secret: str, stripe_ok: bool):
+        """Stripe is unhealthy when webhooks cannot be verified."""
+        with (
+            patch("backend.routes.health.ensure_supabase"),
+            patch("backend.routes.health.stripe.api_key", "sk_test"),
+            patch("backend.routes.health.STRIPE_WEBHOOK_SECRET", webhook_secret),
+        ):
+            response = client.get("/health")
+
+        assert response.json() == {"status": "ok" if stripe_ok else "degraded", "supabase": True, "stripe": stripe_ok}
 
     def test_subscription_created_success(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock

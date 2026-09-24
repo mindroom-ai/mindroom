@@ -68,6 +68,8 @@ ENABLE_CLEANUP_SCHEDULER = os.getenv("ENABLE_CLEANUP_SCHEDULER", "false").lower(
 # Stripe configuration
 stripe.api_key = _get_secret("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = _get_secret("STRIPE_WEBHOOK_SECRET", "")
+if stripe.api_key and not STRIPE_WEBHOOK_SECRET:
+    logger.error("STRIPE_WEBHOOK_SECRET is not configured: all Stripe webhooks will be rejected")
 
 # Provisioner API key for internal provisioning actions
 PROVISIONER_API_KEY = _get_secret("PROVISIONER_API_KEY", "")

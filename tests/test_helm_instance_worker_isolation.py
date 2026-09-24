@@ -899,6 +899,22 @@ def test_platform_chart_rejects_trusted_upstream_without_user_id_header() -> Non
     ) in completed.stderr
 
 
+@pytest.mark.parametrize("webhook_secret", ["", "whsec_test"])
+def test_platform_chart_requires_stripe_webhook_secret_with_stripe_key(webhook_secret: str) -> None:
+    """Stripe webhooks are forgeable without a signing secret, so Stripe billing must not deploy without one."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/platform"),
+        "stripe.secretKey=sk_test",
+        f"stripe.webhookSecret={webhook_secret}",
+        release_name="mindroom-platform",
+    )
+    if not webhook_secret:
+        assert completed.returncode != 0
+        assert "stripe.webhookSecret is required when stripe.secretKey is set" in completed.stderr
+    else:
+        completed.check_returncode()
+
+
 def test_platform_chart_wires_instance_credentials_encryption_secret() -> None:
     """The platform chart should mount the stable instance credential key derivation secret."""
     docs = _render_chart(
