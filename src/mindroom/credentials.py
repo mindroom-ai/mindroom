@@ -17,7 +17,7 @@ import secrets
 import stat
 import threading
 from collections.abc import Mapping
-from contextlib import suppress
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -26,10 +26,11 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from mindroom import runtime_env_policy as _runtime_env_policy
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.credential_policy import credential_service_policy
 from mindroom.durable_write import create_directory_durable
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import open_directory_within_root
+from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
 from mindroom.tool_system.worker_routing import (
     WORKER_CREDENTIALS_DIRNAME,
     WORKER_SHARED_CREDENTIALS_DIRNAME,
@@ -241,18 +242,16 @@ def _open_credentials_file(directory_fd: int, name: str) -> int | None:
 
 def _read_credentials_payload(path: Path) -> bytes | None:
     """Return one stored credential payload, or None when no owned regular file is stored."""
-    try:
-        with open_directory_within_root(path.parent) as directory_fd:
-            file_fd = _open_credentials_file(directory_fd, path.name)
-    except OSError as exc:
-        if exc.errno in _ABSENT_CREDENTIALS_ERRNOS:
+    with ExitStack() as stack:
+        try:
+            file_fd = stack.enter_context(open_regular_file_within_root(path.parent, path.name))
+        except ValueError:
+            # A FIFO, device, or directory planted under the payload name stores nothing.
             return None
-        raise
-    if file_fd is None:
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
-            return None
+        except OSError as exc:
+            if exc.errno in _ABSENT_CREDENTIALS_ERRNOS:
+                return None
+            raise
         chunks: list[bytes] = []
         size = 0
         while chunk := os.read(file_fd, 64 * 1024):
@@ -262,8 +261,6 @@ def _read_credentials_payload(path: Path) -> bytes | None:
                 raise ValueError(msg)
             chunks.append(chunk)
         return b"".join(chunks)
-    finally:
-        os.close(file_fd)
 
 
 def _harden_existing_credential_files(path: Path) -> None:
@@ -377,20 +374,8 @@ def _atomic_write_private_file(path: Path, payload: bytes) -> None:
         msg = f"Credential payload exceeds {_MAX_CREDENTIALS_PAYLOAD_BYTES} bytes"
         raise ValueError(msg)
     _ensure_private_directory(path.parent)
-    tmp_name = f".{path.name}.{secrets.token_hex(8)}.tmp"
     with open_directory_within_root(path.parent) as directory_fd:
-        try:
-            fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd)
-            with os.fdopen(fd, "wb") as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
-            os.rename(tmp_name, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-            os.fsync(directory_fd)
-        except BaseException:
-            with suppress(OSError):
-                os.unlink(tmp_name, dir_fd=directory_fd)
-            raise
+        atomic_write_bytes_at(directory_fd, path.name, payload, file_mode=0o600, temp_prefix=f".{path.name}.")
 
 
 class CredentialsManager:
