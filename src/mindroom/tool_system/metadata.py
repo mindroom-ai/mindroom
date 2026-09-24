@@ -312,6 +312,10 @@ def _validate_authored_overrides(
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
+    if "restrict_to_base_dir" in overrides:
+        path = _override_path(tool_name, "restrict_to_base_dir", config_path_prefix=config_path_prefix)
+        msg = f"{path} was removed; use agents.<name>.file_access or defaults.file_access."
+        raise ToolConfigOverrideError(msg)
     overrides = _validate_authored_file_access(
         tool_name,
         overrides,

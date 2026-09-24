@@ -1460,6 +1460,20 @@ def test_file_access_on_other_tools_points_to_agent_setting() -> None:
             )
 
 
+def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
+    """The removed per-tool restriction field points authors to the agent file_access setting."""
+    for tool_name in ("file", "coding", "python"):
+        with pytest.raises(
+            ToolConfigOverrideError,
+            match=rf"agents\.a\.tools\.{tool_name}\.restrict_to_base_dir was removed; use agents\.<name>\.file_access",
+        ):
+            validate_authored_tool_entry_overrides(
+                tool_name,
+                {"restrict_to_base_dir": False},
+                config_path_prefix="agents.a.tools",
+            )
+
+
 def test_file_access_rules_survive_the_validation_snapshot() -> None:
     """Worker validation snapshots keep each tool's file-access class."""
     snapshot = {

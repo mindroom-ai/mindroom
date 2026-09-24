@@ -546,12 +546,10 @@ class CodingTools(Toolkit):
     def __init__(
         self,
         base_dir: str | None = None,
-        restrict_to_base_dir: bool = True,
         file_access: FileAccess = "workspace",
     ) -> None:
         self.base_dir = Path(base_dir).resolve() if base_dir else Path.cwd().resolve()
-        self.restrict_to_base_dir = restrict_to_base_dir
-        self._file_access = file_access
+        self.restrict_to_base_dir = file_access == "workspace"
         super().__init__(
             name="coding",
             tools=[

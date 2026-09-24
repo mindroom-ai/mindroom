@@ -1637,6 +1637,48 @@ def test_resolve_entrypoint_inherit_sentinel_falls_back_to_persisted_config(tmp_
     assert entrypoint is not None
 
 
+@pytest.mark.parametrize(
+    ("routing_agent_name", "restrict_to_base_dir"),
+    [("admin", False), ("boxed", True), ("stranger", True)],
+)
+def test_resolve_entrypoint_builds_coding_with_routing_agent_file_access(
+    tmp_path: Path,
+    routing_agent_name: str,
+    restrict_to_base_dir: bool,
+) -> None:
+    """Worker-side coding rebuilds follow the routing agent's file_access; unknown agents stay confined."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models: {}\n"
+            "agents:\n"
+            "  admin:\n"
+            "    display_name: Admin\n"
+            "    file_access: unrestricted\n"
+            "  boxed:\n"
+            "    display_name: Boxed\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+        runtime_paths=runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        tool_name="coding",
+        function_name="read_file",
+        worker_scope="shared",
+        routing_agent_name=routing_agent_name,
+    )
+
+    assert toolkit.restrict_to_base_dir is restrict_to_base_dir
+    assert entrypoint is not None
+
+
 def test_sandbox_runner_subprocess_python_sees_sandbox_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

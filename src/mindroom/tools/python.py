@@ -95,13 +95,6 @@ def _python_tools_runtime() -> tuple[Any, Any, Any, Any]:
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="restrict_to_base_dir",
-            label="Restrict To Base Dir",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
     ],
     dependencies=["agno"],
     docs_url="https://docs.agno.com/tools/toolkits/local/python",
@@ -121,6 +114,10 @@ def python_tools() -> type[PythonTools]:
 
     class MindRoomPythonTools(python_tools_class):
         """MindRoom wrapper around Agno's Python tool implementation."""
+
+        def __init__(self, **kwargs: object) -> None:
+            # Arbitrary code execution cannot be confined in-process, so the file helpers are not either.
+            super().__init__(**kwargs, restrict_to_base_dir=False)
 
         def pip_install_package(self, package_name: str) -> str:
             """Install a package into the current interpreter environment."""
