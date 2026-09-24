@@ -6,6 +6,10 @@ credentials stored in MindRoom's unified credentials location.
 
 from __future__ import annotations
 
+import json
+from functools import wraps
+from inspect import signature
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agno.tools.google.auth import google_authenticate
@@ -18,9 +22,12 @@ from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
+from mindroom.path_confinement import resolve_path_within_root
+from mindroom.workspaces import resolve_workspace_relative_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from inspect import Signature
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -46,6 +53,40 @@ _GMAIL_SEND_SCOPES = frozenset(
         "https://www.googleapis.com/auth/gmail.send",
     },
 )
+# Upstream functions that open each ``attachments`` path in this process.
+_ATTACHMENT_FUNCTION_NAMES = ("create_draft_email", "send_email", "send_email_reply", "update_draft")
+
+
+def _resolve_attachment_path(workspace_root: Path, attachment: object) -> Path:
+    """Resolve one model-supplied attachment path to a regular file inside the workspace."""
+    if not isinstance(attachment, str):
+        msg = "Gmail attachments must be file paths"
+        raise ValueError(msg)  # noqa: TRY004 - returned to the model as a tool error
+    requested_path = Path(attachment).expanduser()
+    if requested_path.is_absolute():
+        try:
+            path = resolve_path_within_root(workspace_root, requested_path, symlinks="internal")
+        except ValueError:
+            msg = f"Gmail attachment must stay within the workspace root: {workspace_root.resolve()}"
+            raise ValueError(msg) from None
+    else:
+        path = resolve_workspace_relative_path(workspace_root, requested_path, field_name="Gmail attachment")
+    if not path.is_file():
+        msg = f"Gmail attachment is not a file: {attachment}"
+        raise ValueError(msg)
+    return path
+
+
+def _resolve_attachment_paths(workspace_root: Path | None, attachments: object) -> list[str]:
+    """Resolve every model-supplied attachment, failing closed without a workspace."""
+    if workspace_root is None:
+        msg = "Gmail attachments require an agent workspace"
+        raise ValueError(msg)
+    requested = [attachments] if isinstance(attachments, str) else attachments
+    if not isinstance(requested, list | tuple):
+        msg = "Gmail attachments must be file paths"
+        raise ValueError(msg)  # noqa: TRY004 - returned to the model as a tool error
+    return [str(_resolve_attachment_path(workspace_root, attachment)) for attachment in requested]
 
 
 class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmailTools):
@@ -61,12 +102,15 @@ class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmai
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
         runtime_config: Config | None = None,
+        tool_output_workspace_root: Path | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         """Initialize Gmail tools with MindRoom credentials.
 
         This wrapper automatically loads credentials from MindRoom's
         unified credential storage and passes them to the Agno GmailTools.
+        Attachment paths are confined to ``tool_output_workspace_root`` and
+        refused when the agent has no workspace.
         """
         provided_creds = kwargs.pop("creds", None)
         if credentials_manager is None:
@@ -74,6 +118,7 @@ class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmai
             raise RuntimeError(msg)
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
+        self._workspace_root = tool_output_workspace_root
         defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
         creds = self._initialize_oauth_client(
             worker_target=worker_target,
@@ -95,6 +140,35 @@ class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmai
         # Store original auth method for fallback
         self._set_original_auth(AgnoGmailTools._resolve_creds)
         self._wrap_oauth_function_entrypoints()
+        self._wrap_attachment_entrypoints()
+
+    def _wrap_attachment_entrypoints(self) -> None:
+        """Confine attachment paths before upstream Agno checks or opens them."""
+        for function_name in _ATTACHMENT_FUNCTION_NAMES:
+            function = self.functions.get(function_name)
+            if function is None or function.entrypoint is None:
+                continue
+            entrypoint = function.entrypoint
+            entrypoint_signature = signature(entrypoint)
+
+            @wraps(entrypoint)
+            def attachment_entrypoint(
+                *args: object,
+                _entrypoint: Callable[..., object] = entrypoint,
+                _signature: Signature = entrypoint_signature,
+                **kwargs: object,
+            ) -> object:
+                bound = _signature.bind(*args, **kwargs)
+                attachments = bound.arguments.get("attachments")
+                if attachments:
+                    try:
+                        bound.arguments["attachments"] = _resolve_attachment_paths(self._workspace_root, attachments)
+                    except ValueError as exc:
+                        return json.dumps({"error": str(exc)})
+                return _entrypoint(*bound.args, **bound.kwargs)
+
+            function.entrypoint = attachment_entrypoint
+            setattr(self, function_name, attachment_entrypoint)
 
     def _check_tools_filters(
         self,
