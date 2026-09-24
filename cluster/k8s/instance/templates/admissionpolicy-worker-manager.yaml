@@ -2,7 +2,8 @@
 {{- $customer := .Values.customer | toString -}}
 {{- $policyName := printf "mindroom-worker-manager-%s" $customer -}}
 {{- $username := printf "system:serviceaccount:mindroom-instances:mindroom-worker-manager-%s" $customer -}}
-{{- $workerNamePrefix := printf "%s-" (include "mindroom.workerNamePrefix" .Values) -}}
+{{- /* `worker_id_for_key` names are `{prefix}-{24 hex digest}`; see mindroom.workerNamePrefix. */ -}}
+{{- $workerNamePattern := printf "^%s-[0-9a-f]{24}$" (include "mindroom.workerNamePrefix" .Values) -}}
 {{- $workerServiceAccountName := .Values.kubernetesWorkerServiceAccountName | default "default" -}}
 {{- $controlPlaneNodeName := .Values.controlPlaneNodeName | default "" -}}
 {{- $runtimeClassName := .Values.kubernetesWorkerRuntimeClassName | default "" -}}
@@ -93,6 +94,8 @@ spec:
     reason: Forbidden
   # Deleting is authorized by the tenant label alone so workers created before this policy
   # existed stay removable; creating and updating additionally require this tenant's own name.
+  # Names must match the full worker-name shape, not just start with the prefix, because a
+  # hyphenated customer's prefix (`...-a-b`) also starts with another customer's (`...-a-`).
   - expression: >-
       "customer" in variables.labels && variables.labels["customer"] == {{ $customer | toJson }}
     message: The MindRoom worker manager may only manage resources labelled with its own customer.
@@ -101,7 +104,7 @@ spec:
       request.operation == "DELETE"
       || (request.resource.resource == "secrets"
       ? variables.target.metadata.name == {{ $authSecretName | toJson }}
-      : variables.target.metadata.name.startsWith({{ $workerNamePrefix | toJson }}))
+      : variables.target.metadata.name.matches({{ $workerNamePattern | toJson }}))
     message: The MindRoom worker manager may only create or update its own tenant worker resources.
     reason: Forbidden
   - expression: >-

@@ -872,8 +872,9 @@ def test_instance_chart_binds_worker_manager_policy_to_every_writable_resource()
             ),
         ),
         ("a" * 22, ()),
+        ("acme-corp", ()),
     ],
-    ids=["defaults", "pinned-node-runtime-class-custom-prefix", "longest-customer"],
+    ids=["defaults", "pinned-node-runtime-class-custom-prefix", "longest-customer", "hyphenated-customer"],
 )
 def test_instance_chart_admits_the_backend_worker_lifecycle(
     customer: str,
@@ -1192,19 +1193,53 @@ def test_instance_chart_rejects_worker_name_prefixes_the_runtime_would_truncate(
     assert "must normalize to 1-38 characters" in too_long.stderr
 
 
-def test_instance_chart_rejects_dedicated_workers_for_ambiguous_customer_names() -> None:
-    """A hyphenated customer would share its worker name prefix with another tenant."""
+@pytest.mark.parametrize("customer", ["-acme", "acme-", "Acme", "acme_corp", "acme.corp"])
+def test_instance_chart_rejects_dedicated_workers_for_non_dns_label_customers(customer: str) -> None:
+    """Only DNS-label customers keep normalization from merging two tenants' worker prefixes."""
     completed = _run_helm_template(
         Path("cluster/k8s/instance"),
         "workerBackend=kubernetes",
         "storageAccessMode=ReadWriteMany",
-        "customer=acme-corp",
+        f"customer={customer}",
     )
-    sidecar = _run_helm_template(Path("cluster/k8s/instance"), "customer=acme-corp")
 
     assert completed.returncode != 0
-    assert "requires a customer of lowercase letters and digits" in completed.stderr
-    sidecar.check_returncode()
+    assert "requires a customer that is a DNS label" in completed.stderr
+
+
+def test_instance_chart_keeps_hyphenated_tenant_worker_names_apart(tmp_path: Path) -> None:
+    """Tenant `a`'s prefix starts tenant `a-b`'s worker names, yet neither may write the other's workers."""
+    short_docs = _render_dedicated_worker_chart("a")
+    long_docs = _render_dedicated_worker_chart("a-b")
+    short_deployment, short_service = _backend_worker_resources(short_docs, "a", tmp_path / "a")
+    long_deployment, long_service = _backend_worker_resources(long_docs, "a-b", tmp_path / "a-b")
+
+    def renamed(resource: dict[str, Any], name: str) -> dict[str, Any]:
+        """Return a tenant's own valid worker resource renamed to another tenant's worker name."""
+        claimed = copy.deepcopy(resource)
+        claimed["metadata"]["name"] = name
+        return claimed
+
+    def admit(docs: list[dict[str, Any]], customer: str, operation: str, obj: dict[str, Any]) -> str | None:
+        resource = "deployments" if obj["kind"] == "Deployment" else "services"
+        group = "apps" if resource == "deployments" else ""
+        return _admit(docs, operation=operation, resource=resource, group=group, obj=obj, customer=customer)
+
+    long_name = long_deployment["metadata"]["name"]
+    short_name = short_deployment["metadata"]["name"]
+    assert long_name.startswith("mindroom-worker-a-")
+    for operation in ("CREATE", "UPDATE"):
+        for own, target in ((short_deployment, long_name), (short_service, long_name)):
+            assert "create or update its own tenant" in (admit(short_docs, "a", operation, renamed(own, target)) or "")
+        for own, target in ((long_deployment, short_name), (long_service, short_name)):
+            assert "create or update its own tenant" in (admit(long_docs, "a-b", operation, renamed(own, target)) or "")
+    for docs, customer, own in (
+        (short_docs, "a", short_deployment),
+        (short_docs, "a", short_service),
+        (long_docs, "a-b", long_deployment),
+        (long_docs, "a-b", long_service),
+    ):
+        assert admit(docs, customer, "CREATE", own) is None
 
 
 def test_instance_chart_mounts_api_tokens_only_where_the_api_is_used() -> None:
