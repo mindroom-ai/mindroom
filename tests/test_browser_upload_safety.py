@@ -259,20 +259,21 @@ async def test_upload_keeps_large_files_as_file_paths(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("worker", [False, True])
-async def test_upload_retains_separately_authorized_context_storage(
+async def test_upload_rejects_live_context_storage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     worker: bool,
 ) -> None:
-    """Live context storage remains authorized even with a separate worker workspace."""
+    """Live context storage is not an upload root, with or without a separate worker workspace."""
     tool, consumer, root = _upload_tool(tmp_path, monkeypatch)
     if worker:
         tool._worker_workspace = root.parent
         tool._configured_output_dir = root
     storage = tmp_path / "active-context"
     storage.mkdir()
-    source = storage / "attachment.txt"
-    source.write_bytes(b"context attachment")
+    source = storage / "credentials" / "secret_credentials.json"
+    source.parent.mkdir()
+    source.write_bytes(b"context secret")
     context = make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(room_id="!room:example.org", thread_id=None, reply_to_event_id=None),
@@ -284,18 +285,10 @@ async def test_upload_retains_separately_authorized_context_storage(
         conversation_reader=make_conversation_reader_mock(),
         storage_path=storage,
     )
-    consumed: list[bytes] = []
 
-    async def consume(paths: list[str], *, timeout: int) -> None:  # noqa: ASYNC109
-        assert timeout == 1234
-        consumed.extend(Path(path).read_bytes() for path in paths)
-
-    consumer.side_effect = consume
-    with tool_runtime_context(context):
-        result = await _upload(tool, [source])
-
-    assert consumed == [b"context attachment"]
-    assert result["paths"] == [str(source)]
+    with tool_runtime_context(context), pytest.raises(ValueError, match="outside browser upload root"):
+        await _upload(tool, [source])
+    consumer.assert_not_awaited()
     await tool.aclose()
 
 

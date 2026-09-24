@@ -1941,15 +1941,15 @@ class BrowserTools(Toolkit):
         return output_dir
 
     def _browser_upload_roots(self) -> tuple[Path, ...]:
-        """Return roots whose files can be read by browser upload."""
-        context = get_tool_runtime_context()
+        """Return roots whose files can be read by browser upload.
+
+        Only the browser artifact directory is exposed; the runtime storage root
+        holds credentials, encryption keys, and received media.
+        """
         root = self._browser_artifact_root()
-        roots = [
+        return (
             root if self._worker_workspace is not None or self._configured_output_dir is not None else root / "browser",
-        ]
-        if context is not None and context.storage_path is not None:
-            roots.append(context.storage_path.resolve())
-        return tuple(roots)
+        )
 
     def _resolve_upload_path(self, path: str) -> Path:
         """Resolve and confine one browser upload path."""

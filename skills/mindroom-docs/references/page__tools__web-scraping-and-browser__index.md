@@ -685,6 +685,7 @@ Agno's normal agent-session persistence can retain model-visible screenshot pixe
 Playwright MCP briefly writes its requested screenshot into the local browser workspace, and MindRoom reads and removes that exact scratch file before returning the tool result.
 Safari and other unsupported browsers can still be operated through the separate accessibility-first `desktop` tool.
 For the host target, `output_dir` defaults to `<storage>/browser` for screenshots, PDFs, and other artifacts.
+Host `upload` reads only files inside that artifact directory, or the worker workspace on a routed worker, never other runtime storage such as credentials, encryption keys, or received attachments.
 The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
 
