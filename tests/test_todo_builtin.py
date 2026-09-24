@@ -824,30 +824,36 @@ def test_todo_attributes_items_to_whoever_wrote_the_title(tmp_path: Path) -> Non
 
 
 @pytest.mark.usefixtures("enforce_turn_authorization")
-def test_list_todos_flags_legacy_items_and_title_rewrite_adopts_them(tmp_path: Path) -> None:
-    """Items written before requester attribution are listed as never poked until a title rewrite adopts them."""
+def test_todo_write_records_requester_on_legacy_item(tmp_path: Path) -> None:
+    """The first write to an item from before requester attribution records the writer, within its access."""
     config = _restricted_config(tmp_path)
     tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
 
     with tool_runtime_context(_tool_context(config)):
-        tool.add_todo(agent=_agent(), title="Legacy work", assigned_agent="secret")
-        tool.add_todo(agent=_agent(), title="Legacy finished")
-        tool.update_todo(agent=_agent(), todo_id=_read_todos(config)["items"][1]["id"], status="done")
+        tool.add_todo(agent=_agent(), title="Legacy secret work", assigned_agent="secret")
+        tool.add_todo(agent=_agent(), title="Legacy code work")
     path = _todos_path(config, room_id="!room:localhost", thread_id="$thread-root")
     state = _read_todos(config)
     for item in state["items"]:
         del item["requester_id"]
     path.write_text(json.dumps(state), encoding="utf-8")
-    legacy_id = state["items"][0]["id"]
+    secret_id, code_id = (item["id"] for item in state["items"])
+
+    with tool_runtime_context(_tool_context(config, requester_id="@attacker:localhost")):
+        refused_update = tool.update_todo(agent=_agent(), todo_id=secret_id, priority="high")
+        refused_handoff = tool.update_todo(agent=_agent(), todo_id=code_id, assigned_agent="secret")
+    assert refused_update.startswith("Cannot give or change todo work for 'secret'")
+    assert refused_handoff.startswith("Cannot give or change todo work for 'secret'")
+    assert _read_todos(config) == state
 
     with tool_runtime_context(_tool_context(config)):
-        flagged = tool.list_todos(agent=_agent())
-        tool.update_todo(agent=_agent(), todo_id=legacy_id, title="Legacy work")
-        adopted = tool.list_todos(agent=_agent())
-
-    assert f"Not auto-poked (no recorded requester): `{legacy_id}`." in flagged
-    assert "Not auto-poked" not in adopted
-    assert _read_todos(config)["items"][0]["requester_id"] == "@user:localhost"
+        tool.update_todo(agent=_agent(), todo_id=secret_id, priority="high")
+        tool.update_todo(agent=_agent(), todo_id=code_id, assigned_agent="secret")
+    items = _read_todos(config)["items"]
+    assert [(item["title"], item["assigned_agent"], item["requester_id"]) for item in items] == [
+        ("Legacy secret work", "secret", "@user:localhost"),
+        ("Legacy code work", "secret", "@user:localhost"),
+    ]
 
 
 @pytest.mark.usefixtures("enforce_turn_authorization")

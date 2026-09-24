@@ -11,11 +11,16 @@ from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.custom_tools.todo_poke import (
     TodoPokeDeliveryUnavailableError,
     TodoPokeDeps,
+    TodoPokeRequesterKind,
     TodoPokeWorker,
     todo_poke_policy,
 )
 from mindroom.custom_tools.todo_state import state_root as todo_state_root
-from mindroom.entity_resolution import current_internal_sender_ids
+from mindroom.entity_resolution import (
+    MissingManagedEntityAccountError,
+    current_internal_sender_ids,
+    mindroom_user_id,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.requester_identity import is_human_requester_id
@@ -59,6 +64,7 @@ class TodoPokeRuntimeCoordinator:
                 schedule_query=self._schedule_query,
                 idle_check=self._agent_is_idle,
                 sender=self._send_poke,
+                requester_kind=self._requester_kind,
                 clock=lambda: datetime.now(UTC),
             ),
         )
@@ -143,41 +149,47 @@ class TodoPokeRuntimeCoordinator:
             return None
         return await get_pending_schedule_thread_ids_for_room(agent_bot.client, room_id)
 
+    def _requester_kind(self, requester_id: str) -> TodoPokeRequesterKind:
+        """Classify a recorded todo requester under the current config."""
+        config = self.config_provider()
+        if config is None:
+            raise TodoPokeDeliveryUnavailableError
+        try:
+            internal_sender_ids = current_internal_sender_ids(config, self.runtime_paths)
+        except MissingManagedEntityAccountError as exc:
+            raise TodoPokeDeliveryUnavailableError from exc
+        # Access policies never restrict internal senders, so their work runs as the assignee's own turn.
+        if requester_id in internal_sender_ids:
+            return TodoPokeRequesterKind.INTERNAL
+        # Ingress promotes only a human original sender to requester; any other sender would run with the assignee's authority.
+        if is_human_requester_id(requester_id, config, self.runtime_paths):
+            return TodoPokeRequesterKind.HUMAN
+        return TodoPokeRequesterKind.UNSUPPORTED
+
     async def _send_poke(
         self,
         agent_name: str,
         room_id: str,
         body: str,
         thread_id: str | None,
-        requester_id: str,
+        requester_id: str | None,
     ) -> str | None:
-        """Send one assigned-agent todo poke that enters normal dispatch on behalf of the todo's requester."""
+        """Send one assigned-agent todo poke that enters normal dispatch as its human requester or internally."""
         config = self.config_provider()
         if config is None:
             raise TodoPokeDeliveryUnavailableError
-        # A human requester becomes the poke's requester, so the assignee applies its access policy to them.
-        # Agents, teams, the router, and the internal user are always allowed to address agents, so their pokes
-        # keep the assignee as requester exactly like a direct mention would; any other sender would bypass policy.
-        if not (
-            is_human_requester_id(requester_id, config, self.runtime_paths)
-            or requester_id in current_internal_sender_ids(config, self.runtime_paths)
-        ):
-            logger.warning(
-                "todo_poke_requester_rejected",
-                assigned_agent=agent_name,
-                room_id=room_id,
-                requester_id=requester_id,
-            )
-            return None
         agent_bot = await self._joined_agent_bot(room_id, (agent_name,))
         if agent_bot is None or agent_bot.client is None:
             raise TodoPokeDeliveryUnavailableError
 
+        # A human original sender makes the assignee apply its access policy and tool authorization to that human.
+        original_sender = requester_id if requester_id is not None else mindroom_user_id(config, self.runtime_paths)
+        extra_content = {ORIGINAL_SENDER_KEY: original_sender} if original_sender is not None else None
         return await agent_bot._hook_send_message(
             room_id,
             body,
             thread_id,
             "todo_poke",
-            {ORIGINAL_SENDER_KEY: requester_id},
+            extra_content,
             trigger_dispatch=True,
         )

@@ -14,6 +14,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import Enum
+from functools import cache
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.custom_tools.todo_state import (
@@ -38,14 +40,16 @@ __all__ = [
     "TodoPokeDeliveryUnavailableError",
     "TodoPokeDeps",
     "TodoPokePolicy",
+    "TodoPokeRequesterKind",
     "TodoPokeWorker",
     "scan_todo_pokes",
     "todo_poke_policy",
 ]
 
 type _TodoScheduleQuery = Callable[[str, tuple[str, ...]], Awaitable[frozenset[str | None] | None]]
-type _TodoPokeSender = Callable[[str, str, str, str | None, str], Awaitable[str | None]]
+type _TodoPokeSender = Callable[[str, str, str, str | None, str | None], Awaitable[str | None]]
 type _StateWarningKey = tuple[str, str]
+type _AgentThreadKey = tuple[str, str, str | None]
 
 _VALID_STATUSES = {"open", *TERMINAL_STATUSES}
 # Keep synchronized with config.main._AGENT_NAME_PATTERN without importing the config graph here.
@@ -58,6 +62,14 @@ _MAX_UNCHANGED_REPOKES = 3
 
 class TodoPokeDeliveryUnavailableError(RuntimeError):
     """Signal that the runtime could not attempt a todo poke delivery."""
+
+
+class TodoPokeRequesterKind(Enum):
+    """Authority a todo poke may use for the requester recorded on an item."""
+
+    HUMAN = "human"
+    INTERNAL = "internal"
+    UNSUPPORTED = "unsupported"
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +90,7 @@ class TodoPokeDeps:
     schedule_query: _TodoScheduleQuery
     idle_check: Callable[[str], bool]
     sender: _TodoPokeSender
+    requester_kind: Callable[[str], TodoPokeRequesterKind]
     clock: Callable[[], datetime]
 
 
@@ -89,7 +102,7 @@ class _TodoItemSnapshot:
     priority: str
     depends_on: tuple[str, ...]
     assigned_agent: str
-    requester_id: str
+    requester_id: str | None
     updated_at: datetime
 
 
@@ -111,7 +124,8 @@ class _TodoSnapshotBatch:
 @dataclass(frozen=True, slots=True)
 class _TodoPokeScope:
     assigned_agent: str
-    requester_id: str
+    # The human this poke acts for, or None when it runs as the assignee's own internal turn.
+    requester_id: str | None
     room_id: str
     thread_id: str | None
     actionable_items: tuple[_TodoItemSnapshot, ...]
@@ -216,17 +230,11 @@ def _parse_item(raw_item: object) -> _TodoItemSnapshot:
         raise ValueError(msg)
 
     # LEGACY_COMPAT: Todo items without a recorded requester_id.
-    # Legacy format: Items written by the todo tool before it recorded the title author omit requester_id.
-    # Last legacy release: every stable release before requester attribution shipped (v2026.9.272 was the latest
-    # tag when written); replacement: the next release records requester_id on every title write.
-    # Handling: Parse absence as unattributed; nobody can be safely attributed after the fact, so such items are
-    # never poked, each is logged once, list_todos flags it, and rewriting its title records the new author.
-    # Coverage: tests/test_todo_poke.py::test_scan_never_pokes_legacy_items_without_recorded_requester,
-    # tests/test_todo_builtin.py::test_list_todos_flags_legacy_items_and_title_rewrite_adopts_them.
-    requester_id = item_data.get("requester_id", "")
-    if not isinstance(requester_id, str):
-        msg = "requester_id must be a string"
-        raise TypeError(msg)
+    # Legacy format: A native `todos.json` item with no `requester_id` key.
+    # Last legacy release: v2026.9.289 wrote every item without a requester; replacement: the next release records the title author's `requester_id` on every item it writes.
+    # Handling: The item keeps the authority every release through v2026.9.289 poked it with, the assignee's own internal turn, and shares the internal poke scope and its unchanged dedup key; the todo tool records the current requester on its next write to the item.
+    # Coverage: tests/test_todo_poke.py::test_scan_pokes_legacy_items_as_assignee_turn_with_existing_dedup_state, tests/test_todo_builtin.py::test_todo_write_records_requester_on_legacy_item.
+    requester_id = _require_string(item_data, "requester_id") if "requester_id" in item_data else None
 
     return _TodoItemSnapshot(
         item_id=_require_string(item_data, "id"),
@@ -386,10 +394,12 @@ def _fingerprint(
 def _poke_scopes(
     snapshots: list[_TodoThreadSnapshot],
     seen_warning_keys: set[_StateWarningKey],
+    requester_kind: Callable[[str], TodoPokeRequesterKind],
 ) -> list[_TodoPokeScope]:
     scopes: list[_TodoPokeScope] = []
+    classify_requester = cache(requester_kind)
     for snapshot in snapshots:
-        items_by_owner: dict[tuple[str, str], list[_TodoItemSnapshot]] = {}
+        items_by_owner: dict[tuple[str, str | None], list[_TodoItemSnapshot]] = {}
         for item in snapshot.items:
             if item.item_id not in snapshot.actionable_item_ids or not item.assigned_agent:
                 continue
@@ -403,20 +413,26 @@ def _poke_scopes(
                     assigned_agent=item.assigned_agent,
                 )
                 continue
-            # A poke acts for whoever wrote the work, so the assignee's access policy applies to them.
-            if not item.requester_id:
-                _warn_state_once(
-                    "todo_poke_requester_missing",
-                    snapshot.source_path,
-                    f"assigned todo {item.item_id} has no recorded requester; rewrite its title to re-enable pokes",
-                    seen_warning_keys,
-                    item_id=item.item_id,
-                    assigned_agent=item.assigned_agent,
-                )
-                continue
-            items_by_owner.setdefault((item.assigned_agent, item.requester_id), []).append(item)
+            # A human's work pokes as that human so the assignee applies its access policy to them.
+            # Work from internal senders and legacy work shares one poke as the assignee's own turn.
+            poke_requester = None
+            if item.requester_id is not None:
+                kind = classify_requester(item.requester_id)
+                if kind is TodoPokeRequesterKind.UNSUPPORTED:
+                    _warn_state_once(
+                        "todo_poke_requester_unsupported",
+                        snapshot.source_path,
+                        f"requester {item.requester_id} is neither a human nor an internal sender",
+                        seen_warning_keys,
+                        item_id=item.item_id,
+                        assigned_agent=item.assigned_agent,
+                    )
+                    continue
+                if kind is TodoPokeRequesterKind.HUMAN:
+                    poke_requester = item.requester_id
+            items_by_owner.setdefault((item.assigned_agent, poke_requester), []).append(item)
 
-        for assigned_agent, requester_id in sorted(items_by_owner):
+        for assigned_agent, requester_id in sorted(items_by_owner, key=lambda owner: (owner[0], owner[1] or "")):
             actionable_items = tuple(items_by_owner[assigned_agent, requester_id])
             scopes.append(
                 _TodoPokeScope(
@@ -433,10 +449,15 @@ def _poke_scopes(
 
 
 def _scope_key(scope: _TodoPokeScope) -> str:
-    return json.dumps(
-        [scope.assigned_agent, scope.room_id, scope.thread_id, scope.requester_id],
-        separators=(",", ":"),
-    )
+    # Internal scopes keep the key every earlier release used, so their dedup state survives upgrades.
+    key: list[str | None] = [scope.assigned_agent, scope.room_id, scope.thread_id]
+    if scope.requester_id is not None:
+        key.append(scope.requester_id)
+    return json.dumps(key, separators=(",", ":"))
+
+
+def _agent_thread_key(scope: _TodoPokeScope) -> _AgentThreadKey:
+    return (scope.assigned_agent, scope.room_id, scope.thread_id)
 
 
 def _poke_record(state: Mapping[str, Any], scope: _TodoPokeScope) -> _PokeRecord | None:
@@ -464,6 +485,14 @@ def _poke_record(state: Mapping[str, Any], scope: _TodoPokeScope) -> _PokeRecord
         last_fingerprint=last_fingerprint,
         unchanged_repoke_count=unchanged_repoke_count,
     )
+
+
+def _previous_record(
+    scope: _TodoPokeScope,
+    poke_state: Mapping[str, Any],
+    session_poke_records: Mapping[str, _PokeRecord],
+) -> _PokeRecord | None:
+    return session_poke_records.get(_scope_key(scope)) or _poke_record(poke_state, scope)
 
 
 def _read_poke_state(todo_root: Path) -> dict[str, Any]:
@@ -603,7 +632,7 @@ def _dedup_allows_poke(
     policy: TodoPokePolicy,
     now_timestamp: float,
 ) -> bool:
-    previous = session_poke_records.get(_scope_key(scope)) or _poke_record(poke_state, scope)
+    previous = _previous_record(scope, poke_state, session_poke_records)
     if previous is None:
         return True
     if previous.last_fingerprint != scope.fingerprint:
@@ -617,6 +646,37 @@ def _dedup_allows_poke(
         previous.last_poked_at,
         _RETRY_BACKSTOP_SECONDS,
     )
+
+
+def _one_scope_per_agent_thread(
+    eligible_scopes: list[_TodoPokeScope],
+    all_scopes: list[_TodoPokeScope],
+    poke_state: Mapping[str, Any],
+    session_poke_records: Mapping[str, _PokeRecord],
+    policy: TodoPokePolicy,
+    now_timestamp: float,
+) -> list[_TodoPokeScope]:
+    """Poke an agent thread at most once per cooldown however many requesters wrote its work."""
+    cooling_threads: set[_AgentThreadKey] = set()
+    for scope in all_scopes:
+        previous = _previous_record(scope, poke_state, session_poke_records)
+        if previous is not None and not _period_elapsed(now_timestamp, previous.last_poked_at, policy.cooldown_seconds):
+            cooling_threads.add(_agent_thread_key(scope))
+
+    def last_attempt(scope: _TodoPokeScope) -> float:
+        previous = _previous_record(scope, poke_state, session_poke_records)
+        return previous.last_poked_at if previous is not None else -math.inf
+
+    # The least recently poked requester goes first so one requester's churn cannot starve another's work.
+    chosen: dict[_AgentThreadKey, _TodoPokeScope] = {}
+    for scope in eligible_scopes:
+        thread_key = _agent_thread_key(scope)
+        if thread_key in cooling_threads:
+            continue
+        current = chosen.get(thread_key)
+        if current is None or last_attempt(scope) < last_attempt(current):
+            chosen[thread_key] = scope
+    return list(chosen.values())
 
 
 def _record_after_attempt(
@@ -666,7 +726,7 @@ async def _deliver_pokes(
             continue
 
         scope_key = _scope_key(scope)
-        previous = session_poke_records.get(scope_key) or _poke_record(poke_state, scope)
+        previous = _previous_record(scope, poke_state, session_poke_records)
         try:
             event_id = await deps.sender(
                 scope.assigned_agent,
@@ -705,7 +765,11 @@ async def scan_todo_pokes(
     remembered_warnings = seen_warning_keys if seen_warning_keys is not None else set()
     todo_root = deps.state_root
     snapshot_batch = await asyncio.to_thread(_read_thread_snapshots, todo_root, remembered_warnings)
-    all_scopes = _poke_scopes(list(snapshot_batch.snapshots), remembered_warnings)
+    try:
+        all_scopes = _poke_scopes(list(snapshot_batch.snapshots), remembered_warnings, deps.requester_kind)
+    except TodoPokeDeliveryUnavailableError:
+        logger.debug("todo_poke_scan_skipped_runtime_unavailable")
+        return 0
     active_scope_keys = frozenset(_scope_key(scope) for scope in all_scopes)
     if not snapshot_batch.had_io_failure:
         for stale_scope_key in remembered_pokes.keys() - active_scope_keys:
@@ -722,13 +786,21 @@ async def scan_todo_pokes(
         return 0
 
     now_timestamp = deps.clock().astimezone(UTC).timestamp()
-    scopes = [
+    eligible_scopes = [
         scope
         for scope in all_scopes
         if _period_elapsed(now_timestamp, scope.latest_actionable_update.timestamp(), policy.quiet_seconds)
         and deps.idle_check(scope.assigned_agent)
         and _dedup_allows_poke(scope, poke_state, remembered_pokes, policy, now_timestamp)
     ]
+    scopes = _one_scope_per_agent_thread(
+        eligible_scopes,
+        all_scopes,
+        poke_state,
+        remembered_pokes,
+        policy,
+        now_timestamp,
+    )
     if not scopes:
         return 0
 

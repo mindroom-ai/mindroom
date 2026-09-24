@@ -809,17 +809,6 @@ class TodoTools(Toolkit):
             for item in done:
                 mark = "done" if item["status"] == "done" else "cancelled"
                 result_lines.append(f"- {mark} `{item['id']}` {item['title']}")
-        # Items written before requester attribution are never auto-poked; see the LEGACY_COMPAT note in todo_poke.
-        unattributed = [
-            item["id"]
-            for item in items
-            if item["status"] == "open" and item.get("assigned_agent") and not item.get("requester_id")
-        ]
-        if unattributed:
-            result_lines.append(
-                f"\nNot auto-poked (no recorded requester): {', '.join(f'`{item_id}`' for item_id in unattributed)}. "
-                "Rewrite an item's title with update_todo to record you as its requester.",
-            )
         return "\n".join(result_lines)
 
     def update_todo(  # noqa: C901, PLR0915
@@ -867,7 +856,7 @@ class TodoTools(Toolkit):
                     return no_write(unauthorized_agent)
             # A kept title stays attributed to its author, who must also be allowed to address a new assignee.
             title_author = item.get("requester_id")
-            if not clean_title and title_author and not _may_address(title_author, new_agent):
+            if not clean_title and title_author is not None and not _may_address(title_author, new_agent):
                 return no_write(
                     f"Cannot give todo `{todo_id}` to '{new_agent}': "
                     "the person who wrote it is not allowed to address that agent in this room.",
@@ -886,9 +875,7 @@ class TodoTools(Toolkit):
 
             changes: list[str] = []
             if clean_title:
-                # Writing a title makes the current requester its author, which also adopts unattributed items.
                 item["title"] = clean_title
-                item["requester_id"] = requester_id
                 changes.append(f"title='{clean_title}'")
             if priority:
                 item["priority"] = priority.lower()
@@ -906,6 +893,9 @@ class TodoTools(Toolkit):
             if not changes:
                 return no_write("No fields to update.")
 
+            # Writing a title makes the current requester its author; any write adopts an item that has none yet.
+            if clean_title or title_author is None:
+                item["requester_id"] = requester_id
             item["updated_at"] = now
             data["updated_at"] = now
             unblocked_message = ""

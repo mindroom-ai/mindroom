@@ -156,7 +156,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob scrub and double-JSON decoding; other Agno readers remain dependency-owned. |
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
 | S21 | Isolated | [`legacy_attachments.py`][legacy-attachments] adopts in-place attachment records into verified retained copies; [`attachments.py`][attachments] keeps copying, record publication, and retention cleanup. |
-| S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] treats a todo item without `requester_id` as unattributed: it is never poked, logged once, flagged by `list_todos()`, and adopted by a title rewrite. |
+| S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] pokes a todo item without `requester_id` as the assignee's own internal turn under its unchanged dedup key, and the todo tool records the current requester on the item's next write. |
 
 ## Configuration and credentials
 

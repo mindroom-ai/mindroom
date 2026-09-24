@@ -18,6 +18,7 @@ from mindroom.custom_tools.todo_poke import (
     TodoPokeDeliveryUnavailableError,
     TodoPokeDeps,
     TodoPokePolicy,
+    TodoPokeRequesterKind,
     TodoPokeWorker,
     scan_todo_pokes,
     todo_poke_policy,
@@ -32,7 +33,16 @@ if TYPE_CHECKING:
     from typing import Any
 
 _NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
-_REQUESTER = "@alice:localhost"
+_AGENT_REQUESTER = "@mindroom_planner:localhost"
+_BOT_ACCOUNT = "@bridge:localhost"
+
+
+def _requester_kind(requester_id: str) -> TodoPokeRequesterKind:
+    if requester_id == _AGENT_REQUESTER:
+        return TodoPokeRequesterKind.INTERNAL
+    if requester_id == _BOT_ACCOUNT:
+        return TodoPokeRequesterKind.UNSUPPORTED
+    return TodoPokeRequesterKind.HUMAN
 
 
 def _item(
@@ -44,7 +54,7 @@ def _item(
     priority: str = "medium",
     depends_on: list[str] | None = None,
     updated_at: datetime = _NOW - timedelta(minutes=10),
-    requester_id: str | None = _REQUESTER,
+    requester_id: object = None,
 ) -> dict[str, object]:
     item: dict[str, object] = {
         "id": item_id,
@@ -57,6 +67,7 @@ def _item(
         "updated_at": updated_at.isoformat(),
         "completed_at": None,
     }
+    # Items without a requester are what every release through v2026.9.289 wrote.
     if requester_id is not None:
         item["requester_id"] = requester_id
     return item
@@ -95,6 +106,7 @@ def _deps(
     schedule_result: frozenset[str | None] | None = frozenset(),
     schedule_error: Exception | None = None,
     send_results: list[str | None] | None = None,
+    sent_requesters: list[str | None] | None = None,
 ) -> tuple[TodoPokeDeps, list[str], list[tuple[str, str, str | None]]]:
     queried_rooms: list[str] = []
     sent: list[tuple[str, str, str | None]] = []
@@ -111,9 +123,11 @@ def _deps(
         room_id: str,
         body: str,
         thread_id: str | None,
-        _requester_id: str,
+        requester_id: str | None,
     ) -> str | None:
         sent.append((room_id, body, thread_id))
+        if sent_requesters is not None:
+            sent_requesters.append(requester_id)
         if remaining_results:
             return remaining_results.pop(0)
         return f"$event-{len(sent)}"
@@ -124,6 +138,7 @@ def _deps(
             schedule_query=schedule_query,
             idle_check=idle_check,
             sender=sender,
+            requester_kind=_requester_kind,
             clock=clock,
         ),
         queried_rooms,
@@ -194,7 +209,7 @@ async def test_scan_routes_room_io_through_assigned_candidates(tmp_path: Path) -
         room_id: str,
         body: str,
         thread_id: str | None,
-        _requester_id: str,
+        _requester_id: str | None,
     ) -> str:
         send_calls.append((agent_name, room_id, body, thread_id))
         return "$event"
@@ -204,6 +219,7 @@ async def test_scan_routes_room_io_through_assigned_candidates(tmp_path: Path) -
         schedule_query=schedule_query,
         idle_check=lambda _agent_name: True,
         sender=sender,
+        requester_kind=_requester_kind,
         clock=lambda: _NOW,
     )
 
@@ -243,7 +259,7 @@ async def test_scan_skips_only_room_without_joined_candidate(tmp_path: Path) -> 
         room_id: str,
         _body: str,
         _thread_id: str | None,
-        _requester_id: str,
+        _requester_id: str | None,
     ) -> str:
         send_calls.append((agent_name, room_id))
         return "$event"
@@ -253,6 +269,7 @@ async def test_scan_skips_only_room_without_joined_candidate(tmp_path: Path) -> 
         schedule_query=schedule_query,
         idle_check=lambda _agent_name: True,
         sender=sender,
+        requester_kind=_requester_kind,
         clock=lambda: _NOW,
     )
 
@@ -282,7 +299,7 @@ async def test_unavailable_delivery_does_not_consume_attempt_or_cooldown(tmp_pat
         _room_id: str,
         _body: str,
         _thread_id: str | None,
-        _requester_id: str,
+        _requester_id: str | None,
     ) -> str:
         sender_calls.append(agent_name)
         if agent_name == "code":
@@ -294,6 +311,7 @@ async def test_unavailable_delivery_does_not_consume_attempt_or_cooldown(tmp_pat
         schedule_query=schedule_query,
         idle_check=lambda _agent_name: True,
         sender=sender,
+        requester_kind=_requester_kind,
         clock=lambda: _NOW,
     )
 
@@ -306,7 +324,7 @@ async def test_unavailable_delivery_does_not_consume_attempt_or_cooldown(tmp_pat
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalid_kind",
-    ["duplicate-id", "naive-updated-at", "overflow-updated-at", "non-string-requester"],
+    ["duplicate-id", "naive-updated-at", "overflow-updated-at", "list-requester", "empty-requester"],
 )
 async def test_scan_skips_duplicate_or_invalid_timestamp_items(
     tmp_path: Path,
@@ -320,9 +338,10 @@ async def test_scan_skips_duplicate_or_invalid_timestamp_items(
     elif invalid_kind == "naive-updated-at":
         invalid_item = _item("invalid", title="Naive item")
         invalid_item["updated_at"] = "2026-07-18T11:50:00"
-    elif invalid_kind == "non-string-requester":
-        invalid_item = _item("invalid", title="Requester item")
-        invalid_item["requester_id"] = ["@alice:localhost"]
+    elif invalid_kind == "list-requester":
+        invalid_item = _item("invalid", title="Requester item", requester_id=["@alice:localhost"])
+    elif invalid_kind == "empty-requester":
+        invalid_item = _item("invalid", title="Requester item", requester_id="")
     else:
         invalid_item = _item("invalid", title="Overflow item")
         invalid_item["updated_at"] = "9999-12-31T23:00:00-05:00"
@@ -338,84 +357,127 @@ async def test_scan_skips_duplicate_or_invalid_timestamp_items(
 
 
 @pytest.mark.asyncio
-async def test_scan_never_pokes_legacy_items_without_recorded_requester(tmp_path: Path) -> None:
-    """Items written before requester attribution cannot be safely attributed, so they never wake their assignee."""
+async def test_scan_pokes_legacy_items_as_assignee_turn_with_existing_dedup_state(tmp_path: Path) -> None:
+    """Pre-upgrade items keep poking as the assignee's own turn, sharing one poke and dedup key with agent work."""
     todo_root = tmp_path / "todo"
     _write_thread(
         todo_root,
         "scope",
         items=[
-            _item("orphan", title="Orphan item", requester_id=None),
-            _item("empty", title="Empty requester item", requester_id=""),
+            _item("legacy", title="Legacy work"),
+            _item("agent", title="Agent work", requester_id=_AGENT_REQUESTER),
         ],
     )
-    idle_checks: list[str] = []
+    sent_requesters: list[str | None] = []
+    deps, _queried_rooms, sent = _deps(todo_root, sent_requesters=sent_requesters)
+    policy = TodoPokePolicy(quiet_seconds=0)
 
-    def idle_check(agent_name: str) -> bool:
-        idle_checks.append(agent_name)
-        return True
+    assert await scan_todo_pokes(policy, deps) == 1
+    assert sent_requesters == [None]
+    assert "Legacy work" in sent[0][1]
+    assert "Agent work" in sent[0][1]
+    poke_state_path = todo_root / "poke_state.json"
+    poke_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
+    # The key and record shape are what v2026.9.289 persisted, so upgrading keeps the existing dedup lineage.
+    assert list(poke_state["scopes"]) == ['["code","!room:localhost","$thread"]']
 
-    deps, queried_rooms, sent = _deps(todo_root, idle_check=idle_check)
-
-    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 0
-    assert sent == []
-    assert queried_rooms == []
-    assert idle_checks == []
+    assert await scan_todo_pokes(policy, deps) == 0
+    assert len(sent) == 1
 
 
 @pytest.mark.asyncio
-async def test_scan_pokes_each_requester_separately_on_their_behalf(tmp_path: Path) -> None:
-    """One poke carries one human requester and lists only the work that requester shaped."""
+async def test_scan_pokes_each_human_once_per_thread_cooldown(tmp_path: Path) -> None:
+    """Human work pokes as that human, one requester per agent thread per cooldown, least recently poked first."""
     todo_root = tmp_path / "todo"
-    _write_thread(
+    alice_item = _item("alice", title="Alice work", requester_id="@alice:localhost")
+    items = [alice_item, _item("bob", title="Bob work", requester_id="@bob:localhost"), _item("legacy")]
+    _write_thread(todo_root, "scope", items=items)
+    current_time = [_NOW]
+    sent_requesters: list[str | None] = []
+    deps, _queried_rooms, sent = _deps(
         todo_root,
-        "scope",
-        items=[
-            _item("alice-task", title="Alice work", requester_id="@alice:localhost"),
-            _item("bob-task", title="Bob work", requester_id="@bob:localhost"),
-        ],
+        clock=lambda: current_time[0],
+        sent_requesters=sent_requesters,
     )
-    send_calls: list[tuple[str, str, str]] = []
-
-    async def schedule_query(_room_id: str, _agent_names: tuple[str, ...]) -> frozenset[str | None]:
-        return frozenset()
-
-    async def sender(
-        agent_name: str,
-        _room_id: str,
-        body: str,
-        _thread_id: str | None,
-        requester_id: str,
-    ) -> str:
-        send_calls.append((agent_name, requester_id, body))
-        return f"$event-{len(send_calls)}"
-
-    deps = TodoPokeDeps(
-        state_root=todo_root,
-        schedule_query=schedule_query,
-        idle_check=lambda _agent_name: True,
-        sender=sender,
-        clock=lambda: _NOW,
-    )
-    policy = TodoPokePolicy(quiet_seconds=0)
+    policy = TodoPokePolicy(quiet_seconds=0, cooldown_seconds=300)
     remembered_pokes = {}
 
-    assert await scan_todo_pokes(policy, deps, session_poke_records=remembered_pokes) == 1
-    assert await scan_todo_pokes(policy, deps, session_poke_records=remembered_pokes) == 1
+    async def scan_after(seconds: int) -> int:
+        current_time[0] += timedelta(seconds=seconds)
+        return await scan_todo_pokes(policy, deps, session_poke_records=remembered_pokes)
 
-    assert [(agent, requester) for agent, requester, _body in send_calls] == [
-        ("code", "@alice:localhost"),
-        ("code", "@bob:localhost"),
+    assert await scan_after(0) == 1
+    assert await scan_after(0) == 0
+    assert await scan_after(299) == 0
+    assert await scan_after(1) == 1
+    # Alice's work changes, but Bob's never-poked work goes before her next poke.
+    alice_item["updated_at"] = current_time[0].isoformat()
+    _write_thread(todo_root, "scope", items=items)
+    assert await scan_after(300) == 1
+    assert await scan_after(300) == 1
+    assert await scan_after(300) == 0
+
+    assert sent_requesters == [None, "@alice:localhost", "@bob:localhost", "@alice:localhost"]
+    assert [("Alice work" in body, "Bob work" in body, "Task legacy" in body) for _room, body, _thread in sent] == [
+        (False, False, True),
+        (True, False, False),
+        (False, True, False),
+        (True, False, False),
     ]
-    assert "Alice work" in send_calls[0][2]
-    assert "Bob work" not in send_calls[0][2]
-    assert "Bob work" in send_calls[1][2]
-    assert "Alice work" not in send_calls[1][2]
     poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
     assert sorted(poke_state["scopes"]) == [
         '["code","!room:localhost","$thread","@alice:localhost"]',
         '["code","!room:localhost","$thread","@bob:localhost"]',
+        '["code","!room:localhost","$thread"]',
     ]
+
+
+@pytest.mark.asyncio
+async def test_scan_skips_unsupported_requester_without_holding_back_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Work recorded for a bot account is never poked, is logged once, and does not delay other work."""
+    todo_root = tmp_path / "todo"
+    _write_thread(
+        todo_root,
+        "scope",
+        items=[
+            _item("bridged", title="Bridged work", requester_id=_BOT_ACCOUNT),
+            _item("alice", title="Alice work", requester_id="@alice:localhost"),
+        ],
+    )
+    warnings: list[str] = []
+    monkeypatch.setattr(todo_poke_module.logger, "warning", lambda event, **_context: warnings.append(event))
+    sent_requesters: list[str | None] = []
+    deps, _queried_rooms, sent = _deps(todo_root, sent_requesters=sent_requesters)
+    seen_warning_keys: set[tuple[str, str]] = set()
+
+    for _ in range(2):
+        await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps, seen_warning_keys=seen_warning_keys)
+
+    assert sent_requesters == ["@alice:localhost"]
+    assert "Bridged work" not in sent[0][1]
+    assert warnings == ["todo_poke_requester_unsupported"]
+
+
+@pytest.mark.asyncio
+async def test_scan_skips_when_requesters_cannot_be_classified(tmp_path: Path) -> None:
+    """Attributed work waits, without pruning dedup state, until the runtime can classify its requester."""
+    todo_root = tmp_path / "todo"
+    _write_thread(todo_root, "scope", items=[_item("alice", requester_id="@alice:localhost")])
+    poke_state_path = todo_root / "poke_state.json"
+    poke_state_path.write_text(json.dumps({"scopes": {"stale": {}}}), encoding="utf-8")
+    base_deps, _queried_rooms, sent = _deps(todo_root)
+
+    def unavailable(_requester_id: str) -> TodoPokeRequesterKind:
+        raise TodoPokeDeliveryUnavailableError
+
+    deps = replace(base_deps, requester_kind=unavailable)
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 0
+    assert sent == []
+    assert json.loads(poke_state_path.read_text(encoding="utf-8")) == {"scopes": {"stale": {}}}
 
 
 @pytest.mark.asyncio
@@ -696,7 +758,7 @@ async def test_delivery_outcome_time_owns_cooldown_and_backstop_windows(tmp_path
         room_id: str,
         body: str,
         thread_id: str | None,
-        requester_id: str,
+        requester_id: str | None,
     ) -> str | None:
         current_time[0] += timedelta(minutes=20)
         return await base_deps.sender(agent_name, room_id, body, thread_id, requester_id)
@@ -880,7 +942,7 @@ async def test_persist_failure_keeps_session_dedup_and_later_scopes_continue(
     assert await scan_todo_pokes(policy, deps, session_poke_records=remembered_pokes) == 0
     assert len(sent) == 2
     poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
-    assert list(poke_state["scopes"]) == ['["agent_b","!b:localhost","$thread","@alice:localhost"]']
+    assert list(poke_state["scopes"]) == ['["agent_b","!b:localhost","$thread"]']
 
 
 @pytest.mark.asyncio
@@ -1045,7 +1107,7 @@ async def test_scan_prunes_poke_records_without_current_actionable_scope(tmp_pat
     assert await scan_todo_pokes(policy, deps) == 0
     assert queried_rooms == ["!a:localhost", "!b:localhost"]
     poke_state = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))
-    assert list(poke_state["scopes"]) == ['["agent_b","!b:localhost","$thread","@alice:localhost"]']
+    assert list(poke_state["scopes"]) == ['["agent_b","!b:localhost","$thread"]']
 
 
 @pytest.mark.asyncio

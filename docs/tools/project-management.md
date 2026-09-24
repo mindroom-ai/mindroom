@@ -99,6 +99,7 @@ Todo items are scoped to the current Matrix room and resolved thread, so separat
 Each item can have a priority, dependency list, status, and assigned agent name.
 Assigning work to an agent, or changing work assigned to an agent, is refused unless the requester may address that agent in the current room under its `access` policy.
 Each item records the requester who wrote its title, human or agent, and other changes keep that attribution.
+Items written before requesters were recorded have no attribution until their next change, which records the current requester.
 Reassigning an item without rewriting its title also requires that its recorded requester may address the new agent.
 State is stored under `mindroom_data/todo/` and survives restarts.
 Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
@@ -114,12 +115,10 @@ A failed send is recorded like any other attempt, so the retry waits out the cha
 Future persisted timestamps beyond the relevant cooldown or backstop window are treated as elapsed so clock skew cannot mute valid work indefinitely.
 Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
 Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
-Each poke carries the item's recorded requester as its original sender, and one poke never mixes items from different requesters.
-When that requester is a human, the assigned agent applies its normal reply access and tool authorization to that human.
-When it is an agent, team, router, or the internal user, access policies never restrict that requester, so the poke dispatches as the assigned agent's own internal turn and agent-to-agent todo loops keep running.
-Pokes for any other requester, such as a configured bot account, are refused and logged.
-Items written before requesters were recorded cannot be attributed safely, so they are never poked, each is logged once, and `list_todos()` flags them.
-Rewriting such an item's title with `update_todo()` records the current requester and re-enables its pokes.
+Work written by a human is poked on that human's behalf, with one poke per human, so the assigned agent applies its normal reply access and tool authorization to that human and does not run the poke once that human has lost access.
+Work written by an agent, team, router, or the internal user, which access policies never restrict, shares one poke with items written before requesters were recorded, and that poke dispatches as the assigned agent's own internal turn as every poke did before.
+Items recorded for any other requester, such as a configured bot account, are not poked, and each is logged once.
+An agent is poked at most once per cooldown in each thread however many humans wrote its work there, and the least recently poked requester goes first.
 
 | Environment variable | Default | Behavior |
 | --- | --- | --- |

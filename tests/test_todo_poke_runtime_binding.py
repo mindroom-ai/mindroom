@@ -16,8 +16,8 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
-from mindroom.custom_tools.todo_poke import TodoPokeDeliveryUnavailableError
-from mindroom.entity_resolution import mindroom_user_id
+from mindroom.custom_tools.todo_poke import TodoPokeDeliveryUnavailableError, TodoPokeRequesterKind
+from mindroom.entity_resolution import MissingManagedEntityAccountError, mindroom_user_id
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks.sender import send_hook_message
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
@@ -147,17 +147,23 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
         {"router": router_bot, "code": agent_bot},
     )
 
-    with patch(
-        "mindroom.orchestration.todo_poke_runtime.get_pending_schedule_thread_ids_for_room",
-        new=AsyncMock(return_value=frozenset({"$scheduled"})),
-    ) as schedule_query:
+    with (
+        patch(
+            "mindroom.orchestration.todo_poke_runtime.get_pending_schedule_thread_ids_for_room",
+            new=AsyncMock(return_value=frozenset({"$scheduled"})),
+        ) as schedule_query,
+        patch(
+            "mindroom.orchestration.todo_poke_runtime.mindroom_user_id",
+            return_value="@mindroom_user:localhost",
+        ),
+    ):
         pending = await coordinator._schedule_query("!room:localhost", ("code",))
         event_id = await coordinator._send_poke(
             "code",
             "!room:localhost",
             "@code Todo work is ready.",
             "$thread",
-            "@alice:localhost",
+            None,
         )
 
     assert pending == frozenset({"$scheduled"})
@@ -168,73 +174,54 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
         "@code Todo work is ready.",
         "$thread",
         "todo_poke",
-        {ORIGINAL_SENDER_KEY: "@alice:localhost"},
+        {ORIGINAL_SENDER_KEY: "@mindroom_user:localhost"},
         trigger_dispatch=True,
     )
     router_bot._hook_send_message.assert_not_awaited()
 
+    agent_bot._hook_send_message.reset_mock()
+    await coordinator._send_poke("code", "!room:localhost", "@code Todo work is ready.", "$thread", "@alice:localhost")
 
-@pytest.mark.asyncio
-async def test_send_refuses_requester_outside_access_policy_model(tmp_path: Path) -> None:
-    """A bot account is neither a human nor an internal sender, so its poke would bypass the assignee's policy."""
-    config = _restricted_config(tmp_path)
-    client = _client("!room:localhost")
-    agent_bot = _bot(client=client)
-    agent_bot._hook_send_message = AsyncMock(return_value="$event")
-    coordinator = _coordinator(runtime_paths_for(config), config, {"secret": agent_bot})
-
-    event_id = await coordinator._send_poke(
-        "secret",
-        "!room:localhost",
-        "@secret Todo work is ready.",
-        "$thread",
-        "@bridge:localhost",
-    )
-
-    assert event_id is None
-    agent_bot._hook_send_message.assert_not_awaited()
-    client.joined_rooms.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("requester", ["agent", "internal-user"])
-async def test_send_pokes_internal_requesters(tmp_path: Path, requester: str) -> None:
-    """Agent-authored work keeps poking, which keeps autonomous agent-to-agent todo loops alive."""
-    config = _restricted_config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    requester_ids = {
-        "agent": entity_ids(config, runtime_paths)["code"].full_id,
-        "internal-user": mindroom_user_id(config, runtime_paths),
-    }
-    requester_id = requester_ids[requester]
-    assert requester_id is not None
-    agent_bot = _bot(client=_client("!room:localhost"))
-    agent_bot._hook_send_message = AsyncMock(return_value="$event")
-    coordinator = _coordinator(runtime_paths, config, {"secret": agent_bot})
-
-    event_id = await coordinator._send_poke(
-        "secret",
-        "!room:localhost",
-        "@secret Todo work is ready.",
-        "$thread",
-        requester_id,
-    )
-
-    assert event_id == "$event"
     agent_bot._hook_send_message.assert_awaited_once_with(
         "!room:localhost",
-        "@secret Todo work is ready.",
+        "@code Todo work is ready.",
         "$thread",
         "todo_poke",
-        {ORIGINAL_SENDER_KEY: requester_id},
+        {ORIGINAL_SENDER_KEY: "@alice:localhost"},
         trigger_dispatch=True,
     )
 
 
+def test_requester_kind_follows_current_config(tmp_path: Path) -> None:
+    """Humans keep their identity, internal senders run as the assignee, and any other sender is unsupported."""
+    config = _restricted_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(config, runtime_paths)
+    coordinator = _coordinator(runtime_paths, config, {})
+
+    assert coordinator._requester_kind("@alice:localhost") is TodoPokeRequesterKind.HUMAN
+    assert coordinator._requester_kind("@mallory:localhost") is TodoPokeRequesterKind.HUMAN
+    assert coordinator._requester_kind(ids["code"].full_id) is TodoPokeRequesterKind.INTERNAL
+    assert coordinator._requester_kind(ids["router"].full_id) is TodoPokeRequesterKind.INTERNAL
+    assert coordinator._requester_kind(mindroom_user_id(config, runtime_paths) or "") is TodoPokeRequesterKind.INTERNAL
+    assert coordinator._requester_kind("@bridge:localhost") is TodoPokeRequesterKind.UNSUPPORTED
+
+    with (
+        patch(
+            "mindroom.orchestration.todo_poke_runtime.current_internal_sender_ids",
+            side_effect=MissingManagedEntityAccountError("not prepared"),
+        ),
+        pytest.raises(TodoPokeDeliveryUnavailableError),
+    ):
+        coordinator._requester_kind("@alice:localhost")
+    with pytest.raises(TodoPokeDeliveryUnavailableError):
+        _coordinator(runtime_paths, None, {})._requester_kind("@alice:localhost")
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_poke_applies_assignee_access_policy_to_recorded_requester(tmp_path: Path) -> None:
-    """The assignee's ingress must resolve the poke's requester to the human and enforce its policy."""
+async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: Path) -> None:
+    """The assignee's ingress resolves a human poke to that human, while an internal poke stays the assignee's turn."""
     config = _restricted_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
@@ -276,14 +263,8 @@ async def test_poke_applies_assignee_access_policy_to_recorded_requester(tmp_pat
     agent_bot._hook_send_message = hook_send_message
     coordinator = _coordinator(runtime_paths, config, {"secret": agent_bot})
     with patch("mindroom.matrix.client_delivery.send_message_result", new=send_message_result):
-        for requester_id in ("@alice:localhost", "@mallory:localhost", ids["code"].full_id):
-            await coordinator._send_poke(
-                "secret",
-                "!room:localhost",
-                "@secret Todo work is ready.",
-                None,
-                requester_id,
-            )
+        for requester_id in ("@alice:localhost", "@mallory:localhost", None):
+            await coordinator._send_poke("secret", "!room:localhost", "@secret Todo work is ready.", None, requester_id)
 
     runtime = BotRuntimeState(
         client=None,
@@ -315,7 +296,7 @@ async def test_poke_applies_assignee_access_policy_to_recorded_requester(tmp_pat
         ),
     )
     room = nio.MatrixRoom("!room:localhost", secret_id)
-    authorized_event, unauthorized_event, agent_event = (
+    authorized_event, unauthorized_event, internal_event = (
         nio.RoomMessageText.from_dict(
             {
                 "event_id": f"$poke-{index}",
@@ -330,12 +311,12 @@ async def test_poke_applies_assignee_access_policy_to_recorded_requester(tmp_pat
     assert [content[ORIGINAL_SENDER_KEY] for content in sent_contents] == [
         "@alice:localhost",
         "@mallory:localhost",
-        ids["code"].full_id,
+        mindroom_user_id(config, runtime_paths),
     ]
     assert await validator.precheck_event(room, authorized_event) == "@alice:localhost"
+    # A human who may not address the assignee gets no turn from the poke.
     assert await validator.precheck_event(room, unauthorized_event) is None
-    # An agent requester is never restricted by access, so the poke dispatches as the assignee's own turn.
-    assert await validator.precheck_event(room, agent_event) == secret_id
+    assert await validator.precheck_event(room, internal_event) == secret_id
     turn_store.record_turn.assert_awaited_once_with(TurnRecord.create([unauthorized_event.event_id]))
 
 
@@ -381,13 +362,19 @@ async def test_send_skips_unjoined_todo_owner_without_using_other_candidate(tmp_
         {"code": unjoined_bot, "reviewer": joined_bot},
     )
 
-    with pytest.raises(TodoPokeDeliveryUnavailableError):
+    with (
+        patch(
+            "mindroom.orchestration.todo_poke_runtime.mindroom_user_id",
+            return_value="@mindroom_user:localhost",
+        ),
+        pytest.raises(TodoPokeDeliveryUnavailableError),
+    ):
         await coordinator._send_poke(
             "code",
             "!room:localhost",
             "@code Todo work is ready.",
             "$thread",
-            "@alice:localhost",
+            None,
         )
 
     unjoined_bot._hook_send_message.assert_not_awaited()
@@ -460,7 +447,7 @@ async def test_send_rejects_stale_joined_room_cache(tmp_path: Path) -> None:
             "!room:localhost",
             "@code Todo work is ready.",
             "$thread",
-            "@alice:localhost",
+            None,
         )
 
     stale_bot._hook_send_message.assert_not_awaited()
@@ -485,7 +472,7 @@ async def test_send_maps_membership_probe_failure_to_delivery_unavailable(tmp_pa
             "!room:localhost",
             "@code Todo work is ready.",
             "$thread",
-            "@alice:localhost",
+            None,
         )
 
     failing_bot._hook_send_message.assert_not_awaited()
@@ -504,7 +491,7 @@ async def test_adapters_skip_when_runtime_is_unavailable(tmp_path: Path) -> None
             "!room:localhost",
             "@code Todo work is ready.",
             "$thread",
-            "@alice:localhost",
+            None,
         )
 
 
@@ -539,6 +526,7 @@ async def test_sync_wires_coordinator_adapters_into_worker(tmp_path: Path) -> No
         assert worker.deps.idle_check == coordinator._agent_is_idle
         assert worker.deps.schedule_query == coordinator._schedule_query
         assert worker.deps.sender == coordinator._send_poke
+        assert worker.deps.requester_kind == coordinator._requester_kind
     finally:
         await coordinator.stop()
 
