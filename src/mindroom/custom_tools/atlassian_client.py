@@ -38,6 +38,10 @@ _DOWNLOAD_DEADLINE_SECONDS = 120.0
 # Any media type, but no content coding, so the byte limit counts the bytes actually received.
 _DOWNLOAD_HEADERS = {"Accept": "*/*", "Accept-Encoding": "identity"}
 _URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
+# Atlassian answers a token that lacks an endpoint's scope with 401 "Unauthorized; scope does not match".
+_SCOPE_MISMATCH_PATTERN = re.compile(r"\bscope does not match\b", re.IGNORECASE)
+# A gateway 401 body only needs to be long enough to tell a missing scope from a rejected token.
+_MAX_UNAUTHORIZED_BODY_BYTES = 64 * 1024
 _MAX_ERROR_MESSAGES = 5
 _MAX_ERROR_MESSAGE_CHARS = 300
 _STATUS_ERROR_CODES = {
@@ -154,13 +158,28 @@ def _error_messages(content: bytes | None) -> list[str]:
     return [message for message in messages if message][:_MAX_ERROR_MESSAGES]
 
 
+def _unauthorized_error(content: bytes | None) -> AtlassianError:
+    """Tell a scope the grant lacks, which reconnecting cannot add, from a token Atlassian rejected."""
+    messages = _error_messages(content)
+    if any(_SCOPE_MISMATCH_PATTERN.search(message) for message in messages):
+        return AtlassianError(
+            code="scope_mismatch",
+            message="Atlassian refused this request because the connection lacks a scope this endpoint requires. "
+            "Reconnecting does not add scopes, so an administrator must check the scopes the Atlassian app "
+            "grants and the scopes this tool requests.",
+            status_code=401,
+            messages=messages,
+        )
+    return AtlassianAccessRejectedError(
+        code="access_rejected",
+        message="Atlassian rejected the connected account's authorization.",
+        status_code=401,
+    )
+
+
 def _status_error(status_code: int, content: bytes | None) -> AtlassianError:
     if status_code == 401:
-        return AtlassianAccessRejectedError(
-            code="access_rejected",
-            message="Atlassian rejected the connected account's authorization.",
-            status_code=status_code,
-        )
+        return _unauthorized_error(content)
     return AtlassianError(
         code=_STATUS_ERROR_CODES.get(status_code, "atlassian_error"),
         message="Atlassian rejected the request.",
@@ -407,7 +426,7 @@ def _download_status_error(status_code: int, *, from_gateway: bool) -> Atlassian
             message="The Atlassian media service rejected the download.",
             status_code=status_code,
         )
-    if status_code in {401, 403, 404}:
+    if status_code in {403, 404}:
         # A usable grant always carries the download scope, so this is a page, attachment, or site permission.
         return AtlassianError(
             code="attachment_unavailable",
@@ -451,6 +470,9 @@ async def download(
                     if response.is_redirect:
                         url = _redirect_target(url, response.headers.get("location"), gateway_prefix)
                         continue
+                    if from_gateway and response.status_code == 401:
+                        # Only a gateway 401 body is read, to find a missing-scope message; URLs are scrubbed from it.
+                        raise _unauthorized_error(await _bounded_body(response, _MAX_UNAUTHORIZED_BODY_BYTES))
                     if not response.is_success:
                         raise _download_status_error(response.status_code, from_gateway=from_gateway)
                     return await _bounded_download(response, max_bytes)

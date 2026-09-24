@@ -464,10 +464,10 @@ async def test_download_deadline_covers_a_slow_body(tmp_path: Path, monkeypatch:
 @pytest.mark.parametrize(
     ("gateway_status", "media_status", "code"),
     [
-        (401, None, "attachment_unavailable"),
         (403, None, "attachment_unavailable"),
         (404, None, "attachment_unavailable"),
         (500, None, "download_failed"),
+        (None, 401, "download_failed"),
         (None, 403, "download_failed"),
     ],
 )
@@ -502,6 +502,43 @@ async def test_download_errors_report_status_without_bodies_or_urls(
     assert result["status_code"] == (gateway_status or media_status)
     assert "signed-secret" not in serialized
     assert "api.media.atlassian.com" not in serialized
+    assert TOKEN not in serialized
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ({"code": 401, "message": "Unauthorized"}, "access_rejected"),
+        ({"message": f"denied for {MEDIA_URL}", "token": TOKEN}, "access_rejected"),
+        ({"code": 401, "message": "Unauthorized; scope does not match"}, "scope_mismatch"),
+    ],
+)
+async def test_gateway_401_asks_to_reconnect_unless_a_scope_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    body: dict[str, object],
+    expected: str,
+) -> None:
+    """Downloads treat a gateway 401 like any API call: reconnect, or report the missing scope."""
+    tool, gateway, context, _paths = _setup(tmp_path, monkeypatch)
+    gateway.route(
+        "GET",
+        gateway_url("confluence", DOWNLOAD_PATH),
+        lambda _request: httpx.Response(401, json=body),
+    )
+
+    result = await _download(tool, context)
+
+    serialized = json.dumps(result)
+    if expected == "access_rejected":
+        assert result["oauth_connection_required"] is True
+        assert result["reason"] == "access_rejected"
+    else:
+        assert result["code"] == "scope_mismatch"
+        assert result["status_code"] == 401
+        assert "connect_url" not in result
+    assert "signed-secret" not in serialized
     assert TOKEN not in serialized
 
 

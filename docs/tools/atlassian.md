@@ -246,6 +246,7 @@ When more results exist, it returns `has_more: true` with a `next_cursor` to pas
 The ID is usable in the same turn, for example with `get_attachment(attachment_id)` to inspect the file, `get_attachment(attachment_id, mindroom_output_path=...)` to save it to the workspace, or `matrix_message` to send it.
 In a later turn, download the attachment again.
 Downloads require a conversation with attachment storage and return `attachment_context_unavailable` otherwise.
+A download of an attachment that does not exist, or that the connected account may not view, returns `attachment_unavailable`.
 The display filename comes from the RFC 5987 `filename*` parameter when present, then `filename`, then the optional `filename` argument, and it is stripped of directories and control characters.
 The stored file name is always generated from the attachment ID.
 
@@ -263,7 +264,8 @@ The stored file name is always generated from the attachment ID.
 - Error results carry a code, a fixed message, and a status code, and never a request URL, signed download link, token, or raw response body.
 - HTTP request logs drop the signature query from media service URLs.
 - Jira and Confluence error messages are kept for failed API requests, with URLs replaced and control characters removed.
-- A rejected access token returns a reconnect link instead of Atlassian's error text.
+- A 401 from the gateway, for an API call or a download, returns a reconnect link instead of Atlassian's error text.
+- A 401 whose message reports a scope mismatch returns `scope_mismatch` with Atlassian's message and no reconnect link, because reconnecting grants the same scopes again.
 
 ## Limits
 

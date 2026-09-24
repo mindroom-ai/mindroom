@@ -700,20 +700,47 @@ async def test_site_pins_select_one_site_and_never_fall_back(tmp_path: Path, mon
 
 
 @pytest.mark.asyncio
-async def test_rejected_access_token_returns_reconnect_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("body", [{"code": 401, "message": "Unauthorized"}, {"message": "Token expired"}, None])
+async def test_rejected_access_token_returns_reconnect_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    body: dict[str, object] | None,
+) -> None:
     """A gateway 401 asks the requester to reconnect instead of surfacing the provider response."""
     tool, gateway = _connected(tmp_path, monkeypatch)
     gateway.route(
         "GET",
         gateway_url("jira", "/rest/api/3/issue/PROJ-1"),
-        lambda _request: httpx.Response(401, json={"message": "Unauthorized; scope does not match"}),
+        lambda _request: httpx.Response(401, json=body) if body is not None else httpx.Response(401),
     )
 
     result = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
 
     assert result["oauth_connection_required"] is True
     assert result["reason"] == "access_rejected"
-    assert "scope does not match" not in json.dumps(result)
+    assert "Token expired" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_scope_mismatch_is_reported_without_a_reconnect_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 401 for a scope the grant lacks is not a rejected token, since reconnecting grants the same scopes."""
+    tool, gateway = _connected(tmp_path, monkeypatch)
+    gateway.route(
+        "GET",
+        gateway_url("confluence", "/wiki/rest/api/search"),
+        lambda _request: httpx.Response(401, json={"code": 401, "message": "Unauthorized; scope does not match"}),
+    )
+
+    result = json.loads(await tool.confluence_search(cql="type = page"))
+
+    assert result["code"] == "scope_mismatch"
+    assert result["status_code"] == 401
+    assert result["messages"] == ["Unauthorized; scope does not match"]
+    assert "oauth_connection_required" not in result
+    assert "connect_url" not in result
 
 
 @pytest.mark.asyncio
