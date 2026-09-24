@@ -1833,7 +1833,7 @@ def test_subprocess_worker_consumes_prepared_request_without_repreparing_worker(
 
     monkeypatch.setattr(
         sandbox_worker_prep_module,
-        "resolve_prepared_worker_request",
+        "prepare_worker_request",
         _forbidden_prepare,
     )
     monkeypatch.setattr(sys, "stdin", io.StringIO(envelope))
@@ -2950,6 +2950,7 @@ def test_resolve_worker_base_dir_does_not_create_directories_during_validation(t
         storage_root,
         "v1:default:shared:general",
         requested_base_dir,
+        user_scope_agent_names=frozenset(),
     )
 
     assert resolved == (storage_root / requested_base_dir).resolve()
@@ -2972,6 +2973,7 @@ def test_resolve_worker_base_dir_keeps_worker_root_paths_independent_of_alias_me
             worker_key,
             str(requested),
             frozenset({"writer"}),
+            user_scope_agent_names=frozenset(),
         )
         == requested
     )
@@ -3006,6 +3008,7 @@ def test_resolve_worker_base_dir_translates_verified_historical_scope(
         worker_key,
         str(legacy / "writer/workspace/project"),
         frozenset({"writer"}),
+        user_scope_agent_names=frozenset(),
     )
 
     assert result == canonical / "writer/workspace/project"
@@ -3057,6 +3060,7 @@ def test_resolve_worker_base_dir_rejects_unverified_historical_scope(
             worker_key,
             str(requested),
             frozenset({"writer"}),
+            user_scope_agent_names=frozenset(),
         )
 
 
@@ -3639,23 +3643,45 @@ def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_
     assert saved_file.read_text(encoding="utf-8") == "hello"
 
 
-def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
+def test_sandbox_runner_user_scope_base_dir_reaches_only_user_scope_agent_roots(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """User-scoped workers intentionally allow base_dir anywhere under the shared agents tree."""
+    """A user worker addresses its user-scope agents' roots, never agents on other scopes."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml_io.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "agents": {
+                    "coder": {"display_name": "Coder", "worker_scope": "user"},
+                    "ops": {"display_name": "Ops", "worker_scope": "shared"},
+                },
+                "router": {"model": "default"},
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
+
+    def fail_per_request_policy_resolution(_config: Config) -> frozenset[str]:
+        msg = "user-scope agents must come from the runner context"
+        raise AssertionError(msg)
+
+    # The runner resolved agent policy once at startup; requests must not redo it.
+    monkeypatch.setattr(Config, "get_user_scope_shared_agent_names", fail_per_request_policy_resolution)
 
     def fake_create(venv_dir: Path) -> None:
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
         (venv_dir / "bin" / "python").symlink_to(Path(sys.executable))
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create):
-        response = runner_client.post(
+    def save_note(agent_name: str) -> object:
+        return runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
             json={
@@ -3664,13 +3690,20 @@ def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
                 "args": ["hello", "note.txt"],
                 "kwargs": {},
                 "worker_key": "v1:tenant-123:user:@alice:example.org",
-                "tool_init_overrides": {"base_dir": "agents/other/workspace"},
+                "tool_init_overrides": {"base_dir": f"agents/{agent_name}/workspace"},
             },
         )
 
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-    assert (storage_root / "agents" / "other" / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create):
+        allowed = save_note("coder")
+        rejected = save_note("ops")
+
+    assert allowed.status_code == 200
+    assert allowed.json()["ok"] is True
+    assert (storage_root / "agents" / "coder" / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
+    assert rejected.status_code == 400
+    assert "allowed state roots" in rejected.json()["detail"]
+    assert not (storage_root / "agents" / "ops").exists()
 
 
 def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
@@ -4198,6 +4231,7 @@ def test_prepare_worker_request_shared_worker_does_not_read_private_agent_names(
         worker_key=worker_key,
         tool_init_overrides={"base_dir": "agents/general/workspace"},
         runtime_paths=runtime_paths,
+        user_scope_agent_names=frozenset(),
     )
 
     assert prepared.handle is worker_handle
@@ -4245,6 +4279,7 @@ def test_prepare_worker_request_user_agent_private_visibility_comes_from_explici
             ),
         },
         runtime_paths=runtime_paths,
+        user_scope_agent_names=frozenset(),
         private_agent_names=frozenset({"mind"}),
     )
 
@@ -4297,6 +4332,7 @@ def test_prepare_worker_request_rejects_sibling_private_agent_root_for_user_agen
                 ),
             },
             runtime_paths=runtime_paths,
+            user_scope_agent_names=frozenset(),
             private_agent_names=frozenset({"mind"}),
         )
 
@@ -4331,6 +4367,7 @@ def test_prepare_worker_request_requires_explicit_private_visibility_for_user_ag
             worker_key=worker_key,
             tool_init_overrides={"base_dir": "private_instances/example/mind"},
             runtime_paths=runtime_paths,
+            user_scope_agent_names=frozenset(),
         )
 
 

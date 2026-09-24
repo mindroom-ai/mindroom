@@ -825,12 +825,15 @@ def test_workspace_accepts_exact_visible_user_root_and_rejects_other_roots(
     app, workspace = _app(tmp_path, monkeypatch)
     launch = CliWorkerLaunch.model_validate(_launch(workspace) | {"state_scope_worker_key": "v1:default:user:alice"})
     runtime = sandbox_runner_cli.app_runtime_paths(app)
-    assert sandbox_runner_cli._workspace(launch, runtime) == workspace
+    assert sandbox_runner_cli._workspace(launch, runtime, frozenset({"code"})) == workspace
 
+    with pytest.raises(HTTPException):
+        sandbox_runner_cli._workspace(launch, runtime, frozenset({"other"}))
     with pytest.raises(HTTPException):
         sandbox_runner_cli._workspace(
             launch.model_copy(update={"shell": _shell(str(tmp_path / "other"))}),
             runtime,
+            frozenset({"code"}),
         )
 
 

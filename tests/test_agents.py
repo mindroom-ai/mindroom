@@ -2775,11 +2775,13 @@ def test_resolve_worker_key_encodes_tenant_parts_that_would_break_round_tripping
     worker_key = resolve_worker_key("shared", execution_identity, agent_name="general")
 
     assert worker_key == "v1:tenant_west:shared:general"
-    assert visible_state_roots_for_worker_key(tmp_path, worker_key) == (agent_state_root_path(tmp_path, "general"),)
+    assert visible_state_roots_for_worker_key(tmp_path, worker_key, user_scope_agent_names=frozenset()) == (
+        agent_state_root_path(tmp_path, "general"),
+    )
 
 
 def test_visible_state_roots_for_user_worker_include_private_instance_namespace(tmp_path: Path) -> None:
-    """User workers should see shared agent roots plus their own private-instance namespace."""
+    """User workers should see only user-scope agent roots plus their own private-instance namespace."""
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",
@@ -2793,8 +2795,16 @@ def test_visible_state_roots_for_user_worker_include_private_instance_namespace(
     worker_key = resolve_worker_key("user", identity)
 
     assert worker_key is not None
-    assert visible_state_roots_for_worker_key(tmp_path, worker_key) == (
-        shared_storage_root(tmp_path) / "agents",
+    assert visible_state_roots_for_worker_key(
+        tmp_path,
+        worker_key,
+        user_scope_agent_names=frozenset({"general", "coder"}),
+    ) == (
+        agent_state_root_path(tmp_path, "coder"),
+        agent_state_root_path(tmp_path, "general"),
+        private_instance_scope_root_path(tmp_path, worker_key),
+    )
+    assert visible_state_roots_for_worker_key(tmp_path, worker_key, user_scope_agent_names=frozenset()) == (
         private_instance_scope_root_path(tmp_path, worker_key),
     )
 
@@ -2829,6 +2839,7 @@ def test_visible_state_roots_for_private_user_agent_workers_hide_shared_agent_ro
         tmp_path,
         worker_key,
         private_agent_names=frozenset({"mind"}),
+        user_scope_agent_names=frozenset(),
     ) == (_private_instance_state_root_path(tmp_path, worker_key=worker_key, agent_name="mind"),)
 
 

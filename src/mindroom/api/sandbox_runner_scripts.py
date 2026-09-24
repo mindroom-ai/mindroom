@@ -19,6 +19,7 @@ from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_worker_prep
 from mindroom.api.sandbox_runner import (
     app_runner_token,
     app_runtime_paths,
+    app_user_scope_agent_names,
     resolve_script_state_workspace,
     validate_runner_token,
 )
@@ -247,6 +248,7 @@ def _prepare_worker(
             tool_init_overrides={},
             runtime_paths=runtime_paths,
             private_agent_names=(frozenset(private_agent_names) if private_agent_names is not None else None),
+            user_scope_agent_names=app_user_scope_agent_names(request.app),
             runner_token=app_runner_token(request.app),
         )
     except sandbox_worker_prep.WorkerRequestPreparationError as exc:

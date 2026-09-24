@@ -16,7 +16,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from mindroom.agent_cli.worker_network import probe_cli_network
 from mindroom.agent_cli.worker_protocol import CLI_PRIVATE_ROOT_PATH, CliShellRequest, CliWorkerLaunch
 from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_worker_prep
-from mindroom.api.sandbox_runner import app_cli_state, app_runner_token, app_runtime_paths, validate_runner_token
+from mindroom.api.sandbox_runner import (
+    app_cli_state,
+    app_runner_token,
+    app_runtime_paths,
+    app_user_scope_agent_names,
+    validate_runner_token,
+)
 from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
 from mindroom.shell_supervisor import ensure_shell_supervisor
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
@@ -50,11 +56,12 @@ def _require_worker(request: Request, worker_key: str) -> RuntimePaths:
     return runtime
 
 
-def _workspace(launch: CliWorkerLaunch, runtime: RuntimePaths) -> Path:
+def _workspace(launch: CliWorkerLaunch, runtime: RuntimePaths, user_scope_agent_names: frozenset[str]) -> Path:
     roots = visible_state_roots_for_worker_key(
         runtime.storage_root,
         launch.state_scope_worker_key,
         private_agent_names=frozenset(launch.private_agent_names),
+        user_scope_agent_names=user_scope_agent_names,
     )
     workspace = Path(launch.shell.workspace).resolve()
     if not any(workspace.is_relative_to(root.resolve()) for root in roots):
@@ -71,7 +78,8 @@ async def install_cli_runtime(payload: CliWorkerLaunch, request: Request) -> dic
     cli_state = app_cli_state(request.app)
     if cli_state.install_started:
         raise HTTPException(409, "CLI worker was already assigned a turn")
-    workspace = _workspace(payload, runtime)
+    user_scope_agent_names = app_user_scope_agent_names(request.app)
+    workspace = _workspace(payload, runtime, user_scope_agent_names)
     # Fence concurrent installs before any await. A failed worker must be retired,
     # never revived with another generation's grant or surviving shell process.
     cli_state.install_started = True
@@ -87,6 +95,7 @@ async def install_cli_runtime(payload: CliWorkerLaunch, request: Request) -> dic
                 tool_init_overrides={"base_dir": str(workspace)},
                 runtime_paths=runtime,
                 private_agent_names=frozenset(payload.private_agent_names),
+                user_scope_agent_names=user_scope_agent_names,
                 runner_token=token,
             ),
         )

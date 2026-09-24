@@ -352,6 +352,15 @@ def resolve_agent_policy_index(
     )
 
 
+def user_scope_shared_agent_names(policies: Mapping[str, ResolvedAgentPolicy]) -> frozenset[str]:
+    """Return the non-private agents whose canonical state roots every `user` worker sees."""
+    return frozenset(
+        agent_name
+        for agent_name, policy in policies.items()
+        if policy.effective_execution_scope == "user" and not policy.is_private
+    )
+
+
 def resolve_private_knowledge_base_agent(
     base_id: str,
     seeds: Mapping[str, AgentPolicySeed],
@@ -386,4 +395,5 @@ __all__ = [
     "resolve_agent_policy_index",
     "resolve_private_knowledge_base_agent",
     "unsupported_team_agent_message",
+    "user_scope_shared_agent_names",
 ]

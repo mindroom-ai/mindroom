@@ -227,6 +227,8 @@ def _resolve_worker_base_dir(
     worker_key: str,
     requested_base_dir: object | None,
     private_agent_names: frozenset[str] = frozenset(),
+    *,
+    user_scope_agent_names: frozenset[str],
 ) -> Path:
     """Resolve the effective base_dir inside shared storage or the worker root."""
     shared_root = storage_root.resolve()
@@ -240,6 +242,7 @@ def _resolve_worker_base_dir(
         storage_root,
         worker_key,
         private_agent_names=private_agent_names,
+        user_scope_agent_names=user_scope_agent_names,
     )
     raw_path = Path(requested_base_dir).expanduser()
     if raw_path.is_absolute():
@@ -296,6 +299,7 @@ def prepare_worker_request(
     tool_init_overrides: dict[str, object],
     runtime_paths: RuntimePaths,
     private_agent_names: frozenset[str] | None = None,
+    user_scope_agent_names: frozenset[str],
     runner_token: str | None = None,
 ) -> PreparedWorkerRequest:
     """Prepare one worker-backed request for execution."""
@@ -322,6 +326,7 @@ def prepare_worker_request(
                 worker_key,
                 tool_init_overrides.get("base_dir"),
                 private_agent_names=_explicit_private_agent_names(worker_key, private_agent_names),
+                user_scope_agent_names=user_scope_agent_names,
             ),
         }
     except (FileNotFoundError, TypeError, ValueError) as exc:
@@ -331,27 +336,6 @@ def prepare_worker_request(
         handle=worker_handle,
         paths=paths,
         runtime_overrides=runtime_overrides,
-    )
-
-
-def resolve_prepared_worker_request(
-    *,
-    worker_key: str | None,
-    tool_init_overrides: dict[str, object],
-    runtime_paths: RuntimePaths,
-    private_agent_names: frozenset[str] | None = None,
-    prepared_worker: PreparedWorkerRequest | None,
-    runner_token: str | None = None,
-) -> PreparedWorkerRequest | None:
-    """Reuse or prepare worker state for one request."""
-    if worker_key is None:
-        return None
-    return prepared_worker or prepare_worker_request(
-        worker_key=worker_key,
-        tool_init_overrides=tool_init_overrides,
-        runtime_paths=runtime_paths,
-        private_agent_names=private_agent_names,
-        runner_token=runner_token,
     )
 
 

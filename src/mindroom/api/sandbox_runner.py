@@ -324,6 +324,7 @@ def initialize_sandbox_runner_app(
         config=committed_config,
         tool_metadata=TOOL_METADATA.copy(),
         runner_token=runner_token or sandbox_proxy_config(runtime_paths).proxy_token,
+        user_scope_agent_names=committed_config.get_user_scope_shared_agent_names(),
     )
 
 
@@ -565,6 +566,7 @@ class _SandboxRunnerContext:
     config: Config
     tool_metadata: dict[str, Any]
     runner_token: str | None
+    user_scope_agent_names: frozenset[str]
     cli: _SandboxRunnerCliState = field(default_factory=_SandboxRunnerCliState)
 
 
@@ -606,6 +608,11 @@ def app_runtime_config(app: FastAPI) -> Config:
     return _app_context(app).config
 
 
+def app_user_scope_agent_names(app: FastAPI) -> frozenset[str]:
+    """Return the non-private `worker_scope: user` agents resolved once from the runner config."""
+    return _app_context(app).user_scope_agent_names
+
+
 def app_cli_state(app: FastAPI) -> _SandboxRunnerCliState:
     """Return the sandbox runner's single-turn CLI slot stored on the FastAPI app."""
     return _app_context(app).cli
@@ -633,6 +640,7 @@ def resolve_script_state_workspace(
         sandbox_exec.runner_storage_root(runtime_paths),
         state_scope_worker_key,
         private_agent_names=private_agent_names,
+        user_scope_agent_names=app_user_scope_agent_names(app),
     )
     if len(state_roots) != 1:
         msg = "Script state scope does not resolve one agent workspace."
@@ -1019,16 +1027,19 @@ def _prepare_execute_request(
             runtime_paths,
             extra_env_passthrough=request.extra_env_passthrough,
         )
-    prepared = sandbox_worker_prep.resolve_prepared_worker_request(
-        worker_key=request.worker_key,
-        tool_init_overrides=request.tool_init_overrides,
-        runtime_paths=runtime_paths,
-        private_agent_names=_freeze_private_agent_names(request.private_agent_names),
-        prepared_worker=prepared_worker,
-        runner_token=runner_token,
-    )
-    execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
     config = config or _runtime_config_or_empty(runtime_paths)
+    prepared = None
+    if request.worker_key is not None:
+        # Endpoints pass their already-prepared worker; only direct callers resolve agent policy here.
+        prepared = prepared_worker or sandbox_worker_prep.prepare_worker_request(
+            worker_key=request.worker_key,
+            tool_init_overrides=request.tool_init_overrides,
+            runtime_paths=runtime_paths,
+            private_agent_names=_freeze_private_agent_names(request.private_agent_names),
+            user_scope_agent_names=config.get_user_scope_shared_agent_names(),
+            runner_token=runner_token,
+        )
+    execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
     request_workspace = _resolve_request_workspace(request, prepared, runtime_paths=runtime_paths, config=config)
     source_workspace_env_hook = (
         apply_workspace_env_hook
@@ -1689,6 +1700,7 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
                 private_agent_names=(
                     frozenset(payload.private_agent_names) if payload.private_agent_names is not None else None
                 ),
+                user_scope_agent_names=app_user_scope_agent_names(request.app),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
@@ -1758,6 +1770,7 @@ async def view_file_in_worker(
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
                 private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
+                user_scope_agent_names=app_user_scope_agent_names(request.app),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
@@ -1978,6 +1991,7 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
                 private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
+                user_scope_agent_names=app_user_scope_agent_names(request.app),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:

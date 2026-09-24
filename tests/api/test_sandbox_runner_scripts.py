@@ -78,6 +78,7 @@ def runner_client(
         worker_key=_WORKER_KEY,
         tool_init_overrides={},
         runtime_paths=runtime_paths,
+        user_scope_agent_names=frozenset(),
         runner_token=_TOKEN,
     )
     supervisor = _ShellSupervisorManager()
@@ -403,6 +404,7 @@ router:
         worker_key=worker_key,
         tool_init_overrides={},
         runtime_paths=runtime_paths,
+        user_scope_agent_names=frozenset(),
         private_agent_names=frozenset({"watcher"}),
         runner_token=_TOKEN,
     )
@@ -526,6 +528,7 @@ router:
         worker_key=worker_key,
         tool_init_overrides={},
         runtime_paths=runtime_paths,
+        user_scope_agent_names=frozenset(),
         private_agent_names=frozenset(),
         runner_token=_TOKEN,
     )
