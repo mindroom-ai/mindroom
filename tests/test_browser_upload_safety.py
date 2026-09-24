@@ -206,6 +206,26 @@ async def test_upload_rejects_replaced_workspace_root(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("requested", ["relative", "absolute"])
+async def test_upload_rejects_workspace_root_replaced_before_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested: str,
+) -> None:
+    """A primary workspace root that is already a link when the tool is built must not authorize its target."""
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "upload.txt").write_bytes(b"private bytes")
+    workspace.symlink_to(outside, target_is_directory=True)
+    tool, consumer, _root = _upload_tool(tmp_path, monkeypatch, workspace_root=workspace)
+
+    with pytest.raises((OSError, ValueError)):
+        await _upload(tool, ["upload.txt" if requested == "relative" else workspace / "upload.txt"])
+    consumer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
 async def test_upload_removes_staging_after_browser_failure(
     tmp_path: Path,

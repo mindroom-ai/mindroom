@@ -583,7 +583,8 @@ class BrowserTools(Toolkit):
         self._worker_process_env: dict[str, str] | None = None
         self._lock = asyncio.Lock()
         self._configured_output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
-        self._workspace_root = tool_output_workspace_root.resolve() if tool_output_workspace_root is not None else None
+        # Keep the caller's spelling: uploads open from it without following links, so a root swapped for a link is refused.
+        self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
         if self._configured_output_dir is not None:
             self._configured_output_dir.mkdir(parents=True, exist_ok=True)
