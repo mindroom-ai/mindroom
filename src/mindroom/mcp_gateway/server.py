@@ -51,8 +51,9 @@ logger = get_logger(__name__)
 
 def _instructions(public_url: str, personal_agent_name: str | None) -> str:
     personal_agent = (
-        f"The configured personal agent is {json.dumps(personal_agent_name)}. "
-        "It represents the signed-in user's personal assistant and service connections. "
+        f"This instance's configured personal agent is {json.dumps(personal_agent_name)}. "
+        "For users with access, it represents their personal assistant and service connections. "
+        "It may be unavailable to you; use it only if it appears in your gateway discovery results. "
         if personal_agent_name
         else "A personal agent represents the signed-in user's personal assistant and service connections. "
     )
@@ -74,7 +75,9 @@ def _instructions(public_url: str, personal_agent_name: str | None) -> str:
         f"The user can manage agent/tool selections and service connections at {public_url.rstrip('/')}/connections. "
         "Availability requires both access permission and selection, including for the personal agent.\n\n"
         "For invalid_arguments, check the tool's schema and use only its supported fields. "
-        "For tool_not_found, repeat discovery instead of guessing identifiers. For empty discovery, "
+        "For tool_not_found, repeat discovery instead of guessing identifiers. If a requested shared-agent tool "
+        "is missing, ask the user to check that the agent and tool are selected in Connections, then repeat "
+        "search_tools without agent or toolkit selectors. Do not call an unselected agent. For empty discovery, "
         "ask the user to check their selections. For connection_required, ask the user to open the returned "
         "connection_url and connect that service. Never automatically retry a failed or timed-out invoke_tool "
         "action: it may already have taken effect."
@@ -95,7 +98,7 @@ def _meta_tools() -> list[types.Tool]:
         types.Tool(
             name="search_tools",
             description=(
-                "Discover tools from your selected MindRoom agents, including your personal agent's integrations. "
+                "Discover tools from your selected MindRoom agents, whether personal or shared. "
                 "Start with {} or a query, omitting agent and toolkit, to find available agent/toolkit pairs. "
                 "Then pass an exact returned agent and toolkit to search functions. "
                 "Results omit schemas; use get_tool next. This does not start a conversation with an agent."
