@@ -19,7 +19,7 @@ _LEGACY_METADATA_PATH = ("metadata", "worker.json")
 # LEGACY_COMPAT: Docker worker lifecycle records inside the bind-mounted worker state root.
 # Legacy format: `workers/<worker_dir>/metadata/worker.json`, selected at backend startup when the worker
 # has no record under `workers/.mindroom-worker-control/<worker_dir>/metadata/worker.json`.
-# Last legacy release: v2026.9.281; replacement: unreleased, the first release containing this change keeps
+# Last legacy release: v2026.9.283; replacement: unreleased, the first release containing this change keeps
 # the record in the unmounted control directory.
 # Handling: The old file was writable by the worker's own tool code, so only its `worker_key` is read,
 # through bounded no-follow descriptors, and it is adopted only when `worker_dir_name(worker_key)` names the
