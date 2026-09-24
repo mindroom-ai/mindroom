@@ -138,8 +138,9 @@ Oversized existing files fail closed before JSON parsing and are never discarded
 ## Attachments
 
 Each `attachments` entry is a context-scoped `att_*` ID or a local file path.
-Paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
-Without a configured workspace, only `att_*` IDs are accepted.
+With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
+With `workspace` file access and no configured workspace, only `att_*` IDs are accepted.
 Use `./att_filename` for a local filename that starts with `att_`.
 All references are resolved before any message is sent.
 Files retain their input order.

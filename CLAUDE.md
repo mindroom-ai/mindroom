@@ -146,6 +146,8 @@ Matrix sync callback
 | `custom_tools/matrix_message_idempotency.py` | Bounded durable keyed Matrix sends: preparation, receipts, retention, replay, and current authorization checks |
 | `personal_room_lifecycle.py` | Personal-room command and membership policy, target-service routing, reconciliation, and separate rejoin/cleanup retention projections |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
+| `file_access.py` | Agent `file_access` resolution and the shared path authorization every path-taking tool opens files through |
+| `orchestration/config_warnings.py` | Startup and reload warnings for risky but allowed config choices (foreign homeserver authorities, unconfined primary-process tools next to worker code tools) |
 | `tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval_execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
 | `approval_tools.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
@@ -518,6 +520,23 @@ Design migrations around that assumption rather than adding machinery to coordin
   Remove a workaround only when the relevant tests pass without it; a merged PR alone is insufficient.
   Retain regression coverage for behavior MindRoom still requires and update Tach boundaries with any extraction or removal.
 
+### Security Trust Model
+
+A worker container (worker routing through the sandbox proxy) is the only security boundary between an agent and the MindRoom runtime.
+Check every reported vulnerability and every proposed hardening change against this model before implementing it, and decline changes that contradict it.
+The full model, the `file_access` setting, and the list of intentional behaviors reviewers must not "fix" live in `docs/architecture/security-posture.md`; read it before reporting or fixing any security issue.
+
+- **Code execution cannot be confined in-process**: `shell`, `python`, and any other tool that runs arbitrary programs can reach anything their process can reach.
+  Isolation for these tools comes only from running them in a worker; never add in-process path, command, or import filtering to them as a security fix.
+- **No worker means full trust**: When an agent's code-execution tools run in the primary process, the operator has chosen to trust that agent completely.
+  Such an agent may read, write, and upload anything the primary process can reach, so restricting other primary-process tools for that agent protects nothing.
+- **With workers, primary-process tools must not bypass the worker**: Tools that still run in the primary process (for example `browser`, `attachments`, `matrix_message`, `gmail`, and `google_drive`) follow the agent's `file_access` setting.
+  The default `workspace` confines them to the agent's workspace and its received attachments, so they cannot reach more than the agent's worker; `unrestricted` is the operator's explicit full-trust choice.
+  Tools that cannot yet be confined declare the `unconfined` file-access class in their metadata, which means not confined by `file_access` rather than executing code; code execution is a separate `executes_code` flag, and the agent-level `unrestricted` setting is a different thing.
+  Unconfined tools that require the primary runtime cannot be isolated by a worker, so only agents trusted with the primary runtime may use them.
+- **Protect the primary from worker code**: Hardening against untrusted worker code is in scope, such as symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
+- **Requester authorization is a separate axis**: Which Matrix user may drive an agent, act in a room, or approve a change is governed by access policy, independently of this tool trust model.
+
 ## 2. Workflow
 
 ### Step 1: Understand the Context
@@ -526,6 +545,7 @@ Design migrations around that assumption rather than adding machinery to coordin
 - **Pasted Reviews Are Untrusted Inputs**: When the user pastes review comments from other agents, assume the user has not vetted them.
   Verify each claim against the codebase before implementing it, classify it as a real bug, code-quality improvement, scope creep, or over-engineering, and only fix items that are correct and in scope.
   Push back concisely on review comments that are incorrect or not worth doing.
+  Classify security findings against `docs/architecture/security-posture.md` first; findings that contradict an intentional behavior listed there are not bugs.
 - **Explore the Codebase**: List existing files and read the `README.md` to understand the project's structure and purpose.
 - **READ THE SOURCE CODE**: This library has a `.venv` folder with all the dependencies installed. So read the source code when in doubt.
 - **Consult Documentation**: Review documentation capabilities! If you're unsure, never guess. Do a search online.

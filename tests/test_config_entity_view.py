@@ -278,3 +278,45 @@ def test_max_tool_calls_per_turn_defaults_and_validation() -> None:
         DefaultsConfig(tools=[], max_tool_calls_per_turn=0)
     with pytest.raises(ValueError, match="greater than or equal to 1"):
         AgentConfig(display_name="Broken", max_tool_calls_per_turn=0)
+
+
+def test_file_access_defaults_to_workspace_and_agent_overrides_it() -> None:
+    config = Config.model_validate(
+        {
+            "agents": {
+                "plain": {"display_name": "Plain"},
+                "admin": {"display_name": "Admin", "file_access": "unrestricted"},
+            },
+            "teams": {"crew": {"display_name": "Crew", "role": "r", "agents": ["plain"], "mode": "coordinate"}},
+        },
+    )
+    assert config.resolve_entity(None).file_access == "workspace"
+    assert config.resolve_entity("plain").file_access == "workspace"
+    assert config.resolve_entity("admin").file_access == "unrestricted"
+    assert config.resolve_entity("crew").file_access == "workspace"
+
+
+def test_file_access_global_default_is_inherited() -> None:
+    config = Config.model_validate(
+        {
+            "defaults": {"file_access": "unrestricted"},
+            "agents": {
+                "plain": {"display_name": "Plain"},
+                "boxed": {"display_name": "Boxed", "file_access": "workspace"},
+            },
+        },
+    )
+    assert config.resolve_entity("plain").file_access == "unrestricted"
+    assert config.resolve_entity("boxed").file_access == "workspace"
+
+
+def test_file_access_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError, match="file_access"):
+        Config.model_validate({"defaults": {"file_access": "readonly"}})
+
+
+def test_file_access_unknown_entity_names_inherit_the_default() -> None:
+    config = Config.model_validate(
+        {"defaults": {"file_access": "unrestricted"}, "agents": {"plain": {"display_name": "Plain"}}},
+    )
+    assert config.resolve_entity("not-configured").file_access == "unrestricted"

@@ -402,6 +402,23 @@
           "description": "Worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
           "title": "Worker Scope"
         },
+        "file_access": {
+          "anyOf": [
+            {
+              "enum": [
+                "workspace",
+                "unrestricted"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent override of defaults.file_access (None = inherit the default)",
+          "title": "File Access"
+        },
         "allow_self_config": {
           "anyOf": [
             {
@@ -1265,6 +1282,16 @@
           "description": "Whether to show tool call details inline in responses",
           "title": "Show Tool Calls",
           "type": "boolean"
+        },
+        "file_access": {
+          "default": "workspace",
+          "description": "Where in-process path-taking tools (file, coding, attachments, matrix_message, gmail, google_drive, browser) may read and write files: workspace confines them to the agent workspace and its attachments, unrestricted allows any path their process can reach. Code-execution tools such as shell and python are always unrestricted; isolate them with worker_tools",
+          "enum": [
+            "workspace",
+            "unrestricted"
+          ],
+          "title": "File Access",
+          "type": "string"
         },
         "worker_tools": {
           "anyOf": [
@@ -4112,6 +4139,7 @@
         "max_tool_calls_from_history": null,
         "max_tool_calls_per_turn": 1000,
         "show_tool_calls": true,
+        "file_access": "workspace",
         "worker_tools": null,
         "worker_scope": null,
         "worker_grantable_credentials": null,

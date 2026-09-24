@@ -7,7 +7,7 @@ from pathlib import Path
 
 from mindroom.path_confinement import resolve_path_within_root
 
-_BASE_DIR_ESCAPE_HINT = "Set restrict_to_base_dir=false to allow access outside base_dir."
+_BASE_DIR_ESCAPE_HINT = "Set the agent's file_access to 'unrestricted' to allow paths outside the workspace."
 
 
 def _blocked_base_dir_message(path: str, resolved: Path, base_dir: Path) -> str:

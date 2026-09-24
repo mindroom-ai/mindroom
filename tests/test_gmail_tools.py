@@ -19,6 +19,7 @@ from googleapiclient.errors import HttpError
 
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.config.main import Config
+from mindroom.config.models import FileAccess
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.gmail import GmailTools
@@ -594,11 +595,13 @@ def _gmail_attachment_tool(
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager,
     workspace_root: Path | None,
+    file_access: FileAccess = "workspace",
 ) -> tuple[GmailTools, MagicMock]:
     gmail_tools = GmailTools(
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
         tool_output_workspace_root=workspace_root,
+        file_access=file_access,
     )
     service = MagicMock()
     users = service.users.return_value
@@ -678,6 +681,47 @@ def test_gmail_attachments_outside_workspace_are_rejected_before_any_gmail_call(
     assert json.loads(result)["error"].startswith("Gmail attachment must be a regular file in the agent workspace:")
     for api_call in _gmail_api_calls(service):
         api_call.assert_not_called()
+
+
+@pytest.mark.parametrize("file_access", ["workspace", "unrestricted"])
+@pytest.mark.parametrize("has_workspace", [True, False])
+def test_gmail_outside_workspace_attachment_follows_file_access(
+    file_access: FileAccess,
+    has_workspace: bool,
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Unrestricted agents stage any readable file; workspace agents keep the rejection."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_file = tmp_path / "outside" / "report.txt"
+    outside_file.parent.mkdir()
+    outside_file.write_bytes(b"outside report")
+    gmail_tools, service = _gmail_attachment_tool(
+        runtime_paths,
+        mock_credentials_manager,
+        workspace if has_workspace else None,
+        file_access,
+    )
+
+    result = gmail_tools.functions["send_email"].entrypoint(
+        **_ATTACHMENT_CALLS["send_email"],
+        attachments=str(outside_file),
+    )
+
+    if file_access == "workspace":
+        expected_error = (
+            "Gmail attachment must be a regular file in the agent workspace:"
+            if has_workspace
+            else "Gmail attachments require an agent workspace"
+        )
+        assert json.loads(result)["error"].startswith(expected_error)
+        for api_call in _gmail_api_calls(service):
+            api_call.assert_not_called()
+        return
+    assert "error" not in json.loads(result)
+    assert _sent_attachments(service) == {"report.txt": b"outside report"}
 
 
 @pytest.mark.parametrize("function_name", sorted(_ATTACHMENT_CALLS))
@@ -884,7 +928,7 @@ def test_gmail_attachment_swapped_to_symlink_after_validation_is_refused(
         (workspace / "reports").symlink_to(outside, target_is_directory=True)
         return resolved
 
-    monkeypatch.setattr("mindroom.custom_tools.gmail.resolve_path_within_root", resolve_then_swap)
+    monkeypatch.setattr("mindroom.file_access.resolve_path_within_root", resolve_then_swap)
     gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, workspace)
 
     result = gmail_tools.functions["send_email"].entrypoint(

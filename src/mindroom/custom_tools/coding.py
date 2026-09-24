@@ -21,6 +21,7 @@ import subprocess
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
@@ -32,6 +33,9 @@ from mindroom.tools.path_safety import (
     resolve_base_dir_path,
     split_search_pattern,
 )
+
+if TYPE_CHECKING:
+    from mindroom.config.models import FileAccess
 
 _MAX_LINES = 2000
 _MAX_BYTES = 50 * 1024  # 50KB
@@ -539,9 +543,13 @@ class CodingTools(Toolkit):
     smart truncation, fuzzy matching, and actionable pagination hints.
     """
 
-    def __init__(self, base_dir: str | None = None, restrict_to_base_dir: bool = True) -> None:
+    def __init__(
+        self,
+        base_dir: str | None = None,
+        file_access: FileAccess = "workspace",
+    ) -> None:
         self.base_dir = Path(base_dir).resolve() if base_dir else Path.cwd().resolve()
-        self.restrict_to_base_dir = restrict_to_base_dir
+        self.restrict_to_base_dir = file_access == "workspace"
         super().__init__(
             name="coding",
             tools=[

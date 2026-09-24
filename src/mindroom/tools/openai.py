@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.model_defaults import OPENAI_IMAGE, OPENAI_TRANSCRIPTION, OPENAI_TTS
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="openai",
+    file_access=ToolFileAccess.UNCONFINED,
     worker_inert_agent_functions=("generate_speech",),
     display_name="OpenAI",
     description="AI-powered tools for transcription, image generation, and speech synthesis",

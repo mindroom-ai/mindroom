@@ -8,7 +8,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolManagedInitArg, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -17,6 +24,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="github",
+    file_access=ToolFileAccess.NONE,
     display_name="GitHub",
     description="Browse code and manage GitHub repositories, issues, and pull requests",
     category=ToolCategory.DEVELOPMENT,
