@@ -520,7 +520,10 @@ The runner sources this script with `bash` after applying the workspace home con
 - For agent-routed worker requests, the hook lives at the resolved agent workspace root as `.mindroom/worker-env.sh`.
 - For shared and unscoped agents that means `agents/<agent>/workspace/.mindroom/worker-env.sh`.
 - For private agents that means `private_instances/<scope>/<agent>/workspace/.mindroom/worker-env.sh`.
-- For `worker_scope: user`, the hook follows the per-request workspace, so one shared user runtime can pick up different hooks as it works in different agent workspaces.
+- For `worker_scope: user`, the hook follows the per-request workspace, so one shared user runtime can pick up different hooks as it works in different private agent workspaces.
+- Runtimes that act for one requester (`user` and `user_agent` workers, background script runs, and CLI agent turns) only source a hook from a private agent's workspace or the worker's own scratch workspace.
+  A hook in a non-private agent's `agents/<agent>/workspace` is writable by every requester's runtime for that agent, so these runtimes ignore it and log `workspace_env_hook_ignored` once per workspace.
+  `shared` and unscoped runtimes serve every requester alike and keep sourcing it.
 - For unkeyed static-sidecar proxy calls (no `worker_key`), the hook is discovered from `tool_init_overrides["base_dir"]` only when that value is an absolute path; relative strings are ignored on this path because there is no canonical workspace root to resolve them against.
 
 **Semantics:**
@@ -547,6 +550,8 @@ If you don't want a value to reach tools, don't export it.
 - Hook failures do not poison the worker; only the requesting tool call fails.
 
 This hook works identically for static sidecar, dedicated Docker, and dedicated Kubernetes worker backends because it runs inside the sandbox runner per request.
+The runner starts its own Python processes (tool children, the forkserver template, background-script shims, and supervised process wrappers) with `python -P -s`.
+That keeps the workspace working directory off `sys.path` and skips user site-packages under a workspace `HOME`, so modules or `.pth` files left in a shared workspace cannot run inside those processes.
 It is not a true container startup hook — it does not change pod templates, recreate Deployments, or alter Helm values.
 For an example, see `docs/tools/execution-and-coding.md`.
 

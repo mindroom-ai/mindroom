@@ -882,7 +882,8 @@ class ScriptRunManager:
             result = await run_command_via_supervisor(
                 socket_path,
                 namespace=_local_namespace(run.run_id),
-                argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+                # `-P -s`, as for worker script runs: the workspace cwd must not shadow the shim.
+                argv=[sys.executable, "-P", "-s", "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
                 env=environment,
                 cwd=str(workspace),
                 tail=200,

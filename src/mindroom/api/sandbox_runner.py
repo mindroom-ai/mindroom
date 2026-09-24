@@ -12,7 +12,7 @@ import secrets
 import subprocess
 import sys
 from collections.abc import Mapping
-from contextlib import redirect_stderr, redirect_stdout, suppress
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -86,7 +86,7 @@ from mindroom.workers.backends.local import get_local_worker_manager
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from agno.tools.toolkit import Toolkit
 
@@ -694,6 +694,25 @@ async def _maybe_await(value: object) -> object:
     return value
 
 
+@contextmanager
+def _workspace_importable(workspace: Path | None) -> Iterator[None]:
+    """Let tool code import modules saved in its workspace while it runs.
+
+    Protocol children start with `python -P`, so MindRoom resolves its own imports
+    without the workspace, and the workspace only ever follows installed modules.
+    Restoring `sys.path` afterwards keeps result handling off whatever the tool added.
+    """
+    if workspace is None:
+        yield
+        return
+    original_path = list(sys.path)
+    sys.path.append(str(workspace))
+    try:
+        yield
+    finally:
+        sys.path[:] = original_path
+
+
 async def _run_toolkit_entrypoint(
     toolkit: Toolkit,
     entrypoint: Callable[..., object],
@@ -1011,13 +1030,24 @@ def _prepare_execute_request(
     execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
     config = config or _runtime_config_or_empty(runtime_paths)
     request_workspace = _resolve_request_workspace(request, prepared, runtime_paths=runtime_paths, config=config)
+    source_workspace_env_hook = (
+        apply_workspace_env_hook
+        and request_workspace is not None
+        and sandbox_worker_prep.workspace_env_hook_allowed(
+            request_workspace,
+            requester_bound=sandbox_worker_prep.requester_bound_runtime(request.worker_key, request.worker_scope),
+            state_worker_key=request.worker_key,
+            prepared=prepared,
+            runtime_paths=runtime_paths,
+        )
+    )
     try:
         env_result = sandbox_env_assembly.build_request_execution_env(
             request_workspace=request_workspace,
             prepared=prepared,
             execution_env=execution_env,
             apply_workspace_home_contract=apply_workspace_home_contract,
-            apply_workspace_env_hook=apply_workspace_env_hook,
+            apply_workspace_env_hook=source_workspace_env_hook,
         )
     except sandbox_exec.WorkspaceEnvHookError as exc:
         raise sandbox_worker_prep.WorkerRequestPreparationError(
@@ -1132,6 +1162,7 @@ async def _execute_prepared_request_inprocess(
     config: Config,
     *,
     credentials_manager: CredentialsManager | None = None,
+    importable_workspace: Path | None = None,
 ) -> SandboxRunnerExecuteResponse:
     execution_identity: ToolExecutionIdentity | None = None
     if prepared.execution_identity:
@@ -1169,7 +1200,8 @@ async def _execute_prepared_request_inprocess(
             return SandboxRunnerExecuteResponse(ok=True, result=oauth_connection_required_payload(exc))
 
         try:
-            result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
+            with _workspace_importable(importable_workspace):
+                result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
             result = await asyncio.to_thread(serialize_worker_tool_result, result)
         except OAuthConnectionRequired as exc:
             logger.info(
@@ -1475,8 +1507,18 @@ def _run_subprocess_worker_payload(payload: str) -> tuple[int, str, str]:
     # interfere with the protocol marker in the returned response text.
     captured_out = io.StringIO()
     captured_err = io.StringIO()
+    # Python-tool code may import modules saved in its workspace (the child's cwd),
+    # as it could under a plain `python -m` started there.
+    importable_workspace = Path.cwd() if request.tool_name == "python" else None
     with redirect_stdout(captured_out), redirect_stderr(captured_err):
-        response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config))
+        response = asyncio.run(
+            _execute_prepared_request_inprocess(
+                request,
+                runtime_paths,
+                config,
+                importable_workspace=importable_workspace,
+            ),
+        )
 
     tool_output = captured_out.getvalue() + captured_err.getvalue()
     return 0, tool_output, sandbox_protocol.response_marker_payload(response.model_dump_json())
@@ -1508,11 +1550,6 @@ def _run_forkserver_template() -> int:
     _ = mcp_registry, tool_system_plugins
     import mindroom.tools  # noqa: F401, PLC0415
 
-    # `python -m` prepended the runner's cwd to sys.path at template startup;
-    # fork children prepend their own request cwd instead, matching what a
-    # spawn-per-call child started in that cwd would see.
-    with suppress(ValueError):
-        sys.path.remove(str(Path.cwd()))
     return sandbox_forkserver.serve_template(socket_path, _run_subprocess_worker_payload)
 
 

@@ -473,10 +473,16 @@ Isolation depends on the worker backend:
 - **Shared-runner and local backends**: no hard filesystem boundary today, regardless of scope.
 
 Use `user_agent` if you need per-agent filesystem isolation.
+A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` runtimes, so files one requester leaves there (for example Git config under the workspace `HOME`) are seen by the others.
+Use `private` agents when requesters must not share workspace state.
 
 For per-workspace env that an agent can edit (PATH, package indexes, npm cache locations, etc.), drop a `.mindroom/worker-env.sh` script in the agent workspace; MindRoom sources it before each worker-routed `shell` or `python` request.
 MindRoom-owned workspace identity, cache, and virtualenv env names are reasserted after the hook, so hooks cannot redirect `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, or `VIRTUAL_ENV`.
-With `worker_scope: user`, the same runtime can move between several agent workspaces, and the hook is discovered from the current request's workspace — different agents get different overlays automatically.
+Runtimes that act for one requester (`user` and `user_agent` workers, background script runs, and CLI agent turns) source the hook only from a workspace no other requester can write: a private agent's workspace or the worker's own scratch workspace.
+They ignore a hook in a non-private agent's `agents/<agent>/workspace` and log one warning per workspace, because every requester's runtime for that agent can write that file and the hook would otherwise run with the current requester's credentials.
+`shared` and unscoped runtimes still source hooks from the agent workspace, because they already serve every requester alike.
+Give an agent `private` when each requester needs its own editable hook.
+With `worker_scope: user`, the same runtime can move between several private agent workspaces, and the hook is discovered from the current request's workspace — different private agents get different overlays automatically.
 See [Workspace env hook](../deployment/sandbox-proxy.md#workspace-env-hook-mindroomworker-envsh) for filename, filtering, and failure semantics.
 
 ### Where Agent Data Lives

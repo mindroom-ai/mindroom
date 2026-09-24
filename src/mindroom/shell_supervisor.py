@@ -126,8 +126,11 @@ async def _handle_run(
     output_destination = ShellOutputDestination.from_payload(payload.get("output_destination"))
     command_argv = [str(item) for item in argv_payload]
     if handle_payload is not None and background_script_supervision_supported():
+        # `-P -s`: the command's cwd and `HOME` may be a workspace other runtimes can write.
         command_argv = [
             sys.executable,
+            "-P",
+            "-s",
             "-m",
             "mindroom.parent_death_exec",
             str(os.getpid()),

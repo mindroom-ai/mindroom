@@ -17,7 +17,9 @@ from mindroom.path_confinement import resolve_path_within_root
 from mindroom.private_storage_paths import resolve_private_scope_path
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
+    private_instance_scope_root_path,
     requires_explicit_private_agent_visibility,
+    resolved_worker_key_scope,
     visible_state_roots_for_worker_key,
     worker_dir_name,
 )
@@ -39,6 +41,9 @@ logger = get_logger(__name__)
 
 _MAX_LEASE_TTL_SECONDS = 3600
 DEFAULT_LEASE_TTL_SECONDS = 60
+_REQUESTER_SCOPES = frozenset({"user", "user_agent"})
+# Shared workspaces whose ignored hook was already logged; bounded by the configured agents.
+_LOGGED_IGNORED_HOOK_WORKSPACES: set[Path] = set()
 
 
 @dataclass
@@ -348,6 +353,51 @@ def resolve_prepared_worker_request(
         private_agent_names=private_agent_names,
         runner_token=runner_token,
     )
+
+
+def requester_bound_runtime(worker_key: str | None, worker_scope: str | None = None) -> bool:
+    """Return whether one runtime acts for a single requester, holding that requester's credentials."""
+    key_scope = resolved_worker_key_scope(worker_key) if worker_key is not None else None
+    return key_scope in _REQUESTER_SCOPES or worker_scope in _REQUESTER_SCOPES
+
+
+def workspace_env_hook_allowed(
+    workspace: Path,
+    *,
+    requester_bound: bool,
+    state_worker_key: str | None,
+    prepared: PreparedWorkerRequest | None,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether one runtime may source `<workspace>/.mindroom/worker-env.sh`.
+
+    A requester-bound runtime sources hooks only from a workspace no other requester
+    can write: its own worker workspace or the requester's private-instance namespace
+    under `state_worker_key`.
+    A non-private agent's workspace is writable by every requester's runtime for that
+    agent, so its hook would otherwise run with this requester's credentials.
+    Shared and unscoped runtimes serve every requester alike, so their hooks still run.
+    """
+    if not requester_bound:
+        return True
+    resolved_workspace = workspace.expanduser().resolve()
+    owned_roots = [prepared.paths.workspace.resolve()] if prepared is not None else []
+    if state_worker_key is not None:
+        # Kept unresolved: a private root replaced by a link never contains the resolved workspace.
+        owned_roots.append(
+            private_instance_scope_root_path(sandbox_exec.runner_storage_root(runtime_paths), state_worker_key),
+        )
+    if any(resolved_workspace.is_relative_to(root) for root in owned_roots):
+        return True
+    hook_path = resolved_workspace / sandbox_exec.WORKSPACE_ENV_HOOK_RELATIVE_PATH
+    if resolved_workspace not in _LOGGED_IGNORED_HOOK_WORKSPACES and hook_path.exists():
+        _LOGGED_IGNORED_HOOK_WORKSPACES.add(resolved_workspace)
+        logger.warning(
+            "workspace_env_hook_ignored",
+            hook_path=str(hook_path),
+            reason="other requesters' runtimes can write this workspace; requester-bound runtimes only run private hooks",
+        )
+    return False
 
 
 def record_worker_failure(

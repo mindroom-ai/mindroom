@@ -106,10 +106,18 @@ async def install_cli_runtime(payload: CliWorkerLaunch, request: Request) -> dic
 def _shell_runtime(state: CliWorkerRuntime, runtime: RuntimePaths) -> RuntimePaths:
     # Rebuilt per request like the canonical sandbox runner, so workspace env hooks stay current.
     execution_env = sandbox_exec.worker_subprocess_env(state.prepared.paths)
+    workspace = Path(state.launch.shell.workspace)
     env_result = sandbox_env_assembly.build_request_execution_env(
-        request_workspace=Path(state.launch.shell.workspace),
+        request_workspace=workspace,
         prepared=state.prepared,
         execution_env=execution_env,
+        apply_workspace_env_hook=sandbox_worker_prep.workspace_env_hook_allowed(
+            workspace,
+            requester_bound=sandbox_worker_prep.requester_bound_runtime(state.launch.worker_key),
+            state_worker_key=state.launch.state_scope_worker_key,
+            prepared=state.prepared,
+            runtime_paths=runtime,
+        ),
     )
     return sandbox_exec.tool_runtime_paths_with_request_env(
         runtime,
