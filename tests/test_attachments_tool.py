@@ -946,7 +946,7 @@ async def test_matrix_message_attachments_cross_room_send_does_not_inherit_sourc
 @pytest.mark.asyncio
 async def test_attachments_tool_register_attachment_uses_resolved_thread_scope(tmp_path: Path) -> None:
     """Registering from a thread-start context should persist the resolved thread root."""
-    tool = AttachmentTools()
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _tool_context_with_thread_scope(
@@ -983,6 +983,144 @@ async def test_attachments_tool_register_attachment_resolves_relative_paths_from
     attachment = load_attachment(tmp_path, payload["attachment_id"])
     assert attachment is not None
     assert attachment.local_path == generated_file.resolve()
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_accepts_absolute_workspace_paths(tmp_path: Path) -> None:
+    """An absolute path inside the workspace should still register."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    generated_file = workspace / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    ctx = _tool_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.register_attachment(str(generated_file)))
+
+    assert payload["status"] == "ok"
+    assert payload["attachment"]["local_path"] == str(generated_file.resolve())
+
+
+def _outside_workspace_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Create a workspace beside readable secrets reachable by path, link, and ``~``."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "secret.txt").write_text("secret", encoding="utf-8")
+    (outside_dir / ".env").write_text("MINDROOM_API_KEY=secret", encoding="utf-8")
+    (workspace / "workspace_link").symlink_to(outside_dir)
+    monkeypatch.setenv("HOME", str(outside_dir))
+    return workspace
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "requested_path",
+    ["/etc/passwd", "~/.env", "workspace_link/secret.txt", "../outside/secret.txt"],
+)
+async def test_attachments_tool_register_attachment_rejects_paths_outside_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested_path: str,
+) -> None:
+    """Absolute, home-relative, symlinked, and traversal paths must not escape the workspace."""
+    workspace = _outside_workspace_secrets(tmp_path, monkeypatch)
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    ctx = _tool_context(tmp_path)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.register_local_attachment") as mocked_register,
+    ):
+        payload = json.loads(await tool.register_attachment(requested_path))
+
+    assert payload["status"] == "error"
+    assert "must stay within the workspace root" in payload["message"]
+    mocked_register.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_reports_os_errors(tmp_path: Path) -> None:
+    """An OS-level path error must become an error payload, not an exception."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    ctx = _tool_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.register_attachment("a" * 300))
+
+    assert payload["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_requires_a_workspace(tmp_path: Path) -> None:
+    """Without a workspace root, path registration must fail closed and read no file."""
+    generated_file = tmp_path / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    tool = AttachmentTools()
+    ctx = _tool_context(tmp_path)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.register_local_attachment") as mocked_register,
+    ):
+        payload = json.loads(await tool.register_attachment(str(generated_file)))
+
+    assert payload["status"] == "error"
+    assert "requires an agent workspace" in payload["message"]
+    mocked_register.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "requested_path",
+    ["/etc/passwd", "~/.env", "workspace_link/secret.txt", "../outside/secret.txt"],
+)
+async def test_matrix_message_attachments_reject_paths_outside_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested_path: str,
+) -> None:
+    """matrix_message must not upload files resolved outside the agent workspace."""
+    workspace = _outside_workspace_secrets(tmp_path, monkeypatch)
+    ctx = _tool_context(tmp_path)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.register_local_attachment") as mocked_register,
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        result = json.loads(
+            await MatrixMessageTools(tool_output_workspace_root=workspace).matrix_message(
+                attachments=[requested_path],
+            ),
+        )
+
+    assert result["status"] == "error"
+    assert "must stay within the workspace root" in result["message"]
+    mocked_register.assert_not_called()
+    mocked.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_attachments_require_a_workspace(tmp_path: Path) -> None:
+    """Without a workspace root, matrix_message must accept only att_* IDs."""
+    generated_file = tmp_path / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    ctx = _tool_context(tmp_path)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        result = json.loads(await MatrixMessageTools().matrix_message(attachments=[str(generated_file)]))
+
+    assert result["status"] == "error"
+    assert "requires an agent workspace" in result["message"]
+    mocked.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1029,7 +1167,7 @@ async def test_matrix_message_attachments_inherits_resolved_thread_scope(tmp_pat
 @pytest.mark.asyncio
 async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_path: Path) -> None:
     """Registering a file should make it available for matrix_message_attachments in the same context."""
-    tool = AttachmentTools()
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _tool_context(tmp_path)
@@ -1060,7 +1198,7 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
 @pytest.mark.asyncio
 async def test_attachments_tool_register_attachment_infers_file_metadata(tmp_path: Path) -> None:
     """Registering a local path should preserve filename, MIME type, and media kind."""
-    tool = AttachmentTools()
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "clip.wav"
     generated_file.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
     ctx = _tool_context(tmp_path)
@@ -1084,7 +1222,7 @@ async def test_attachments_tool_register_attachment_infers_file_metadata(tmp_pat
 @pytest.mark.asyncio
 async def test_attachments_tool_register_attachment_available_after_task_boundary(tmp_path: Path) -> None:
     """Registered attachments should remain available when a later tool call runs in another task."""
-    tool = AttachmentTools()
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _tool_context(tmp_path)
@@ -1153,7 +1291,11 @@ async def test_matrix_message_attachments_sends_local_file_paths_by_auto_registe
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
         with tool_runtime_context(ctx):
-            result = json.loads(await MatrixMessageTools().matrix_message(attachments=[str(generated_file)]))
+            result = json.loads(
+                await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
+                    attachments=[str(generated_file)],
+                ),
+            )
         send_error = result.get("message") if result["status"] == "error" else None
         current_context = get_tool_runtime_context()
         assert current_context is not None
@@ -1164,33 +1306,6 @@ async def test_matrix_message_attachments_sends_local_file_paths_by_auto_registe
     assert result["newly_registered_attachment_ids"] == result["resolved_attachment_ids"]
     assert result["newly_registered_attachment_ids"][0] in list_tool_runtime_attachment_ids(current_context)
     mocked.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_matrix_message_attachments_rejects_workspace_relative_file_path_escape(tmp_path: Path) -> None:
-    """Workspace-relative attachment paths must not resolve outside the agent workspace."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    outside_file = tmp_path / "outside.txt"
-    outside_file.write_text("secret", encoding="utf-8")
-    ctx = _tool_context(tmp_path)
-
-    with (
-        tool_runtime_context(ctx),
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
-    ):
-        with tool_runtime_context(ctx):
-            result = json.loads(
-                await MatrixMessageTools(tool_output_workspace_root=workspace).matrix_message(
-                    attachments=["../outside.txt"],
-                ),
-            )
-        send_error = result.get("message") if result["status"] == "error" else None
-
-    assert result["status"] == "error"
-    assert send_error is not None
-    assert "workspace" in send_error
-    mocked.assert_not_awaited()
 
 
 def test_tool_runtime_context_none_temporarily_clears_nested_scope(tmp_path: Path) -> None:
