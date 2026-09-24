@@ -4481,6 +4481,7 @@ In normal `config.yaml` authoring, `base_dir` is therefore usually runtime-manag
 
 Those workspace-backed agents also receive the optional `mindroom_output_path` argument on eligible tools.
 Set it to a workspace-relative file path to save the full supported tool output to that file and return a compact receipt to the model.
+Paths inside a `.git` directory are refused.
 When `mindroom_output_path` is omitted, MindRoom automatically saves supported tool outputs larger than `defaults.tool_output_auto_save_threshold_bytes` to `mindroom_tool_outputs/` inside the workspace and returns a compact receipt with the path, size, format, threshold, and preview.
 The default automatic-save threshold is 50 KiB.
 Agents without a resolved workspace do not receive this argument.
@@ -4532,6 +4533,8 @@ Choose a destination shared with the tools that need the files, or generate work
 
 `file` exposes `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
 Paths resolve against `base_dir` and reject escapes by default; set `restrict_to_base_dir: false` to allow outside paths.
+`save_file()`, `replace_file_chunk()`, and `delete_file()` refuse any path inside a `.git` directory, because MindRoom runs Git in knowledge checkouts that may sit inside agent workspaces.
+This is defense in depth: code-execution tools and tools that accept arbitrary output paths can still write there, so the dashboard's knowledge Git listing does not trust a checkout's config.
 `read_file()` enforces `max_file_length` and `max_file_lines`, and it tells the caller to use chunk reads when a file is too large.
 `search_files()` uses glob patterns relative to `base_dir` rather than full-text search.
 `search_content()` searches text-file contents and skips paths matching `exclude_patterns`.
@@ -4719,6 +4722,7 @@ If exact matching fails, `edit_file()` falls back to whitespace-and-Unicode-norm
 `grep()` prefers `rg` when available and falls back to Python regex search otherwise.
 `find_files()` filters hidden and gitignored paths, and `ls()` keeps dotfiles visible while adding `/` markers to directories.
 Path resolution stays inside `base_dir` by default; set `restrict_to_base_dir: false` to allow outside paths.
+`write_file()` and `edit_file()` refuse any path inside a `.git` directory.
 MindRoom marks `coding` as worker-routed by default.
 
 ### Configuration
@@ -8582,7 +8586,7 @@ matrix_message(action="react", event_id="$event123", message="✅")
 See [Matrix Message Full Semantics](https://docs.mindroom.chat/tools/matrix-message/) for the complete argument schema, conversation selection, attachments, and collapsible sections.
 Use `matrix_room(action="threads")` for thread discovery and `matrix_room(action="room-info")` for current targeting metadata.
 `attachments` accepts up to five ordered context-scoped `att_*` IDs or file paths.
-Relative paths resolve from the agent workspace and must stay inside it.
+Paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
 When sending to a recipient, all files arrive before the task text starts its response.
 For durable text-only retries, supply `idempotency_key`; the same requester, agent, room, and key reuse the first prepared payload and receipt for eight days after completion.
 Send results include the conversation `thread_id` and delivered event IDs, including partial delivery details on failure.
@@ -8974,7 +8978,9 @@ Use `mindroom_output_path` before handing attachments to worker-routed workspace
 In shell tools, the agent workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in worker-routed shell and python tools it is also `~` and `$HOME`, so a saved path like `incoming/file.txt` can also be read as `~/incoming/file.txt`.
 The path must be relative to the workspace and must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, start with `~`, or contain `$` or `%` characters.
 `register_attachment()` turns a local file path into a new context-scoped `att_*` ID and appends that ID to the current runtime context so later tool calls in the same run can reuse it.
-Relative `register_attachment()` paths resolve from the agent workspace when one is available, and they must stay inside that workspace.
+`register_attachment()` paths resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
+Absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace, so `~/incoming/file.txt` is rejected here.
+Without a configured agent workspace, path-based registration is refused and only existing `att_*` IDs can be attached.
 Attachment records include kind, filename, MIME type, room ID, thread ID, sender, creation time, and an `available` flag that reports whether the local file still exists.
 This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`.
 
@@ -9179,7 +9185,8 @@ Oversized existing files fail closed before JSON parsing and are never discarded
 ## Attachments
 
 Each `attachments` entry is a context-scoped `att_*` ID or a local file path.
-Relative paths resolve from the agent workspace when configured.
+Paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+Without a configured workspace, only `att_*` IDs are accepted.
 Use `./att_filename` for a local filename that starts with `att_`.
 All references are resolved before any message is sent.
 Files retain their input order.
@@ -9862,7 +9869,11 @@ The default MindRoom Gmail toolkit exposes 26 functions for stars, drafts, messa
 Its exact function names are `apply_label()`, `create_draft_email()`, `delete_custom_label()`, `get_draft()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `get_emails_from_user()`, `get_latest_emails()`, `get_message()`, `get_starred_emails()`, `get_thread()`, `get_unread_emails()`, `list_custom_labels()`, `list_drafts()`, `mark_email_as_read()`, `mark_email_as_unread()`, `remove_label()`, `search_emails()`, `search_threads()`, `send_email()`, `send_email_reply()`, `send_email_to_self()`, `star_email()`, `unstar_email()`, and `update_draft()`.
 `send_email_to_self(subject, body)` derives its sole recipient from the connected Gmail profile and accepts no recipient, CC, BCC, or attachment arguments.
 The function follows the configured tool approval policy, so operators can match `send_email_to_self` separately from other send functions.
-Draft and send operations accept local file-system paths for attachments.
+Draft and send operations accept attachment file paths inside the agent workspace.
+Relative attachment paths resolve from the workspace root, and paths that resolve outside it, including through symlinks, are rejected before any file is read or Gmail request is made.
+Attachments are read through no-follow file descriptors, so a path component swapped for a symlink after validation is refused.
+Attachments are limited to 25 MiB in total per message.
+Agents without a workspace cannot attach files.
 
 ### Configuration
 
@@ -9904,7 +9915,7 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 - The configuration flags listed above can disable their corresponding methods; `include_tools` and `exclude_tools` can further filter the constructed toolkit.
 - Agno's optional archive, trash, attachment-download, raw label-modification, label-listing, and draft-send methods are not exposed through MindRoom's authored selector fields.
 - `include_tools` filters existing functions and cannot enable those additional SDK methods.
-- Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
+- Attachment arguments are agent-workspace file paths in the primary runtime, not Matrix attachment IDs.
 
 ## [`slack`]
 
@@ -12005,6 +12016,7 @@ manage_team(
 `get_own_config()` returns the current agent's authored YAML block.
 `update_own_config()` only changes fields that you pass explicitly.
 On this branch, `update_own_config()` can modify `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.
+`update_own_config()` requires a requester listed in `administrators`, like [`config_manager`], and every call raises an approval card even when `tool_approval.default` is `auto_approve`.
 The update path validates tool names against the live registry and validates knowledge base IDs against the current config.
 It also preserves inline tool overrides for retained tools when a string-only tool list is provided.
 Updates are validated through `AgentConfig.model_validate()` before the file is saved.
@@ -17311,8 +17323,8 @@ In shell tools, that workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in wor
 
 `matrix_message` accepts one ordered `attachments` list containing context attachment IDs (`att_*`) and local file paths.
 Local files are registered in the current context before sending.
-Relative paths resolve from the agent workspace when one is available.
-Relative paths must stay inside the workspace.
+Paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+Without a configured agent workspace, only `att_*` IDs can be attached.
 Use `matrix_message(attachments=["att_example", "exports/report.csv"])` to send attachment IDs and file paths in order to the current conversation.
 
 ### Why use this tool?
@@ -20124,7 +20136,7 @@ These rows are checked manually because the original inventory used section head
 | D1 | Dependency-owned | [`matrix/legacy_crypto_upgrade.py`][crypto-upgrade] isolates the pre-durable cutoff, while Nio owns its current SQLite schema and preserves crypto and trust records. |
 | D2 | Dependency-owned | [`knowledge/indexing_config.py`][knowledge-settings] owns corpus compatibility, while Chroma owns storage-engine migrations. |
 | D3 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history-table rewrite and possibly external default history path to Mem0. |
-| D4 | Current behavior | [The three SaaS SQL files][saas-migrations] remain explicit migrations for authoritative account, subscription, instance, payment, usage, audit, and grant data. |
+| D4 | Current behavior | [The four SaaS SQL files][saas-migrations] remain explicit migrations for authoritative account, subscription, instance, payment, usage, audit, and grant data. |
 | D5 | Current behavior | [SSO cookie cleanup][sso], [Terraform relocation][terraform-state], and [root service-worker cleanup][client-chart] remain deployment-owned; logger aliases and UI preferences are current state. |
 | D6 | Current behavior | [Worker protocol checks][worker-compat] and [desktop protocol checks][desktop-protocol] protect current execution, identity reuse, metadata recovery, and replay gates. |
 | D7 | Current behavior | [Provider][claude-compat], [Matrix protocol][event-info], dependency, and [cancellation][cancellation] adapters remain necessary after database reset. |

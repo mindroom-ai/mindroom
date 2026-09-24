@@ -20,4 +20,11 @@ describe('post-auth redirects', () => {
   it('rejects backslash protocol-relative URL variants', () => {
     expect(sanitizePostAuthRedirect('/\\evil.example/phish', 'mindroom.chat')).toBe('/dashboard')
   })
+
+  it.each(['/\t/evil.example', '/\n/evil.example', '/\r/evil.example'])(
+    'rejects targets whose control characters browsers strip (%j)',
+    (target) => {
+      expect(sanitizePostAuthRedirect(target, 'mindroom.chat')).toBe('/dashboard')
+    }
+  )
 })

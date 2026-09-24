@@ -633,6 +633,7 @@ manage_team(
 `get_own_config()` returns the current agent's authored YAML block.
 `update_own_config()` only changes fields that you pass explicitly.
 On this branch, `update_own_config()` can modify `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.
+`update_own_config()` requires a requester listed in `administrators`, like [`config_manager`], and every call raises an approval card even when `tool_approval.default` is `auto_approve`.
 The update path validates tool names against the live registry and validates knowledge base IDs against the current config.
 It also preserves inline tool overrides for retained tools when a string-only tool list is provided.
 Updates are validated through `AgentConfig.model_validate()` before the file is saved.
