@@ -15,6 +15,14 @@ describe('post-auth redirects', () => {
     expect(sanitizePostAuthRedirect('https://evil.example/phish', 'mindroom.chat')).toBe('/dashboard')
   })
 
+  it.each(['https://app.mindroom.chat./', 'https://x@app.mindroom.chat/', 'javascript:alert(1)'])(
+    'rejects disguised platform target %j',
+    (target) => {
+      expect(sanitizePostAuthRedirect(target, 'mindroom.chat')).toBe('/dashboard')
+      expect(isPlatformRedirect(target, 'mindroom.chat')).toBe(false)
+    }
+  )
+
   it('rejects protocol-relative URLs', () => {
     expect(sanitizePostAuthRedirect('//evil.example/phish', 'mindroom.chat')).toBe('/dashboard')
   })

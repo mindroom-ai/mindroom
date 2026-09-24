@@ -9,6 +9,7 @@ import {
   isPlatformRedirect,
   sanitizePostAuthRedirect,
 } from '@/lib/auth/redirect'
+import { navigateTo } from '@/lib/navigation'
 import { getRuntimeConfig } from '@/lib/runtime-config'
 
 export const dynamic = 'force-dynamic'
@@ -43,7 +44,7 @@ function CompleteInner() {
         }
       }
       if (!canceled) {
-        window.location.href = approved ? next : DEFAULT_POST_AUTH_REDIRECT
+        navigateTo(approved ? next : DEFAULT_POST_AUTH_REDIRECT)
       }
     }
     void go()
