@@ -27,7 +27,8 @@ Platform logout clears `__Host-mindroom_jwt` but cannot clear instance cookies, 
 
 Instances provisioned before dashboard SSO have no `platform_sso_secret`, and the new platform no longer sends its cookie to instance hosts.
 Deploy the platform backend and then re-provision every instance through the provisioner so each one receives its instance key, `MINDROOM_PLATFORM_SSO_URL`, and `platformDomain`.
-Until an instance is re-provisioned, its pod still starts, but browser dashboard login returns `401` instead of redirecting to the platform.
+Re-provision right after the platform deploy: until then, browser dashboard login fails, because older runtimes still wait for the retired shared cookie and newer runtimes without the key return `401`.
+Re-provisioning also rolls the instance pod onto the current runtime image.
 
 ## Instance Authentication Modes
 

@@ -274,25 +274,6 @@ def _is_standalone_public_path(path: str) -> bool:
     return path in _STANDALONE_PUBLIC_PATHS
 
 
-def _get_request_token(
-    request: Request,
-    authorization: str | None,
-    *,
-    cookie_names: tuple[str, ...],
-) -> str | None:
-    """Return the request auth token from bearer auth or one of the allowed cookies."""
-    bearer_token = _extract_bearer_token(authorization)
-    if bearer_token:
-        return bearer_token
-
-    for cookie_name in cookie_names:
-        cookie_value = request.cookies.get(cookie_name)
-        if cookie_value:
-            return cookie_value
-
-    return None
-
-
 def _get_configured_header(request: Request, header_name: str | None) -> str | None:
     """Return a stripped configured header value when present."""
     if header_name is None:
@@ -1064,11 +1045,7 @@ async def authenticate_user(
             return auth_user
 
         if mindroom_api_key:
-            token = _get_request_token(
-                request,
-                authorization,
-                cookie_names=(_STANDALONE_AUTH_COOKIE_NAME,),
-            )
+            token = _extract_bearer_token(authorization) or request.cookies.get(_STANDALONE_AUTH_COOKIE_NAME) or None
             if token is None:
                 raise HTTPException(status_code=401, detail="Missing or invalid credentials")
             if not secrets.compare_digest(token, mindroom_api_key):

@@ -157,6 +157,7 @@ def _instance_secret_hash(**overrides: str) -> str:
         "credentials_encryption_key": "",
         "matrix_oidc_client_secret": "",
         "matrix_registration_shared_secret": "",
+        "platform_sso_secret": "",
     }
     secret_data.update(overrides)
     ordered_values = [
@@ -170,6 +171,7 @@ def _instance_secret_hash(**overrides: str) -> str:
         secret_data["credentials_encryption_key"],
         secret_data["matrix_oidc_client_secret"],
         secret_data["matrix_registration_shared_secret"],
+        secret_data["platform_sso_secret"],
     ]
     return hashlib.sha256("|".join(ordered_values).encode("utf-8")).hexdigest()
 
@@ -725,15 +727,16 @@ def test_instance_chart_wires_credentials_encryption_env_when_key_is_unset() -> 
     assert annotations["mindroom.ai/instance-secret-hash"] == _instance_secret_hash()
 
 
-def test_instance_chart_credentials_encryption_key_rotation_changes_pod_template() -> None:
-    """Changing the Secret-backed credential key should render a new pod template hash."""
+@pytest.mark.parametrize("secret_value", ["credentials_encryption_key", "platformSsoSecret"])
+def test_instance_chart_secret_key_rotation_changes_pod_template(secret_value: str) -> None:
+    """Changing a Secret-backed key the runtime reads at startup should render a new pod template hash."""
     first_docs = _render_chart(
         Path("cluster/k8s/instance"),
-        "credentials_encryption_key=first-key",
+        f"{secret_value}=first-key",
     )
     second_docs = _render_chart(
         Path("cluster/k8s/instance"),
-        "credentials_encryption_key=second-key",
+        f"{secret_value}=second-key",
     )
     first_deployment = _resource(first_docs, "Deployment", "mindroom-demo")
     second_deployment = _resource(second_docs, "Deployment", "mindroom-demo")
