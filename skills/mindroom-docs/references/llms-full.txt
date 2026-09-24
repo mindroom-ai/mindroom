@@ -11265,6 +11265,7 @@ The stored file name is always generated from the attachment ID.
 ## Limits
 
 - Search and listing functions return at most 50 results per call.
+- Each Jira or Confluence API call other than an attachment download must finish within 60 seconds and return at most 32 MiB, and a larger response returns `response_too_large`.
 - Attachment downloads are limited to the inline worker transfer size, 16 MiB by default, controlled by `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`.
 - A download must finish within 120 seconds, including every redirect.
 - Page reads and attachment listings use Confluence search, so a page created moments ago can take a short time to appear, and archived or draft pages are not returned.

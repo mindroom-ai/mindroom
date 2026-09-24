@@ -7,6 +7,7 @@ message, and non-sensitive details, never a request URL, header, or response bod
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass, replace
@@ -29,6 +30,9 @@ _ACCESSIBLE_RESOURCES_URL = f"{_GATEWAY_ORIGIN}/oauth/token/accessible-resources
 # Attachment downloads redirect to signed media URLs, which are fetched without the OAuth bearer.
 _MEDIA_HOSTS = frozenset({"api.media.atlassian.com"})
 _REQUEST_TIMEOUT_SECONDS = 20.0
+# Generous bounds for one API call as a whole: memory for its body, and time including a trickling body.
+_MAX_JSON_RESPONSE_BYTES = 32 * 1024 * 1024
+_REQUEST_DEADLINE_SECONDS = 60.0
 _MAX_DOWNLOAD_REDIRECTS = 3
 _DOWNLOAD_DEADLINE_SECONDS = 120.0
 # Any media type, but no content coding, so the byte limit counts the bytes actually received.
@@ -128,10 +132,10 @@ def _scrubbed(text: str) -> str:
     return _URL_PATTERN.sub("<url>", printable).strip()[:_MAX_ERROR_MESSAGE_CHARS]
 
 
-def _error_messages(response: httpx.Response) -> list[str]:
-    """Return Jira or Confluence error messages from a failed response, without its raw body."""
+def _error_messages(content: bytes | None) -> list[str]:
+    """Return Jira or Confluence error messages from a failed response body, without the raw body."""
     try:
-        payload = response.json()
+        payload = json.loads(content) if content else None
     except ValueError:
         return []
     if not isinstance(payload, dict):
@@ -150,8 +154,7 @@ def _error_messages(response: httpx.Response) -> list[str]:
     return [message for message in messages if message][:_MAX_ERROR_MESSAGES]
 
 
-def _status_error(response: httpx.Response) -> AtlassianError:
-    status_code = response.status_code
+def _status_error(status_code: int, content: bytes | None) -> AtlassianError:
     if status_code == 401:
         return AtlassianAccessRejectedError(
             code="access_rejected",
@@ -162,17 +165,64 @@ def _status_error(response: httpx.Response) -> AtlassianError:
         code=_STATUS_ERROR_CODES.get(status_code, "atlassian_error"),
         message="Atlassian rejected the request.",
         status_code=status_code,
-        messages=_error_messages(response),
+        messages=_error_messages(content),
     )
 
 
-def _json_response(response: httpx.Response) -> object:
-    if not response.is_success:
-        raise _status_error(response)
-    if not response.content:
+async def _bounded_body(response: httpx.Response, max_bytes: int) -> bytes | None:
+    """Read a response body, or return None as soon as it is known to pass max_bytes."""
+    declared = response.headers.get("content-length", "").strip()
+    if declared.isdecimal() and int(declared) > max_bytes:
         return None
     try:
-        return response.json()
+        return await collect_bounded_bytes(response.aiter_bytes(), max_bytes=max_bytes)
+    except ByteLimitExceededError:
+        return None
+
+
+async def _send_json(
+    method: str,
+    url: str,
+    access_token: str,
+    *,
+    params: Mapping[str, str | int] | None = None,
+    json_body: object = None,
+) -> object:
+    """Send one bearer request and decode its JSON, bounding both the body size and the whole exchange."""
+    try:
+        async with (
+            asyncio.timeout(_REQUEST_DEADLINE_SECONDS),
+            _new_http_client() as client,
+            client.stream(
+                method,
+                url,
+                headers=_bearer_headers(access_token),
+                params=dict(params) if params else None,
+                json=json_body,
+            ) as response,
+        ):
+            status_code = response.status_code
+            content = await _bounded_body(response, _MAX_JSON_RESPONSE_BYTES)
+    except TimeoutError:
+        raise AtlassianError(
+            code="request_timeout",
+            message=f"The Atlassian request did not finish within {_REQUEST_DEADLINE_SECONDS:.0f} seconds.",
+        ) from None
+    except httpx.HTTPError as exc:
+        raise _transport_error(exc) from None
+    if not httpx.codes.is_success(status_code):
+        raise _status_error(status_code, content)
+    if content is None:
+        raise AtlassianError(
+            code="response_too_large",
+            message=f"Atlassian returned more than {_MAX_JSON_RESPONSE_BYTES} bytes. "
+            "Narrow the request, for example with fewer fields or a smaller limit.",
+            max_bytes=_MAX_JSON_RESPONSE_BYTES,
+        )
+    if not content:
+        return None
+    try:
+        return json.loads(content)
     except ValueError:
         raise AtlassianError(
             code="invalid_response",
@@ -211,12 +261,7 @@ def _site_from_resource(resource: object) -> AtlassianSite | None:
 
 async def accessible_sites(access_token: str) -> list[AtlassianSite]:
     """Return the Atlassian Cloud sites the access token was granted for."""
-    try:
-        async with _new_http_client() as client:
-            response = await client.get(_ACCESSIBLE_RESOURCES_URL, headers=_bearer_headers(access_token))
-    except httpx.HTTPError as exc:
-        raise _transport_error(exc) from None
-    resources = _json_response(response)
+    resources = await _send_json("GET", _ACCESSIBLE_RESOURCES_URL, access_token)
     sites_by_cloud_id: dict[str, AtlassianSite] = {}
     for resource in resources if isinstance(resources, list) else []:
         site = _site_from_resource(resource)
@@ -288,18 +333,7 @@ async def request_json(
 ) -> object:
     """Call one product REST path on the pinned site and return its decoded JSON."""
     url = f"{_GATEWAY_ORIGIN}{_gateway_prefix(product, site)}{path.lstrip('/')}"
-    try:
-        async with _new_http_client() as client:
-            response = await client.request(
-                method,
-                url,
-                headers=_bearer_headers(access_token),
-                params=dict(params) if params else None,
-                json=json_body,
-            )
-    except httpx.HTTPError as exc:
-        raise _transport_error(exc) from None
-    return _json_response(response)
+    return await _send_json(method, url, access_token, params=params, json_body=json_body)
 
 
 def _fully_unquoted(segment: str) -> str | None:

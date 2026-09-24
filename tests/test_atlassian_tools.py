@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from typing import TYPE_CHECKING
@@ -41,6 +42,7 @@ from tests.atlassian_test_support import (
 from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -767,6 +769,74 @@ async def test_api_redirects_are_reported_instead_of_followed(tmp_path: Path, mo
 
     assert (result["code"], result["status_code"]) == ("atlassian_error", 302)
     assert [request.url.host for request in gateway.product_requests()] == ["api.atlassian.com"]
+
+
+async def _chunks(*parts: bytes) -> AsyncIterator[bytes]:
+    for part in parts:
+        yield part
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "headers", "body", "expected"),
+    [
+        (200, {"content-length": "9999"}, b"{}", ("response_too_large", None)),
+        (200, {}, b'{"key": "' + b"x" * 2000 + b'"}', ("response_too_large", None)),
+        (400, {}, b'{"errorMessages": ["' + b"x" * 2000 + b'"]}', ("invalid_request", [])),
+        (400, {}, b'{"errorMessages": ["Bad field"]}', ("invalid_request", ["Bad field"])),
+        (200, {}, b'{"key": "PROJ-1"}', ("ok", None)),
+    ],
+)
+async def test_api_response_bodies_are_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    headers: dict[str, str],
+    body: bytes,
+    expected: tuple[str, list[str] | None],
+) -> None:
+    """A body over the cap is never buffered whole; a failed call then reports its status without messages."""
+    tool, gateway = _connected(tmp_path, monkeypatch)
+    # Large enough for site discovery, small enough for the oversized bodies below.
+    monkeypatch.setattr(atlassian_client, "_MAX_JSON_RESPONSE_BYTES", 1024)
+    gateway.route(
+        "GET",
+        gateway_url("jira", "/rest/api/3/issue/PROJ-1"),
+        lambda _request: httpx.Response(status_code, headers=headers, content=_chunks(body[:600], body[600:])),
+    )
+
+    result = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
+
+    code, messages = expected
+    assert len(gateway.product_requests()) == 1
+    assert result.get("code", result["status"]) == code
+    if code == "response_too_large":
+        assert result["max_bytes"] == 1024
+    if messages is not None:
+        assert (result["status_code"], result["messages"]) == (status_code, messages)
+
+
+@pytest.mark.asyncio
+async def test_api_calls_have_an_overall_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A body that keeps trickling in cannot hold a call open past the deadline."""
+    tool, gateway = _connected(tmp_path, monkeypatch)
+    monkeypatch.setattr(atlassian_client, "_REQUEST_DEADLINE_SECONDS", 0.05)
+
+    async def trickle() -> AsyncIterator[bytes]:
+        yield b"{"
+        while True:
+            await asyncio.sleep(0.01)
+            yield b" "
+
+    gateway.route(
+        "GET",
+        gateway_url("jira", "/rest/api/3/issue/PROJ-1"),
+        lambda _request: httpx.Response(200, content=trickle()),
+    )
+
+    result = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
+
+    assert result["code"] == "request_timeout"
 
 
 @pytest.mark.asyncio
