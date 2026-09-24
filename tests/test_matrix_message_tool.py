@@ -604,6 +604,7 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
         ctx.room_id,
         attachment.local_path,
         filename=attachment.filename,
+        mimetype=attachment.mime_type,
         thread_id=ctx.resolved_thread_id,
         latest_thread_event_id="$evt",
     )
@@ -659,6 +660,7 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
         ctx.room_id,
         attachment.local_path,
         filename=attachment.filename,
+        mimetype=attachment.mime_type,
         thread_id=None,
         latest_thread_event_id=None,
     )
@@ -708,6 +710,7 @@ async def test_matrix_message_send_with_attachments_keeps_existing_thread(tmp_pa
         ctx.room_id,
         attachment.local_path,
         filename=attachment.filename,
+        mimetype=attachment.mime_type,
         thread_id=ctx.thread_id,
         # The reply text this same call just sent, not the thread root a
         # projection read would still be answering with until its echo lands.
@@ -767,6 +770,7 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
         ctx.room_id,
         attachment.local_path,
         filename=attachment.filename,
+        mimetype=attachment.mime_type,
         thread_id=explicit_thread_id,
         # The text this same call just sent into the explicit thread.
         latest_thread_event_id="$send_evt",
@@ -817,6 +821,7 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
         ctx.room_id,
         attachment.local_path,
         filename=attachment.filename,
+        mimetype=attachment.mime_type,
         thread_id=ctx.resolved_thread_id,
         latest_thread_event_id=ctx.resolved_thread_id,
     )
@@ -937,9 +942,19 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
     first_call = mock_send_file.await_args_list[0]
     second_call = mock_send_file.await_args_list[1]
     assert first_call.args == (ctx.client, ctx.room_id, first_attachment.local_path)
-    assert first_call.kwargs == {"filename": "first.txt", "thread_id": None, "latest_thread_event_id": None}
+    assert first_call.kwargs == {
+        "filename": "first.txt",
+        "mimetype": None,
+        "thread_id": None,
+        "latest_thread_event_id": None,
+    }
     assert second_call.args == (ctx.client, ctx.room_id, second_attachment.local_path)
-    assert second_call.kwargs == {"filename": "second.txt", "thread_id": None, "latest_thread_event_id": "$file_one"}
+    assert second_call.kwargs == {
+        "filename": "second.txt",
+        "mimetype": None,
+        "thread_id": None,
+        "latest_thread_event_id": "$file_one",
+    }
 
 
 @pytest.mark.asyncio
@@ -984,6 +999,7 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
         ctx.room_id,
         retained.local_path,
         filename="generated.txt",
+        mimetype="text/plain",
         thread_id=ctx.resolved_thread_id,
         latest_thread_event_id="$evt",
     )
@@ -1029,6 +1045,7 @@ async def test_matrix_message_send_resolves_relative_attachment_file_paths_from_
         ctx.room_id,
         retained.local_path,
         filename="generated.txt",
+        mimetype="text/plain",
         thread_id=ctx.resolved_thread_id,
         latest_thread_event_id="$evt",
     )

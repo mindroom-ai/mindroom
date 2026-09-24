@@ -709,10 +709,12 @@ async def send_file_message(
     caption: str | None = None,
     latest_thread_event_id: str | None = None,
     filename: str | None = None,
+    mimetype: str | None = None,
 ) -> str | None:
     """Upload a file and send it with the appropriate Matrix message type.
 
     ``filename`` names the upload for recipients and defaults to the file's own name.
+    ``mimetype`` defaults to a guess from the file's own name.
     """
     resolved_path = Path(file_path).expanduser().resolve()
     if not resolved_path.is_file():
@@ -722,7 +724,7 @@ async def send_file_message(
         return None
 
     display_name = filename or resolved_path.name
-    mimetype = _guess_mimetype(resolved_path)
+    mimetype = mimetype or _guess_mimetype(resolved_path)
     mxc_uri, upload_payload = await _upload_file_as_mxc(
         client,
         room_id,
