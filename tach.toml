@@ -6872,6 +6872,19 @@ from = ["mindroom.tools.agno_compat_modelslabs"]
 expose = ["ModelsLabCompletionTools"]
 
 [[modules]]
+path = "mindroom.tools.trafilatura"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_trafilatura"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_trafilatura"
+depends_on = ["mindroom.server_fetch_url"]
+visibility = ["mindroom.tools.trafilatura"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_trafilatura"]
+expose = ["install_server_fetch_guard"]
+
+[[modules]]
 path = "mindroom.tools.browser_mcp"
 depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.worker_computer.mcp_catalog", "mindroom.custom_tools.browser_mcp"]
 
