@@ -1320,21 +1320,14 @@ def _shell_subprocess_dispatch_context(
 def _subprocess_config_yaml(config: Config, tool_name: str) -> str:
     """Serialize the validated config needed by one subprocess tool call."""
     builtin_metadata = BUILTIN_TOOL_METADATA.get(tool_name)
-    needs_runtime_config = (
-        builtin_metadata is None or ToolManagedInitArg.RUNTIME_CONFIG in builtin_metadata.managed_init_args
-    )
-    include = (
-        None
-        if needs_runtime_config
-        else {
-            "plugins": True,
-            "mcp_servers": True,
-            "defaults": {
-                "worker_grantable_credentials",
-                "tool_output_auto_save_threshold_bytes",
-            },
-        }
-    )
+    include: dict[str, object] | None = None
+    if builtin_metadata is not None and ToolManagedInitArg.RUNTIME_CONFIG not in builtin_metadata.managed_init_args:
+        default_fields = {"worker_grantable_credentials", "tool_output_auto_save_threshold_bytes"}
+        include = {"plugins": True, "mcp_servers": True, "defaults": default_fields}
+        if ToolManagedInitArg.FILE_ACCESS in builtin_metadata.managed_init_args:
+            # The injected file_access resolves the routing agent through config.resolve_entity().
+            default_fields.add("file_access")
+            include["agents"] = {"__all__": {"display_name", "file_access"}}
     payload = config.model_dump(
         include=include,
         exclude_unset=include is None,

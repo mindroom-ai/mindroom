@@ -71,6 +71,7 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     private_instance_scope_root_path,
     resolve_worker_key,
+    resolve_worker_target,
     worker_dir_name,
 )
 from mindroom.workers.backends import local as local_workers_module
@@ -1896,6 +1897,31 @@ def test_subprocess_config_projection_keeps_effective_policy_and_omits_agents() 
         },
         "mcp_servers": {},
     }
+
+
+@pytest.mark.parametrize("tool_name", ["file", "coding"])
+def test_subprocess_config_projection_keeps_agent_file_access(tool_name: str) -> None:
+    """Worker subprocesses must resolve the routing agent's file_access, not fall back to workspace."""
+    config = Config.model_validate(
+        {
+            "defaults": {"file_access": "unrestricted"},
+            "agents": {
+                "admin": {"display_name": "Admin", "role": "Operate the host", "file_access": "unrestricted"},
+                "boxed": {"display_name": "Boxed", "file_access": "workspace"},
+                "inherits": {"display_name": "Inherits"},
+            },
+        },
+    )
+
+    payload = yaml_io.safe_load(sandbox_runner_module._subprocess_config_yaml(config, tool_name))
+    subprocess_config = Config.model_validate(payload)
+
+    assert payload["agents"]["admin"] == {"display_name": "Admin", "file_access": "unrestricted"}
+    assert subprocess_config.resolve_entity("admin").file_access == "unrestricted"
+    assert subprocess_config.resolve_entity("boxed").file_access == "workspace"
+    assert subprocess_config.resolve_entity("inherits").file_access == "unrestricted"
+    worker_target = resolve_worker_target("shared", "admin", execution_identity=None)
+    assert metadata_module._managed_file_access(subprocess_config, worker_target) == "unrestricted"
 
 
 @pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
