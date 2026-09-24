@@ -28,7 +28,8 @@ services:
         server=${MATRIX_SERVER_NAME:-m-${INSTANCE_DOMAIN}}:443
         }
     ports:
-      - "${MATRIX_PORT:-8448}:6167"
+      # Loopback only: containers, including the sandbox, reach the host through its bridge gateway.
+      - "127.0.0.1:${MATRIX_PORT:-8448}:6167"
     extra_hosts:
       - "${MATRIX_SERVER_NAME}:host-gateway"
       - "host.docker.internal:host-gateway"
@@ -60,7 +61,8 @@ services:
   # Update MindRoom to know about the Matrix server
   mindroom:
     environment:
-      MATRIX_HOMESERVER: http://tuwunel:6167
+      # Container names are unique; other instances' homeservers share the "tuwunel" alias on mynetwork.
+      MATRIX_HOMESERVER: http://${INSTANCE_NAME:-mindroom}-tuwunel:6167
       MINDROOM_DESKTOP_MATRIX_HOMESERVER: https://m-${INSTANCE_DOMAIN}
       MATRIX_SERVER_NAME: ${MATRIX_SERVER_NAME:-m-${INSTANCE_DOMAIN}}
     depends_on:

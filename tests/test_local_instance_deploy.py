@@ -19,6 +19,7 @@ from tests.conftest import normalize_console_output
 
 _REAL_SUBPROCESS_RUN = subprocess.run
 _SANDBOX_SERVICES = {"sandbox-runner", "sandbox-relay"}
+_RUNTIME_SECRETS = "MINDROOM_API_KEY=configured-dashboard-key\nMINDROOM_SANDBOX_PROXY_TOKEN=configured-proxy-token\n"
 _SCRIPT_PATH = Path("local/instances/deploy/deploy.py")
 _MODULE_SPEC = importlib.util.spec_from_file_location("mindroom_local_instance_deploy", _SCRIPT_PATH)
 assert _MODULE_SPEC is not None
@@ -289,8 +290,8 @@ def test_matrix_compose_files_publish_localhost_ports() -> None:
     tuwunel_compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.tuwunel.yml").read_text())
     synapse_compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.synapse.yml").read_text())
 
-    assert tuwunel_compose["services"]["tuwunel"]["ports"] == ["${MATRIX_PORT:-8448}:6167"]
-    assert synapse_compose["services"]["synapse"]["ports"] == ["${MATRIX_PORT:-8448}:8008"]
+    assert tuwunel_compose["services"]["tuwunel"]["ports"] == ["127.0.0.1:${MATRIX_PORT:-8448}:6167"]
+    assert synapse_compose["services"]["synapse"]["ports"] == ["127.0.0.1:${MATRIX_PORT:-8448}:8008"]
 
 
 def test_matrix_compose_files_expose_public_url_to_desktop_pairing() -> None:
@@ -535,7 +536,7 @@ def authelia_launch(
     env_dir = tmp_path / "envs"
     env_dir.mkdir()
     (env_dir / "alpha.env").write_text(
-        f"INSTANCE_NAME=alpha\nDATA_DIR={instance.data_dir}\nMINDROOM_API_KEY=configured-dashboard-key\n",
+        f"INSTANCE_NAME=alpha\nDATA_DIR={instance.data_dir}\n{_RUNTIME_SECRETS}",
     )
     users_file = Path(instance.data_dir) / "authelia" / "users_database.yml"
     users_file.parent.mkdir(parents=True)
@@ -979,7 +980,7 @@ def test_rejected_authelia_start_preserves_existing_instance_data(
     (matrix_dir / "database-marker").write_bytes(b"existing Matrix data")
     env_file = deploy.ENV_DIR / "alpha.env"
     env_file.write_text(
-        "INSTANCE_NAME=alpha\nMATRIX_SERVER_NAME=m-previous.localhost\nMINDROOM_API_KEY=configured-dashboard-key\n",
+        f"INSTANCE_NAME=alpha\nMATRIX_SERVER_NAME=m-previous.localhost\n{_RUNTIME_SECRETS}",
     )
     env_before = env_file.read_bytes()
 
@@ -1073,7 +1074,7 @@ def test_authelia_launch_checks_compose_selected_database(  # noqa: PLR0915
     env_root = public_root if case in {"env_public", "shell_configured"} else configured_root
     (deploy.ENV_DIR / "alpha.env").write_text(
         f"INSTANCE_NAME=alpha\nINSTANCE_DOMAIN=alpha.localhost\n"
-        f"DATA_DIR='{env_root}'\nMATRIX_SERVER_NAME=m-previous.localhost\nMINDROOM_API_KEY=configured-dashboard-key\n",
+        f"DATA_DIR='{env_root}'\nMATRIX_SERVER_NAME=m-previous.localhost\n{_RUNTIME_SECRETS}",
     )
     monkeypatch.delenv("DATA_DIR", raising=False)
     monkeypatch.delenv("INSTANCE_ENV_FILE", raising=False)
@@ -1294,6 +1295,7 @@ def test_sandbox_runner_shares_no_network_with_runtime_or_datastores() -> None:
     assert services["sandbox-runner"]["networks"] == ["sandbox-network"]
     assert services["sandbox-relay"]["networks"] == ["mindroom-network", "sandbox-network"]
     assert services["sandbox-relay"]["command"][-2:] == ["sandbox-runner", "8766"]
+    assert services["sandbox-relay"]["sysctls"] == {"net.ipv4.ip_forward": 0}
     assert "MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766" in services["mindroom"]["environment"]
     assert services["mindroom"]["ports"] == ["127.0.0.1:${MINDROOM_PORT:-8765}:8765"]
     for compose_file in _COMPOSE_FILES:
@@ -1310,15 +1312,18 @@ def test_compose_requires_generated_instance_secrets() -> None:
     base = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
     synapse = yaml.safe_load(Path("local/instances/deploy/docker-compose.synapse.yml").read_text())
 
+    for name in deploy.RUNTIME_SECRET_NAMES:
+        assert any(value.startswith(f"{name}=${{{name}:?") for value in base["services"]["mindroom"]["environment"])
     assert any(
-        value.startswith("MINDROOM_API_KEY=${MINDROOM_API_KEY:?")
-        for value in base["services"]["mindroom"]["environment"]
+        value.startswith("MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:?")
+        for value in base["services"]["sandbox-runner"]["environment"]
     )
     assert synapse["services"]["postgres"]["environment"]["POSTGRES_PASSWORD"].startswith("${POSTGRES_PASSWORD:?")
     assert synapse["services"]["redis"]["command"][:2] == ["redis-server", "--requirepass"]
     assert synapse["services"]["redis"]["command"][2].startswith("${REDIS_PASSWORD:?")
     for path in [*_COMPOSE_FILES, Path("local/instances/deploy/templates/synapse/homeserver.yaml.j2")]:
         assert "synapse_password" not in path.read_text(), path
+        assert "sandbox-secret" not in path.read_text(), path
 
 
 def test_create_generates_unique_synapse_instance_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1331,7 +1336,7 @@ def test_create_generates_unique_synapse_instance_secrets(tmp_path: Path, monkey
         deploy._create_environment_file(instance, name, deploy.MatrixType.SYNAPSE)
         deploy._setup_synapse_config(instance)
         values = deploy._read_env_values(tmp_path / "envs" / f"{name}.env")
-        generated = {key: values[key] for key in (*deploy.DASHBOARD_SECRET_NAMES, *deploy.SYNAPSE_SECRET_NAMES)}
+        generated = {key: values[key] for key in (*deploy.RUNTIME_SECRET_NAMES, *deploy.SYNAPSE_SECRET_NAMES)}
         assert all(len(value) == 64 and set(value) <= set("0123456789abcdef") for value in generated.values())
         assert len(set(generated.values())) == len(generated)
         homeserver = yaml.safe_load((Path(instance.data_dir) / "synapse" / "homeserver.yaml").read_text())
@@ -1360,12 +1365,12 @@ def test_ensure_env_secrets_fills_only_empty_values(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("command", ["start", "restart"])
-def test_launch_adds_dashboard_key_before_compose_interpolation(
+def test_launch_adds_runtime_secrets_before_compose_interpolation(
     authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
     monkeypatch: pytest.MonkeyPatch,
     command: str,
 ) -> None:
-    """Instances created before key generation get one before Compose requires it."""
+    """Instances created before secret generation get them before Compose requires them."""
     instance, users_file, commands, _console = authelia_launch
     configured = yaml.safe_load(users_file.read_text())
     configured["users"]["admin"]["disabled"] = True
@@ -1376,7 +1381,8 @@ def test_launch_adds_dashboard_key_before_compose_interpolation(
 
     def _run(cmd: str, **kwargs: object) -> SimpleNamespace:
         if "docker compose" in cmd:
-            assert len(deploy._read_env_values(env_file).get("MINDROOM_API_KEY", "")) == 64
+            values = deploy._read_env_values(env_file)
+            assert all(len(values.get(name, "")) == 64 for name in deploy.RUNTIME_SECRET_NAMES)
         return fake_run(cmd, **kwargs)
 
     monkeypatch.setattr(deploy.subprocess, "run", _run)
@@ -1385,3 +1391,19 @@ def test_launch_adds_dashboard_key_before_compose_interpolation(
 
     assert any(" config --format json" in cmd for cmd in commands)
     assert "authelia" in _launched_services(commands)
+
+
+def test_runtime_reaches_its_own_homeserver_by_unique_container_name() -> None:
+    """Other instances' homeservers share the service alias on mynetwork, so use container names."""
+    tuwunel_compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.tuwunel.yml").read_text())
+    synapse_compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.synapse.yml").read_text())
+
+    assert tuwunel_compose["services"]["tuwunel"]["container_name"] == "${INSTANCE_NAME:-mindroom}-tuwunel"
+    assert tuwunel_compose["services"]["mindroom"]["environment"]["MATRIX_HOMESERVER"] == (
+        "http://${INSTANCE_NAME:-mindroom}-tuwunel:6167"
+    )
+    assert synapse_compose["services"]["synapse"]["container_name"] == "${INSTANCE_NAME:-mindroom}-synapse"
+    assert (
+        "MATRIX_HOMESERVER=http://${INSTANCE_NAME:-mindroom}-synapse:8008"
+        in (synapse_compose["services"]["mindroom"]["environment"])
+    )

@@ -53,7 +53,8 @@ services:
       # DATA_DIR should be set in the .env file
       - ${DATA_DIR}/synapse:/data
     ports:
-      - "${MATRIX_PORT:-8448}:8008"
+      # Loopback only: containers, including the sandbox, reach the host through its bridge gateway.
+      - "127.0.0.1:${MATRIX_PORT:-8448}:8008"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8008/_matrix/client/versions"]
       interval: 10s
@@ -92,7 +93,8 @@ services:
   # Update MindRoom to know about the Matrix server
   mindroom:
     environment:
-      - MATRIX_HOMESERVER=http://synapse:8008
+      # Container names are unique; other instances' homeservers share the "synapse" alias on mynetwork.
+      - MATRIX_HOMESERVER=http://${INSTANCE_NAME:-mindroom}-synapse:8008
       - MINDROOM_DESKTOP_MATRIX_HOMESERVER=https://m-${INSTANCE_DOMAIN}
       - MATRIX_SERVER_NAME=m-${INSTANCE_DOMAIN}
     depends_on:

@@ -22241,6 +22241,8 @@ services:
   sandbox-relay:
     image: busybox:1.36
     user: "65534:65534"
+    cap_drop:
+      - ALL
     command: ["tcpsvd", "-c", "256", "0.0.0.0", "8766", "nc", "sandbox-runner", "8766"]
     networks:
       - mindroom-network

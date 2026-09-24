@@ -23,7 +23,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MINDROOM_STORAGE_PATH=/app/mindroom_data
       - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
-      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:-sandbox-secret}
+      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:?MINDROOM_SANDBOX_PROXY_TOKEN must be set in the instance env file}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
       - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
       - HOME=/app
@@ -83,7 +83,7 @@ services:
       - sandbox-workspace:/app/workspace
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
-      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:-sandbox-secret}
+      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:?MINDROOM_SANDBOX_PROXY_TOKEN must be set in the instance env file}
       - MINDROOM_CONFIG_PATH=/app/config.yaml
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
     # Tool code runs here, so share no network with the runtime, datastores, or homeserver.
@@ -98,6 +98,8 @@ services:
     user: "65534:65534"
     cap_drop:
       - ALL
+    sysctls:
+      net.ipv4.ip_forward: 0
     command: ["tcpsvd", "-c", "256", "0.0.0.0", "8766", "nc", "sandbox-runner", "8766"]
     networks:
       - mindroom-network

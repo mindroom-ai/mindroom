@@ -49,7 +49,7 @@ DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT = "matrix-fed"
 DEFAULT_TRAEFIK_CERTRESOLVER = "porkbun"
 PERMISSION_REPAIR_IMAGE = "busybox:1.36"
 # Generated per instance into its env file; Compose refuses to start without them.
-DASHBOARD_SECRET_NAMES = ("MINDROOM_API_KEY",)
+RUNTIME_SECRET_NAMES = ("MINDROOM_API_KEY", "MINDROOM_SANDBOX_PROXY_TOKEN")
 SYNAPSE_SECRET_NAMES = ("POSTGRES_PASSWORD", "REDIS_PASSWORD")
 
 
@@ -533,7 +533,7 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
                 f.write("SYNAPSE_ALLOW_PUBLIC_ROOMS=true\n")
 
     synapse_secret_names = SYNAPSE_SECRET_NAMES if matrix_type == MatrixType.SYNAPSE else ()
-    _ensure_env_secrets(env_file, DASHBOARD_SECRET_NAMES + synapse_secret_names)
+    _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES + synapse_secret_names)
 
 
 def _ensure_external_network(name: str) -> bool:
@@ -787,8 +787,8 @@ def _bring_up_instance(
 ) -> None:
     """Start or restart an instance using one shared compose-up path."""
     env_file = _require_instance_env_file(name)
-    # Compose interpolation, including the Authelia check, requires the dashboard key.
-    _ensure_env_secrets(env_file, DASHBOARD_SECRET_NAMES)
+    # Compose interpolation, including the Authelia check, requires the runtime secrets.
+    _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES)
     if instance.auth_type == AuthType.AUTHELIA and not only_matrix:
         _require_authelia_account_setup(instance)
 
@@ -1179,7 +1179,7 @@ def start(
     instance = registry.instances[name]
     previous_status = instance.status
     env_file = _require_instance_env_file(name)
-    _ensure_env_secrets(env_file, DASHBOARD_SECRET_NAMES)
+    _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES)
     if instance.auth_type == AuthType.AUTHELIA and not only_matrix:
         _require_authelia_account_setup(instance)
 
