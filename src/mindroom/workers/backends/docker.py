@@ -26,6 +26,7 @@ from mindroom.constants import (
     runtime_paths_with_storage_root,
     sandbox_startup_manifest_path,
     serialize_runtime_paths,
+    startup_manifest_sha256,
     write_startup_manifest,
 )
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, sync_shared_credentials_to_worker
@@ -33,6 +34,7 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+    SANDBOX_STARTUP_MANIFEST_SHA256_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
 )
 from mindroom.tool_system.dependencies import ensure_optional_deps
@@ -998,6 +1000,10 @@ class DockerWorkerBackend:
                 **security_kwargs,
             )
         elif not self._container_is_running(container):
+            # A stopped container restarts from whatever is on disk, and the
+            # worker could have rewritten the manifest before it stopped, so the
+            # primary republishes it on every start, not only on creation.
+            self._write_startup_manifest(paths, worker_key=metadata.worker_key)
             try:
                 container.start()
             except self._docker_errors.DockerException as exc:
@@ -1152,6 +1158,14 @@ class DockerWorkerBackend:
         if self._tool_validation_snapshot is not None:
             env[SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(
                 Path(self.config.storage_mount_path) / ".runtime" / "startup_manifest.json",
+            )
+            # The manifest itself lives in the worker's read-write bind mount, so
+            # the runner only trusts it against this digest, which is fixed in the
+            # container spec and therefore out of reach of tool code.
+            env[SANDBOX_STARTUP_MANIFEST_SHA256_ENV] = startup_manifest_sha256(
+                startup_runtime_paths,
+                tool_validation_snapshot=self._tool_validation_snapshot,
+                public_runtime=True,
             )
         return env
 

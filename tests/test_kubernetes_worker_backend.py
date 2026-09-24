@@ -1123,6 +1123,30 @@ def test_kubernetes_worker_omits_runtime_class_when_unset(tmp_path: Path) -> Non
     assert "runtimeClassName" not in apps_api.created_bodies[0]["spec"]["template"]["spec"]
 
 
+def test_kubernetes_worker_publishes_startup_manifest_digest_in_pod_env(tmp_path: Path) -> None:
+    """A kubelet restart re-reads the worker-writable manifest, so the pod spec carries its digest."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = _TEST_SCOPED_WORKER_KEY_A
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    manifest_path = sandbox_startup_manifest_path(
+        backend.storage_root / f"workers/{worker_dir_name(worker_key)}",
+    )
+
+    assert (
+        env_values["MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256"]
+        == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    )
+
+
 def test_kubernetes_worker_startup_manifest_omits_credentials_encryption_key(tmp_path: Path) -> None:
     """Worker manifests should not persist credential encryption key material beside worker state."""
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")

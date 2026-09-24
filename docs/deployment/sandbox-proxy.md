@@ -169,6 +169,10 @@ Untrusted code-execution tools may still share the runner container's process na
 For dedicated Kubernetes workers, the exposed environment contains only that worker's derived runner token, not the shared control-plane token.
 This leaves same-worker token exposure as a local containment risk, while per-worker credentials and NetworkPolicy limit cross-worker blast radius.
 
+Tool code can write the sandbox-runner startup manifest, because it lives in the worker's read-write state root.
+The primary therefore publishes the manifest's SHA-256 through `MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256` in the container or pod environment, which tool code cannot change, and republishes the manifest before every worker start.
+A runner whose manifest fails that digest, or whose manifest contradicts the dedicated-worker identity and policy fixed in the container environment, refuses to start rather than boot from a file the worker could have rewritten.
+
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](kubernetes.md).
 
 ### Host machine + Docker sandbox container

@@ -18,6 +18,8 @@ __all__ = [
     "CREDENTIALS_ENCRYPTION_KEY_ENV",
     "CREDENTIAL_SEEDS_FILE_ENV",
     "CREDENTIAL_SEEDS_JSON_ENV",
+    "DEDICATED_WORKER_PINNED_LITERAL_ENV_NAMES",
+    "DEDICATED_WORKER_PINNED_PATH_ENV_NAMES",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES",
     "MATRIX_APPSERVICE_TOKEN_ENV",
@@ -25,6 +27,7 @@ __all__ = [
     "MATRIX_MANAGED_ACCOUNT_AUTH_ENV",
     "SANDBOX_RUNTIME_ENV_BY_KEY",
     "SANDBOX_STARTUP_MANIFEST_PATH_ENV",
+    "SANDBOX_STARTUP_MANIFEST_SHA256_ENV",
     "SESSION_STORAGE_PATH_ENV",
     "SHARED_CREDENTIALS_PATH_ENV",
     "VENDOR_TELEMETRY_ENV_VALUES",
@@ -54,6 +57,11 @@ __all__ = [
 ]
 
 SANDBOX_STARTUP_MANIFEST_PATH_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"
+# The startup manifest lives in the worker's read-write state root, so tool code
+# running inside a worker can rewrite it. The primary publishes the manifest
+# digest through the immutable container/pod environment instead, and the runner
+# refuses to boot from a manifest that does not match it.
+SANDBOX_STARTUP_MANIFEST_SHA256_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256"
 CREDENTIAL_SEEDS_JSON_ENV = "MINDROOM_CREDENTIAL_SEEDS_JSON"
 CREDENTIAL_SEEDS_FILE_ENV = "MINDROOM_CREDENTIAL_SEEDS_FILE"
 CREDENTIALS_ENCRYPTION_KEY_ENV = "MINDROOM_CREDENTIALS_ENCRYPTION_KEY"
@@ -274,6 +282,24 @@ _WORKER_EXTRA_ENV_SANDBOX_ENV_NAMES = frozenset(
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_subprocess_timeout_seconds"],
     },
 )
+# Dedicated-worker identity and policy that the container/pod spec fixes. The
+# startup manifest may only restate these values; any disagreement means the
+# worker-writable manifest is trying to override operator-fixed policy, so the
+# runner fails closed instead of trusting the file.
+DEDICATED_WORKER_PINNED_PATH_ENV_NAMES = frozenset(
+    {
+        "MINDROOM_STORAGE_PATH",
+        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"],
+        SHARED_CREDENTIALS_PATH_ENV,
+    },
+)
+DEDICATED_WORKER_PINNED_LITERAL_ENV_NAMES = frozenset(
+    {
+        WORKER_COMPUTER_ENABLED_ENV,
+        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"],
+    },
+)
 _SANDBOX_RUNNER_STARTUP_ENV_NAMES = frozenset(
     {
         WORKER_COMPUTER_ENABLED_ENV,
@@ -314,6 +340,7 @@ _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
         MATRIX_MANAGED_ACCOUNT_AUTH_ENV,
         SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
         SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+        SANDBOX_STARTUP_MANIFEST_SHA256_ENV,
     },
 )
 # Shared secret stems (api_key/password/secret/token) plus the env-only `_API_KEYS`.

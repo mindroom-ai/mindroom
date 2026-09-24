@@ -35,6 +35,7 @@ from mindroom.runtime_env_policy import (
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+    SANDBOX_STARTUP_MANIFEST_SHA256_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
     VENDOR_TELEMETRY_ENV_VALUES,
     WORKER_EGRESS_PROXY_ENV_BY_KEY,
@@ -1370,6 +1371,7 @@ class KubernetesResourceManager:
                         worker_id=worker_id,
                         state_subpath=state_subpath,
                         startup_manifest_path=startup_manifest_path,
+                        startup_manifest_hash=startup_manifest_hash,
                         include_agent_vault=include_agent_vault,
                     ),
                     "volumeMounts": self._volume_mounts(
@@ -1503,6 +1505,7 @@ class KubernetesResourceManager:
         worker_id: str,
         state_subpath: str,
         startup_manifest_path: str,
+        startup_manifest_hash: str,
         include_agent_vault: bool,
     ) -> list[dict[str, object]]:
         dedicated_root = f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")
@@ -1514,6 +1517,13 @@ class KubernetesResourceManager:
             {
                 "name": SANDBOX_STARTUP_MANIFEST_PATH_ENV,
                 "value": startup_manifest_path,
+            },
+            # The manifest sits in the worker's read-write subPath, so the runner
+            # only trusts it against this digest, which lives in the pod spec and
+            # is therefore out of reach of tool code inside the worker.
+            {
+                "name": SANDBOX_STARTUP_MANIFEST_SHA256_ENV,
+                "value": startup_manifest_hash,
             },
             {"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path},
             {"name": "MINDROOM_STORAGE_PATH", "value": dedicated_root},

@@ -40,8 +40,11 @@ from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_r
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
+    DEDICATED_WORKER_PINNED_LITERAL_ENV_NAMES,
+    DEDICATED_WORKER_PINNED_PATH_ENV_NAMES,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+    SANDBOX_STARTUP_MANIFEST_SHA256_ENV,
     sandbox_runner_startup_process_env,
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -109,18 +112,67 @@ def _startup_manifest_path_from_env() -> Path:
     return Path(raw_path).expanduser()
 
 
+def _startup_manifest_digest_from_env() -> str:
+    digest = os.environ.get(SANDBOX_STARTUP_MANIFEST_SHA256_ENV, "").strip()
+    if not digest:
+        msg = (
+            f"{SANDBOX_STARTUP_MANIFEST_SHA256_ENV} must be set whenever "
+            f"{SANDBOX_STARTUP_MANIFEST_PATH_ENV} is set: the sandbox runner only boots from a startup "
+            "manifest whose digest the primary published through the immutable container environment."
+        )
+        raise RuntimeError(msg)
+    return digest
+
+
 def _startup_manifest_from_env() -> dict[str, object]:
-    payload = json.loads(_startup_manifest_path_from_env().read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        msg = f"{SANDBOX_STARTUP_MANIFEST_PATH_ENV} must point to a JSON object."
-        raise TypeError(msg)
-    return payload
+    """Read one startup manifest, proving it matches the primary-published digest."""
+    return constants.read_verified_startup_manifest(
+        _startup_manifest_path_from_env(),
+        expected_sha256=_startup_manifest_digest_from_env(),
+    )
+
+
+def _verify_dedicated_worker_env_pins(startup_runtime_paths: RuntimePaths) -> None:
+    """Fail closed when the startup manifest contradicts the container/pod spec.
+
+    Dedicated-worker identity and policy are fixed by the container environment,
+    which tool code cannot touch. A manifest that drops or rewrites one of those
+    values is trying to unpin the worker, so the runner refuses to start.
+    """
+    pinned_key_env = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]
+    if not os.environ.get(pinned_key_env, "").strip():
+        return
+
+    mismatched: list[str] = []
+    for name in sorted(DEDICATED_WORKER_PINNED_PATH_ENV_NAMES | DEDICATED_WORKER_PINNED_LITERAL_ENV_NAMES):
+        container_value = os.environ.get(name)
+        if container_value is None:
+            continue
+        manifest_value = startup_runtime_paths.env_value(name)
+        if manifest_value is None:
+            mismatched.append(name)
+        elif name in DEDICATED_WORKER_PINNED_PATH_ENV_NAMES:
+            if Path(manifest_value).expanduser().resolve() != Path(container_value).expanduser().resolve():
+                mismatched.append(name)
+        elif manifest_value.strip() != container_value.strip():
+            mismatched.append(name)
+
+    if mismatched:
+        msg = (
+            "Sandbox startup manifest contradicts the dedicated worker environment for "
+            f"{', '.join(mismatched)}; refusing to start."
+        )
+        raise RuntimeError(msg)
 
 
 def _startup_runtime_payload_from_env() -> tuple[RuntimePaths, object]:
     """Read startup runtime payload from the manifest path or Docker runtime JSON."""
     if os.environ.get(SANDBOX_STARTUP_MANIFEST_PATH_ENV, "").strip():
-        return constants.deserialize_startup_manifest(_startup_manifest_from_env())
+        startup_runtime_paths, tool_validation_snapshot = constants.deserialize_startup_manifest(
+            _startup_manifest_from_env(),
+        )
+        _verify_dedicated_worker_env_pins(startup_runtime_paths)
+        return startup_runtime_paths, tool_validation_snapshot
 
     raw_runtime_paths = os.environ.get(_STARTUP_RUNTIME_PATHS_JSON_ENV, "").strip()
     if not raw_runtime_paths:
@@ -223,11 +275,15 @@ def _wipe_process_environment_entry(address: int, size: int) -> None:
 
 
 def _upstream_tool_validation_snapshot(runtime_paths: RuntimePaths) -> dict[str, ToolValidationInfo]:
-    startup_manifest_path = constants.sandbox_startup_manifest_path(runtime_paths.storage_root)
-    if not startup_manifest_path.exists():
+    # Only a manifest the primary published (and whose digest it put in the
+    # immutable container env) may relax this worker's tool validation. Without
+    # that published digest a file in the worker state root proves nothing.
+    if not os.environ.get(SANDBOX_STARTUP_MANIFEST_PATH_ENV, "").strip():
+        return {}
+    if not _startup_manifest_path_from_env().exists():
         return {}
     startup_runtime_paths, tool_validation_snapshot = constants.deserialize_startup_manifest(
-        json.loads(startup_manifest_path.read_text(encoding="utf-8")),
+        _startup_manifest_from_env(),
     )
     if startup_runtime_paths.storage_root != runtime_paths.storage_root:
         msg = "Sandbox startup manifest storage_root does not match runtime storage_root."

@@ -1583,6 +1583,55 @@ def test_docker_backend_writes_authoritative_worker_validation_snapshot(
     assert env["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"] == "/app/worker/.runtime/startup_manifest.json"
 
 
+def test_docker_backend_publishes_startup_manifest_digest_in_container_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The runner verifies the worker-writable manifest against this container-fixed digest."""
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot={"shell": {"name": "shell", "config_fields": []}},
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    manifest_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / ".runtime" / "startup_manifest.json"
+    env = fake_client.containers.run_calls[0]["environment"]
+    assert isinstance(env, dict)
+    assert (
+        env["MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    )
+
+
+def test_docker_backend_republishes_startup_manifest_before_restarting_container(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stopped container boots from disk, so tool-code edits must not survive the restart."""
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot={"shell": {"name": "shell", "config_fields": []}},
+    )
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    container = fake_client.containers.by_name[handle.worker_id]
+    manifest_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / ".runtime" / "startup_manifest.json"
+    primary_manifest = manifest_path.read_bytes()
+
+    # Tool code inside the worker rewrites the manifest, then stops the runner.
+    tampered = json.loads(primary_manifest.decode("utf-8"))
+    tampered["runtime_paths"]["config_path"] = "/app/worker/evil/config.yaml"
+    manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
+    container.stop()
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert container.status == "running"
+    assert container.removed == 0
+    assert manifest_path.read_bytes() == primary_manifest
+
+
 def test_docker_backend_removes_stale_validation_manifest_for_snapshotless_worker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

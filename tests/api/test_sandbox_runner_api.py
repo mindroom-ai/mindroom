@@ -140,7 +140,7 @@ def _shell_command_output(result: object, *, cwd: Path) -> str:
     return result.removeprefix(prefix)
 
 
-def _set_worker_tool_validation_snapshot(*tool_names: str) -> None:
+def _set_worker_tool_validation_snapshot(monkeypatch: pytest.MonkeyPatch, *tool_names: str) -> None:
     """Set the upstream-authored validation snapshot visible to one worker runtime."""
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
     config = Config.validate_with_runtime({}, runtime_paths)
@@ -153,10 +153,11 @@ def _set_worker_tool_validation_snapshot(*tool_names: str) -> None:
             "agent_override_fields": [],
             "authored_override_validator": "default",
         }
-    _write_startup_manifest(
+    manifest_path = _write_startup_manifest(
         runtime_paths=runtime_paths,
         tool_validation_snapshot=snapshot,
     )
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
 
 
 def _write_startup_manifest(
@@ -179,6 +180,10 @@ def _set_startup_manifest(
     manifest_path: Path,
 ) -> None:
     monkeypatch.setenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", str(manifest_path))
+    monkeypatch.setenv(
+        "MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256",
+        hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+    )
 
 
 def test_worker_tool_validation_snapshot_reads_from_startup_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -380,6 +385,125 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
 
     assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
     assert sandbox_runner_module.app_runner_token(sandbox_runner_app) == "from-env"
+
+
+def _dedicated_worker_manifest_runtime(tmp_path: Path, *, worker_key: str = "worker-1") -> RuntimePaths:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    worker_root = tmp_path / "worker"
+    worker_root.mkdir(exist_ok=True)
+    return resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=worker_root,
+        process_env={
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(worker_root),
+        },
+    )
+
+
+def test_startup_manifest_rewritten_by_worker_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Tool code owns the manifest file, so a payload that fails the digest must not boot."""
+    payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
+    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
+
+    attacker_config = tmp_path / "evil" / "config.yaml"
+    attacker_config.parent.mkdir(parents=True, exist_ok=True)
+    attacker_config.write_text("plugins:\n  - ./evil-plugin\n", encoding="utf-8")
+    tampered = json.loads(manifest_path.read_text(encoding="utf-8"))
+    tampered["runtime_paths"]["config_path"] = str(attacker_config)
+    manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="does not match the digest published by the primary"):
+        sandbox_runner_module._startup_runtime_paths_from_env()
+
+
+def test_startup_manifest_without_published_digest_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A manifest path with no out-of-band digest proves nothing, so startup fails closed."""
+    payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
+    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
+    monkeypatch.setenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", str(manifest_path))
+    monkeypatch.delenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256", raising=False)
+
+    with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256 must be set"):
+        sandbox_runner_module._startup_runtime_paths_from_env()
+
+
+def test_startup_manifest_dropping_dedicated_worker_pin_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated worker identity comes from the container spec, not from the writable manifest."""
+    payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
+    unpinned_process_env = {
+        name: value
+        for name, value in payload_runtime.process_env.items()
+        if name != "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
+    }
+    manifest_path = _write_startup_manifest(
+        runtime_paths=constants_module.RuntimePaths(
+            config_path=payload_runtime.config_path,
+            config_dir=payload_runtime.config_dir,
+            env_path=payload_runtime.env_path,
+            storage_root=payload_runtime.storage_root,
+            process_env=unpinned_process_env,
+            env_file_values=payload_runtime.env_file_values,
+        ),
+    )
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-1")
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(payload_runtime.storage_root))
+
+    with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"):
+        sandbox_runner_module._startup_runtime_paths_from_env()
+
+
+def test_startup_manifest_redirecting_storage_root_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A manifest may restate the pod-fixed storage root, never redirect it."""
+    payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
+    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-1")
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "operator-root"))
+
+    with pytest.raises(RuntimeError, match="MINDROOM_STORAGE_PATH"):
+        sandbox_runner_module._startup_runtime_paths_from_env()
+
+
+def test_unverified_startup_manifest_cannot_relax_tool_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A manifest the primary never published must not seed the worker's validation snapshot."""
+    payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
+    _write_startup_manifest(
+        runtime_paths=payload_runtime,
+        tool_validation_snapshot={
+            "agentspace_slack_search": {
+                "config_fields": [],
+                "agent_override_fields": [],
+                "authored_override_validator": "default",
+                "runtime_loadable": True,
+            },
+        },
+    )
+    monkeypatch.delenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", raising=False)
+    monkeypatch.delenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256", raising=False)
+
+    assert sandbox_runner_module._upstream_tool_validation_snapshot(payload_runtime) == {}
 
 
 def test_startup_runtime_accepts_runtime_paths_json_without_manifest(
@@ -715,6 +839,9 @@ def test_static_runner_credentials_encryption_key_is_removed_from_proc_environ(t
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     env = os.environ.copy()
     env[runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(manifest_path)
+    env[runtime_env_policy.SANDBOX_STARTUP_MANIFEST_SHA256_ENV] = hashlib.sha256(
+        manifest_path.read_bytes(),
+    ).hexdigest()
     env[runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV] = encryption_key
     script = (
         "import os\n"
@@ -865,6 +992,9 @@ def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_enviro
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     env = os.environ.copy()
     env[runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(manifest_path)
+    env[runtime_env_policy.SANDBOX_STARTUP_MANIFEST_SHA256_ENV] = hashlib.sha256(
+        manifest_path.read_bytes(),
+    ).hexdigest()
     env[runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV] = encryption_key
     script = (
         "import os\n"
@@ -2531,7 +2661,7 @@ def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
-    _set_worker_tool_validation_snapshot("agentspace_slack_search")
+    _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
     _set_sandbox_token(monkeypatch)
 
     runtime_paths, config = _refresh_runner_app_from_env()
@@ -2567,7 +2697,7 @@ def test_sandbox_runner_shared_startup_still_rejects_missing_plugins(
     config_path = _missing_plugin_path_config_path(tmp_path)
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
-    _set_worker_tool_validation_snapshot("agentspace_slack_search")
+    _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
 
     with pytest.raises(ConfigRuntimeValidationError, match="Configured plugin path does not exist"):
@@ -2583,7 +2713,7 @@ def test_sandbox_runner_defers_unavailable_authored_tools_for_worker_runtime(
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
-    _set_worker_tool_validation_snapshot("agentspace_slack_search")
+    _set_worker_tool_validation_snapshot(monkeypatch, "agentspace_slack_search")
     _set_sandbox_token(monkeypatch)
 
     runtime_paths, config = _refresh_runner_app_from_env()
