@@ -548,7 +548,7 @@ See [Sandbox Proxy](../deployment/sandbox-proxy.md) for the full list of `MINDRO
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `CUSTOMER_ID` | Tenant identity for worker key derivation (SaaS platform only) | _(none)_ |
-| `ACCOUNT_ID` | Account identity for worker key derivation (SaaS platform only) | _(none)_ |
+| `ACCOUNT_ID` | Account identity for worker key derivation and the Supabase dashboard ownership check (SaaS platform only); setting it without `SUPABASE_URL` and `SUPABASE_ANON_KEY` makes the dashboard API refuse every request | _(none)_ |
 
 ## Basic Structure
 

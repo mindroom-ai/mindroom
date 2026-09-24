@@ -150,6 +150,28 @@ class TestInstanceDashboardAuthGuard:
         assert err.value.status_code == 503
         assert "SUPABASE_ANON_KEY" in err.value.detail
 
+    @pytest.mark.asyncio
+    async def test_provision_instance_rejects_before_any_database_or_helm_work(self):
+        """The guard runs first, so an unauthenticatable tenant is never created or deployed."""
+        sb = MagicMock()
+        with (
+            patch.multiple(provisioner_service, SUPABASE_ANON_KEY="", INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED=""),
+            patch.object(provisioner_service, "create_instance") as create_instance,
+            patch.object(provisioner_service, "update_instance") as update_instance,
+            patch.object(provisioner_service, "run_helm") as run_helm,
+            pytest.raises(HTTPException) as err,
+        ):
+            await provisioner_service.provision_instance(
+                sb,
+                data={"subscription_id": "sub-1", "account_id": "acc-1", "tier": "byok"},
+                background_tasks=None,
+            )
+
+        assert err.value.status_code == 503
+        create_instance.assert_not_called()
+        update_instance.assert_not_called()
+        run_helm.assert_not_called()
+
     def test_complete_auth_configurations_allow_provisioning(self):
         """Either a full Supabase pair or trusted upstream auth is enough to provision."""
         with patch.multiple(
@@ -165,5 +187,18 @@ class TestInstanceDashboardAuthGuard:
             SUPABASE_URL="",
             SUPABASE_ANON_KEY="",
             INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED="true",
+        ):
+            provisioner_service._require_instance_dashboard_auth()
+
+    def test_trusted_upstream_flag_parses_like_the_instance_chart(self):
+        """A value the chart would not treat as enabled must not unlock provisioning either."""
+        with (
+            patch.multiple(
+                provisioner_service,
+                SUPABASE_URL="",
+                SUPABASE_ANON_KEY="",
+                INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED=" true ",
+            ),
+            pytest.raises(HTTPException),
         ):
             provisioner_service._require_instance_dashboard_auth()

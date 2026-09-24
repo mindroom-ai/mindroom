@@ -144,21 +144,13 @@ class ApiAuthState:
     trusted_upstream_jwt_client: PyJWKClient | None = None
 
 
-def _env_text(runtime_paths: RuntimePaths, name: str) -> str | None:
-    value = runtime_paths.env_value(name)
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
 def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None = None) -> _ApiAuthSettings:
     """Read dashboard auth settings from one explicit runtime context."""
     return _ApiAuthSettings(
-        platform_login_url=_env_text(runtime_paths, "MINDROOM_PLATFORM_LOGIN_URL"),
-        supabase_url=_env_text(runtime_paths, "SUPABASE_URL"),
-        supabase_anon_key=_env_text(runtime_paths, "SUPABASE_ANON_KEY"),
-        account_id=(account_id or "").strip() or None,
+        platform_login_url=runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL"),
+        supabase_url=runtime_paths.env_value("SUPABASE_URL"),
+        supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
+        account_id=account_id,
         mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
         public_url=runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
         trusted_upstream=_build_trusted_upstream_auth_settings(runtime_paths),
@@ -182,7 +174,7 @@ def hosted_auth_configuration_error(settings: _ApiAuthSettings) -> str | None:
     if not configured:
         return None
     return (
-        f"Hosted dashboard authentication is incomplete: {', '.join(configured)} is set but "
+        f"Hosted dashboard authentication is incomplete (configured: {', '.join(configured)}); "
         "SUPABASE_URL and SUPABASE_ANON_KEY are both required to validate dashboard users"
     )
 
@@ -204,6 +196,14 @@ def report_dashboard_auth_configuration(runtime_paths: RuntimePaths, account_id:
             "Dashboard authentication is misconfigured - the API will reject every request until this is fixed",
             detail=configuration_error,
         )
+
+
+def _env_text(runtime_paths: RuntimePaths, name: str) -> str | None:
+    value = runtime_paths.env_value(name)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> _TrustedUpstreamAuthSettings:

@@ -480,7 +480,8 @@ async def _provision_openrouter_key(
 
 def _require_instance_dashboard_auth() -> None:
     """Refuse to provision a tenant whose dashboard would be served without authentication."""
-    trusted_upstream_enabled = INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED.strip().lower() in {"1", "true", "yes", "on"}
+    # Parse exactly like the instance chart so both agree on whether trusted upstream auth is on.
+    trusted_upstream_enabled = INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED.lower() in {"1", "true", "yes", "on"}
     if trusted_upstream_enabled or (SUPABASE_URL and SUPABASE_ANON_KEY):
         return
     msg = (

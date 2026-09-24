@@ -284,6 +284,9 @@ def test_hosted_auth_configuration_error_accepts_complete_setups(
         ({"SUPABASE_ANON_KEY": "anon-key"}, None),
         ({"MINDROOM_PLATFORM_LOGIN_URL": "https://app.example.com/auth/login"}, None),
         ({}, "account-123"),
+        # Whitespace-only values still signal hosted intent; they must never read as "unset".
+        ({"SUPABASE_URL": "   "}, None),
+        ({}, "   "),
         # An operator key must not excuse an incomplete hosted configuration either.
         ({"SUPABASE_URL": "https://supabase.test", "MINDROOM_API_KEY": "operator-key"}, None),
     ],
