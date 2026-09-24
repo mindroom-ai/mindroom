@@ -939,8 +939,8 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
 
 @pytest.mark.asyncio
 async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path) -> None:
-    """Send should auto-register local file paths and upload them."""
-    tool = MatrixMessageTools()
+    """Send should auto-register workspace file paths and upload them."""
+    tool = MatrixMessageTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _make_context(storage_path=tmp_path)
@@ -1125,7 +1125,7 @@ async def test_matrix_message_send_multiple_attachments_only_returns_error_when_
 async def test_matrix_message_accepts_register_attachment_ids_across_task_boundaries(tmp_path: Path) -> None:
     """matrix_message should accept attachment IDs registered by a prior tool call in another task."""
     matrix_tool = MatrixMessageTools()
-    attachment_tool = AttachmentTools()
+    attachment_tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _make_context(storage_path=tmp_path)
@@ -2030,7 +2030,7 @@ async def test_matrix_message_rejects_attachments_for_non_send_actions(tmp_path:
 @pytest.mark.asyncio
 async def test_matrix_message_rejects_missing_attachment_paths(tmp_path: Path) -> None:
     """Missing attachment paths must fail before sending."""
-    tool = MatrixMessageTools()
+    tool = MatrixMessageTools(tool_output_workspace_root=tmp_path)
     ctx = _make_context(storage_path=tmp_path)
 
     with tool_runtime_context(ctx):

@@ -3749,6 +3749,12 @@ def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(
     assert location.path == "/login"
     assert parse_qs(location.query) == {"next": ["/"]}
 
+    response = api_key_client.get("/%09/evil.com", follow_redirects=False)
+    assert response.status_code == 307
+    location = urlparse(response.headers["location"])
+    assert location.path == "/login"
+    assert parse_qs(location.query) == {"next": ["/"]}
+
 
 def test_frontend_login_page_renders_for_api_key_auth(api_key_client: TestClient) -> None:
     """Standalone API-key auth should expose a simple login form."""
@@ -3774,6 +3780,16 @@ def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
     assert "&amp;execution_scope" not in response.text
 
 
+def test_frontend_login_page_drops_tab_bearing_next_path(api_key_client: TestClient) -> None:
+    """Browsers strip ASCII tabs before parsing, so a tab-bearing target must not survive."""
+    response = api_key_client.get("/login?next=/%09/evil.com")
+
+    assert response.status_code == 200
+    next_path_line = next(line for line in response.text.splitlines() if "const nextPath =" in line)
+    assert next_path_line.strip() == 'const nextPath = "/";'
+    assert 'target.origin === window.location.origin ? target.href : "/"' in response.text
+
+
 @pytest.mark.parametrize(
     ("next_path", "expected"),
     [
@@ -3794,6 +3810,14 @@ def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
         ("/%255Cexample.com", "/"),
         ("/%252Fexample.com", "/"),
         ("/agents/%5Cprofile", "/agents/%5Cprofile"),
+        ("/\t/evil.com", "/"),
+        ("/\n/evil.com", "/"),
+        ("/\r/evil.com", "/"),
+        ("/%09/evil.com", "/"),
+        ("/%0a/evil.com", "/"),
+        ("/%0d/evil.com", "/"),
+        ("/%2509/evil.com", "/"),
+        ("/agents\t", "/"),
     ],
 )
 def test_sanitize_next_path_blocks_protocol_relative_variants(

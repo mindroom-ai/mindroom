@@ -2,7 +2,7 @@
 
 import inspect
 from pathlib import Path
-from types import UnionType
+from types import SimpleNamespace, UnionType
 from typing import Any, Union, cast, get_args, get_origin, get_type_hints
 
 import pytest
@@ -263,6 +263,29 @@ def test_tool_metadata_lists_only_model_callable_functions() -> None:
         "send_message_thread",
         "upload_file",
     )
+
+
+def test_slack_upload_file_sends_model_content_without_opening_local_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slack runs in the primary runtime, so a path-like upload argument must never read that file."""
+    secret_path = tmp_path / ".env"
+    secret_path.write_text("MINDROOM_API_KEY=secret\n")
+    tool = cast("Any", TOOL_REGISTRY["slack"]())(token="xoxb-test")  # noqa: S106
+    captured: dict[str, object] = {}
+
+    def files_upload_v2(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(data={"ok": True})
+
+    monkeypatch.setattr(tool.client, "files_upload_v2", files_upload_v2)
+
+    tool.upload_file(channel="C0123", content=str(secret_path), filename=str(secret_path))
+
+    assert "file" not in captured
+    assert captured["content"] == str(secret_path).encode()
+    assert captured["filename"] == ".env"
 
 
 def test_zep_metadata_lists_only_model_callable_functions() -> None:

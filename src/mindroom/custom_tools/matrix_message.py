@@ -110,7 +110,7 @@ class MatrixMessageTools(Toolkit):
 
         Set recipient to an agent/team name from matrix_room(action="agents") to request a response, including from yourself for a human requester. Only that recipient is dispatched; without recipient, names in the body do not start agents. Room-mode recipients use the room timeline and cannot accept new_thread or an explicit thread. Sending returns immediately; run_subagent waits for an answer.
 
-        Send text, attachments, or both. attachments is an ordered list of att_* IDs or local file paths (max 5); relative paths use the workspace. Use ./ for a filename starting with att_. Files arrive before recipient dispatch.
+        Send text, attachments, or both. attachments is an ordered list of att_* IDs or file paths inside the agent workspace (max 5). Use ./ for a filename starting with att_. Files arrive before recipient dispatch.
 
         edit/react require event_id; react uses message as emoji (default 👍). message_extras adds optional collapsible sections to send/edit. Interactive prompts require normal response delivery. Use matrix_room for room details and thread discovery.
 
@@ -122,7 +122,7 @@ class MatrixMessageTools(Toolkit):
             thread_id: Thread root ID; current conversation by default, "room" for room timeline.
             new_thread: Start a separate thread; send only, cannot combine with thread_id.
             event_id: Message event ID to edit or react to.
-            attachments: Ordered att_* IDs or file paths; send only, maximum 5.
+            attachments: Ordered att_* IDs or workspace file paths; send only, maximum 5.
             message_extras: Collapsible sections with title/content; optional content_type and collapsed.
             limit: Messages to read, 1-50; default 20.
             idempotency_key: Nonblank key (max 256 characters) for durable text-only send retries.

@@ -46,7 +46,11 @@ The default MindRoom Gmail toolkit exposes 26 functions for stars, drafts, messa
 Its exact function names are `apply_label()`, `create_draft_email()`, `delete_custom_label()`, `get_draft()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `get_emails_from_user()`, `get_latest_emails()`, `get_message()`, `get_starred_emails()`, `get_thread()`, `get_unread_emails()`, `list_custom_labels()`, `list_drafts()`, `mark_email_as_read()`, `mark_email_as_unread()`, `remove_label()`, `search_emails()`, `search_threads()`, `send_email()`, `send_email_reply()`, `send_email_to_self()`, `star_email()`, `unstar_email()`, and `update_draft()`.
 `send_email_to_self(subject, body)` derives its sole recipient from the connected Gmail profile and accepts no recipient, CC, BCC, or attachment arguments.
 The function follows the configured tool approval policy, so operators can match `send_email_to_self` separately from other send functions.
-Draft and send operations accept local file-system paths for attachments.
+Draft and send operations accept attachment file paths inside the agent workspace.
+Relative attachment paths resolve from the workspace root, and paths that resolve outside it, including through symlinks, are rejected before any file is read or Gmail request is made.
+Attachments are read through no-follow file descriptors, so a path component swapped for a symlink after validation is refused.
+Attachments are limited to 25 MiB in total per message.
+Agents without a workspace cannot attach files.
 
 ### Configuration
 
@@ -88,7 +92,7 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 - The configuration flags listed above can disable their corresponding methods; `include_tools` and `exclude_tools` can further filter the constructed toolkit.
 - Agno's optional archive, trash, attachment-download, raw label-modification, label-listing, and draft-send methods are not exposed through MindRoom's authored selector fields.
 - `include_tools` filters existing functions and cannot enable those additional SDK methods.
-- Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
+- Attachment arguments are agent-workspace file paths in the primary runtime, not Matrix attachment IDs.
 
 ## [`slack`]
 

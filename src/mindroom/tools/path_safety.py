@@ -20,6 +20,11 @@ def blocked_file_action_message(action: str, requested_path: str, base_dir: Path
     return f"Error {action}: path '{requested_path}' is outside base_dir '{base_dir}'. {_BASE_DIR_ESCAPE_HINT}"
 
 
+def blocked_git_metadata_message(action: str, requested_path: str) -> str:
+    """Explain why a file-tool write into Git metadata was blocked."""
+    return f"Error {action}: path '{requested_path}' is inside Git metadata ('.git'), which file tools may not modify."
+
+
 def format_path_for_output(path: str | Path, base_dir: Path) -> str:
     """Prefer base-dir-relative output, falling back to absolute paths outside the base dir."""
     try:

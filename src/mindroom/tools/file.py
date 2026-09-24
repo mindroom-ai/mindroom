@@ -9,6 +9,7 @@ from typing import Any, cast
 from agno.tools.file import FileTools as AgnoFileTools
 from agno.utils.log import log_debug, log_error
 
+from mindroom.path_confinement import is_git_metadata_path
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -19,6 +20,7 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.path_safety import (
     blocked_file_action_message,
+    blocked_git_metadata_message,
     format_path_for_output,
     is_within_base_dir,
     resolve_base_dir_path,
@@ -88,6 +90,9 @@ class _MindRoomFileTools(AgnoFileTools):
             if not safe:
                 log_error(f"Attempted to save file: {file_name}")
                 return blocked_file_action_message("saving file", file_name, self.base_dir)
+            if is_git_metadata_path(file_path):
+                log_error(f"Attempted to save Git metadata: {file_name}")
+                return blocked_git_metadata_message("saving file", file_name)
             log_debug(f"Saving contents to {file_path}")
             if not file_path.parent.exists():
                 file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,6 +170,9 @@ class _MindRoomFileTools(AgnoFileTools):
         """Delete a file or empty directory with clear blocked-path errors."""
         safe, path = self._check_path(file_name, self.base_dir)
         try:
+            if safe and is_git_metadata_path(path):
+                log_error(f"Attempted to remove Git metadata: {file_name}")
+                return blocked_git_metadata_message("removing file", file_name)
             if safe:
                 if path.is_dir():
                     path.rmdir()

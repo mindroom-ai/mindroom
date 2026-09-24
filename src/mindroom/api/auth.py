@@ -655,21 +655,31 @@ async def request_has_frontend_access(request: Request) -> bool:
 
 def sanitize_next_path(next_path: str | None) -> str:
     """Normalize redirect targets to an absolute in-app path."""
-    if not next_path or not next_path.startswith("/") or _is_protocol_relative_redirect(next_path):
+    if not next_path or not next_path.startswith("/") or _leaves_dashboard_origin(next_path):
         return "/"
     return next_path
 
 
-def _is_protocol_relative_redirect(next_path: str) -> bool:
-    """Return whether a browser may normalize one target to a protocol-relative URL."""
+def _leaves_dashboard_origin(next_path: str) -> bool:
+    """Return whether a browser may resolve one target outside the dashboard origin."""
     candidate = next_path
     for _ in range(_REDIRECT_TARGET_DECODE_PASSES):
-        if candidate.replace("\\", "/").startswith("//"):
+        if _is_offsite_candidate(candidate):
             return True
         decoded = unquote(candidate)
         if decoded == candidate:
             return False
         candidate = decoded
+    return _is_offsite_candidate(candidate)
+
+
+def _is_offsite_candidate(candidate: str) -> bool:
+    """Return whether one decoded target reads as protocol-relative to a browser's URL parser."""
+    # The WHATWG URL parser removes ASCII tab and newline before parsing, so "/\t/evil.com"
+    # resolves to the scheme-relative "//evil.com". Reject every C0 control character instead of
+    # replaying that removal, since no in-app path needs one.
+    if any(character < " " for character in candidate):
+        return True
     return candidate.replace("\\", "/").startswith("//")
 
 
@@ -813,7 +823,8 @@ def _render_standalone_login_page(
         body: JSON.stringify({{ api_key: input.value }}),
       }});
       if (response.ok) {{
-        window.location.assign(nextPath);
+        const target = new URL(nextPath, window.location.origin);
+        window.location.assign(target.origin === window.location.origin ? target.href : "/");
         return;
       }}
       error.textContent = "Invalid API key.";
