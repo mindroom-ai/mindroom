@@ -353,7 +353,7 @@ visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.report_publishing"
-depends_on = ["mindroom.durable_write"]
+depends_on = ["mindroom.durable_write", "mindroom.path_confinement"]
 
 # Keep memory consumers explicit so imports are enforced rather than merely
 # interface-checked.
