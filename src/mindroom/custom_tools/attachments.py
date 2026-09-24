@@ -115,7 +115,7 @@ def _get_attachment_listing(
     )
 
 
-def _resolve_context_attachment_path(
+def resolve_context_attachment_path(
     context: ToolRuntimeContext,
     attachment_id: str,
 ) -> tuple[Path | None, str | None]:
@@ -244,7 +244,7 @@ def _resolve_attachment_ids(
             resolved_attachment_ids.append(attachment_id)
             continue
 
-        attachment_path, error = _resolve_context_attachment_path(context, attachment_id)
+        attachment_path, error = resolve_context_attachment_path(context, attachment_id)
         if error is not None:
             return [], [], error
         if attachment_path is None:
