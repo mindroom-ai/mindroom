@@ -347,17 +347,33 @@ def _batch_dispatch_policy_source_kind(ordered_pending_events: list[PendingEvent
     raise ValueError(msg)
 
 
-def _batch_requester_user_id(key: CoalescingKey, primary_pending_event: PendingEvent) -> str:
-    """Resolve the batch requester from the primary event, falling back to a requester owner.
+def pending_event_requester_user_id(key: CoalescingKey, pending_event: PendingEvent) -> str:
+    """Resolve one event's effective requester, falling back to a requester owner.
 
-    A follow-up owner carries no requester, so a requester-less primary event
-    falls back to the event sender, matching the per-message sender fallback.
+    A follow-up owner carries no requester, so a requester-less event falls
+    back to the event sender, matching the per-message sender fallback.
     """
-    if primary_pending_event.event.requester_user_id:
-        return primary_pending_event.event.requester_user_id
+    if pending_event.event.requester_user_id:
+        return pending_event.event.requester_user_id
     if isinstance(key.owner, RequesterCoalescingOwner):
         return key.owner.requester_user_id
-    return primary_pending_event.event.sender
+    return pending_event.event.sender
+
+
+def _batch_requester_user_id(key: CoalescingKey, ordered_pending_events: list[PendingEvent]) -> str:
+    """Resolve the one requester every event in the batch executes as.
+
+    The turn runs with this requester's authorization, credentials, and
+    approvals, so a batch mixing requesters would run one sender's messages
+    under another sender's identity.
+    """
+    requester_user_ids = {
+        pending_event_requester_user_id(key, pending_event) for pending_event in ordered_pending_events
+    }
+    if len(requester_user_ids) == 1:
+        return next(iter(requester_user_ids))
+    msg = "Coalesced batch carried multiple requesters"
+    raise ValueError(msg)
 
 
 def _batch_hook_source(ordered_pending_events: list[PendingEvent]) -> str | None:
@@ -428,7 +444,7 @@ def build_prepared_turn(
     source_event_prompts = _batch_source_event_prompts(ordered_pending_events)
     source_event_metadata = _batch_source_event_metadata(ordered_pending_events)
     routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_event_metadata.values())))
-    requester_user_id = _batch_requester_user_id(key, primary_pending_event)
+    requester_user_id = _batch_requester_user_id(key, ordered_pending_events)
     return PreparedTurn(
         room=primary_pending_event.room,
         event=replace(primary_pending_event.event, body=prompt_rendering.prompt),
