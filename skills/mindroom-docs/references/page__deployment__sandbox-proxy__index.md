@@ -391,7 +391,7 @@ Tools that require the primary runtime stay local, and runner processes never pr
 | _(unset)_ | An explicit `MINDROOM_SANDBOX_PROXY_TOOLS` selection controls routing. Otherwise, a configured static proxy URL routes all eligible tools, dedicated Docker/Kubernetes backends route metadata defaults, and plain `static_runner` without a proxy URL runs locally. Requested dedicated routing fails closed when misconfigured. |
 
 `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` permits local execution when routing was requested with `static_runner` but no proxy URL is configured.
-It applies only to tools whose metadata defaults to worker execution, currently `browser_mcp`, `coding`, `docker`, `file`, `python`, and `shell`.
+It applies only to tools whose metadata defaults to worker execution, currently `browser_mcp`, `coding`, `docker`, `file`, `pandas`, `python`, and `shell`.
 It does not bypass dedicated Docker or Kubernetes workers, and a configured static proxy URL keeps calls routed.
 Do not set it in hosted or multi-tenant deployments.
 
@@ -636,7 +636,7 @@ Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
 Tools whose catalog metadata sets `requires_primary_runtime=True` or `requires_room_context=True` stay in the primary runtime even when listed.
 This includes `reasoning`, `daytona`, `mem0`, `slack`, and `claude_agent`, which consume live agent or run state.
-The `browserbase`, `composio`, `duckdb`, `e2b`, `pandas`, `sql`, and `zep` toolkits also stay local because they retain a browser or local shell session, database connection (including in-memory databases), execution result, named dataframe, or generated session identity between calls.
+The `browserbase`, `composio`, `duckdb`, `e2b`, `sql`, and `zep` toolkits also stay local because they retain a browser or local shell session, database connection (including in-memory databases), execution result, or generated session identity between calls.
 The generic worker runner creates a fresh toolkit for each request.
 `config_manager` stays primary to manage the authored configuration and live API snapshots; its roomless inspection functions remain available.
 `agent_vault_access` stays primary to read the owner token mounted for self-service Vault grants.

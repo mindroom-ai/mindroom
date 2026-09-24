@@ -141,40 +141,87 @@ def test_ordinary_json_is_opaque_across_worker_transport(
     assert result == tool_result
 
 
-@pytest.mark.parametrize("explicit", [False, True])
-def test_routing_preserves_pandas_frames_across_calls(
+@pytest.mark.parametrize(
+    ("process_env", "agent_settings"),
+    [
+        ({}, {}),
+        ({}, {"worker_tools": ["pandas"]}),
+        ({"MINDROOM_SANDBOX_EXECUTION_MODE": "all"}, {}),
+    ],
+)
+def test_worker_pandas_frames_persist_in_workspace_across_calls(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    explicit: bool,
+    worker_requests: list[dict[str, object]],
+    process_env: dict[str, str],
+    agent_settings: dict[str, object],
 ) -> None:
-    """Named frames created by one call remain available to the next call."""
-
-    def no_worker(*_args: object, **_kwargs: object) -> object:
-        pytest.fail("Stateful Pandas call was sent to a fresh worker toolkit")
-
-    monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", no_worker)
+    """Each worker call builds a fresh toolkit, so named frames live in the agent workspace."""
     agent = _create_routing_agent(
-        tmp_path,
-        {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
-        agent_settings={"tools": ["pandas"], **({"worker_tools": ["pandas"]} if explicit else {})},
+        tmp_path / "primary",
+        {
+            "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "dummy-worker-token",
+            **process_env,
+        },
+        agent_settings={"tools": ["pandas"], "memory_backend": "file", **agent_settings},
     )
+    workspace = tmp_path / "primary" / "storage" / "agents" / "routing" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "sales.csv").write_text("region,total\nwest,42\neast,7\n", encoding="utf-8")
+
     created = FunctionCall(
         function=_function(agent, "create_pandas_dataframe"),
         arguments={
-            "dataframe_name": "retained",
-            "create_using_function": "DataFrame",
-            "function_parameters": {"data": {"value": [42]}},
+            "dataframe_name": "sales",
+            "create_using_function": "read_csv",
+            "function_parameters": {"filepath_or_buffer": "sales.csv"},
         },
     ).execute()
-    assert created.status == "success"
-    assert created.result == "retained"
-
     operated = FunctionCall(
         function=_function(agent, "run_dataframe_operation"),
-        arguments={"dataframe_name": "retained", "operation": "head", "operation_parameters": {}},
+        arguments={
+            "dataframe_name": "sales",
+            "operation": "nlargest",
+            "operation_parameters": {"n": 1, "columns": "total"},
+        },
     ).execute()
+
+    assert created.status == "success"
+    assert created.result == "sales"
     assert operated.status == "success"
-    assert "42" in operated.result
+    assert "west" in operated.result
+    assert "east" not in operated.result
+    assert [request["function_name"] for request in worker_requests] == [
+        "create_pandas_dataframe",
+        "run_dataframe_operation",
+    ]
+    assert (workspace / "pandas_dataframes" / "sales.json").is_file()
+
+
+def test_worker_pandas_cannot_read_primary_secrets(
+    tmp_path: Path,
+    worker_requests: list[dict[str, object]],
+) -> None:
+    """A worker-routed reader stays inside the agent workspace instead of reaching primary-only files."""
+    agent = _create_routing_agent(
+        tmp_path / "primary",
+        {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid", "MINDROOM_SANDBOX_PROXY_TOKEN": "dummy-worker-token"},
+        agent_settings={"tools": ["pandas"], "memory_backend": "file", "worker_tools": ["pandas"]},
+    )
+    env_path = tmp_path / "primary" / ".env"
+    env_path.write_text("OPENAI_API_KEY=primary-only-secret\n", encoding="utf-8")
+
+    response = FunctionCall(
+        function=_function(agent, "create_pandas_dataframe"),
+        arguments={
+            "dataframe_name": "secrets",
+            "create_using_function": "read_csv",
+            "function_parameters": {"filepath_or_buffer": str(env_path), "sep": "\x01"},
+        },
+    ).execute()
+
+    assert len(worker_requests) == 1
+    assert response.result == f"Error creating dataframe: File path {str(env_path)!r} is outside the agent workspace"
 
 
 @pytest.mark.parametrize("explicit", [False, True])

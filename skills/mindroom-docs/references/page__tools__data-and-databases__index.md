@@ -344,19 +344,24 @@ query_csv_file("sales_2025", 'SELECT "region", COUNT(*) FROM sales_2025 GROUP BY
 
 ## [`pandas`]
 
-`pandas` is the in-memory dataframe toolkit for creating named dataframes and running dataframe methods on them.
+`pandas` is the dataframe toolkit for creating named dataframes from agent-workspace files and running dataframe methods on them.
 
 ### What It Does
 
 `pandas` exposes `create_pandas_dataframe()` and `run_dataframe_operation()`.
-`create_pandas_dataframe()` calls a top-level Pandas constructor such as `read_csv` or `read_json` and stores the resulting dataframe under a caller-chosen name.
-`run_dataframe_operation()` then calls a dataframe method such as `head`, `tail`, `describe`, or `groupby` on that stored dataframe.
-Stored dataframes live in the current process memory only and are not persisted to disk.
+`create_pandas_dataframe()` calls one allow-listed constructor, `DataFrame`, `read_csv`, `read_excel`, or `read_json`, and saves that call under a caller-chosen name.
+File readers only open regular files inside the agent workspace, with relative paths resolving from it, and URLs are not supported.
+`run_dataframe_operation()` rebuilds the named dataframe from its saved call and then runs one allow-listed method such as `head`, `tail`, `describe`, `value_counts`, `sort_values`, `mean`, or `corr`.
+Methods that write files, evaluate expressions, or dispatch functions by name, such as `to_csv`, `query`, `eval`, `apply`, and `agg`, are rejected.
+With an agent workspace, saved calls live under `pandas_dataframes/` in that workspace so worker-routed calls and later turns can reuse the names.
+Without a workspace, only inline `DataFrame` data is available and names last for the current toolkit instance.
+`pandas` defaults to worker execution, so dedicated worker backends, `worker_tools`, and `MINDROOM_SANDBOX_EXECUTION_MODE` route it like `file`.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
+| `base_dir` | `text` | `no` | `null` | Runtime-managed agent workspace that file readers and saved dataframes are confined to. This field is not authored inline in `config.yaml`. |
 | `enable_create_pandas_dataframe` | `boolean` | `no` | `true` | Enable `create_pandas_dataframe()`. |
 | `enable_run_dataframe_operation` | `boolean` | `no` | `true` | Enable `run_dataframe_operation()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full Pandas toolkit. |
@@ -374,7 +379,7 @@ agents:
 create_pandas_dataframe(
     "sales",
     "read_csv",
-    {"filepath_or_buffer": "/workspace/data/sales.csv"},
+    {"filepath_or_buffer": "data/sales.csv"},
 )
 run_dataframe_operation("sales", "head", {"n": 5})
 run_dataframe_operation("sales", "describe", {})
@@ -382,8 +387,9 @@ run_dataframe_operation("sales", "describe", {})
 
 ### Notes
 
-- The toolkit keeps dataframe state in memory on the current runtime process, so a restart clears it.
-- `create_pandas_dataframe()` rejects empty dataframes and duplicate dataframe names.
+- Every operation rereads the source file, so results follow the current file contents and operations never modify the saved dataframe.
+- `create_pandas_dataframe()` rejects empty dataframes and replaces an existing dataframe with the same name.
+- Dataframe names use 1-64 letters, digits, underscores, or hyphens.
 - Use `pandas` when you want dataframe-native operations rather than SQL.
 
 ## [`google_bigquery`]

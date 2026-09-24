@@ -6056,7 +6056,6 @@ class TestWorkerToolsOverride:
             "invite_router",
             "mem0",
             "oauth_connections",
-            "pandas",
             "reasoning",
             "script",
             "slack",
@@ -6094,6 +6093,42 @@ class TestWorkerToolsOverride:
                 worker_tools_override=[tool_name],
             )
             is False
+        )
+
+    @pytest.mark.parametrize(
+        ("execution_mode", "proxy_tools", "worker_tools_override", "expected"),
+        [
+            ("all", None, None, True),
+            ("selective", {"pandas"}, None, True),
+            (None, None, ["pandas"], True),
+            ("off", None, None, False),
+        ],
+    )
+    def test_pandas_follows_operator_worker_routing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        execution_mode: str | None,
+        proxy_tools: set[str] | None,
+        worker_tools_override: list[str] | None,
+        expected: bool,
+    ) -> None:
+        """Pandas parses untrusted files, so operator isolation settings must be able to move it to a worker."""
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url="http://sandbox:8765",
+            execution_mode=execution_mode,
+            proxy_tools=proxy_tools,
+        )
+
+        assert TOOL_METADATA["pandas"].requires_primary_runtime is False
+        assert TOOL_METADATA["pandas"].default_execution_target is ToolExecutionTarget.WORKER
+        assert (
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
+                "pandas",
+                runtime_paths=runtime_paths,
+                worker_tools_override=worker_tools_override,
+            )
+            is expected
         )
 
     @pytest.mark.parametrize(

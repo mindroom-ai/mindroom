@@ -8808,6 +8808,18 @@
       "category": "productivity",
       "config_fields": [
         {
+          "authored_override": false,
+          "default": null,
+          "description": null,
+          "label": "Base Dir",
+          "name": "base_dir",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
           "authored_override": true,
           "default": true,
           "description": null,
@@ -8844,8 +8856,8 @@
           "validation": null
         }
       ],
-      "consumes_workspace_paths": false,
-      "default_execution_target": "primary",
+      "consumes_workspace_paths": true,
+      "default_execution_target": "worker",
       "dependencies": [
         "pandas"
       ],
@@ -8860,7 +8872,6 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "pandas",
-      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
