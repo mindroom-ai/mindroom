@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from mindroom.workers.backends.local import LocalWorkerStatePaths
 
 _DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 120.0
-WORKSPACE_ENV_HOOK_RELATIVE_PATH = Path(".mindroom") / "worker-env.sh"
+_WORKSPACE_ENV_HOOK_RELATIVE_PATH = Path(".mindroom") / "worker-env.sh"
 _WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS = 10.0
 _WORKSPACE_ENV_HOOK_MAX_SCRIPT_BYTES = 64 * 1024
 _WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES = 256 * 1024
@@ -354,13 +354,8 @@ def subprocess_worker_command(
     *,
     python_executable: str | None = None,
 ) -> list[str]:
-    """Build the sandbox subprocess worker command line.
-
-    `-P` keeps the child's cwd, often a workspace other runtimes can write, off
-    `sys.path`, and `-s` skips user site-packages under a workspace `HOME`, so
-    planted modules and `.pth` files cannot run inside the protocol child.
-    """
-    return [python_executable or sys.executable, "-P", "-s", "-m", "mindroom.api.sandbox_runner", subprocess_worker_arg]
+    """Build the sandbox subprocess worker command line."""
+    return [python_executable or sys.executable, "-m", "mindroom.api.sandbox_runner", subprocess_worker_arg]
 
 
 class WorkspaceEnvHookError(RuntimeError):
@@ -393,7 +388,7 @@ def resolve_workspace_env_hook_path(base_dir: Path | str | None) -> Path | None:
     except OSError as exc:
         msg = f"Failed to resolve base_dir for .mindroom/worker-env.sh: {exc}"
         raise WorkspaceEnvHookError(msg) from exc
-    candidate = base_resolved / WORKSPACE_ENV_HOOK_RELATIVE_PATH
+    candidate = base_resolved / _WORKSPACE_ENV_HOOK_RELATIVE_PATH
     if not candidate.exists():
         return None
     try:

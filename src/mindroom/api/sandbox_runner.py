@@ -12,7 +12,7 @@ import secrets
 import subprocess
 import sys
 from collections.abc import Mapping
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -86,7 +86,7 @@ from mindroom.workers.backends.local import get_local_worker_manager
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
 
     from agno.tools.toolkit import Toolkit
 
@@ -324,7 +324,6 @@ def initialize_sandbox_runner_app(
         config=committed_config,
         tool_metadata=TOOL_METADATA.copy(),
         runner_token=runner_token or sandbox_proxy_config(runtime_paths).proxy_token,
-        user_scope_agent_names=committed_config.get_user_scope_shared_agent_names(),
     )
 
 
@@ -566,7 +565,6 @@ class _SandboxRunnerContext:
     config: Config
     tool_metadata: dict[str, Any]
     runner_token: str | None
-    user_scope_agent_names: frozenset[str]
     cli: _SandboxRunnerCliState = field(default_factory=_SandboxRunnerCliState)
 
 
@@ -608,11 +606,6 @@ def app_runtime_config(app: FastAPI) -> Config:
     return _app_context(app).config
 
 
-def app_user_scope_agent_names(app: FastAPI) -> frozenset[str]:
-    """Return the non-private `worker_scope: user` agents resolved once from the runner config."""
-    return _app_context(app).user_scope_agent_names
-
-
 def app_cli_state(app: FastAPI) -> _SandboxRunnerCliState:
     """Return the sandbox runner's single-turn CLI slot stored on the FastAPI app."""
     return _app_context(app).cli
@@ -640,7 +633,6 @@ def resolve_script_state_workspace(
         sandbox_exec.runner_storage_root(runtime_paths),
         state_scope_worker_key,
         private_agent_names=private_agent_names,
-        user_scope_agent_names=app_user_scope_agent_names(app),
     )
     if len(state_roots) != 1:
         msg = "Script state scope does not resolve one agent workspace."
@@ -700,25 +692,6 @@ async def _maybe_await(value: object) -> object:
     if inspect.isawaitable(value):
         return await value
     return value
-
-
-@contextmanager
-def _workspace_importable(workspace: Path | None) -> Iterator[None]:
-    """Let tool code import modules saved in its workspace while it runs.
-
-    Protocol children start with `python -P`, so MindRoom resolves its own imports
-    without the workspace, and the workspace only ever follows installed modules.
-    Restoring `sys.path` afterwards keeps result handling off whatever the tool added.
-    """
-    if workspace is None:
-        yield
-        return
-    original_path = list(sys.path)
-    sys.path.append(str(workspace))
-    try:
-        yield
-    finally:
-        sys.path[:] = original_path
 
 
 async def _run_toolkit_entrypoint(
@@ -1027,38 +1000,24 @@ def _prepare_execute_request(
             runtime_paths,
             extra_env_passthrough=request.extra_env_passthrough,
         )
-    config = config or _runtime_config_or_empty(runtime_paths)
-    prepared = None
-    if request.worker_key is not None:
-        # Endpoints pass their already-prepared worker; only direct callers resolve agent policy here.
-        prepared = prepared_worker or sandbox_worker_prep.prepare_worker_request(
-            worker_key=request.worker_key,
-            tool_init_overrides=request.tool_init_overrides,
-            runtime_paths=runtime_paths,
-            private_agent_names=_freeze_private_agent_names(request.private_agent_names),
-            user_scope_agent_names=config.get_user_scope_shared_agent_names(),
-            runner_token=runner_token,
-        )
-    execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
-    request_workspace = _resolve_request_workspace(request, prepared, runtime_paths=runtime_paths, config=config)
-    source_workspace_env_hook = (
-        apply_workspace_env_hook
-        and request_workspace is not None
-        and sandbox_worker_prep.workspace_env_hook_allowed(
-            request_workspace,
-            requester_bound=sandbox_worker_prep.requester_bound_runtime(request.worker_key, request.worker_scope),
-            state_worker_key=request.worker_key,
-            prepared=prepared,
-            runtime_paths=runtime_paths,
-        )
+    prepared = sandbox_worker_prep.resolve_prepared_worker_request(
+        worker_key=request.worker_key,
+        tool_init_overrides=request.tool_init_overrides,
+        runtime_paths=runtime_paths,
+        private_agent_names=_freeze_private_agent_names(request.private_agent_names),
+        prepared_worker=prepared_worker,
+        runner_token=runner_token,
     )
+    execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
+    config = config or _runtime_config_or_empty(runtime_paths)
+    request_workspace = _resolve_request_workspace(request, prepared, runtime_paths=runtime_paths, config=config)
     try:
         env_result = sandbox_env_assembly.build_request_execution_env(
             request_workspace=request_workspace,
             prepared=prepared,
             execution_env=execution_env,
             apply_workspace_home_contract=apply_workspace_home_contract,
-            apply_workspace_env_hook=source_workspace_env_hook,
+            apply_workspace_env_hook=apply_workspace_env_hook,
         )
     except sandbox_exec.WorkspaceEnvHookError as exc:
         raise sandbox_worker_prep.WorkerRequestPreparationError(
@@ -1173,7 +1132,6 @@ async def _execute_prepared_request_inprocess(
     config: Config,
     *,
     credentials_manager: CredentialsManager | None = None,
-    importable_workspace: Path | None = None,
 ) -> SandboxRunnerExecuteResponse:
     execution_identity: ToolExecutionIdentity | None = None
     if prepared.execution_identity:
@@ -1211,8 +1169,7 @@ async def _execute_prepared_request_inprocess(
             return SandboxRunnerExecuteResponse(ok=True, result=oauth_connection_required_payload(exc))
 
         try:
-            with _workspace_importable(importable_workspace):
-                result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
+            result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
             result = await asyncio.to_thread(serialize_worker_tool_result, result)
         except OAuthConnectionRequired as exc:
             logger.info(
@@ -1518,18 +1475,8 @@ def _run_subprocess_worker_payload(payload: str) -> tuple[int, str, str]:
     # interfere with the protocol marker in the returned response text.
     captured_out = io.StringIO()
     captured_err = io.StringIO()
-    # Python-tool code may import modules saved in its workspace (the child's cwd),
-    # as it could under a plain `python -m` started there.
-    importable_workspace = Path.cwd() if request.tool_name == "python" else None
     with redirect_stdout(captured_out), redirect_stderr(captured_err):
-        response = asyncio.run(
-            _execute_prepared_request_inprocess(
-                request,
-                runtime_paths,
-                config,
-                importable_workspace=importable_workspace,
-            ),
-        )
+        response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config))
 
     tool_output = captured_out.getvalue() + captured_err.getvalue()
     return 0, tool_output, sandbox_protocol.response_marker_payload(response.model_dump_json())
@@ -1561,6 +1508,11 @@ def _run_forkserver_template() -> int:
     _ = mcp_registry, tool_system_plugins
     import mindroom.tools  # noqa: F401, PLC0415
 
+    # `python -m` prepended the runner's cwd to sys.path at template startup;
+    # fork children prepend their own request cwd instead, matching what a
+    # spawn-per-call child started in that cwd would see.
+    with suppress(ValueError):
+        sys.path.remove(str(Path.cwd()))
     return sandbox_forkserver.serve_template(socket_path, _run_subprocess_worker_payload)
 
 
@@ -1700,7 +1652,6 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
                 private_agent_names=(
                     frozenset(payload.private_agent_names) if payload.private_agent_names is not None else None
                 ),
-                user_scope_agent_names=app_user_scope_agent_names(request.app),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
@@ -1770,7 +1721,6 @@ async def view_file_in_worker(
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
                 private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
-                user_scope_agent_names=app_user_scope_agent_names(request.app),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
@@ -1991,7 +1941,6 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
                 private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
-                user_scope_agent_names=app_user_scope_agent_names(request.app),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:

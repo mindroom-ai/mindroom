@@ -94,8 +94,7 @@ def _template_fingerprint(python_executable: str, template_env: Mapping[str, str
 
 
 def _default_template_command(python_executable: str, socket_path: str) -> list[str]:
-    # Same `-P -s` isolation as a spawn-per-call child; fork children inherit it.
-    return [python_executable, "-P", "-s", "-m", "mindroom.api.sandbox_runner", TEMPLATE_ARG, socket_path]
+    return [python_executable, "-m", "mindroom.api.sandbox_runner", TEMPLATE_ARG, socket_path]
 
 
 @dataclass
@@ -529,6 +528,9 @@ def _run_child_request(
         os.environ.update(request.env)
     if request.cwd is not None:
         os.chdir(request.cwd)
+    # `python -m` prepends the effective cwd to sys.path; mirror that for the
+    # request cwd (the runner template drops its own baked entry at startup).
+    sys.path.insert(0, str(Path.cwd()))
     returncode, stdout_text, stderr_text = run_payload(request.envelope)
     conn.settimeout(_CHILD_RESPONSE_WRITE_TIMEOUT_SECONDS)
     _send_json(conn, {"returncode": returncode, "stdout": stdout_text, "stderr": stderr_text})

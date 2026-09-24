@@ -76,7 +76,6 @@ def routed_workspace(tmp_path: Path) -> tuple[TestClient, ResolvedWorkerTarget, 
         config=Config(agents={}, models={}),
         tool_metadata={},
         runner_token=TOKEN,
-        user_scope_agent_names=frozenset(),
     )
     app.include_router(sandbox_runner.router)
     return TestClient(app), target, shared_root, workspace

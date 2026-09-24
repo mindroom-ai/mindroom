@@ -32,7 +32,6 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
     resolve_private_knowledge_base_agent,
     unsupported_team_agent_message,
-    user_scope_shared_agent_names,
 )
 from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig  # noqa: TC001
@@ -1346,20 +1345,6 @@ class Config(BaseModel):
         if configured is None:
             return DEFAULT_WORKER_GRANTABLE_CREDENTIALS
         return frozenset(configured)
-
-    def get_user_scope_shared_agent_names(self) -> frozenset[str]:
-        """Return the non-private agents whose canonical state roots every `user` worker sees."""
-        return user_scope_shared_agent_names(
-            {
-                agent_name: resolve_agent_policy_from_data(
-                    agent_name,
-                    agent_config,
-                    default_worker_scope=self.defaults.worker_scope,
-                    private_knowledge_base_id_prefix=self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
-                )
-                for agent_name, agent_config in self.agents.items()
-            },
-        )
 
     def _agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
         """Return the internal derived execution scope for one agent.

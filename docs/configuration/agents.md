@@ -468,25 +468,15 @@ Isolation depends on the worker backend:
 
 - **Kubernetes dedicated workers** (`shared`, `user_agent`, unscoped): the runtime can only see its own agent's storage directory plus its worker-local scratch space.
   This is the strongest isolation available today.
-- **Kubernetes dedicated workers** (`user`): the runtime can see the storage of every non-private agent that resolves to `worker_scope: user`, plus that user's own private-instance namespace, because `user` mode intentionally shares one runtime across that user's agents.
-  It never mounts agents on `shared`, `user_agent`, or unscoped execution, so their sessions, memory, and workspaces stay out of reach.
-  It still mounts every `worker_scope: user` agent, including that agent's sessions from other requesters, even when this requester may not use all of them.
+- **Kubernetes dedicated workers** (`user`): the runtime can see all agents' storage, because `user` mode intentionally shares one runtime across multiple agents for a single user.
   Treat this as a shared workstation.
-  A `user`-scope tool call whose `base_dir` points at an agent on another scope fails with HTTP 400 (`base_dir must stay inside the allowed state roots or worker root`).
-  Adding, removing, or re-scoping a `worker_scope: user` agent changes every user worker's mounts, so Kubernetes and Docker recreate those workers on their next use.
 - **Shared-runner and local backends**: no hard filesystem boundary today, regardless of scope.
 
 Use `user_agent` if you need per-agent filesystem isolation.
-A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` runtimes, so files one requester leaves there (for example Git config under the workspace `HOME`) are seen by the others.
-Use `private` agents when requesters must not share workspace state.
 
 For per-workspace env that an agent can edit (PATH, package indexes, npm cache locations, etc.), drop a `.mindroom/worker-env.sh` script in the agent workspace; MindRoom sources it before each worker-routed `shell` or `python` request.
 MindRoom-owned workspace identity, cache, and virtualenv env names are reasserted after the hook, so hooks cannot redirect `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, or `VIRTUAL_ENV`.
-Runtimes that act for one requester (`user` and `user_agent` workers, background script runs, and CLI agent turns) source the hook only from a workspace no other requester can write: a private agent's workspace or the worker's own scratch workspace.
-They ignore a hook in a non-private agent's `agents/<agent>/workspace` and log one warning per workspace, because every requester's runtime for that agent can write that file and the hook would otherwise run with the current requester's credentials.
-`shared` and unscoped runtimes still source hooks from the agent workspace, because they already serve every requester alike.
-Give an agent `private` when each requester needs its own editable hook.
-With `worker_scope: user`, the same runtime can move between several private agent workspaces, and the hook is discovered from the current request's workspace — different private agents get different overlays automatically.
+With `worker_scope: user`, the same runtime can move between several agent workspaces, and the hook is discovered from the current request's workspace — different agents get different overlays automatically.
 See [Workspace env hook](../deployment/sandbox-proxy.md#workspace-env-hook-mindroomworker-envsh) for filename, filtering, and failure semantics.
 
 ### Where Agent Data Lives

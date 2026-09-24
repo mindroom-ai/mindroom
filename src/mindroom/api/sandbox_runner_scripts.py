@@ -19,7 +19,6 @@ from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_worker_prep
 from mindroom.api.sandbox_runner import (
     app_runner_token,
     app_runtime_paths,
-    app_user_scope_agent_names,
     resolve_script_state_workspace,
     validate_runner_token,
 )
@@ -248,7 +247,6 @@ def _prepare_worker(
             tool_init_overrides={},
             runtime_paths=runtime_paths,
             private_agent_names=(frozenset(private_agent_names) if private_agent_names is not None else None),
-            user_scope_agent_names=app_user_scope_agent_names(request.app),
             runner_token=app_runner_token(request.app),
         )
     except sandbox_worker_prep.WorkerRequestPreparationError as exc:
@@ -421,20 +419,12 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
     python_executable, base_environment, _cwd = sandbox_exec.resolve_subprocess_worker_context(prepared.paths)
     if python_executable is None or base_environment is None:
         return SandboxScriptRunResponse(ok=False, error="Worker Python runtime is unavailable.", failure_kind="worker")
-    runtime_paths = app_runtime_paths(request.app)
-    execution_environment = sandbox_exec.request_execution_env("python", None, runtime_paths)
+    execution_environment = sandbox_exec.request_execution_env("python", None, app_runtime_paths(request.app))
     try:
         sandbox_env_assembly.build_request_execution_env(
             request_workspace=workspace,
             prepared=prepared,
             execution_env=execution_environment,
-            apply_workspace_env_hook=sandbox_worker_prep.workspace_env_hook_allowed(
-                workspace,
-                requester_bound=sandbox_worker_prep.requester_bound_runtime(payload.worker_key),
-                state_worker_key=payload.state_scope_worker_key,
-                prepared=prepared,
-                runtime_paths=runtime_paths,
-            ),
         )
     except sandbox_exec.WorkspaceEnvHookError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -448,8 +438,7 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
     result = await run_command_via_supervisor(
         socket_path,
         namespace=_script_namespace(payload.worker_key, payload.run_id),
-        # `-P -s`: the workspace cwd and `HOME` must not shadow the shim or inject site code.
-        argv=[python_executable, "-P", "-s", "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        argv=[python_executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
         env=environment,
         cwd=str(workspace),
         tail=200,

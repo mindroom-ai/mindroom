@@ -808,6 +808,7 @@ def test_worker_mount_plan_never_infers_historical_access(tmp_path: Path, state:
     )
 
     assert {(mount.local_path, mount.worker_visible_path) for mount in mounts} == {
+        (tmp_path / "agents", Path("/app/worker/agents")),
         (canonical, Path("/app/worker/private_instances") / canonical.name),
     }
 

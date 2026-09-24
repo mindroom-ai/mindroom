@@ -828,7 +828,6 @@ async def test_sandbox_runner_save_attachment_writes_worker_workspace(tmp_path: 
                 config=config,
                 tool_metadata=TOOL_METADATA.copy(),
                 runner_token=_TEST_AUTH_TOKEN,
-                user_scope_agent_names=frozenset(),
             ),
         ),
     )
@@ -873,7 +872,6 @@ async def test_sandbox_runner_save_attachment_rejects_sha_mismatch_and_unsafe_pa
                 config=config,
                 tool_metadata=TOOL_METADATA.copy(),
                 runner_token=_TEST_AUTH_TOKEN,
-                user_scope_agent_names=frozenset(),
             ),
         ),
     )
@@ -930,7 +928,6 @@ async def test_sandbox_runner_save_attachment_rejects_unsafe_path_before_decodin
                 config=config,
                 tool_metadata=TOOL_METADATA.copy(),
                 runner_token=_TEST_AUTH_TOKEN,
-                user_scope_agent_names=frozenset(),
             ),
         ),
     )
@@ -968,7 +965,6 @@ async def test_sandbox_runner_save_attachment_supports_static_unkeyed_workspace(
                 config=config,
                 tool_metadata=TOOL_METADATA.copy(),
                 runner_token=_TEST_AUTH_TOKEN,
-                user_scope_agent_names=frozenset(),
             ),
         ),
     )

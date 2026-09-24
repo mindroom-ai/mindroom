@@ -112,18 +112,11 @@ class CliWorkerLease:
         if self.container_storage_root is not None:
             key = self.spec.state_scope_worker_key or ""
             private = self.spec.private_agent_names or frozenset()
-            user_scope = self.context.config.get_user_scope_shared_agent_names()
-            local_roots = visible_state_roots_for_worker_key(
-                runtime.storage_root,
-                key,
-                private_agent_names=private,
-                user_scope_agent_names=user_scope,
-            )
+            local_roots = visible_state_roots_for_worker_key(runtime.storage_root, key, private_agent_names=private)
             worker_roots = visible_state_roots_for_worker_key(
                 self.container_storage_root,
                 key,
                 private_agent_names=private,
-                user_scope_agent_names=user_scope,
             )
             workspace = Path(shell.workspace).resolve()
             projected = [
