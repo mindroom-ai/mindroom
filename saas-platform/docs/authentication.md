@@ -45,6 +45,8 @@ The platform's first-party Matrix OIDC endpoints are an additional, opt-in consu
 They validate the user, instance ownership, and subscription before authorizing hosted Matrix login.
 A missing or invalid cookie redirects this flow to platform login.
 This is separate from the instance dashboard/API Supabase authentication path.
+Tenant homeservers never accept anonymous self-registration, so this flow is the only way to create the owner's Matrix account.
+The provisioner therefore grants the owner's Matrix user administrator, invite, and room-admin authority only when Matrix OIDC is enabled.
 
 ## Key Settings
 

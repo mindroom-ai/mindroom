@@ -214,8 +214,12 @@ def _owner_matrix_user_id_from_email(email: str, *, instance_id: str, base_domai
 
 
 def _owner_matrix_user_id_for_account(sb: Any, *, account_id: Any, instance_id: str, base_domain: str) -> str | None:
-    """Return the MXID that should be authorized for the tenant owner."""
-    if not account_id:
+    """Return the MXID that should be authorized for the tenant owner.
+
+    Only platform OIDC binds the derived localpart to the authenticated account holder.
+    Without it the platform cannot prove who holds that MXID, so nothing is pre-authorized.
+    """
+    if not account_id or not _env_flag_enabled(INSTANCE_MATRIX_OIDC_ENABLED):
         return None
     try:
         normalized_account_id = str(UUID(str(account_id)))

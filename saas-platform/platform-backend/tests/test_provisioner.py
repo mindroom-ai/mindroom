@@ -676,6 +676,48 @@ class TestProvisionerEndpoints:
         assert set_string_args["roomDefaults.admins[0]"] == "@owner.user+test:123.mindroom.test"
         _assert_helm_uses_external_instance_secret(helm_args)
 
+    def test_provision_does_not_authorize_unbound_owner_matrix_user_without_oidc(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Without platform OIDC nothing binds the derived owner MXID to the account, so it gets no authority."""
+        account_id = "11111111-1111-4111-8111-111111111111"
+        instances_table = MagicMock()
+        instances_table.insert.return_value.execute.return_value = Mock(data=[{"instance_id": "123"}])
+        instances_table.update.return_value.eq.return_value.execute.return_value = Mock()
+        accounts_table = MagicMock()
+        accounts_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = Mock(
+            data=[{"email": "Owner.User+Test@example.com"}]
+        )
+        mock_supabase.table.side_effect = lambda table: {"accounts": accounts_table, "instances": instances_table}[
+            table
+        ]
+
+        with patch.multiple(
+            "backend.services.provisioner_service",
+            INSTANCE_MATRIX_OIDC_ENABLED="",
+            INSTANCE_MATRIX_OIDC_ISSUER="",
+            INSTANCE_MATRIX_OIDC_CLIENT_ID="",
+        ):
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": account_id, "tier": "byok"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        set_string_args = _helm_set_string_args(mock_helm.call_args.args[0])
+        assert "administrators[0]" not in set_string_args
+        assert "roomDefaults.inviteUsers[0]" not in set_string_args
+        assert "roomDefaults.admins[0]" not in set_string_args
+        accounts_table.select.assert_not_called()
+
     def test_provision_re_provision_existing(
         self,
         client: TestClient,
