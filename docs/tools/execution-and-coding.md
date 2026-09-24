@@ -69,8 +69,7 @@ agents:
     tools:
       - coding
       - file
-      - python:
-          restrict_to_base_dir: true
+      - python
       - shell:
           extra_env_passthrough:
             - GITHUB_TOKEN
@@ -95,7 +94,7 @@ Choose a destination shared with the tools that need the files, or generate work
 ### What It Does
 
 `file` exposes `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
-Paths resolve against `base_dir` and reject escapes by default; set `restrict_to_base_dir: false` to allow outside paths.
+Paths resolve against `base_dir` and follow the agent's [`file_access`](../architecture/security-posture.md#file-access) setting: `workspace` (the default) rejects escapes, and `unrestricted` allows any path the tool's process can reach.
 `save_file()`, `replace_file_chunk()`, and `delete_file()` refuse any path inside a `.git` directory, because MindRoom runs Git in knowledge checkouts that may sit inside agent workspaces.
 This is defense in depth: code-execution tools and tools that accept arbitrary output paths can still write there, so the dashboard's knowledge Git listing does not trust a checkout's config.
 `read_file()` enforces `max_file_length` and `max_file_lines`, and it tells the caller to use chunk reads when a file is too large.
@@ -108,7 +107,6 @@ MindRoom marks `file` as worker-routed by default, so it usually executes in the
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working root when an agent workspace exists, otherwise the current directory. This field is not normally authored inline in `config.yaml`. |
-| `restrict_to_base_dir` | `boolean` | `no` | `true` | Keep file access inside `base_dir`; set to `false` to allow outside paths. |
 | `enable_save_file` | `boolean` | `no` | `true` | Enable `save_file()`. |
 | `enable_read_file` | `boolean` | `no` | `true` | Enable `read_file()`. |
 | `enable_delete_file` | `boolean` | `no` | `false` | Enable `delete_file()`. |
@@ -243,7 +241,6 @@ MindRoom marks `python` as worker-routed by default, so sandbox execution is the
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working root when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
 | `safe_globals` | `text` | `no` | `null` | Advanced raw constructor input that maps to the upstream `safe_globals` dict parameter. |
 | `safe_locals` | `text` | `no` | `null` | Advanced raw constructor input that maps to the upstream `safe_locals` dict parameter. |
-| `restrict_to_base_dir` | `boolean` | `no` | `true` | Constrain the file helper methods to `base_dir`. |
 
 ### Example
 
@@ -251,8 +248,7 @@ MindRoom marks `python` as worker-routed by default, so sandbox execution is the
 agents:
   analyst:
     tools:
-      - python:
-          restrict_to_base_dir: true
+      - python
 ```
 
 ```python
@@ -266,7 +262,7 @@ list_files()
 
 ### Notes
 
-- `restrict_to_base_dir` only constrains the file helper paths, not what arbitrary Python code can do once executed.
+- `python` runs arbitrary code, so its file helpers are never confined to `base_dir` and its [`file_access`](../architecture/security-posture.md#file-access) is always `unrestricted`; isolate it with `worker_tools`.
 - `safe_globals` and `safe_locals` are exposed directly from the upstream constructor and are mainly useful for advanced programmatic wiring, not typical hand-written YAML.
 - If you need runtime-scoped environment isolation, rely on worker-routed execution instead of assuming in-process Python emulation is a security boundary.
 - Worker-routed `python` execution also receives `.mindroom/worker-env.sh` overlay env via `os.environ` (e.g., `PIP_INDEX_URL`). See "Workspace env hook" in `docs/deployment/sandbox-proxy.md`.
@@ -284,7 +280,7 @@ list_files()
 If exact matching fails, `edit_file()` falls back to whitespace-and-Unicode-normalized fuzzy matching.
 `grep()` prefers `rg` when available and falls back to Python regex search otherwise.
 `find_files()` filters hidden and gitignored paths, and `ls()` keeps dotfiles visible while adding `/` markers to directories.
-Path resolution stays inside `base_dir` by default; set `restrict_to_base_dir: false` to allow outside paths.
+Path resolution follows the agent's [`file_access`](../architecture/security-posture.md#file-access) setting: `workspace` (the default) stays inside `base_dir`, and `unrestricted` allows outside paths.
 `write_file()` and `edit_file()` refuse any path inside a `.git` directory.
 MindRoom marks `coding` as worker-routed by default.
 
@@ -293,7 +289,6 @@ MindRoom marks `coding` as worker-routed by default.
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working directory for code operations when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
-| `restrict_to_base_dir` | `boolean` | `no` | `true` | Keep code operations inside `base_dir`; set to `false` to allow outside paths. |
 
 ### Example
 

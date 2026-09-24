@@ -1662,6 +1662,7 @@ agents:
     markdown: true                 # Optional: Override default (inherits from defaults section)
     worker_tools: [shell, file]    # Optional: Override default (inherits from defaults section)
     worker_scope: user_agent       # Optional: Reuse one proxied runtime per requester+agent
+    file_access: workspace         # Optional: workspace or unrestricted (inherits from defaults section)
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0, file, or none)
@@ -1768,6 +1769,7 @@ defaults:
   show_tool_calls: true            # Default: true (show tool details inline; hidden mode still allows generic worker warmup copy)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
+  file_access: workspace           # Default: workspace (path tools stay in the agent workspace; unrestricted allows any path)
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
   thread_summary_model: null       # Default: null (uses the default model)
@@ -2543,6 +2545,7 @@ agents:
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Routed tools may still show generic worker warmup text such as `Preparing isolated worker...`, but that copy never includes tool identifiers or tool-trace metadata. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
 | `worker_scope` | string | `null` | How sandbox runtimes are shared for non-private agents. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` already defines the requester partition for that agent |
+| `file_access` | string | `null` | Which files path-taking tools (`file`, `coding`, `attachments`, `matrix_message`, `gmail`, `google_drive`, `browser` uploads) may use. `workspace`: the agent workspace and its attachments. `unrestricted`: any path the tool's process can reach. Code-execution tools such as `shell` and `python` are always unrestricted; isolate them with `worker_tools`. Inherits from `defaults.file_access` (default: `workspace`). See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/) |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Allowed agent names for `run_subagent`, including itself if listed (see [Agent Delegation](#agent-delegation)) |
 | `thread_exports` | bool or object | `null` | Continuously export every thread from rooms this agent is joined to as YAML under `<workspace>/thread_exports/`. `true` enables the defaults; an object sets `invited_rooms` and `private_room_scope` (see [Thread Exports](#thread-exports)) |
@@ -4396,7 +4399,7 @@ agents:
     role: Help in chat
     tools:
       - shell
-      - coding: {defer: true, initial: true, restrict_to_base_dir: false}
+      - coding: {defer: true, initial: true}
       - searxng: {defer: true, host: https://search.example.test, fixed_max_results: 10}
       - name: serper
         defer: true
@@ -4506,8 +4509,7 @@ agents:
     tools:
       - coding
       - file
-      - python:
-          restrict_to_base_dir: true
+      - python
       - shell:
           extra_env_passthrough:
             - GITHUB_TOKEN
@@ -4532,7 +4534,7 @@ Choose a destination shared with the tools that need the files, or generate work
 ### What It Does
 
 `file` exposes `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
-Paths resolve against `base_dir` and reject escapes by default; set `restrict_to_base_dir: false` to allow outside paths.
+Paths resolve against `base_dir` and follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: `workspace` (the default) rejects escapes, and `unrestricted` allows any path the tool's process can reach.
 `save_file()`, `replace_file_chunk()`, and `delete_file()` refuse any path inside a `.git` directory, because MindRoom runs Git in knowledge checkouts that may sit inside agent workspaces.
 This is defense in depth: code-execution tools and tools that accept arbitrary output paths can still write there, so the dashboard's knowledge Git listing does not trust a checkout's config.
 `read_file()` enforces `max_file_length` and `max_file_lines`, and it tells the caller to use chunk reads when a file is too large.
@@ -4545,7 +4547,6 @@ MindRoom marks `file` as worker-routed by default, so it usually executes in the
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working root when an agent workspace exists, otherwise the current directory. This field is not normally authored inline in `config.yaml`. |
-| `restrict_to_base_dir` | `boolean` | `no` | `true` | Keep file access inside `base_dir`; set to `false` to allow outside paths. |
 | `enable_save_file` | `boolean` | `no` | `true` | Enable `save_file()`. |
 | `enable_read_file` | `boolean` | `no` | `true` | Enable `read_file()`. |
 | `enable_delete_file` | `boolean` | `no` | `false` | Enable `delete_file()`. |
@@ -4680,7 +4681,6 @@ MindRoom marks `python` as worker-routed by default, so sandbox execution is the
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working root when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
 | `safe_globals` | `text` | `no` | `null` | Advanced raw constructor input that maps to the upstream `safe_globals` dict parameter. |
 | `safe_locals` | `text` | `no` | `null` | Advanced raw constructor input that maps to the upstream `safe_locals` dict parameter. |
-| `restrict_to_base_dir` | `boolean` | `no` | `true` | Constrain the file helper methods to `base_dir`. |
 
 ### Example
 
@@ -4688,8 +4688,7 @@ MindRoom marks `python` as worker-routed by default, so sandbox execution is the
 agents:
   analyst:
     tools:
-      - python:
-          restrict_to_base_dir: true
+      - python
 ```
 
 ```python
@@ -4703,7 +4702,7 @@ list_files()
 
 ### Notes
 
-- `restrict_to_base_dir` only constrains the file helper paths, not what arbitrary Python code can do once executed.
+- `python` runs arbitrary code, so its file helpers are never confined to `base_dir` and its [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) is always `unrestricted`; isolate it with `worker_tools`.
 - `safe_globals` and `safe_locals` are exposed directly from the upstream constructor and are mainly useful for advanced programmatic wiring, not typical hand-written YAML.
 - If you need runtime-scoped environment isolation, rely on worker-routed execution instead of assuming in-process Python emulation is a security boundary.
 - Worker-routed `python` execution also receives `.mindroom/worker-env.sh` overlay env via `os.environ` (e.g., `PIP_INDEX_URL`). See "Workspace env hook" in `docs/deployment/sandbox-proxy.md`.
@@ -4721,7 +4720,7 @@ list_files()
 If exact matching fails, `edit_file()` falls back to whitespace-and-Unicode-normalized fuzzy matching.
 `grep()` prefers `rg` when available and falls back to Python regex search otherwise.
 `find_files()` filters hidden and gitignored paths, and `ls()` keeps dotfiles visible while adding `/` markers to directories.
-Path resolution stays inside `base_dir` by default; set `restrict_to_base_dir: false` to allow outside paths.
+Path resolution follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: `workspace` (the default) stays inside `base_dir`, and `unrestricted` allows outside paths.
 `write_file()` and `edit_file()` refuse any path inside a `.git` directory.
 MindRoom marks `coding` as worker-routed by default.
 
@@ -4730,7 +4729,6 @@ MindRoom marks `coding` as worker-routed by default.
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working directory for code operations when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
-| `restrict_to_base_dir` | `boolean` | `no` | `true` | Keep code operations inside `base_dir`; set to `false` to allow outside paths. |
 
 ### Example
 
@@ -5484,8 +5482,8 @@ MindRoom exposes `google_drive_list_files()`, `google_drive_search_files()`, `go
 `google_drive_search_files()` searches Drive metadata.
 `google_drive_read_file()` reads Google Workspace files and non-Google files up to the configured `max_read_size`.
 `google_drive_download_file()` downloads a Drive file, exporting Google Workspace files to their best native format, for example a complete Google Sheets workbook as `.xlsx`.
-`google_drive_upload_file()` uploads a local file and resolves relative paths from the agent workspace.
-`google_drive_update_file(file_id, local_path, mime_type=None)` replaces an existing binary file's contents from a file inside the agent workspace.
+`google_drive_upload_file()` uploads a local file, resolves relative paths from the agent workspace, and follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting for which local files it may read.
+`google_drive_update_file(file_id, local_path, mime_type=None)` replaces an existing binary file's contents from a local file under the same `file_access` rule.
 Native Google Workspace files require their respective Workspace APIs for content updates.
 `google_drive_create_folder()` creates a folder under the Drive root or an optional parent.
 `google_drive_move_file()` moves a file to a new parent and can rename it in the same request.
@@ -6975,9 +6973,11 @@ Agno's normal agent-session persistence can retain model-visible screenshot pixe
 Playwright MCP briefly writes its requested screenshot into the local browser workspace, and MindRoom reads and removes that exact scratch file before returning the tool result.
 Safari and other unsupported browsers can still be operated through the separate accessibility-first `desktop` tool.
 For the host target, `output_dir` defaults to `<storage>/browser` for screenshots, PDFs, and other artifacts.
-Host `upload` accepts files in that artifact directory, files in the agent's workspace (absolute or workspace-relative paths), and `att_*` IDs of attachments available in the current conversation; use `./` for a workspace file whose name starts with `att_`.
+Which files `upload` may read follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
+With the default `workspace`, host `upload` accepts files in that artifact directory, files in the agent's workspace (absolute or workspace-relative paths), and `att_*` IDs of attachments available in the current conversation; use `./` for a workspace file whose name starts with `att_`.
 Everything else under the runtime storage root, including credentials, encryption keys, Matrix state, sessions, and other agents' workspaces, is rejected, so `output_dir` must not point at runtime state.
-On a routed worker, `upload` reads only files inside the worker workspace.
+On a routed worker, `workspace` mode reads only files inside the worker workspace.
+With `unrestricted`, `upload` accepts any existing file its process can read, which on a routed worker is the worker container.
 The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
 
@@ -8588,7 +8588,8 @@ matrix_message(action="react", event_id="$event123", message="✅")
 See [Matrix Message Full Semantics](https://docs.mindroom.chat/tools/matrix-message/) for the complete argument schema, conversation selection, attachments, and collapsible sections.
 Use `matrix_room(action="threads")` for thread discovery and `matrix_room(action="room-info")` for current targeting metadata.
 `attachments` accepts up to five ordered context-scoped `att_*` IDs or file paths.
-Paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
 When sending to a recipient, all files arrive before the task text starts its response.
 For durable text-only retries, supply `idempotency_key`; the same requester, agent, room, and key reuse the first prepared payload and receipt for eight days after completion.
 Send results include the conversation `thread_id` and delivered event IDs, including partial delivery details on failure.
@@ -8980,9 +8981,9 @@ Use `mindroom_output_path` before handing attachments to worker-routed workspace
 In shell tools, the agent workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in worker-routed shell and python tools it is also `~` and `$HOME`, so a saved path like `incoming/file.txt` can also be read as `~/incoming/file.txt`.
 The path must be relative to the workspace and must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, start with `~`, or contain `$` or `%` characters.
 `register_attachment()` turns a local file path into a new context-scoped `att_*` ID and appends that ID to the current runtime context so later tool calls in the same run can reuse it.
-`register_attachment()` paths resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
+`register_attachment()` paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: with the default `workspace`, they resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
 Absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace, so `~/incoming/file.txt` is rejected here.
-Without a configured agent workspace, path-based registration is refused and only existing `att_*` IDs can be attached.
+Without a configured agent workspace, `workspace` mode refuses path-based registration and only existing `att_*` IDs can be attached; `unrestricted` mode still accepts absolute paths.
 Attachment records include kind, filename, MIME type, room ID, thread ID, sender, creation time, and an `available` flag that reports whether the local file still exists.
 This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`.
 
@@ -9187,7 +9188,8 @@ Oversized existing files fail closed before JSON parsing and are never discarded
 ## Attachments
 
 Each `attachments` entry is a context-scoped `att_*` ID or a local file path.
-Paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
 Without a configured workspace, only `att_*` IDs are accepted.
 Use `./att_filename` for a local filename that starts with `att_`.
 All references are resolved before any message is sent.
@@ -9871,7 +9873,7 @@ The default MindRoom Gmail toolkit exposes 26 functions for stars, drafts, messa
 Its exact function names are `apply_label()`, `create_draft_email()`, `delete_custom_label()`, `get_draft()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `get_emails_from_user()`, `get_latest_emails()`, `get_message()`, `get_starred_emails()`, `get_thread()`, `get_unread_emails()`, `list_custom_labels()`, `list_drafts()`, `mark_email_as_read()`, `mark_email_as_unread()`, `remove_label()`, `search_emails()`, `search_threads()`, `send_email()`, `send_email_reply()`, `send_email_to_self()`, `star_email()`, `unstar_email()`, and `update_draft()`.
 `send_email_to_self(subject, body)` derives its sole recipient from the connected Gmail profile and accepts no recipient, CC, BCC, or attachment arguments.
 The function follows the configured tool approval policy, so operators can match `send_email_to_self` separately from other send functions.
-Draft and send operations accept attachment file paths inside the agent workspace.
+Draft and send operations accept attachment file paths that the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting allows: inside the agent workspace by default, or any readable file when it is `unrestricted`.
 Relative attachment paths resolve from the workspace root, and paths that resolve outside it, including through symlinks, are rejected before any file is read or Gmail request is made.
 Attachments are read through no-follow file descriptors, so a path component swapped for a symlink after validation is refused.
 Attachments are limited to 25 MiB in total per message.
@@ -17325,8 +17327,9 @@ In shell tools, that workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in wor
 
 `matrix_message` accepts one ordered `attachments` list containing context attachment IDs (`att_*`) and local file paths.
 Local files are registered in the current context before sending.
-Paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
-Without a configured agent workspace, only `att_*` IDs can be attached.
+With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
+Without a configured agent workspace, `workspace` mode only attaches `att_*` IDs.
 Use `matrix_message(attachments=["att_example", "exports/report.csv"])` to send attachment IDs and file paths in order to the current conversation.
 
 ### Why use this tool?

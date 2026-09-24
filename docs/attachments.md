@@ -112,8 +112,9 @@ In shell tools, that workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in wor
 
 `matrix_message` accepts one ordered `attachments` list containing context attachment IDs (`att_*`) and local file paths.
 Local files are registered in the current context before sending.
-Paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
-Without a configured agent workspace, only `att_*` IDs can be attached.
+With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With [`file_access`](architecture/security-posture.md#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
+Without a configured agent workspace, `workspace` mode only attaches `att_*` IDs.
 Use `matrix_message(attachments=["att_example", "exports/report.csv"])` to send attachment IDs and file paths in order to the current conversation.
 
 ### Why use this tool?

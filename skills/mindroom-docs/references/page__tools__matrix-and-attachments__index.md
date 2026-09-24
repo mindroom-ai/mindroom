@@ -64,7 +64,8 @@ matrix_message(action="react", event_id="$event123", message="✅")
 See [Matrix Message Full Semantics](https://docs.mindroom.chat/tools/matrix-message/) for the complete argument schema, conversation selection, attachments, and collapsible sections.
 Use `matrix_room(action="threads")` for thread discovery and `matrix_room(action="room-info")` for current targeting metadata.
 `attachments` accepts up to five ordered context-scoped `att_*` IDs or file paths.
-Paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
 When sending to a recipient, all files arrive before the task text starts its response.
 For durable text-only retries, supply `idempotency_key`; the same requester, agent, room, and key reuse the first prepared payload and receipt for eight days after completion.
 Send results include the conversation `thread_id` and delivered event IDs, including partial delivery details on failure.
@@ -456,9 +457,9 @@ Use `mindroom_output_path` before handing attachments to worker-routed workspace
 In shell tools, the agent workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in worker-routed shell and python tools it is also `~` and `$HOME`, so a saved path like `incoming/file.txt` can also be read as `~/incoming/file.txt`.
 The path must be relative to the workspace and must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, start with `~`, or contain `$` or `%` characters.
 `register_attachment()` turns a local file path into a new context-scoped `att_*` ID and appends that ID to the current runtime context so later tool calls in the same run can reuse it.
-`register_attachment()` paths resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
+`register_attachment()` paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: with the default `workspace`, they resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
 Absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace, so `~/incoming/file.txt` is rejected here.
-Without a configured agent workspace, path-based registration is refused and only existing `att_*` IDs can be attached.
+Without a configured agent workspace, `workspace` mode refuses path-based registration and only existing `att_*` IDs can be attached; `unrestricted` mode still accepts absolute paths.
 Attachment records include kind, filename, MIME type, room ID, thread ID, sender, creation time, and an `available` flag that reports whether the local file still exists.
 This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`.
 

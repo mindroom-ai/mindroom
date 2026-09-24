@@ -19,7 +19,7 @@ agents:
     role: Help in chat
     tools:
       - shell
-      - coding: {defer: true, initial: true, restrict_to_base_dir: false}
+      - coding: {defer: true, initial: true}
       - searxng: {defer: true, host: https://search.example.test, fixed_max_results: 10}
       - name: serper
         defer: true
