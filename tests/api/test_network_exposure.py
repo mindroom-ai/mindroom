@@ -1,4 +1,4 @@
-"""Tests for the dashboard's network exposure guards."""
+"""Tests for the Host allow-list of a dashboard that needs no credential."""
 
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
+_ALL_INTERFACES = "0.0.0.0"  # noqa: S104
+
 
 def _runtime_paths(tmp_path: Path, **process_env: str) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
@@ -25,7 +27,7 @@ def _runtime_paths(tmp_path: Path, **process_env: str) -> RuntimePaths:
     return constants.resolve_primary_runtime_paths(config_path=config_path, process_env=process_env)
 
 
-def _guarded_client(runtime_paths: RuntimePaths, handled: list[str]) -> TestClient:
+def _app(handled: list[str]) -> FastAPI:
     app = FastAPI()
 
     @app.post("/api/config/save")
@@ -33,136 +35,89 @@ def _guarded_client(runtime_paths: RuntimePaths, handled: list[str]) -> TestClie
         handled.append("save")
         return {"success": True}
 
-    @app.get("/api/health")
-    async def health() -> dict[str, str]:
-        handled.append("health")
-        return {"status": "healthy"}
-
-    return TestClient(network_exposure.DashboardHostGuard(app, runtime_paths), base_url="http://localhost:8765")
-
-
-@pytest.mark.parametrize(
-    ("host", "expected"),
-    [
-        ("localhost:8765", 200),
-        ("127.0.0.1:8765", 200),
-        ("[::1]:8765", 200),
-        ("mindroom.localhost:8765", 200),
-        # An address literal cannot be a rebinding target: a page is only
-        # same-origin with it when it is served from that address.
-        ("192.168.1.10:8765", 200),
-        ("[fd00::1]:8765", 200),
-        ("attacker.example:8765", 400),
-        ("dashboard.example.org", 400),
-        ("localhost:8765,attacker.example", 400),
-    ],
-)
-def test_open_access_answers_only_expected_hosts(tmp_path: Path, host: str, expected: int) -> None:
-    """A rebound attacker host must never reach an unauthenticated dashboard."""
-    handled: list[str] = []
-    client = _guarded_client(_runtime_paths(tmp_path), handled)
-
-    response = client.post("/api/config/save", json={}, headers={"Host": host})
-
-    assert response.status_code == expected
-    assert handled == (["save"] if expected == 200 else [])
-
-
-@pytest.mark.parametrize(
-    ("env_name", "self_url"),
-    [
-        ("MINDROOM_PUBLIC_URL", "https://dashboard.example.org"),
-        ("MINDROOM_SCRIPT_GATEWAY_URL", "http://dashboard.example.org:8765/api/script-gateway"),
-        ("MINDROOM_URL", "https://dashboard.example.org"),
-    ],
-)
-def test_self_declared_hosts_are_accepted(tmp_path: Path, env_name: str, self_url: str) -> None:
-    """A URL the runtime publishes as its own address names an expected host."""
-    handled: list[str] = []
-    client = _guarded_client(_runtime_paths(tmp_path, **{env_name: self_url}), handled)
-
-    response = client.post("/api/config/save", json={}, headers={"Host": "dashboard.example.org"})
-
-    assert response.status_code == 200
-    assert handled == ["save"]
-
-
-@pytest.mark.parametrize("configured", ["mindroom.internal", "other.example, mindroom.internal", "*"])
-def test_configured_extra_hosts_are_accepted(tmp_path: Path, configured: str) -> None:
-    """Operators can name the extra hosts their deployment answers."""
-    handled: list[str] = []
-    runtime_paths = _runtime_paths(tmp_path, MINDROOM_DASHBOARD_ALLOWED_HOSTS=configured)
-    client = _guarded_client(runtime_paths, handled)
-
-    response = client.post("/api/config/save", json={}, headers={"Host": "mindroom.internal:8765"})
-
-    assert response.status_code == 200
-    assert handled == ["save"]
-
-
-def test_websocket_handshake_is_rejected_for_unexpected_hosts(tmp_path: Path) -> None:
-    """A rebound page must not open a socket to an unauthenticated dashboard either."""
-    handled: list[str] = []
-    app = FastAPI()
-
     @app.websocket("/api/computers/ws")
     async def socket(websocket: WebSocket) -> None:
         handled.append("socket")
         await websocket.accept()
         await websocket.close()
 
-    client = TestClient(
-        network_exposure.DashboardHostGuard(app, _runtime_paths(tmp_path)),
-        base_url="http://localhost:8765",
-    )
+    return app
+
+
+def _client(runtime_paths: RuntimePaths, handled: list[str]) -> TestClient:
+    guarded = network_exposure.guard_unauthenticated_dashboard(_app(handled), runtime_paths, host="127.0.0.1")
+    return TestClient(guarded)
+
+
+@pytest.mark.parametrize(
+    ("host", "allowed"),
+    [
+        ("localhost:8765", True),
+        ("LOCALHOST.:8765", True),
+        ("myapp.localhost", True),
+        ("127.0.0.1:8765", True),
+        ("[::1]:8765", True),
+        # An address literal cannot be a rebinding target, so pod IPs and LAN addresses work.
+        ("10.1.2.3:8765", True),
+        ("attacker.example:8765", False),
+        ("localhost:8765,attacker.example", False),
+        ("", False),
+    ],
+)
+def test_unauthenticated_dashboard_answers_only_its_own_hosts(tmp_path: Path, host: str, *, allowed: bool) -> None:
+    """A DNS-rebound attacker host must never reach an unauthenticated dashboard."""
+    handled: list[str] = []
+
+    response = _client(_runtime_paths(tmp_path), handled).post("/api/config/save", headers={"Host": host})
+
+    assert response.status_code == (200 if allowed else 400)
+    assert handled == (["save"] if allowed else [])
+
+
+@pytest.mark.parametrize(
+    ("env_name", "value"),
+    [
+        ("MINDROOM_PUBLIC_URL", "https://dashboard.example.org"),
+        ("MINDROOM_SCRIPT_GATEWAY_URL", "http://dashboard.example.org:8765/api/script-gateway"),
+        ("MINDROOM_DASHBOARD_ALLOWED_HOSTS", "other.example, Dashboard.Example.org"),
+    ],
+)
+def test_configured_hosts_are_answered(tmp_path: Path, env_name: str, value: str) -> None:
+    """The runtime's own URLs and explicitly named hosts are expected hosts."""
+    handled: list[str] = []
+    client = _client(_runtime_paths(tmp_path, **{env_name: value}), handled)
+
+    response = client.post("/api/config/save", headers={"Host": "dashboard.example.org"})
+
+    assert response.status_code == 200
+    assert handled == ["save"]
+
+
+def test_websocket_handshake_is_refused_for_unexpected_hosts(tmp_path: Path) -> None:
+    """A rebound page must not open a socket to an unauthenticated dashboard either."""
+    handled: list[str] = []
+    client = _client(_runtime_paths(tmp_path), handled)
 
     with (
         pytest.raises(WebSocketDisconnect),
-        client.websocket_connect("/api/computers/ws", headers={"Host": "attacker.example:8765"}),
+        client.websocket_connect("/api/computers/ws", headers={"Host": "attacker.example"}),
     ):
-        pass  # pragma: no cover - the handshake is refused before the body runs.
-
-    assert handled == []
-
-    with client.websocket_connect("/api/computers/ws", headers={"Host": "localhost:8765"}):
         pass
+    with client.websocket_connect("/api/computers/ws", headers={"Host": "localhost"}):
+        pass
+
     assert handled == ["socket"]
 
 
-def test_missing_host_header_is_rejected(tmp_path: Path) -> None:
-    """A request that names no host cannot be matched against the allow-list."""
-    handled: list[str] = []
-    client = _guarded_client(_runtime_paths(tmp_path), handled)
+def test_unauthenticated_bind_is_guarded_and_warned_about(tmp_path: Path) -> None:
+    """Operators must see that the dashboard serves requests without a credential."""
+    app = _app([])
 
-    response = client.post("/api/config/save", json={}, headers={"Host": ""})
+    with patch.object(network_exposure.logger, "warning") as warning:
+        served = network_exposure.guard_unauthenticated_dashboard(app, _runtime_paths(tmp_path), host=_ALL_INTERFACES)
 
-    assert response.status_code == 400
-    assert handled == []
-
-
-def test_probe_paths_stay_reachable_under_any_host(tmp_path: Path) -> None:
-    """Schedulers probe the runtime by their own routable address."""
-    handled: list[str] = []
-    client = _guarded_client(_runtime_paths(tmp_path), handled)
-
-    response = client.get("/api/health", headers={"Host": "10.1.2.3:8765"})
-
-    assert response.status_code == 200
-    assert handled == ["health"]
-
-
-def test_probe_exemption_does_not_cover_browser_requests(tmp_path: Path) -> None:
-    """A rebound page must not read runtime status through the probe exemption."""
-    handled: list[str] = []
-    client = _guarded_client(_runtime_paths(tmp_path), handled)
-
-    response = client.get(
-        "/api/health",
-        headers={"Host": "attacker.example:8765", "Sec-Fetch-Site": "same-origin"},
-    )
-
-    assert response.status_code == 400
-    assert handled == []
+    assert served is not app
+    assert warning.call_args.kwargs["bind_host"] == _ALL_INTERFACES
 
 
 @pytest.mark.parametrize(
@@ -173,46 +128,16 @@ def test_probe_exemption_does_not_cover_browser_requests(tmp_path: Path) -> None
         {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"},
     ],
 )
-def test_authenticated_dashboards_keep_answering_every_host(tmp_path: Path, process_env: dict[str, str]) -> None:
+def test_authenticated_dashboards_are_served_unchanged(tmp_path: Path, process_env: dict[str, str]) -> None:
     """Credentialed deployments sit behind proxies that route arbitrary host names."""
-    handled: list[str] = []
-    runtime_paths = _runtime_paths(tmp_path, **process_env)
-    assert not network_exposure.dashboard_open_access(runtime_paths)
-    client = _guarded_client(runtime_paths, handled)
-
-    response = client.post("/api/config/save", json={}, headers={"Host": "anything.example"})
-
-    assert response.status_code == 200
-    assert handled == ["save"]
-
-
-def test_open_access_is_detected_without_configured_auth(tmp_path: Path) -> None:
-    """An empty API key is the documented open-access default, not a credential."""
-    assert network_exposure.dashboard_open_access(_runtime_paths(tmp_path))
-    assert network_exposure.dashboard_open_access(_runtime_paths(tmp_path, MINDROOM_API_KEY="  "))
-    assert network_exposure.dashboard_open_access(_runtime_paths(tmp_path, SUPABASE_URL="https://project.supabase.co"))
-
-
-@pytest.mark.parametrize(
-    ("host", "event"),
-    [
-        ("127.0.0.1", "dashboard_unauthenticated"),
-        ("0.0.0.0", "dashboard_unauthenticated_non_loopback_bind"),  # noqa: S104
-    ],
-)
-def test_unauthenticated_bind_is_reported_at_startup(tmp_path: Path, host: str, event: str) -> None:
-    """Operators must see that the dashboard serves requests without a credential."""
-    with patch.object(network_exposure.logger, "warning") as warning:
-        network_exposure.warn_unauthenticated_dashboard_exposure(_runtime_paths(tmp_path), host=host)
-
-    assert warning.call_args.args[0] == event
-
-
-def test_authenticated_bind_is_not_warned_about(tmp_path: Path) -> None:
-    """A configured API key is the expected deployment, not a warning."""
-    runtime_paths = _runtime_paths(tmp_path, MINDROOM_API_KEY="test-key")
+    app = _app([])
 
     with patch.object(network_exposure.logger, "warning") as warning:
-        network_exposure.warn_unauthenticated_dashboard_exposure(runtime_paths, host="0.0.0.0")  # noqa: S104
+        served = network_exposure.guard_unauthenticated_dashboard(
+            app,
+            _runtime_paths(tmp_path, **process_env),
+            host=_ALL_INTERFACES,
+        )
 
+    assert served is app
     warning.assert_not_called()

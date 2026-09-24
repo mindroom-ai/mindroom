@@ -237,7 +237,7 @@ Matrix sync callback
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `api/usage_export.py` | Application-scoped usage-export preparation: one background scan, a bounded cache for daily/request-detail variants, committed-generation validation, and non-blocking shutdown cleanup |
-| `api/network_exposure.py` | Open-access dashboard exposure policy: accepted `Host` names, the ASGI host guard installed by the serving entry points, and the unauthenticated-bind warning |
+| `api/network_exposure.py` | `Host` allow-list and startup warning for a dashboard served without a credential |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |

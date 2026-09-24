@@ -16,7 +16,7 @@ from mindroom import constants, file_watcher
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import ApiAuthState, public_origin, verify_user  # noqa: F401
+from mindroom.api.auth import ApiAuthState, dashboard_open_access, public_origin, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
 from mindroom.api.computers import active_computer_worker_keys, rebind_computer_runtime
 from mindroom.api.computers import router as computers_router
@@ -35,11 +35,6 @@ from mindroom.api.integrations import router as integrations_router
 from mindroom.api.knowledge import router as knowledge_router
 from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.mcp_gateway import gateway_cors_origins, gateway_lifespan, install_gateway_routes
-from mindroom.api.network_exposure import (
-    DashboardHostGuard,
-    dashboard_open_access,
-    warn_unauthenticated_dashboard_exposure,
-)
 from mindroom.api.oauth import router as oauth_router
 from mindroom.api.openai_compat import router as openai_compat_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
@@ -1141,10 +1136,3 @@ async def get_available_rooms(request: Request, _user: Annotated[dict, Depends(v
 
 
 app.include_router(frontend_router)
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    warn_unauthenticated_dashboard_exposure(_runtime_paths, host="127.0.0.1")
-    uvicorn.run(DashboardHostGuard(app, _runtime_paths), host="127.0.0.1", port=8765)

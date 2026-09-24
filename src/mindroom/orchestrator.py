@@ -2705,11 +2705,8 @@ async def _run_api_server(
         )
     if knowledge_refresh_scheduler is not None:
         api_main.bind_orchestrator_knowledge_refresh_scheduler(api_main.app, knowledge_refresh_scheduler)
-    network_exposure.warn_unauthenticated_dashboard_exposure(runtime_paths, host=host)
     config = uvicorn.Config(
-        # An open-access dashboard must answer only to its own host names, so a
-        # DNS-rebound attacker page never becomes same-origin with it.
-        network_exposure.DashboardHostGuard(api_main.app, runtime_paths),
+        network_exposure.guard_unauthenticated_dashboard(api_main.app, runtime_paths, host=host),
         host=host,
         port=port,
         log_level=log_level.lower(),

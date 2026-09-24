@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import html
 import importlib
+import ipaddress
 import json
 import secrets
 from dataclasses import dataclass, field, replace
@@ -20,7 +21,6 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
-from mindroom.api.network_exposure import is_forged_browser_mutation
 from mindroom.authorization import is_platform_administrator
 from mindroom.matrix.identity import (
     matrix_user_id_from_email,
@@ -933,7 +933,7 @@ def require_same_origin(
 
 def _require_browser_mutation_origin(
     request: Request,
-    settings: _ApiAuthSettings,
+    public_url: str | None,
     validated_authorization: str | None = None,
 ) -> None:
     if (
@@ -941,23 +941,44 @@ def _require_browser_mutation_origin(
         or _extract_bearer_token(validated_authorization) is not None
     ):
         return
-    origin = public_origin(settings.public_url or str(request.base_url))
+    origin = public_origin(public_url or str(request.base_url))
     if origin is None:
         raise HTTPException(403, "Browser changes require a valid public origin")
     require_same_origin(request, origin)
 
 
-def _require_open_access_mutation_origin(request: Request, settings: _ApiAuthSettings) -> None:
-    """Guard mutations a browser could forge while the dashboard needs no credential.
+def is_loopback_host(hostname: str) -> bool:
+    """Return whether one host name always addresses this machine."""
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
-    Open access has no credential that could exempt an API client, so the guard
-    covers every request a browser marked as its own. `mindroom.api.network_exposure`
-    owns that rule and the `Host` allow-list that keeps a rebound attacker host
-    from becoming the expected origin here.
+
+def require_open_access_origin(request: Request, public_url: str | None) -> None:
+    """Refuse a cross-site browser mutation to an endpoint that needs no credential.
+
+    Browsers attach `Origin` to every mutation, so a request without one is an API
+    client. A loopback origin, such as the frontend dev server, is as local as the
+    dashboard itself.
     """
-    expected_origin = public_origin(settings.public_url or str(request.base_url))
-    if is_forged_browser_mutation(request, expected_origin=expected_origin):
-        raise HTTPException(403, "Browser changes require a same-origin request")
+    origin = request.headers.get("origin")
+    loopback = origin is not None and is_loopback_host(urlsplit(origin).hostname or "")
+    if request.headers.get("sec-fetch-site") != "cross-site" and (origin is None or loopback):
+        return
+    _require_browser_mutation_origin(request, public_url)
+
+
+def dashboard_open_access(runtime_paths: RuntimePaths) -> bool:
+    """Return whether the dashboard serves every request as the administrator without a credential."""
+    settings = _build_auth_settings(runtime_paths)
+    return not (
+        settings.mindroom_api_key
+        or (settings.supabase_url and settings.supabase_anon_key)
+        or settings.trusted_upstream.enabled
+    )
 
 
 async def authenticate_user(
@@ -976,7 +997,7 @@ async def authenticate_user(
         auth_state.trusted_upstream_jwt_client,
     )
     if trusted_auth_user is not None:
-        _require_browser_mutation_origin(request, auth_state.settings)
+        _require_browser_mutation_origin(request, auth_state.settings.public_url)
         request.scope["auth_user"] = trusted_auth_user
         return trusted_auth_user
 
@@ -996,9 +1017,9 @@ async def authenticate_user(
                 raise HTTPException(status_code=401, detail="Missing or invalid credentials")
             if not secrets.compare_digest(token, mindroom_api_key):
                 raise HTTPException(status_code=401, detail="Invalid API key")
-            _require_browser_mutation_origin(request, auth_state.settings, authorization)
+            _require_browser_mutation_origin(request, auth_state.settings.public_url, authorization)
         else:
-            _require_open_access_mutation_origin(request, auth_state.settings)
+            require_open_access_origin(request, auth_state.settings.public_url)
         auth_user = {"user_id": "standalone", "email": None}
         request.scope["auth_user"] = auth_user
         return auth_user
@@ -1018,7 +1039,7 @@ async def authenticate_user(
     if auth_state.settings.account_id and user.id != auth_state.settings.account_id:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    _require_browser_mutation_origin(request, auth_state.settings, authorization)
+    _require_browser_mutation_origin(request, auth_state.settings.public_url, authorization)
     auth_user = {"user_id": user.id, "email": user.email}
     request.scope["auth_user"] = auth_user
     return auth_user

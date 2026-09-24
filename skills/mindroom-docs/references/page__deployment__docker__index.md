@@ -91,12 +91,10 @@ Key environment variables (set in `.env` or pass directly):
 | `OPENAI_API_KEY` | OpenAI API key (if using OpenAI models) | - |
 | `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765` |
 | `MINDROOM_API_KEY` | API key for dashboard auth (standalone) | - (open access) |
-| `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra `Host` values an open-access dashboard answers, beyond loopback names, address literals, and the runtime's own configured URLs | - |
 
 To change the API server port or bind address, pass `--api-port` or `--api-host` to the `mindroom run` command.
 For example, add `command: ["mindroom", "run", "--api-host", "0.0.0.0", "--api-port", "9000"]` to the Docker Compose service.
-The image binds `0.0.0.0` inside the container so the published port works; outside a container the API binds `127.0.0.1` by default.
-An open-access container is therefore reachable from wherever its port is published, so publish it on the host loopback (`-p 127.0.0.1:8765:8765`) unless `MINDROOM_API_KEY` is set.
+The image binds `0.0.0.0` inside the container, so publish the port on the host loopback as above unless `MINDROOM_API_KEY` is set.
 
 Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).
 

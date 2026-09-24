@@ -154,9 +154,7 @@ Dashboard configuration access follows deployment authentication.
 Standalone deployments check `MINDROOM_API_KEY` when configured; Supabase deployments validate the user's token and enforce the instance account ID when configured.
 Without an API key, standalone dashboard and configuration API access is unauthenticated.
 Set `MINDROOM_API_KEY` before exposing a standalone instance outside a trusted local environment.
-Unauthenticated access is served only to requests whose `Host` is a loopback name, the `MINDROOM_PUBLIC_URL` host, or an entry in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`, so a DNS-rebound attacker host never becomes the dashboard's own origin.
-Such a deployment also rejects any state-changing browser request whose `Origin` is neither the dashboard's own origin nor a loopback origin, so a page on another site cannot drive the API through the operator's browser.
-The bundled API binds `127.0.0.1` unless `mindroom run --api-host` selects another interface, and it warns at startup whenever it serves unauthenticated requests.
+Unauthenticated access binds `127.0.0.1` by default, answers only local host names, address literals, and the hosts of `MINDROOM_PUBLIC_URL` or `MINDROOM_DASHBOARD_ALLOWED_HOSTS`, and refuses browser changes from other sites.
 These operator authentication checks are independent of the Matrix `administrators` list.
 
 With trusted upstream auth and no `MINDROOM_CONNECTIONS_AGENT`, every gateway-authenticated user can read and change dashboard configuration, regardless of `administrators`.

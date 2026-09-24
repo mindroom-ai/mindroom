@@ -17,10 +17,8 @@ services:
       - ${DATA_DIR}/mindroom_data:/app/mindroom_data
       - ${DATA_DIR}/logs:/app/logs
     ports:
-      # Published on the host loopback by default: without MINDROOM_API_KEY every
-      # dashboard request is served as the administrator. Set MINDROOM_BIND_ADDRESS
-      # to 0.0.0.0 only together with MINDROOM_API_KEY.
-      - "${MINDROOM_BIND_ADDRESS:-127.0.0.1}:${MINDROOM_PORT:-8765}:8765"
+      # Loopback only: without MINDROOM_API_KEY every request is served as the administrator.
+      - "127.0.0.1:${MINDROOM_PORT:-8765}:8765"
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MINDROOM_STORAGE_PATH=/app/mindroom_data

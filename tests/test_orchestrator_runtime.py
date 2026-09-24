@@ -19,6 +19,7 @@ import httpx
 import nio
 import pytest
 import uvicorn
+from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
 import mindroom.orchestrator as orchestrator_module
@@ -27,7 +28,6 @@ import mindroom.workers.runtime as workers_runtime_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle as api_config_lifecycle
 from mindroom.api import main as api_main
-from mindroom.api.network_exposure import DashboardHostGuard
 from mindroom.approval_manager import (
     _ApprovalStartupSweep,
     get_approval_store,
@@ -561,8 +561,9 @@ class TestAgentBot(AgentBotTestBase):
             log_level="info",
             ws="websockets-sansio",
         )
-        # The served app is the dashboard behind its Host allow-list, never the bare app.
-        assert isinstance(mock_uvicorn_config.call_args.args[0], DashboardHostGuard)
+        # Without a dashboard credential the served app refuses a rebound attacker host.
+        served_app = mock_uvicorn_config.call_args.args[0]
+        assert TestClient(served_app).get("/api/health", headers={"Host": "attacker.example"}).status_code == 400
         mock_error.assert_called_once()
         assert mock_error.call_args.args == ("fatal_embedded_api_server_exit",)
         assert get_api_server_address() is None

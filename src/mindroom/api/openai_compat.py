@@ -33,8 +33,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_run_context import prepend_knowledge_availability_notice
 from mindroom.ai import AIStreamChunk, ResponseTurnContext, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import public_origin
-from mindroom.api.network_exposure import is_forged_browser_mutation
+from mindroom.api.auth import require_open_access_origin
 from mindroom.api.openai_request_parsing import (
     AUTO_MODEL_NAME,
     RESERVED_MODEL_NAMES,
@@ -297,7 +296,9 @@ def _authenticate_request(
     )
     if not keys_env.strip():
         if allow_unauthenticated:
-            return _unauthenticated_browser_error(request, runtime_paths)
+            # A completion runs an agent with its tools, so no other site may trigger one.
+            require_open_access_origin(request, runtime_paths.env_value("MINDROOM_PUBLIC_URL"))
+            return None
         return _error_response(
             401,
             "OpenAI-compatible API keys are not configured",
@@ -318,24 +319,6 @@ def _authenticate_request(
         return _error_response(401, "Invalid API key", code="invalid_api_key")
 
     return _api_key_requester(token, runtime_paths)
-
-
-def _unauthenticated_browser_error(request: Request, runtime_paths: RuntimePaths) -> JSONResponse | None:
-    """Refuse a cross-origin browser call while `/v1` runs without an API key.
-
-    A completion request is a state change: it runs an agent with its tools. An
-    unauthenticated `/v1` accepts one from any caller, so a page on another site
-    must not be able to trigger one through the operator's browser.
-    """
-    public_url = runtime_paths.env_value("MINDROOM_PUBLIC_URL")
-    expected_origin = public_origin(public_url or str(request.base_url))
-    if not is_forged_browser_mutation(request, expected_origin=expected_origin):
-        return None
-    return _error_response(
-        403,
-        "Cross-origin browser requests require an OpenAI-compatible API key",
-        code="invalid_request_error",
-    )
 
 
 def _api_key_requester(token: str, runtime_paths: RuntimePaths) -> JSONResponse | str | None:
