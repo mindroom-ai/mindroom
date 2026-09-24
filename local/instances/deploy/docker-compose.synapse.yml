@@ -9,7 +9,7 @@ services:
     environment:
       POSTGRES_DB: synapse
       POSTGRES_USER: synapse
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-synapse_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in the instance env file}
       POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -24,10 +24,15 @@ services:
   redis:
     image: redis:7-alpine
     container_name: ${INSTANCE_NAME:-mindroom}-redis
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in the instance env file and as redis.password in homeserver.yaml}"]
+    environment:
+      # Authenticates the healthcheck's redis-cli.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # redis-cli exits 0 on NOAUTH, so require the reply.
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -97,6 +102,7 @@ services:
 networks:
   mindroom-network:
     driver: bridge
+    internal: true
   mynetwork:
     external: true
 

@@ -18,6 +18,7 @@ from rich.console import Console
 from tests.conftest import normalize_console_output
 
 _REAL_SUBPROCESS_RUN = subprocess.run
+_SANDBOX_SERVICES = {"sandbox-runner", "sandbox-relay"}
 _SCRIPT_PATH = Path("local/instances/deploy/deploy.py")
 _MODULE_SPEC = importlib.util.spec_from_file_location("mindroom_local_instance_deploy", _SCRIPT_PATH)
 assert _MODULE_SPEC is not None
@@ -533,7 +534,9 @@ def authelia_launch(
     registry = deploy.Registry(instances={"alpha": instance})
     env_dir = tmp_path / "envs"
     env_dir.mkdir()
-    (env_dir / "alpha.env").write_text(f"INSTANCE_NAME=alpha\nDATA_DIR={instance.data_dir}\n")
+    (env_dir / "alpha.env").write_text(
+        f"INSTANCE_NAME=alpha\nDATA_DIR={instance.data_dir}\nMINDROOM_API_KEY=configured-dashboard-key\n",
+    )
     users_file = Path(instance.data_dir) / "authelia" / "users_database.yml"
     users_file.parent.mkdir(parents=True)
     users_file.write_text((deploy.SCRIPT_DIR / "templates" / "authelia" / "users_database.yml").read_text())
@@ -780,7 +783,7 @@ def test_authelia_launch_preserves_configured_users(
     assert instance.status == deploy.InstanceStatus.RUNNING
     services = _launched_services(commands)
     assert services.count("sandbox-runner") <= 1
-    assert [service for service in services if service != "sandbox-runner"] == [
+    assert [service for service in services if service not in _SANDBOX_SERVICES] == [
         "mindroom",
         "tuwunel",
         "wellknown",
@@ -821,7 +824,11 @@ def test_launch_without_authelia_does_not_require_users(
     assert not users_file.exists()
     services = _launched_services(commands)
     assert services.count("sandbox-runner") <= 1
-    assert [service for service in services if service != "sandbox-runner"] == ["mindroom", "tuwunel", "wellknown"]
+    assert [service for service in services if service not in _SANDBOX_SERVICES] == [
+        "mindroom",
+        "tuwunel",
+        "wellknown",
+    ]
     assert not any(" config --format json" in cmd for cmd in commands)
 
 
@@ -971,7 +978,9 @@ def test_rejected_authelia_start_preserves_existing_instance_data(
     matrix_dir.mkdir()
     (matrix_dir / "database-marker").write_bytes(b"existing Matrix data")
     env_file = deploy.ENV_DIR / "alpha.env"
-    env_file.write_text("INSTANCE_NAME=alpha\nMATRIX_SERVER_NAME=m-previous.localhost\n")
+    env_file.write_text(
+        "INSTANCE_NAME=alpha\nMATRIX_SERVER_NAME=m-previous.localhost\nMINDROOM_API_KEY=configured-dashboard-key\n",
+    )
     env_before = env_file.read_bytes()
 
     # Let the real setup helpers discover only synthetic config and credentials.
@@ -1064,7 +1073,7 @@ def test_authelia_launch_checks_compose_selected_database(  # noqa: PLR0915
     env_root = public_root if case in {"env_public", "shell_configured"} else configured_root
     (deploy.ENV_DIR / "alpha.env").write_text(
         f"INSTANCE_NAME=alpha\nINSTANCE_DOMAIN=alpha.localhost\n"
-        f"DATA_DIR='{env_root}'\nMATRIX_SERVER_NAME=m-previous.localhost\n",
+        f"DATA_DIR='{env_root}'\nMATRIX_SERVER_NAME=m-previous.localhost\nMINDROOM_API_KEY=configured-dashboard-key\n",
     )
     monkeypatch.delenv("DATA_DIR", raising=False)
     monkeypatch.delenv("INSTANCE_ENV_FILE", raising=False)
@@ -1180,10 +1189,9 @@ def test_full_stack_starts_its_configured_sandbox_runner(
         for value in compose["services"]["mindroom"]["environment"]
         if value.startswith("MINDROOM_SANDBOX_PROXY_URL=")
     )
-    assert "sandbox-runner" in proxy_url
-    assert "sandbox-runner" in compose["services"]
-    assert "mindroom" in selected
-    assert "sandbox-runner" in selected
+    assert proxy_url == "MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766"
+    assert {"sandbox-runner", "sandbox-relay"} <= compose["services"].keys()
+    assert {"mindroom", "sandbox-runner", "sandbox-relay"} <= selected
 
 
 @pytest.mark.parametrize("matrix_type", [deploy.MatrixType.TUWUNEL, deploy.MatrixType.SYNAPSE])
@@ -1245,7 +1253,7 @@ def test_failed_sandbox_initialization_preserves_instance_status(
         if cmd == "docker network inspect mynetwork" or cmd.startswith("docker ps --filter network=mynetwork "):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         assert " up -d" in cmd
-        assert cmd.endswith(" mindroom sandbox-runner")
+        assert cmd.endswith(" mindroom sandbox-runner sandbox-relay")
         return SimpleNamespace(
             returncode=1,
             stdout="",
@@ -1273,3 +1281,107 @@ def test_failed_sandbox_initialization_preserves_instance_status(
     assert (" --force-recreate " in commands[-1]) is force_recreate
     assert instance.status == deploy.InstanceStatus.STOPPED
     assert registry_file.read_bytes() == original_registry
+
+
+_COMPOSE_FILES = sorted(Path("local/instances/deploy").glob("docker-compose*.yml"))
+
+
+def test_sandbox_runner_shares_no_network_with_runtime_or_datastores() -> None:
+    """Tool code must not reach the dashboard, datastores, or homeserver over a shared network."""
+    base = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
+    services = base["services"]
+
+    assert services["sandbox-runner"]["networks"] == ["sandbox-network"]
+    assert services["sandbox-relay"]["networks"] == ["mindroom-network", "sandbox-network"]
+    assert services["sandbox-relay"]["command"][-2:] == ["sandbox-runner", "8766"]
+    assert "MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766" in services["mindroom"]["environment"]
+    assert services["mindroom"]["ports"] == ["127.0.0.1:${MINDROOM_PORT:-8765}:8765"]
+    for compose_file in _COMPOSE_FILES:
+        compose = yaml.safe_load(compose_file.read_text())
+        for name, service in compose.get("services", {}).items():
+            if name not in _SANDBOX_SERVICES:
+                assert "sandbox-network" not in service.get("networks", []), (compose_file, name)
+        if "mindroom-network" in compose.get("networks", {}):
+            assert compose["networks"]["mindroom-network"]["internal"] is True, compose_file
+
+
+def test_compose_requires_generated_instance_secrets() -> None:
+    """Compose must refuse to start instead of falling back to open or shared credentials."""
+    base = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
+    synapse = yaml.safe_load(Path("local/instances/deploy/docker-compose.synapse.yml").read_text())
+
+    assert any(
+        value.startswith("MINDROOM_API_KEY=${MINDROOM_API_KEY:?")
+        for value in base["services"]["mindroom"]["environment"]
+    )
+    assert synapse["services"]["postgres"]["environment"]["POSTGRES_PASSWORD"].startswith("${POSTGRES_PASSWORD:?")
+    assert synapse["services"]["redis"]["command"][:2] == ["redis-server", "--requirepass"]
+    assert synapse["services"]["redis"]["command"][2].startswith("${REDIS_PASSWORD:?")
+    for path in [*_COMPOSE_FILES, Path("local/instances/deploy/templates/synapse/homeserver.yaml.j2")]:
+        assert "synapse_password" not in path.read_text(), path
+
+
+def test_create_generates_unique_synapse_instance_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each instance gets its own dashboard key and datastore passwords, rendered into Synapse."""
+    monkeypatch.setattr(deploy, "ENV_DIR", tmp_path / "envs")
+    monkeypatch.setattr(deploy, "ENV_TEMPLATE", tmp_path / "missing.env.template")
+    secrets_by_instance = {}
+    for name in ["alpha", "beta"]:
+        instance = _instance(name, matrix_type=deploy.MatrixType.SYNAPSE, data_root=tmp_path)
+        deploy._create_environment_file(instance, name, deploy.MatrixType.SYNAPSE)
+        deploy._setup_synapse_config(instance)
+        values = deploy._read_env_values(tmp_path / "envs" / f"{name}.env")
+        generated = {key: values[key] for key in (*deploy.DASHBOARD_SECRET_NAMES, *deploy.SYNAPSE_SECRET_NAMES)}
+        assert all(len(value) == 64 and set(value) <= set("0123456789abcdef") for value in generated.values())
+        assert len(set(generated.values())) == len(generated)
+        homeserver = yaml.safe_load((Path(instance.data_dir) / "synapse" / "homeserver.yaml").read_text())
+        assert homeserver["database"]["args"]["password"] == generated["POSTGRES_PASSWORD"]
+        assert homeserver["redis"]["password"] == generated["REDIS_PASSWORD"]
+        secrets_by_instance[name] = generated
+
+    assert set(secrets_by_instance["alpha"].values()).isdisjoint(secrets_by_instance["beta"].values())
+
+
+def test_ensure_env_secrets_fills_only_empty_values(tmp_path: Path) -> None:
+    """Existing secrets are preserved while empty template placeholders are replaced."""
+    env_file = tmp_path / "alpha.env"
+    existing = "existing-value"
+    env_file.write_text(f"MINDROOM_API_KEY=\nPOSTGRES_PASSWORD={existing}")
+
+    values = deploy._ensure_env_secrets(env_file, ("MINDROOM_API_KEY", "POSTGRES_PASSWORD"))
+    written = env_file.read_text()
+
+    assert values["POSTGRES_PASSWORD"] == existing
+    assert len(values["MINDROOM_API_KEY"]) == 64
+    assert deploy._read_env_values(env_file) == values
+    assert written.startswith(f"MINDROOM_API_KEY=\nPOSTGRES_PASSWORD={existing}\n")
+    assert deploy._ensure_env_secrets(env_file, ("MINDROOM_API_KEY", "POSTGRES_PASSWORD")) == values
+    assert env_file.read_text() == written
+
+
+@pytest.mark.parametrize("command", ["start", "restart"])
+def test_launch_adds_dashboard_key_before_compose_interpolation(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    """Instances created before key generation get one before Compose requires it."""
+    instance, users_file, commands, _console = authelia_launch
+    configured = yaml.safe_load(users_file.read_text())
+    configured["users"]["admin"]["disabled"] = True
+    users_file.write_text(yaml.safe_dump(configured))
+    env_file = deploy.ENV_DIR / "alpha.env"
+    env_file.write_text(f"INSTANCE_NAME=alpha\nDATA_DIR={instance.data_dir}\n")
+    fake_run = deploy.subprocess.run
+
+    def _run(cmd: str, **kwargs: object) -> SimpleNamespace:
+        if "docker compose" in cmd:
+            assert len(deploy._read_env_values(env_file).get("MINDROOM_API_KEY", "")) == 64
+        return fake_run(cmd, **kwargs)
+
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+
+    _launch_authelia(command)
+
+    assert any(" config --format json" in cmd for cmd in commands)
+    assert "authelia" in _launched_services(commands)

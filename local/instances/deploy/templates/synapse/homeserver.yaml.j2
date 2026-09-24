@@ -21,7 +21,7 @@ database:
   name: psycopg2
   args:
     user: synapse
-    password: synapse_password
+    password: "{{ postgres_password }}"
     database: synapse
     host: {{ postgres_host }}
     port: 5432
@@ -31,6 +31,7 @@ redis:
   enabled: true
   host: {{ redis_host }}
   port: 6379
+  password: "{{ redis_password }}"
 
 # Storage
 media_store_path: "/data/media_store"

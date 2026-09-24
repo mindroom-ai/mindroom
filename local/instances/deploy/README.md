@@ -92,17 +92,25 @@ Complete this account setup and the required HTTPS/Traefik configuration before 
 This will start:
 - MindRoom on its bundled dashboard/API port (automatically assigned, e.g., 8765)
 - The sandbox runner used by the default shell, file, and Python tool routing
+- A relay that forwards MindRoom's calls to the sandbox runner port
 - Matrix server if enabled (port automatically assigned, e.g., 8448)
 - Authelia authentication server if enabled
 - PostgreSQL and Redis (if using Synapse)
 
 Before starting the sandbox runner, Compose initializes its scratch volume ownership using `UID` and `GID` (both default to `1000`).
 
+The sandbox runner joins only its own `sandbox-network`, so tool code cannot reach the MindRoom API, PostgreSQL, Redis, or the homeserver over Docker networking.
+The `sandbox-relay` container joins both networks and forwards only the runner port.
+The shared `mindroom-network` is internal, so services attached only to it, such as PostgreSQL and Redis, have no outbound access.
+
 ### 4. Access Your Instance
 
 After starting, these direct host-port endpoints are exposed on the host:
 - **MindRoom**: `http://localhost:{MINDROOM_PORT}` (e.g., `http://localhost:8765`)
 - **Matrix Server** (if enabled): `http://localhost:{MATRIX_PORT}` (e.g., `http://localhost:8448`)
+
+The MindRoom port is published on the host loopback interface only, because containers, including the sandbox, can reach ports published on all interfaces through their Docker gateway.
+The dashboard asks for the `MINDROOM_API_KEY` stored in `envs/{instance_name}.env`, and API clients send it as a bearer token.
 
 Some services, especially Synapse, can take a moment before they answer requests on those ports.
 
@@ -336,7 +344,17 @@ INSTANCE_DOMAIN=myapp.localhost
 # Matrix configuration (if enabled)
 MATRIX_PORT=8448
 MATRIX_SERVER_NAME=m-myapp.localhost
+
+# Random per-instance secrets
+MINDROOM_API_KEY=...
+POSTGRES_PASSWORD=...  # Synapse only
+REDIS_PASSWORD=...     # Synapse only
 ```
+
+Compose refuses to start an instance without these secrets.
+`start` and `restart` add a missing `MINDROOM_API_KEY` to env files created by older versions.
+Synapse instances created by older versions must add `REDIS_PASSWORD` to the env file and the same value as `redis.password` in `{DATA_DIR}/synapse/homeserver.yaml`.
+They should also replace the shared `synapse_password` PostgreSQL password with `ALTER USER synapse PASSWORD '...'` and store the new value as `POSTGRES_PASSWORD` and `database.args.password`.
 
 ## Examples
 

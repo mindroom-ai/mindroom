@@ -48,6 +48,9 @@ DEFAULT_TRAEFIK_WEB_ENTRYPOINT = "websecure"
 DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT = "matrix-fed"
 DEFAULT_TRAEFIK_CERTRESOLVER = "porkbun"
 PERMISSION_REPAIR_IMAGE = "busybox:1.36"
+# Generated per instance into its env file; Compose refuses to start without them.
+DASHBOARD_SECRET_NAMES = ("MINDROOM_API_KEY",)
+SYNAPSE_SECRET_NAMES = ("POSTGRES_PASSWORD", "REDIS_PASSWORD")
 
 
 # Pydantic Models
@@ -219,10 +222,13 @@ def _prepare_matrix_config(
 
         # Render template with variables
         if matrix_type == MatrixType.SYNAPSE:
+            env_values = _ensure_env_secrets(ENV_DIR / f"{instance.name}.env", SYNAPSE_SECRET_NAMES)
             content = template.render(
                 matrix_server_name=matrix_server_name,
                 postgres_host=f"{instance.name}-postgres",
+                postgres_password=env_values["POSTGRES_PASSWORD"],
                 redis_host=f"{instance.name}-redis",
+                redis_password=env_values["REDIS_PASSWORD"],
                 macaroon_secret_key=secrets.token_hex(32),
             )
         else:
@@ -326,8 +332,8 @@ def _require_instance_env_file(name: str) -> Path:
     raise typer.Exit(1)
 
 
-def _load_traefik_settings(env_file: Path) -> TraefikSettings:
-    """Read optional Traefik label overrides from the instance env file."""
+def _read_env_values(env_file: Path) -> dict[str, str]:
+    """Read KEY=VALUE assignments from an instance env file; later assignments win, as in Compose."""
     values: dict[str, str] = {}
     if env_file.exists():
         for raw_line in env_file.read_text().splitlines():
@@ -336,7 +342,26 @@ def _load_traefik_settings(env_file: Path) -> TraefikSettings:
                 continue
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip().strip("'\"")
+    return values
 
+
+def _ensure_env_secrets(env_file: Path, names: tuple[str, ...]) -> dict[str, str]:
+    """Append a random value for each named secret the env file leaves empty, then return its values."""
+    values = _read_env_values(env_file)
+    # Hex values stay safe as command-line arguments, URLs, and YAML scalars.
+    generated = {name: secrets.token_hex(32) for name in names if not values.get(name)}
+    if generated:
+        content = env_file.read_text()
+        suffix = "" if not content or content.endswith("\n") else "\n"
+        with env_file.open("a") as f:
+            f.write(suffix + "".join(f"{name}={value}\n" for name, value in generated.items()))
+        values.update(generated)
+    return values
+
+
+def _load_traefik_settings(env_file: Path) -> TraefikSettings:
+    """Read optional Traefik label overrides from the instance env file."""
+    values = _read_env_values(env_file)
     return TraefikSettings(
         web_entrypoint=values.get("TRAEFIK_WEB_ENTRYPOINT", DEFAULT_TRAEFIK_WEB_ENTRYPOINT),
         matrix_entrypoint=values.get("TRAEFIK_MATRIX_ENTRYPOINT", DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT),
@@ -422,8 +447,8 @@ def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str
             raise ValueError(msg)
         return _get_matrix_services(instance.matrix_type).strip()
 
-    # Start full stack: MindRoom + sandbox runner + matrix + auth
-    services = ["mindroom", "sandbox-runner"]
+    # Start full stack: MindRoom + sandbox runner and its relay + matrix + auth
+    services = ["mindroom", "sandbox-runner", "sandbox-relay"]
 
     if instance.matrix_type == MatrixType.SYNAPSE:
         services.extend(["postgres", "redis", "synapse", "wellknown"])
@@ -504,9 +529,11 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
                 f.write("MATRIX_ALLOW_REGISTRATION=true\n")
                 f.write("MATRIX_ALLOW_FEDERATION=true\n")
             elif matrix_type == MatrixType.SYNAPSE:
-                f.write("POSTGRES_PASSWORD=synapse_password\n")
                 f.write("SYNAPSE_REGISTRATION_ENABLED=true\n")
                 f.write("SYNAPSE_ALLOW_PUBLIC_ROOMS=true\n")
+
+    synapse_secret_names = SYNAPSE_SECRET_NAMES if matrix_type == MatrixType.SYNAPSE else ()
+    _ensure_env_secrets(env_file, DASHBOARD_SECRET_NAMES + synapse_secret_names)
 
 
 def _ensure_external_network(name: str) -> bool:
@@ -594,6 +621,7 @@ def _print_running_instance_access(
         console.print(f"  [dim]Matrix local:[/dim] http://localhost:{instance.matrix_port}")
     else:
         console.print(f"  [dim]MindRoom local:[/dim] http://localhost:{instance.mindroom_port}")
+        console.print(f"  [dim]Dashboard API key:[/dim] MINDROOM_API_KEY in envs/{instance.name}.env")
         if instance.matrix_type is not None:
             console.print(f"  [dim]Matrix local:[/dim] http://localhost:{instance.matrix_port}")
 
@@ -758,10 +786,12 @@ def _bring_up_instance(
     force_recreate: bool = False,
 ) -> None:
     """Start or restart an instance using one shared compose-up path."""
+    env_file = _require_instance_env_file(name)
+    # Compose interpolation, including the Authelia check, requires the dashboard key.
+    _ensure_env_secrets(env_file, DASHBOARD_SECRET_NAMES)
     if instance.auth_type == AuthType.AUTHELIA and not only_matrix:
         _require_authelia_account_setup(instance)
 
-    env_file = _require_instance_env_file(name)
     _sync_matrix_host_overrides(registry.instances)
     _ensure_instance_env_file_reference(env_file)
 
@@ -1023,6 +1053,7 @@ def _print_instance_info(instance: Instance, matrix_type: MatrixType | None, aut
     console.print(f"  [dim]Data dir:[/dim] {instance.data_dir}")
     console.print(f"  [dim]Domain:[/dim] {instance.domain}")
     console.print(f"  [dim]Env file:[/dim] envs/{instance.name}.env")
+    console.print("  [dim]Dashboard API key:[/dim] MINDROOM_API_KEY in the env file")
     if matrix_type:
         matrix_name = "Tuwunel (lightweight)" if matrix_type == MatrixType.TUWUNEL else "Synapse (full)"
         console.print(f"  [dim]Matrix:[/dim] [green]{matrix_name}[/green]")
@@ -1148,6 +1179,7 @@ def start(
     instance = registry.instances[name]
     previous_status = instance.status
     env_file = _require_instance_env_file(name)
+    _ensure_env_secrets(env_file, DASHBOARD_SECRET_NAMES)
     if instance.auth_type == AuthType.AUTHELIA and not only_matrix:
         _require_authelia_account_setup(instance)
 

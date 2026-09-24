@@ -67,10 +67,12 @@ services:
       - ./mindroom_data:/app/mindroom_data
     environment:
       - MINDROOM_WORKER_BACKEND=static_runner
-      - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-runner:8766
+      - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
       - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
+    networks:
+      - mindroom-network
 
   sandbox-runner:
     image: ghcr.io/mindroom-ai/mindroom:latest
@@ -83,12 +85,29 @@ services:
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_CONFIG_PATH=/app/config.yaml
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
+    networks:
+      - sandbox-network
+
+  # Forwards only the runner port, so the runner shares no network with MindRoom.
+  sandbox-relay:
+    image: busybox:1.36
+    user: "65534:65534"
+    command: ["tcpsvd", "-c", "256", "0.0.0.0", "8766", "nc", "sandbox-runner", "8766"]
+    networks:
+      - mindroom-network
+      - sandbox-network
 
 volumes:
   sandbox-workspace:
+
+networks:
+  mindroom-network:
+  sandbox-network:
 ```
 
 Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
+Do not attach the runner to a network shared with MindRoom, its homeserver, or databases, because tool code could then call the MindRoom API or read those services directly.
+Set `MINDROOM_API_KEY` as well, because containers can still reach MindRoom through ports published on all host interfaces or its public URL.
 
 > [!IMPORTANT]
 > The `sandbox-workspace` Docker volume is created as root by default.
@@ -100,6 +119,7 @@ Do not mount the full `mindroom_data` tree into the runner because it contains c
 
 Key differences from the primary MindRoom runtime:
 - **No `env_file`** — runner has no API keys, no Matrix credentials
+- **Separate network** — only the relay reaches the runner, and the runner cannot reach MindRoom or its datastores
 - **Scratch workspace** — a dedicated volume for worker-local files (caches, virtualenvs)
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the scratch workspace for tool registry and cache files
 
