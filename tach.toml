@@ -618,6 +618,11 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.legacy_attachments"
+depends_on = ["mindroom.path_confinement"]
+visibility = ["mindroom.attachments"]
+
+[[modules]]
 path = "mindroom.legacy_delivery_payloads"
 depends_on = ["mindroom.constants"]
 visibility = [
@@ -1613,6 +1618,7 @@ depends_on = [
     "mindroom.tool_system.media_attachments",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.media",
+    "mindroom.path_confinement",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.sandbox_proxy",

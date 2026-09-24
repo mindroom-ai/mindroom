@@ -59,6 +59,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/oauth/legacy_credentials.py`][oauth-legacy-credentials] | The OAuth SQLite store normalizes a retired field or verifies a lossless requester binding. | The store retains schema, scope, revision, reset-receipt, transaction, and rollback ownership; old OAuth JSON is not adopted. |
 | [`src/mindroom/matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | Nio first takes durable ownership of a pre-durable crypto store. | Nio's file lease and account/device checks protect keys and trust while only retired recovery rows are cleared. |
 | [`src/mindroom/script_runs/legacy_recovery.py`][script-legacy-recovery] and [`src/mindroom/workers/backends/kubernetes.py`][kubernetes-worker-backend] | Script-runtime startup encounters an unversioned recovery signature or a v2 digest from before the optional seccomp or RuntimeClass fields. | Only an exact recomputation permits migration; pre-seccomp workers require an unset current seccomp policy, an unset RuntimeClass retains the pre-RuntimeClass digest bytes, and the current store owns atomic signature replacement and rejects concurrent revocation or signature changes. |
+| [`src/mindroom/legacy_attachments.py`][legacy-attachments] | `load_attachment` finds a record whose `local_path` is outside the current `incoming_media/` directory. | A no-follow walk from the filesystem root and the recorded SHA-256 gate a capped retained copy; the owner rewrites the record atomically and rejects anything unverifiable. |
 | [`src/mindroom/desktop/legacy_command_journal.py`][desktop-legacy-journal] | The desktop SQLite journal finds JSON v1 receipts during its one-time import. | Historical validation stays isolated; the journal retains file permissions, atomic import, replay tombstones, response delivery state, sequence maxima, and admission capacity. |
 
 ## Python provenance and regression coverage
@@ -92,6 +93,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`legacy_streaming.py`][legacy-streaming] and [`execution_preparation.py`][execution-preparation] | [Partial-reply][partial-reply-tests] and [streaming][streaming-tests] tests cover bounded historical suffixes, exact stripping order, current structured-status precedence, and interruption classification. |
 | [`legacy_revision_replay.py`][legacy-revision-replay] | [Revision replay][legacy-revision-replay-tests], [turn-store][turn-store-tests], and [handled-turn][handled-turn-tests] tests cover reconstruction, monotonic preservation, historical and modern selection, and cold-reopen cleanup. |
 | [`session_storage_preflight.py`][session-preflight] | [Session recovery tests][session-recovery-tests] cover schema-based archive, locks, rollback recovery, unrelated tables, current corruption, and byte preservation without inventing one release cutoff. |
+| [`legacy_attachments.py`][legacy-attachments] | [Attachment tests][attachment-tests] cover verified adoption and record rewrite, independence from later source swaps, and rejection of planted leaf or ancestor links, changed bytes, and missing digests. |
 | [`desktop/legacy_command_journal.py`][desktop-legacy-journal] | [Desktop journal tests][desktop-journal-tests] cover bodyless started receipts, retained sequence high-watermarks, deferred response replay, repeated opens, and independent current admission capacity. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert exact shared-domain and host-only expiry cookies on both endpoints and retain current host-only behavior for localhost, IP addresses, and single-label hosts. |
 
@@ -151,6 +153,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S18 | Isolated | [`session_storage_preflight.py`][session-preflight] archives incompatible owned sessions; MindRoom does not invoke Agno's historical migration manager. |
 | S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob scrub and double-JSON decoding; other Agno readers remain dependency-owned. |
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
+| S21 | Isolated | [`legacy_attachments.py`][legacy-attachments] adopts in-place attachment records into verified retained copies; [`attachments.py`][attachments] keeps copying, record publication, and retention cleanup. |
 
 ## Configuration and credentials
 
@@ -257,6 +260,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [crypto-upgrade]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/legacy_crypto_upgrade.py
 [desktop-legacy-journal]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/desktop/legacy_command_journal.py
 [desktop-journal-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_desktop_command_journal.py
+[attachment-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_attachments.py
 [desktop-protocol]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/desktop/protocol.py
 [egress-policy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/egress/policy.py
 [event-info]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/event_info.py
@@ -275,6 +279,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [legacy-revision-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_revision_replay.py
 [legacy-streaming]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_streaming.py
 [legacy-approval]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_approval_payloads.py
+[legacy-attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_attachments.py
 [legacy-approval-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_approval_recovery.py
 [legacy-delivery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_delivery_payloads.py
 [legacy-handled]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_handled_turns.py

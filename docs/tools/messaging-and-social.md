@@ -51,10 +51,10 @@ Its exact function names are `apply_label()`, `create_draft_email()`, `delete_cu
 `send_email_to_self(subject, body)` derives its sole recipient from the connected Gmail profile and accepts no recipient, CC, BCC, or attachment arguments.
 The function follows the configured tool approval policy, so operators can match `send_email_to_self` separately from other send functions.
 Draft and send operations accept attachment file paths that the agent's [`file_access`](../architecture/security-posture.md#file-access) setting allows: inside the agent workspace by default, or any readable file when it is `unrestricted`.
-Relative attachment paths resolve from the workspace root, and paths that resolve outside it, including through symlinks, are rejected before any file is read or Gmail request is made.
+Relative attachment paths resolve from the workspace root; with `workspace` file access, paths that resolve outside it, including through symlinks, are rejected before any file is read or Gmail request is made, and an agent without a workspace cannot attach files.
 Attachments are read through no-follow file descriptors, so a path component swapped for a symlink after validation is refused.
 Attachments are limited to 25 MiB in total per message.
-Agents without a workspace cannot attach files.
+With `unrestricted` file access, attachments work without a workspace; relative paths then resolve from the MindRoom process working directory.
 
 ### Configuration
 

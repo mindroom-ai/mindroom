@@ -464,6 +464,7 @@ The path must be relative to the workspace and must not be empty, absolute, poin
 `register_attachment()` paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access) setting: with the default `workspace`, they resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
 Absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace, so `~/incoming/file.txt` is rejected here.
 Without a configured agent workspace, `workspace` mode refuses path-based registration and only existing `att_*` IDs can be attached; `unrestricted` mode still accepts absolute paths.
+Registration copies the file's current bytes into managed attachment storage without following symbolic links, so later edits or replacement of the source file do not change the attachment.
 Attachment records include kind, filename, MIME type, room ID, thread ID, sender, creation time, and an `available` flag that reports whether the local file still exists.
 This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`.
 

@@ -396,7 +396,7 @@ async def test_primary_upload_reads_received_attachment_by_id(
         result = await _upload(tool, ["att_photo"])
 
     assert consumed == [b"received photo"]
-    assert result["paths"] == [str(media.resolve())]
+    assert result["paths"] == [str(record.local_path.resolve())]
     await tool.aclose()
 
 
@@ -410,15 +410,16 @@ async def test_primary_upload_rejects_attachments_outside_context_and_replaced_f
     media = storage / "incoming_media" / "photo.png"
     media.parent.mkdir(parents=True)
     media.write_bytes(b"received photo")
-    assert register_local_attachment(storage, media, kind="image", attachment_id="att_photo") is not None
+    record = register_local_attachment(storage, media, kind="image", attachment_id="att_photo")
+    assert record is not None
     secret = storage / "credentials" / "secret_credentials.json"
     secret.parent.mkdir()
     secret.write_bytes(b"secret")
 
     with tool_runtime_context(_upload_context(tool, storage)), pytest.raises(ValueError, match="not available"):
         await _upload(tool, ["att_photo"])
-    media.unlink()
-    media.symlink_to(secret)
+    record.local_path.unlink()
+    record.local_path.symlink_to(secret)
     with (
         tool_runtime_context(_upload_context(tool, storage, attachment_ids=("att_photo",))),
         pytest.raises((OSError, ValueError)),
