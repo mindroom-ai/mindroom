@@ -529,6 +529,9 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
         worker_scope=worker_scope,
+        file_access="workspace",
+        unconfined_tool_names=("shell",),
+        primary_only_unconfined_tool_names=(),
     )
 
     assert f"Worker reuse: {expected_reuse}." in rendered
@@ -545,6 +548,9 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
+        file_access="workspace",
+        unconfined_tool_names=("shell",),
+        primary_only_unconfined_tool_names=(),
     )
 
     assert "Worker backend: `static_runner`." in rendered
@@ -566,10 +572,54 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
+        file_access="workspace",
+        unconfined_tool_names=("shell",),
+        primary_only_unconfined_tool_names=(),
     )
 
     assert "After the configured idle timeout, the container stops" in rendered
     assert "persisted files and caches remain until an operator deletes that worker state." in rendered
+
+
+@pytest.mark.parametrize(
+    ("file_access", "expected"),
+    [
+        ("workspace", "- File access for path tools: `workspace` (agent workspace and attachments only)."),
+        ("unrestricted", "- File access for path tools: `unrestricted` (any path the tool's process can reach)."),
+    ],
+)
+def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_access: str, expected: str) -> None:
+    """The model should learn which files its path tools may use and which tools are never confined."""
+    for worker_routed in ((), ("shell",)):
+        rendered = _render_tool_execution_environment(
+            runtime_paths=_runtime_paths(tmp_path),
+            local_tool_names=("gmail", "python"),
+            worker_routed_tool_names=worker_routed,
+            worker_scope=None,
+            file_access=file_access,
+            unconfined_tool_names=("python", "shell"),
+            primary_only_unconfined_tool_names=("duckdb",),
+        )
+        assert expected in rendered
+        assert "- Not confined by file_access (only a worker isolates them): `python`, `shell`." in rendered
+        assert (
+            "- Not confined by file_access and unable to run in a worker (trusted primary runtime only): `duckdb`."
+            in rendered
+        )
+
+
+def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(tmp_path: Path) -> None:
+    """Without unconfined tools there is no unconfined-tools line."""
+    rendered = _render_tool_execution_environment(
+        runtime_paths=_runtime_paths(tmp_path),
+        local_tool_names=("gmail",),
+        worker_routed_tool_names=(),
+        worker_scope=None,
+        file_access="workspace",
+        unconfined_tool_names=(),
+        primary_only_unconfined_tool_names=(),
+    )
+    assert "Not confined by file_access" not in rendered
 
 
 @patch("mindroom.agents.get_tool_by_name", side_effect=ImportError("dependency missing"))

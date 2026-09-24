@@ -47,13 +47,14 @@ def _valid_plugin(root: Path) -> Path:
         modules={
             "tools.py": (
                 "from agno.tools import Toolkit\n"
-                "from mindroom.tool_system.declarations import ToolCategory\n"
+                "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
                 "from mindroom.tool_system.registration import register_tool_with_metadata\n"
                 "class DemoTool(Toolkit):\n"
                 "    def __init__(self):\n"
                 "        super().__init__(name='demo', tools=[])\n"
                 "@register_tool_with_metadata(\n"
                 "    name='compat_demo_tool',\n"
+                "    file_access=ToolFileAccess.NONE,\n"
                 "    display_name='Compatibility demo',\n"
                 "    description='Compatibility test tool',\n"
                 "    category=ToolCategory.DEVELOPMENT,\n"

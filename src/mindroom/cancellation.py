@@ -23,6 +23,7 @@ __all__ = [
     "current_task_is_process_shutdown",
     "request_task_cancel",
     "task_cancel_source_from_message",
+    "task_is_process_shutdown",
 ]
 
 _TASK_CANCEL_SOURCES: dict[asyncio.Task[Any], TaskCancelSource] = {}
@@ -76,7 +77,11 @@ def request_task_cancel(
 
 def current_task_is_process_shutdown() -> bool:
     """Return whether orderly process shutdown cancelled the current task."""
-    task = asyncio.current_task()
+    return task_is_process_shutdown(asyncio.current_task())
+
+
+def task_is_process_shutdown(task: asyncio.Task[Any] | None) -> bool:
+    """Read shutdown disposition from an explicitly retained response owner task."""
     return task is not None and task in _PROCESS_SHUTDOWN_TASKS
 
 

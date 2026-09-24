@@ -206,6 +206,7 @@ class EnrichmentItem:
     text: str
     cache_policy: EnrichmentCachePolicy = "volatile"
     persist: bool = True
+    minimal_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)
