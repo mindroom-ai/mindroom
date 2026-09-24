@@ -87,6 +87,9 @@ credentials_encryption_key: ""
 # Dedicated Synapse registration shared secret when Helm creates the instance Secret.
 # With instanceSecrets.create=false, populate matrix_registration_shared_secret in the existing instance Secret instead.
 matrixRegistrationSharedSecret: ""
+# Per-instance key the platform uses to sign dashboard login tickets for this instance.
+# With instanceSecrets.create=false, the provisioner writes platform_sso_secret into the existing instance Secret.
+platformSsoSecret: ""
 
 # Supabase (shared auth)
 supabaseUrl: ""

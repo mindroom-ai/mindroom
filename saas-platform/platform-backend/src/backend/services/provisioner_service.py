@@ -176,13 +176,18 @@ def _instance_matrix_registration_shared_secret(instance_id: str) -> str:
     return _stable_instance_secret("matrix-registration", instance_id)
 
 
+def instance_platform_sso_secret(instance_id: str) -> str:
+    """Derive the per-instance key that signs dashboard login tickets for one tenant runtime."""
+    return _stable_instance_secret("platform-sso", instance_id)
+
+
 def _stable_instance_secret(purpose: str, instance_id: str) -> str:
     """Derive one stable per-instance secret from the platform root secret.
 
     WARNING: when INSTANCE_CREDENTIALS_ENCRYPTION_SECRET is unset, PROVISIONER_API_KEY doubles
     as the HMAC root secret. Rotating PROVISIONER_API_KEY without first setting
     INSTANCE_CREDENTIALS_ENCRYPTION_SECRET silently invalidates every derived per-instance
-    secret (credential encryption keys, Matrix registration shared secrets) for existing tenants.
+    secret (credential encryption keys, Matrix registration shared secrets, dashboard SSO keys) for existing tenants.
     """
     root_secret = (INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY).strip()
     if not root_secret:
@@ -599,6 +604,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             "credentials_encryption_key": credentials_encryption_key,
             "matrix_oidc_client_secret": INSTANCE_MATRIX_OIDC_CLIENT_SECRET or "",
             "matrix_registration_shared_secret": _instance_matrix_registration_shared_secret(customer_id),
+            "platform_sso_secret": instance_platform_sso_secret(customer_id),
         }
         instance_secret_hash = _instance_secret_hash(instance_secret_data)
         # Use upgrade --install to handle both new and re-provisioning cases

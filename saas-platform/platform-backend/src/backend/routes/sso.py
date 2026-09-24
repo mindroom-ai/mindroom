@@ -1,30 +1,27 @@
-"""SSO cookie management routes."""
+"""Platform SSO cookie and hosted-instance login routes."""
 
-from datetime import timedelta
+import re
+import secrets
+from datetime import UTC, datetime, timedelta
 from ipaddress import ip_address
 from typing import Annotated
+from urllib.parse import urlencode, urlsplit
 
-from backend.config import PLATFORM_DOMAIN
-from backend.deps import _extract_bearer_token, limiter, verify_user
+import jwt
+from backend.config import INSTANCE_BASE_DOMAIN, PLATFORM_DOMAIN
+from backend.deps import _extract_bearer_token, ensure_supabase, limiter, verify_user
 from backend.models import StatusResponse
+from backend.services import instances_data, provisioner_service
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi.responses import RedirectResponse
 
 router = APIRouter()
 
 SSO_COOKIE_NAME = "mindroom_jwt"
 SSO_COOKIE_MAX_AGE_SECONDS = int(timedelta(hours=1).total_seconds())
-
-
-def _sso_cookie_domain() -> str | None:
-    domain = PLATFORM_DOMAIN.strip()
-    host = domain.lstrip(".").lower()
-    if not host or host == "localhost" or ":" in host or "." not in host:
-        return None
-    try:
-        ip_address(host)
-    except ValueError:
-        return domain if domain.startswith(".") else f".{domain}"
-    return None
+INSTANCE_SSO_TICKET_TYPE = "mindroom_platform_sso_ticket"
+INSTANCE_SSO_TICKET_TTL_SECONDS = 60
+_INSTANCE_ID_LABEL = re.compile(r"[1-9][0-9]*")
 
 
 def _set_cookie(
@@ -48,18 +45,25 @@ def _set_cookie(
     response.set_cookie(**kwargs)
 
 
-# LEGACY_COMPAT: Host-only SSO cookies on shared-domain deployments.
-# Legacy format: Shared DNS-domain deployments wrote host-only SSO cookies that tenant subdomains could not receive.
-# Last legacy release: v2026.6.146; replacement: v2026.6.147 wrote shared-domain cookies and expired host-only cookies.
-# Handling: Expire old host-only cookies for shared DNS domains; localhost, IPs, and single-label hosts remain host-only.
+# LEGACY_COMPAT: Shared-domain SSO cookies sent to every tenant subdomain.
+# Legacy format: `mindroom_jwt` cookies with `Domain=.PLATFORM_DOMAIN` when the platform domain is an ordinary DNS name.
+# Last legacy release: v2026.9.270, which wrote them since v2026.6.147; replacement: the next release writes host-only cookies on the platform API host.
+# Handling: Setting or clearing the cookie also expires the shared-domain cookie so browsers stop sending platform tokens to tenant hosts; localhost, IP, and single-label domains never had one.
 # Coverage: saas-platform/platform-backend/tests/test_sso_cookie_attrs.py.
-def _expire_legacy_host_only_sso_cookie(response: Response) -> None:
-    _set_cookie(response, value="", max_age=0)
+def _legacy_shared_sso_cookie_domain() -> str | None:
+    domain = PLATFORM_DOMAIN.strip()
+    host = domain.lstrip(".").lower()
+    if not host or host == "localhost" or ":" in host or "." not in host:
+        return None
+    try:
+        ip_address(host)
+    except ValueError:
+        return domain if domain.startswith(".") else f".{domain}"
+    return None
 
 
-def _expire_sso_cookie(response: Response) -> None:
-    _expire_legacy_host_only_sso_cookie(response)
-    domain = _sso_cookie_domain()
+def _expire_legacy_shared_sso_cookie(response: Response) -> None:
+    domain = _legacy_shared_sso_cookie_domain()
     if domain is not None:
         _set_cookie(response, value="", max_age=0, domain=domain)
 
@@ -76,14 +80,14 @@ async def set_sso_cookie(
     user: dict = Depends(verify_user),  # noqa: ARG001, FAST002, B008
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, str]:
-    """Set an SSO cookie with the current Supabase access token."""
+    """Set a host-only platform API cookie with the current Supabase access token."""
     try:
         token = _extract_bearer_token(authorization or request.headers.get("authorization"))
     except HTTPException:
         raise HTTPException(status_code=401, detail="Missing bearer token") from None
 
-    _expire_legacy_host_only_sso_cookie(response)
-    _set_cookie(response, value=token, max_age=SSO_COOKIE_MAX_AGE_SECONDS, domain=_sso_cookie_domain())
+    _expire_legacy_shared_sso_cookie(response)
+    _set_cookie(response, value=token, max_age=SSO_COOKIE_MAX_AGE_SECONDS)
     return {"status": "ok"}
 
 
@@ -91,5 +95,69 @@ async def set_sso_cookie(
 @limiter.limit("10/minute")
 async def clear_sso_cookie(request: Request, response: Response) -> dict[str, str]:  # noqa: ARG001
     """Clear the SSO cookie on logout."""
-    _expire_sso_cookie(response)
+    _set_cookie(response, value="", max_age=0)
+    _expire_legacy_shared_sso_cookie(response)
     return {"status": "cleared"}
+
+
+def _instance_dashboard_target(redirect_to: str) -> tuple[str, str, str]:
+    """Return the instance id, origin, and in-app path of one hosted dashboard URL."""
+    try:
+        parsed = urlsplit(redirect_to)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid redirect_to") from None
+    hostname = parsed.hostname or ""
+    suffix = f".{(INSTANCE_BASE_DOMAIN or PLATFORM_DOMAIN).lower()}"
+    instance_id = hostname.removesuffix(suffix)
+    # Only canonical numeric labels: the integer column would otherwise match labels such as "01".
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc.lower() != hostname
+        or not hostname.endswith(suffix)
+        or _INSTANCE_ID_LABEL.fullmatch(instance_id) is None
+    ):
+        raise HTTPException(status_code=400, detail="Invalid redirect_to")
+    path = parsed.path or "/"
+    return instance_id, f"https://{hostname}", f"{path}?{parsed.query}" if parsed.query else path
+
+
+def _platform_login_redirect(redirect_to: str) -> RedirectResponse:
+    authorize_url = f"https://api.{PLATFORM_DOMAIN}/instance-sso/authorize?{urlencode({'redirect_to': redirect_to})}"
+    return RedirectResponse(f"https://app.{PLATFORM_DOMAIN}/auth/login?{urlencode({'redirect_to': authorize_url})}")
+
+
+# response_model=None: the slowapi wrapper keeps FastAPI from resolving the RedirectResponse annotation.
+@router.get("/instance-sso/authorize", response_model=None)
+@limiter.limit("60/minute")
+async def authorize_instance_sso(request: Request, redirect_to: str) -> RedirectResponse:
+    """Send one owned instance a short-lived login ticket signed with that instance's own key.
+
+    The platform cookie never leaves the API host, and the ticket is not a platform credential.
+    """
+    instance_id, origin, next_path = _instance_dashboard_target(redirect_to)
+    token = request.cookies.get(SSO_COOKIE_NAME)
+    if not token:
+        return _platform_login_redirect(redirect_to)
+    try:
+        user = await verify_user(authorization=f"Bearer {token}", request=request)
+    except HTTPException:
+        return _platform_login_redirect(redirect_to)
+
+    if instances_data.get_owned_instance(ensure_supabase(), instance_id, str(user["account_id"])) is None:
+        raise HTTPException(status_code=403, detail="Instance not found or access denied")
+
+    now = int(datetime.now(UTC).timestamp())
+    ticket = jwt.encode(
+        {
+            "typ": INSTANCE_SSO_TICKET_TYPE,
+            "aud": origin,
+            "sub": str(user["user_id"]),
+            "email": user.get("email"),
+            "iat": now,
+            "exp": now + INSTANCE_SSO_TICKET_TTL_SECONDS,
+            "jti": secrets.token_urlsafe(24),
+        },
+        provisioner_service.instance_platform_sso_secret(instance_id),
+        algorithm="HS256",
+    )
+    return RedirectResponse(f"{origin}/api/auth/platform-sso?{urlencode({'ticket': ticket, 'next': next_path})}")

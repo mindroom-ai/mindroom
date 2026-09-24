@@ -757,6 +757,7 @@ def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
         "matrixOidc.clientId=mindroom-synapse",
         "matrixOidc.clientSecret=must-not-render-oidc",
         "matrixRegistrationSharedSecret=must-not-render-registration",
+        "platformSsoSecret=must-not-render-platform-sso",
     )
     mindroom = _resource(docs, "Deployment", "mindroom-demo")
     synapse = _resource(docs, "Deployment", "synapse-demo")
@@ -769,6 +770,15 @@ def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
     assert "must-not-render" not in rendered
     assert "must-not-render-oidc" not in rendered
     assert "must-not-render-registration" not in rendered
+    assert "must-not-render-platform-sso" not in rendered
+    platform_sso_secret_env = next(
+        env for env in mindroom_container["env"] if env["name"] == "MINDROOM_PLATFORM_SSO_SECRET"
+    )
+    assert platform_sso_secret_env["valueFrom"]["secretKeyRef"] == {
+        "name": "tenant-runtime-secrets",
+        "key": "platform_sso_secret",
+    }
+    assert mindroom_env["MINDROOM_PLATFORM_SSO_URL"] == "https://api.mindroom.chat/instance-sso/authorize"
     assert mindroom["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "tenant-runtime-secrets"
     assert synapse["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "tenant-runtime-secrets"
     assert mindroom["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/instance-secret-hash"] == "abc123"
@@ -792,6 +802,7 @@ def test_instance_chart_numeric_customer_uses_valid_instance_secret_name() -> No
 
     assert secret["metadata"]["name"] == "mindroom-api-keys-1"
     assert secret["stringData"]["matrix_registration_shared_secret"]
+    assert secret["stringData"]["platform_sso_secret"] == ""
     assert deployment["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "mindroom-api-keys-1"
 
 
