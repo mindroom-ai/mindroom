@@ -14,10 +14,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from playwright.async_api import async_playwright
 
+from mindroom.attachments import register_local_attachment
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.custom_tools.browser import BrowserTools, _BrowserProfileState, _BrowserTabState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
@@ -25,8 +27,15 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import BinaryIO
 
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-def _upload_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[BrowserTools, AsyncMock, Path]:
+
+def _upload_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    workspace_root: Path | None = None,
+) -> tuple[BrowserTools, AsyncMock, Path]:
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -34,7 +43,7 @@ def _upload_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Brows
     )
     root = runtime_paths.storage_root / "browser"
     root.mkdir(parents=True)
-    tool = BrowserTools(runtime_paths)
+    tool = BrowserTools(runtime_paths, tool_output_workspace_root=workspace_root)
     consumer = AsyncMock()
     page: Any = SimpleNamespace(
         locator=MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=consumer))),
@@ -53,7 +62,7 @@ def _upload_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Brows
     return tool, consumer, root
 
 
-async def _upload(tool: BrowserTools, paths: list[Path]) -> dict[str, Any]:
+async def _upload(tool: BrowserTools, paths: list[Path | str]) -> dict[str, Any]:
     return await tool._upload(
         profile_name="mindroom",
         target_id=None,
@@ -132,7 +141,7 @@ async def test_upload_rejects_source_swapped_after_resolution(
     source, swap = _swap_fixture(root, part)
     resolve = tool._resolve_upload_path
 
-    def resolve_then_swap(path: str) -> Path:
+    def resolve_then_swap(path: str) -> tuple[Path, Path]:
         resolved = resolve(path)
         swap()
         return resolved
@@ -257,23 +266,12 @@ async def test_upload_keeps_large_files_as_file_paths(
     await tool.aclose()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("worker", [False, True])
-async def test_upload_retains_separately_authorized_context_storage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    worker: bool,
-) -> None:
-    """Live context storage remains authorized even with a separate worker workspace."""
-    tool, consumer, root = _upload_tool(tmp_path, monkeypatch)
-    if worker:
-        tool._worker_workspace = root.parent
-        tool._configured_output_dir = root
-    storage = tmp_path / "active-context"
-    storage.mkdir()
-    source = storage / "attachment.txt"
-    source.write_bytes(b"context attachment")
-    context = make_test_tool_runtime_context(
+def _upload_context(
+    tool: BrowserTools,
+    storage: Path,
+    attachment_ids: tuple[str, ...] = (),
+) -> ToolRuntimeContext:
+    return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(room_id="!room:example.org", thread_id=None, reply_to_event_id=None),
         requester_id="@alice:example.org",
@@ -283,7 +281,22 @@ async def test_upload_retains_separately_authorized_context_storage(
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         storage_path=storage,
+        attachment_ids=attachment_ids,
     )
+
+
+def _primary_upload_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[BrowserTools, AsyncMock, Path, Path]:
+    storage = tmp_path / "storage"
+    workspace = agent_workspace_root_path(storage, "general")
+    workspace.mkdir(parents=True)
+    tool, consumer, _root = _upload_tool(tmp_path, monkeypatch, workspace_root=workspace)
+    return tool, consumer, storage, workspace
+
+
+def _capture_uploads(consumer: AsyncMock) -> list[bytes]:
     consumed: list[bytes] = []
 
     async def consume(paths: list[str], *, timeout: int) -> None:  # noqa: ASYNC109
@@ -291,11 +304,136 @@ async def test_upload_retains_separately_authorized_context_storage(
         consumed.extend(Path(path).read_bytes() for path in paths)
 
     consumer.side_effect = consume
-    with tool_runtime_context(context):
-        result = await _upload(tool, [source])
+    return consumed
 
-    assert consumed == [b"context attachment"]
-    assert result["paths"] == [str(source)]
+
+@pytest.mark.asyncio
+async def test_primary_upload_reads_agent_workspace_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A primary-process browser uploads the agent's workspace files by absolute or relative path."""
+    tool, consumer, storage, workspace = _primary_upload_tool(tmp_path, monkeypatch)
+    report = workspace / "reports" / "report.txt"
+    report.parent.mkdir()
+    report.write_bytes(b"workspace report")
+    (workspace / "att_named.txt").write_bytes(b"workspace att name")
+    consumed = _capture_uploads(consumer)
+
+    with tool_runtime_context(_upload_context(tool, storage)):
+        result = await _upload(tool, [report, "reports/report.txt", "./att_named.txt"])
+
+    assert consumed == [b"workspace report", b"workspace report", b"workspace att name"]
+    assert result["paths"] == [str(report), str(report), str(workspace / "att_named.txt")]
+    await tool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_primary_upload_reads_received_attachment_by_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Attachments available in the conversation upload through their att_* IDs."""
+    tool, consumer, storage, _workspace = _primary_upload_tool(tmp_path, monkeypatch)
+    media = storage / "incoming_media" / "photo.png"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"received photo")
+    record = register_local_attachment(storage, media, kind="image", attachment_id="att_photo")
+    assert record is not None
+    consumed = _capture_uploads(consumer)
+
+    with tool_runtime_context(_upload_context(tool, storage, attachment_ids=("att_photo",))):
+        result = await _upload(tool, ["att_photo"])
+
+    assert consumed == [b"received photo"]
+    assert result["paths"] == [str(media.resolve())]
+    await tool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_primary_upload_rejects_attachments_outside_context_and_replaced_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Attachment IDs require context availability, and a replaced recorded file is never followed."""
+    tool, consumer, storage, _workspace = _primary_upload_tool(tmp_path, monkeypatch)
+    media = storage / "incoming_media" / "photo.png"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"received photo")
+    assert register_local_attachment(storage, media, kind="image", attachment_id="att_photo") is not None
+    secret = storage / "credentials" / "secret_credentials.json"
+    secret.parent.mkdir()
+    secret.write_bytes(b"secret")
+
+    with tool_runtime_context(_upload_context(tool, storage)), pytest.raises(ValueError, match="not available"):
+        await _upload(tool, ["att_photo"])
+    media.unlink()
+    media.symlink_to(secret)
+    with (
+        tool_runtime_context(_upload_context(tool, storage, attachment_ids=("att_photo",))),
+        pytest.raises((OSError, ValueError)),
+    ):
+        await _upload(tool, ["att_photo"])
+    consumer.assert_not_awaited()
+    await tool.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "credentials/secret_credentials.json",
+        "encryption_keys/bot.db",
+        "matrix_state.yaml",
+        "attachments/att_photo.json",
+        "incoming_media/photo.png",
+        "agents/other/workspace/notes.txt",
+    ],
+)
+async def test_primary_upload_rejects_runtime_state_and_other_agents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+) -> None:
+    """Runtime storage outside the artifact directory and this agent's workspace stays unreadable by path."""
+    tool, consumer, storage, _workspace = _primary_upload_tool(tmp_path, monkeypatch)
+    source = storage / relative_path
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"private bytes")
+
+    with (
+        tool_runtime_context(_upload_context(tool, storage)),
+        pytest.raises(ValueError, match="outside browser upload root"),
+    ):
+        await _upload(tool, [source])
+    consumer.assert_not_awaited()
+    await tool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_worker_upload_reads_only_worker_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker-bound browser reads its worker workspace and treats att_* as an ordinary path."""
+    tool, consumer, root = _upload_tool(tmp_path, monkeypatch, workspace_root=tmp_path / "primary-workspace")
+    tool._worker_workspace = root.parent
+    tool._configured_output_dir = root
+    workspace_file = root.parent / "notes.txt"
+    workspace_file.write_bytes(b"worker notes")
+    primary_file = tmp_path / "primary-workspace" / "notes.txt"
+    primary_file.parent.mkdir()
+    primary_file.write_bytes(b"primary notes")
+    consumed = _capture_uploads(consumer)
+
+    result = await _upload(tool, [workspace_file])
+    with pytest.raises(ValueError, match="outside browser upload root"):
+        await _upload(tool, [primary_file])
+    with pytest.raises(ValueError, match="must be an existing file"):
+        await _upload(tool, ["att_photo"])
+
+    assert consumed == [b"worker notes"]
+    assert result["paths"] == [str(workspace_file)]
     await tool.aclose()
 
 

@@ -28,6 +28,7 @@ from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
 from mindroom.browser_profile import clear_stale_singleton_locks
+from mindroom.custom_tools.attachments import resolve_context_attachment_path
 from mindroom.custom_tools.desktop_attachment import (
     register_runtime_screenshot_attachment,
     screenshot_attachment_result_fields,
@@ -133,7 +134,10 @@ _BROWSER_ACTION_TABLE = (
     {"action": "pdf", "description": "Host target only: save the selected page as a PDF."},
     {
         "action": "upload",
-        "description": "Host target only: upload paths through a selector or ref.",
+        "description": (
+            "Host target only: upload browser artifacts, agent workspace files, or att_* context attachments "
+            "through a selector or ref."
+        ),
     },
     {"action": "dialog", "description": "Host target only: arm how the next browser dialog should be handled."},
     {
@@ -510,16 +514,12 @@ def _friendly_playwright_browser_error_message(exc: PlaywrightError) -> str | No
     )
 
 
-def _stage_browser_upload_paths(paths: list[Path], roots: tuple[Path, ...], staging_dir: Path) -> list[str]:
+def _stage_browser_upload_paths(sources: list[tuple[Path, Path]], staging_dir: Path) -> list[str]:
     """Snapshot authorized descriptors to private paths that Playwright can reopen."""
     staged_paths: list[str] = []
-    for index, path in enumerate(paths):
-        # Match the canonical file against the original authorized root spelling.
+    for index, (root, path) in enumerate(sources):
+        # Open the canonical file relative to the root that authorized it, without following links.
         # Resolving a replaced child here would grant trust to its new destination.
-        root = next((root for root in roots if path.is_relative_to(root)), None)
-        if root is None:
-            msg = f"upload path '{path}' is outside browser upload root(s)"
-            raise ValueError(msg)
         with open_regular_file_within_root(root, path.relative_to(root)) as descriptor:
             destination = staging_dir / str(index) / path.name
             destination.parent.mkdir(mode=0o700)
@@ -552,6 +552,7 @@ class BrowserTools(Toolkit):
         device_id: str | None = None,
         device_ed25519: str | None = None,
         timeout_seconds: float = 90.0,
+        tool_output_workspace_root: Path | None = None,
     ) -> None:
         super().__init__(name="browser", tools=[self.browser])
         apply_toolkit_function_aliases(self, {"browser": "browser_control"})
@@ -578,6 +579,7 @@ class BrowserTools(Toolkit):
         self._worker_process_env: dict[str, str] | None = None
         self._lock = asyncio.Lock()
         self._configured_output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
+        self._workspace_root = tool_output_workspace_root.resolve() if tool_output_workspace_root is not None else None
         if self._configured_output_dir is not None:
             self._configured_output_dir.mkdir(parents=True, exist_ok=True)
         self._close_task: asyncio.Task[None] | None = None
@@ -812,7 +814,8 @@ class BrowserTools(Toolkit):
             saveOnly: For host screenshots, return saved artifact metadata without model-visible image bytes.
             returnAttachment: For desktop screenshots, expose an ephemeral handle that matrix_message can send.
             level: Console log level filter.
-            paths: Upload file paths.
+            paths: Browser artifact or workspace file paths, or att_* context attachment IDs to upload.
+                Workspace-relative paths are allowed; use ./ for a workspace file named att_*.
             inputRef: Host-target upload input selector or ref.
             timeoutMs: Host-target timeout for upload/dialog actions.
             accept: Whether to accept dialog.
@@ -1328,15 +1331,13 @@ class BrowserTools(Toolkit):
         if selector is None:
             msg = "upload requires inputRef, ref, or element"
             raise ValueError(msg)
-        upload_roots = self._browser_upload_roots()
-        normalized_paths = [self._resolve_upload_path(path) for path in paths]
+        sources = [self._resolve_upload_path(path) for path in paths]
         locator = tab.page.locator(selector).first
         staging = TemporaryDirectory(prefix="mindroom-browser-upload-")
         try:
             staged_paths = await run_blocking_until_complete(
                 _stage_browser_upload_paths,
-                normalized_paths,
-                upload_roots,
+                sources,
                 Path(staging.name),
             )
             await locator.set_input_files(staged_paths, timeout=timeout_ms or _DEFAULT_TIMEOUT_MS)
@@ -1351,7 +1352,7 @@ class BrowserTools(Toolkit):
             tab.upload_staging.append(staging)
         return {
             "action": "upload",
-            "paths": [str(path) for path in normalized_paths],
+            "paths": [str(path) for _root, path in sources],
             "profile": profile_name,
             "selector": selector,
             "status": "ok",
@@ -1941,31 +1942,53 @@ class BrowserTools(Toolkit):
         return output_dir
 
     def _browser_upload_roots(self) -> tuple[Path, ...]:
-        """Return roots whose files can be read by browser upload."""
-        context = get_tool_runtime_context()
+        """Return directories whose files browser upload may read.
+
+        A worker-bound browser reads its worker workspace. A primary-process
+        browser reads its artifact directory and the agent workspace, never the
+        rest of the runtime storage root with its credentials, keys, and state.
+        """
         root = self._browser_artifact_root()
-        roots = [
-            root if self._worker_workspace is not None or self._configured_output_dir is not None else root / "browser",
-        ]
-        if context is not None and context.storage_path is not None:
-            roots.append(context.storage_path.resolve())
+        if self._worker_workspace is not None:
+            return (root,)
+        roots = [root if self._configured_output_dir is not None else root / "browser"]
+        if self._workspace_root is not None:
+            roots.append(self._workspace_root)
         return tuple(roots)
 
-    def _resolve_upload_path(self, path: str) -> Path:
-        """Resolve and confine one browser upload path."""
-        resolved = Path(path).expanduser().resolve()
+    def _resolve_upload_path(self, path: str) -> tuple[Path, Path]:
+        """Resolve one upload path or ``att_*`` ID to its authorizing root and canonical file."""
+        if self._worker_workspace is None and path.startswith("att_"):
+            return self._resolve_upload_attachment(path)
+        requested = Path(path).expanduser()
+        if not requested.is_absolute() and self._worker_workspace is None and self._workspace_root is not None:
+            requested = self._workspace_root / requested
+        resolved = requested.resolve()
         if not resolved.is_file():
             msg = f"upload path must be an existing file: {path}"
             raise ValueError(msg)
         roots = self._browser_upload_roots()
         for root in roots:
             try:
-                return resolve_path_within_root(root, resolved, symlinks="internal")
+                return root, resolve_path_within_root(root, resolved, symlinks="internal")
             except ValueError:
                 continue
         root_list = ", ".join(str(root) for root in roots)
         msg = f"upload path '{path}' resolves to '{resolved}', outside browser upload root(s): {root_list}"
         raise ValueError(msg)
+
+    @staticmethod
+    def _resolve_upload_attachment(attachment_id: str) -> tuple[Path, Path]:
+        """Resolve an attachment available in this conversation to its recorded file."""
+        context = get_tool_runtime_context()
+        if context is None:
+            msg = "Tool runtime context is unavailable for attachment uploads."
+            raise ValueError(msg)
+        local_path, error = resolve_context_attachment_path(context, attachment_id)
+        if error is not None or local_path is None:
+            raise ValueError(error or f"Attachment is unavailable: {attachment_id}")
+        # Records store canonical paths, so walk every component without following links.
+        return Path(local_path.anchor), local_path
 
     @staticmethod
     def _remove_tab(state: _BrowserProfileState, target_id: str) -> None:

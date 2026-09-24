@@ -899,7 +899,7 @@ async def test_browser_upload_allows_paths_inside_tool_storage(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Browser uploads should allow files produced inside the active tool storage root."""
+    """Browser uploads should allow files produced inside the browser artifact directory."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
