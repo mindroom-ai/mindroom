@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="trafilatura",
+    file_access=ToolFileAccess.NONE,
     display_name="Trafilatura",
     description="Extract text and metadata from web pages, crawl websites, and convert HTML to text",
     category=ToolCategory.RESEARCH,
@@ -169,7 +170,10 @@ if TYPE_CHECKING:
     function_names=("crawl_website", "extract_batch", "extract_metadata_only", "extract_text", "html_to_text"),
 )
 def trafilatura_tools() -> type[TrafilaturaTools]:
-    """Return Trafilatura tools for web content extraction."""
+    """Return Trafilatura tools whose downloads follow the server-fetch policy."""
     from agno.tools.trafilatura import TrafilaturaTools
 
+    from mindroom.tools.agno_compat_trafilatura import install_server_fetch_guard
+
+    install_server_fetch_guard()
     return TrafilaturaTools

@@ -8,6 +8,7 @@ directly in ``create_agent()``, so it is NOT added to ``TOOL_REGISTRY``.
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolMetadata,
     ToolStatus,
 )
@@ -16,6 +17,7 @@ from mindroom.tool_system.registration import register_builtin_tool_metadata
 register_builtin_tool_metadata(
     ToolMetadata(
         name="dynamic_tools",
+        file_access=ToolFileAccess.NONE,
         display_name="Dynamic Tools",
         description="Load and unload deferred tools for the current session",
         category=ToolCategory.DEVELOPMENT,

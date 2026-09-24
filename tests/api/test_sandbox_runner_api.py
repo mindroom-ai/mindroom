@@ -56,6 +56,7 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolMetadata,
     ToolStatus,
 )
@@ -71,6 +72,7 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     private_instance_scope_root_path,
     resolve_worker_key,
+    resolve_worker_target,
     worker_dir_name,
 )
 from mindroom.workers.backends import local as local_workers_module
@@ -1766,6 +1768,48 @@ def test_resolve_entrypoint_inherit_sentinel_falls_back_to_persisted_config(tmp_
     assert entrypoint is not None
 
 
+@pytest.mark.parametrize(
+    ("routing_agent_name", "restrict_to_base_dir"),
+    [("admin", False), ("boxed", True), ("stranger", True)],
+)
+def test_resolve_entrypoint_builds_coding_with_routing_agent_file_access(
+    tmp_path: Path,
+    routing_agent_name: str,
+    restrict_to_base_dir: bool,
+) -> None:
+    """Worker-side coding rebuilds follow the routing agent's file_access; unknown agents inherit the default."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models: {}\n"
+            "agents:\n"
+            "  admin:\n"
+            "    display_name: Admin\n"
+            "    file_access: unrestricted\n"
+            "  boxed:\n"
+            "    display_name: Boxed\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+        runtime_paths=runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        tool_name="coding",
+        function_name="read_file",
+        worker_scope="shared",
+        routing_agent_name=routing_agent_name,
+    )
+
+    assert toolkit.restrict_to_base_dir is restrict_to_base_dir
+    assert entrypoint is not None
+
+
 def test_sandbox_runner_subprocess_python_sees_sandbox_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2028,6 +2072,31 @@ def test_subprocess_config_projection_keeps_effective_policy_and_omits_agents() 
     }
 
 
+@pytest.mark.parametrize("tool_name", ["file", "coding"])
+def test_subprocess_config_projection_keeps_agent_file_access(tool_name: str) -> None:
+    """Worker subprocesses must resolve the routing agent's file_access, not fall back to workspace."""
+    config = Config.model_validate(
+        {
+            "defaults": {"file_access": "unrestricted"},
+            "agents": {
+                "admin": {"display_name": "Admin", "role": "Operate the host", "file_access": "unrestricted"},
+                "boxed": {"display_name": "Boxed", "file_access": "workspace"},
+                "inherits": {"display_name": "Inherits"},
+            },
+        },
+    )
+
+    payload = yaml_io.safe_load(sandbox_runner_module._subprocess_config_yaml(config, tool_name))
+    subprocess_config = Config.model_validate(payload)
+
+    assert payload["agents"]["admin"] == {"display_name": "Admin", "file_access": "unrestricted"}
+    assert subprocess_config.resolve_entity("admin").file_access == "unrestricted"
+    assert subprocess_config.resolve_entity("boxed").file_access == "workspace"
+    assert subprocess_config.resolve_entity("inherits").file_access == "unrestricted"
+    worker_target = resolve_worker_target("shared", "admin", execution_identity=None)
+    assert metadata_module._managed_file_access(subprocess_config, worker_target) == "unrestricted"
+
+
 @pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
 def test_subprocess_plugin_receives_full_config_and_explicit_refresh(
     runner_client: TestClient,
@@ -2044,7 +2113,7 @@ def test_subprocess_plugin_receives_full_config_and_explicit_refresh(
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolManagedInitArg\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class RuntimeConfigPluginTool(Toolkit):\n"
@@ -2065,6 +2134,7 @@ def test_subprocess_plugin_receives_full_config_and_explicit_refresh(
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='runtime_config_plugin',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Runtime Config Plugin',\n"
         "    description='Inspect received runtime config',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -2896,6 +2966,7 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
+            file_access=ToolFileAccess.NONE,
             display_name="Dummy",
             description="Dummy",
             category=ToolCategory.DEVELOPMENT,
@@ -2959,6 +3030,7 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
     registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
+            file_access=ToolFileAccess.NONE,
             display_name="Dummy",
             description="Dummy",
             category=ToolCategory.DEVELOPMENT,
@@ -3440,7 +3512,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ConfigField, ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoPluginTool(Toolkit):\n"
         "    def __init__(self, label: str | None = None) -> None:\n"
@@ -3449,6 +3521,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='demo_plugin',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Demo Plugin',\n"
         "    description='Demo plugin tool',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -3504,7 +3577,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_overr
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ConfigField, ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoPluginInitTool(Toolkit):\n"
         "    def __init__(self, base_dir: str | None = None) -> None:\n"
@@ -3513,6 +3586,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_overr
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='demo_plugin_init',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Demo Plugin Init',\n"
         "    description='Demo plugin tool with init overrides',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -4029,6 +4103,7 @@ def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
     registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
+            file_access=ToolFileAccess.NONE,
             display_name="Runner Auto Save",
             description="Test-only runner auto-save coverage.",
             category=ToolCategory.DEVELOPMENT,

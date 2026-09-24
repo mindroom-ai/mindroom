@@ -43,6 +43,7 @@ from mindroom.runtime_env_policy import (
     worker_extra_env,
 )
 from mindroom.tool_system.worker_routing import (
+    WORKER_SHARED_CREDENTIALS_DIRNAME,
     descriptive_worker_id_for_key,
     normalize_worker_key_part,
     resolved_worker_key_scope,
@@ -1531,7 +1532,7 @@ class KubernetesResourceManager:
             {"name": "PATH", "value": f"{venv_path}/bin:{_DEFAULT_CONTAINER_PATH}"},
             {
                 "name": SHARED_CREDENTIALS_PATH_ENV,
-                "value": f"{dedicated_root}/.shared_credentials",
+                "value": f"{dedicated_root}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
             },
             {"name": SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], "value": worker_key},
             {"name": SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"], "value": dedicated_root},
@@ -1650,7 +1651,7 @@ class KubernetesResourceManager:
                 "MINDROOM_CONFIG_PATH": str(config_path),
                 "MINDROOM_STORAGE_PATH": str(dedicated_root),
                 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV: self.config.storage_subpath_prefix,
-                SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/.shared_credentials",
+                SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
                 SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: worker_key,
                 SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(dedicated_root),
             },
@@ -1872,6 +1873,19 @@ class KubernetesResourceManager:
                 "name": WORKER_STORAGE_VOLUME_NAME,
                 "mountPath": f"{self.config.storage_mount_path}/{state_subpath}",
                 "subPath": state_subpath,
+            },
+        )
+        # The worker root is writable so tools can persist state, but the primary keeps
+        # mirroring credentials into `.shared_credentials` on every ensure. Mounting that
+        # directory read-only stops worker code from deleting it or replacing it with a
+        # link into the deployment-wide credential store.
+        mirror_subpath = f"{state_subpath}/{WORKER_SHARED_CREDENTIALS_DIRNAME}"
+        mounts.append(
+            {
+                "name": WORKER_STORAGE_VOLUME_NAME,
+                "mountPath": f"{self.config.storage_mount_path}/{mirror_subpath}",
+                "subPath": mirror_subpath,
+                "readOnly": True,
             },
         )
         validate_unique_worker_visible_paths(

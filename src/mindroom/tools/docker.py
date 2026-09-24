@@ -9,6 +9,7 @@ from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
+    ToolFileAccess,
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
     display_name="Docker",
     description="Container, image, volume, and network management",
     category=ToolCategory.DEVELOPMENT,
+    file_access=ToolFileAccess.UNCONFINED,
+    executes_code=True,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
     default_execution_target=ToolExecutionTarget.WORKER,
