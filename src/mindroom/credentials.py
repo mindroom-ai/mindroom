@@ -26,6 +26,7 @@ from mindroom import runtime_env_policy as _runtime_env_policy
 from mindroom.credential_policy import credential_service_policy
 from mindroom.durable_write import create_directory_durable, replace_file_durable
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
 from mindroom.tool_system.worker_routing import worker_root_path
 
 if TYPE_CHECKING:
@@ -381,20 +382,34 @@ class CredentialsManager:
         return self._load_credentials_file(normalized_service, credentials_path)
 
     def _load_credentials_file(self, normalized_service: str, credentials_path: Path) -> dict[str, Any] | None:
-        if credentials_path.exists():
-            try:
-                return self.decode_credentials(normalized_service, credentials_path.read_bytes())
-            except (OSError, TypeError, ValueError, InvalidTag) as exc:
-                logger.warning(
-                    "Failed to load encrypted credentials"
-                    if self._encryption_key is not None
-                    else "Failed to load credentials",
-                    service=normalized_service,
-                    path=str(credentials_path),
-                    error_type=type(exc).__name__,
-                )
-                return None
-        return None
+        try:
+            payload = self._read_credentials_payload(credentials_path)
+            return None if payload is None else self.decode_credentials(normalized_service, payload)
+        except (OSError, TypeError, ValueError, InvalidTag) as exc:
+            logger.warning(
+                "Failed to load encrypted credentials"
+                if self._encryption_key is not None
+                else "Failed to load credentials",
+                service=normalized_service,
+                path=str(credentials_path),
+                error_type=type(exc).__name__,
+            )
+            return None
+
+    def _read_credentials_payload(self, credentials_path: Path) -> bytes | None:
+        """Return one stored payload, or None when it is absent."""
+        if self.current_worker_root is None:
+            return credentials_path.read_bytes() if credentials_path.exists() else None
+        # Worker code can rewrite its own root, so read only a regular file physically inside it.
+        worker_root = self.base_path.parent
+        try:
+            with (
+                open_regular_file_within_root(worker_root, credentials_path.relative_to(worker_root)) as descriptor,
+                os.fdopen(descriptor, "rb", closefd=False) as credentials_file,
+            ):
+                return credentials_file.read()
+        except FileNotFoundError:
+            return None
 
     def save_credentials(self, service: str, credentials: dict[str, Any]) -> None:
         """Save credentials for a service.
@@ -445,12 +460,31 @@ class CredentialsManager:
 
         """
         services = []
-        if self.base_path.exists():
-            for path in self.base_path.glob("*_credentials.json"):
-                service = path.stem.replace("_credentials", "")
-                if _SERVICE_NAME_PATTERN.fullmatch(service):
-                    services.append(service)
+        for name in self._credentials_file_names():
+            service = Path(name).stem.replace("_credentials", "")
+            if _SERVICE_NAME_PATTERN.fullmatch(service):
+                services.append(service)
         return sorted(services)
+
+    def _credentials_file_names(self) -> list[str]:
+        if self.current_worker_root is None:
+            if not self.base_path.exists():
+                return []
+            return [path.name for path in self.base_path.glob("*_credentials.json")]
+        # Worker code can rewrite its own root, so never list through a linked directory.
+        try:
+            with open_directory_within_root(self.base_path.parent, self.base_path.name) as directory:
+                names = os.listdir(directory)  # noqa: PTH208 - directory pins the credentials directory
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            logger.warning(
+                "Failed to list credentials",
+                path=str(self.base_path),
+                error_type=type(exc).__name__,
+            )
+            return []
+        return [name for name in names if name.endswith("_credentials.json")]
 
     def get_api_key(self, service: str, key_name: str = "api_key") -> str | None:
         """Get an API key for a service.

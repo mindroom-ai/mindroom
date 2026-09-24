@@ -1,6 +1,7 @@
 """Tests for the centralized credentials manager."""
 
 import base64
+import os
 import stat
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,20 @@ def temp_credentials_dir(tmp_path: Path) -> Path:
 def credentials_manager(temp_credentials_dir: Path) -> CredentialsManager:
     """Create a CredentialsManager instance with a temporary directory."""
     return CredentialsManager(base_path=temp_credentials_dir)
+
+
+def _requester_identity(requester_id: str) -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=requester_id,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+        tenant_id="tenant-123",
+        account_id="account-456",
+    )
 
 
 def _worker_target(
@@ -839,6 +854,64 @@ class TestCredentialsManager:
         )
 
         assert loaded_credentials is None
+
+    @pytest.mark.parametrize("encrypted", [False, True])
+    def test_load_scoped_credentials_rejects_worker_override_linked_to_shared_store(
+        self,
+        tmp_path: Path,
+        encrypted: bool,
+    ) -> None:
+        """Worker code must not smuggle a non-grantable shared credential through an override link."""
+        manager = CredentialsManager(
+            tmp_path / "credentials",
+            encryption_key=_test_encryption_key() if encrypted else None,
+        )
+        manager.save_credentials("github", {"access_token": "operator-token", "_source": "ui"})
+        worker_target = _worker_target("user", "general", _requester_identity("@alice:example.org"))
+        assert worker_target.worker_key is not None
+        worker_credentials_path = manager.for_worker(worker_target.worker_key).get_credentials_path("github")
+        worker_credentials_path.symlink_to(
+            os.path.relpath(manager.get_credentials_path("github"), worker_credentials_path.parent),
+        )
+
+        loaded_credentials = load_scoped_credentials(
+            "github",
+            credentials_manager=manager,
+            worker_target=worker_target,
+            allowed_shared_services=frozenset(),
+        )
+
+        assert loaded_credentials is None
+
+    def test_load_scoped_credentials_rejects_worker_directory_linked_to_another_worker(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Worker code must not read another worker's overrides through a linked credentials directory."""
+        manager = CredentialsManager(tmp_path / "credentials")
+        victim_target = _worker_target("user", "general", _requester_identity("@bob:example.org"))
+        attacker_target = _worker_target("user", "general", _requester_identity("@alice:example.org"))
+        assert victim_target.worker_key is not None
+        assert attacker_target.worker_key is not None
+        victim_manager = manager.for_worker(victim_target.worker_key)
+        victim_manager.save_credentials("openweather", {"api_key": "bob-key", "_source": "ui"})
+        attacker_credentials_path = manager.for_worker(attacker_target.worker_key).base_path
+        attacker_credentials_path.rmdir()
+        attacker_credentials_path.symlink_to(
+            os.path.relpath(victim_manager.base_path, attacker_credentials_path.parent),
+            target_is_directory=True,
+        )
+
+        loaded_credentials = load_scoped_credentials(
+            "openweather",
+            credentials_manager=manager,
+            worker_target=attacker_target,
+            allowed_shared_services=frozenset(),
+        )
+
+        assert loaded_credentials is None
+        assert manager.for_worker(attacker_target.worker_key).list_services() == []
+        assert victim_manager.list_services() == ["openweather"]
 
     def test_load_scoped_credentials_uses_worker_rooted_manager_without_nesting(
         self,
