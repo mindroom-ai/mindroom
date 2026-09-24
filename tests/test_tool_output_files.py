@@ -682,6 +682,27 @@ def test_git_metadata_output_paths_rejected_without_calling_tool(tmp_path: Path,
     assert not (tmp_path / "repo").exists()
 
 
+def test_symlink_into_git_metadata_rejected_without_calling_tool(tmp_path: Path) -> None:
+    """A workspace-internal link to ``.git`` must not bypass the name check."""
+    git_config = tmp_path / "knowledge" / "docs" / ".git" / "config"
+    git_config.parent.mkdir(parents=True)
+    git_config.write_text("[core]\n", encoding="utf-8")
+    (tmp_path / "linked").symlink_to(git_config.parent, target_is_directory=True)
+    seen: list[object] = []
+    toolkit = _EchoToolkit(seen, result="should not run")
+    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+
+    result = FunctionCall(
+        function=_first_function(toolkit),
+        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "linked/config"},
+        call_id="call-1",
+    ).execute()
+
+    assert seen == []
+    assert _receipt(result.result)["status"] == "error"
+    assert git_config.read_text(encoding="utf-8") == "[core]\n"
+
+
 def test_intermediate_symlink_escape_rejected_without_calling_tool(tmp_path: Path) -> None:
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir()

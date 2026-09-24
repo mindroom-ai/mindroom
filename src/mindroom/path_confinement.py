@@ -1,4 +1,4 @@
-"""Shared symlink policy and descriptor-relative access below caller-authorized roots.
+"""Shared symlink and Git-metadata path policy, and descriptor-relative access below caller-authorized roots.
 
 Resolution checks a pathname at one instant; it does not authorize a later open.
 Use the descriptor helpers for local I/O that must reject links swapped after
@@ -22,8 +22,9 @@ def is_git_metadata_path(path: Path) -> bool:
 
     MindRoom runs Git in knowledge checkouts that may sit inside agent
     workspaces, and Git trusts ``.git`` contents, so agent-facing writers refuse
-    these paths. That is defense in depth: shell and code-execution tools can
-    still write there, so Git itself must never trust a checkout's config.
+    these paths. That is defense in depth: code-execution tools and tools that
+    accept arbitrary output paths can still write there, so the Git commands
+    themselves must not trust a checkout's config.
     """
     return any(part.casefold() == ".git" for part in path.parts)
 

@@ -97,7 +97,7 @@ Choose a destination shared with the tools that need the files, or generate work
 `file` exposes `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
 Paths resolve against `base_dir` and reject escapes by default; set `restrict_to_base_dir: false` to allow outside paths.
 `save_file()`, `replace_file_chunk()`, and `delete_file()` refuse any path inside a `.git` directory, because MindRoom runs Git in knowledge checkouts that may sit inside agent workspaces.
-This is defense in depth: shell and code-execution tools can still write there, so MindRoom's own Git listing never trusts a checkout's config.
+This is defense in depth: code-execution tools and tools that accept arbitrary output paths can still write there, so the dashboard's knowledge Git listing does not trust a checkout's config.
 `read_file()` enforces `max_file_length` and `max_file_lines`, and it tells the caller to use chunk reads when a file is too large.
 `search_files()` uses glob patterns relative to `base_dir` rather than full-text search.
 `search_content()` searches text-file contents and skips paths matching `exclude_patterns`.

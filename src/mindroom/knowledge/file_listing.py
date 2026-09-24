@@ -30,10 +30,13 @@ _GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS = 5.0
 # the checkout's own ``.git/config``. Command-line ``-c`` values take precedence
 # over repository config and reach any Git child, so these stop a listing from
 # running programs the checkout names (``core.fsmonitor`` fires on ``ls-files``).
+# ``safe.bareRepository=explicit`` stops Git adopting a bare-repository layout
+# that an agent built at the root without any ``.git`` path component.
 _READ_ONLY_GIT_CONFIG_OVERRIDES = (
     "core.fsmonitor=false",
     "core.hooksPath=/dev/null",
     "credential.helper=",
+    "safe.bareRepository=explicit",
 )
 # Operator-controlled config locations, kept so settings such as ``safe.directory`` still apply.
 _GIT_CONFIG_LOCATION_ENV = ("HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
@@ -308,14 +311,14 @@ def _read_only_git_env() -> dict[str, str]:
     """Return a minimal Git environment that carries none of the caller's secrets.
 
     Relative ``PATH`` entries are dropped because they would resolve inside the
-    checkout. An empty ``GIT_ALLOW_PROTOCOL`` refuses every transport, overriding
+    checkout, and so would an empty ``PATH``, which falls back to ``os.defpath``. An empty ``GIT_ALLOW_PROTOCOL`` refuses every transport, overriding
     any ``protocol.*`` config in the checkout, so an index read that would lazily
     fetch missing objects cannot reach a remote helper; newer Git also honours
     ``GIT_NO_LAZY_FETCH`` and skips that fetch outright.
     """
     path_entries = os.environ.get("PATH", os.defpath).split(os.pathsep)
     env = {
-        "PATH": os.pathsep.join(entry for entry in path_entries if Path(entry).is_absolute()),
+        "PATH": os.pathsep.join(entry for entry in path_entries if Path(entry).is_absolute()) or os.defpath,
         "GIT_ALLOW_PROTOCOL": "",
         "GIT_NO_LAZY_FETCH": "1",
     }

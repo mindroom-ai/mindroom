@@ -1804,10 +1804,34 @@ def test_git_listing_runs_git_without_caller_environment(
 
     assert list_git_tracked_knowledge_files(config, "docs", docs_path) == [docs_path.resolve() / "doc.md"]
     assert len(envs) == 2
+    allowed_names = {
+        "PATH",
+        "GIT_ALLOW_PROTOCOL",
+        "GIT_NO_LAZY_FETCH",
+        *knowledge_file_listing_module._GIT_CONFIG_LOCATION_ENV,
+    }
     for env in envs:
-        assert "MINDROOM_API_KEY" not in env
+        assert set(env) <= allowed_names
         assert env["GIT_ALLOW_PROTOCOL"] == ""
         assert all(Path(entry).is_absolute() for entry in env["PATH"].split(os.pathsep))
+
+
+def test_read_only_git_refuses_transports_that_checkout_config_allows(tmp_path: Path) -> None:
+    """Checkout config re-allowing a protocol must not open a transport during listing."""
+    remote = tmp_path / "remote"
+    _committed_git_checkout(remote)
+    docs_path = tmp_path / "docs"
+    _committed_git_checkout(docs_path)
+    subprocess.run(["git", "config", "protocol.file.allow", "always"], cwd=docs_path, check=True, capture_output=True)
+
+    result = knowledge_file_listing_module._run_read_only_git(
+        docs_path,
+        ["ls-remote", remote.resolve().as_uri()],
+        timeout=10.0,
+    )
+
+    assert result.returncode != 0
+    assert "not allowed" in result.stderr
 
 
 def test_directory_guard_rejects_parent_traversal(tmp_path: Path) -> None:
