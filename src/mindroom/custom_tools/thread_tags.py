@@ -151,7 +151,7 @@ class ThreadTagsTools(Toolkit):
                 message=room_error,
             )
         assert resolved_room_id is not None
-        if not room_access_allowed(context, resolved_room_id):
+        if not await room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",
                 action="tag",
@@ -242,7 +242,7 @@ class ThreadTagsTools(Toolkit):
                 message=room_error,
             )
         assert resolved_room_id is not None
-        if not room_access_allowed(context, resolved_room_id):
+        if not await room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",
                 action="untag",
@@ -391,7 +391,7 @@ class ThreadTagsTools(Toolkit):
                 message=room_error,
             )
         assert resolved_room_id is not None
-        if not room_access_allowed(context, resolved_room_id):
+        if not await room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",
                 action="list",

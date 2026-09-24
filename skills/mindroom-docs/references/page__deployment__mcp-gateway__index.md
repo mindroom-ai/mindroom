@@ -398,3 +398,8 @@ The gateway does not provide process isolation for native integrations.
 The gateway does not automatically retry an invocation whose outcome is unknown.
 Upstream MCP reconnection can refresh a failed session for a later call without replaying the failed action.
 Existing tool-specific authorization, provider scopes, worker isolation, and filters remain authoritative.
+
+## Agent CLI
+
+The [minimal-mode agent CLI](https://docs.mindroom.chat/tools/agent-cli/) belongs to an active agent response and uses a separate restricted gateway.
+It does not change external MCP authentication, saved selections, or compatible-tool restrictions.

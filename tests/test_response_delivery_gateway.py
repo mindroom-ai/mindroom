@@ -4022,7 +4022,8 @@ class TestTurnDeliverySerialization:
             await publication_started.wait()
             assert (
                 await runner.drain_inbox_responses(
-                    cancel_after_seconds=0.05,
+                    # Exercise repeated cancellation without imposing a 50 ms database deadline.
+                    cancel_after_seconds=0.5,
                     shutdown_intent=ORDERLY_SHUTDOWN,
                 )
                 is True

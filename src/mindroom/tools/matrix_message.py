@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     display_name="Matrix Message",
     description="Read, send, edit, and react to messages in Matrix rooms and threads",
     category=ToolCategory.COMMUNICATION,
+    file_access=ToolFileAccess.AGENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     requires_room_context=True,
@@ -29,7 +31,7 @@ if TYPE_CHECKING:
     dependencies=["agno"],
     docs_url="https://github.com/mindroom-ai/mindroom",
     function_names=("matrix_message",),
-    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,),
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
 )
 def matrix_message_tools() -> type[MatrixMessageTools]:
     """Return native Matrix messaging tools."""

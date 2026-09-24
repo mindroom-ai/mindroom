@@ -237,6 +237,12 @@ When all participating team members use the `file` backend, team file memory is 
 - `agents/<agent>/memory_files/team_<sorted_members>/MEMORY.md`
 - `agents/<agent>/memory_files/team_<sorted_members>/memory/YYYY-MM-DD.md`
 
+Memory files must be plain regular files inside that scope directory, because agent tools can write to it.
+The file backend skips symlinks, FIFOs, device nodes, and anything under a symlinked directory when it reads entries for the prompt preload, keyword search, and listing, and it rejects them when it writes, so an entry planted inside the scope directory cannot redirect MindRoom to another file.
+Each memory file is read up to 1 MiB; a larger file is truncated at its last complete line for reads, and updates of a truncated or non-UTF-8 file fail with an error so the rest of the file survives.
+A scan examines at most 4096 entries under `memory/`, reads at most 16 MiB, and descends at most 8 directory levels below `memory/`.
+Semantic search indexes the same files through the knowledge-base listing, which applies its own symlink rules.
+
 ## File Auto-Flush Worker
 
 When the effective backend is `file` for at least one agent, you can enable background auto-flush:

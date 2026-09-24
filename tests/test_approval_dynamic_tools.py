@@ -178,7 +178,7 @@ async def test_saved_approval_restores_deferred_plugin_without_function_metadata
     )
     (plugin_path / "tools.py").write_text(
         "from agno.tools.calculator import CalculatorTools\n"
-        "from mindroom.tool_system.declarations import ToolCategory\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class ApprovalCalculator(CalculatorTools):\n"
@@ -196,6 +196,7 @@ async def test_saved_approval_restores_deferred_plugin_without_function_metadata
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='approval_calculator',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Approval Calculator',\n"
         "    description='Perform synthetic arithmetic',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -260,7 +261,7 @@ async def test_saved_approval_ignores_unavailable_unrelated_deferred_plugin(
     (plugin_path / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
         "from pathlib import Path\n"
-        "from mindroom.tool_system.declarations import ToolCategory\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class UnavailableTools(Toolkit):\n"
@@ -270,6 +271,7 @@ async def test_saved_approval_ignores_unavailable_unrelated_deferred_plugin(
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='unavailable_plugin',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Unavailable Plugin',\n"
         "    description='An unrelated unavailable integration',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"

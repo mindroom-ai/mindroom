@@ -9,12 +9,14 @@ from agno.tools import Toolkit
 from pydantic import ValidationError
 
 from mindroom.api.config_lifecycle import validate_and_persist_config_payload
+from mindroom.authorization import is_platform_administrator
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.custom_tools.config_manager import preserve_tool_overrides, validate_knowledge_bases
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -23,6 +25,9 @@ logger = get_logger(__name__)
 
 _SELF_CONFIG_BLOCKED_TOOLS = {"config_manager"}
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
+_PLATFORM_ADMIN_REQUIRED_MESSAGE = (
+    "Error: Self-configuration changes require an active platform administrator requester."
+)
 
 
 class SelfConfigTools(Toolkit):
@@ -36,6 +41,9 @@ class SelfConfigTools(Toolkit):
             name="self_config",
             tools=[self.get_own_config, self.update_own_config],
         )
+        # A human confirms every write, even under tool_approval.default: auto_approve,
+        # because the model issuing the call also reads untrusted content.
+        self.functions["update_own_config"].requires_confirmation = True
 
     def get_own_config(self) -> str:
         """Get this agent's current configuration as YAML.
@@ -59,7 +67,7 @@ class SelfConfigTools(Toolkit):
         yaml_str = yaml.dump(agent_dict, default_flow_style=False, sort_keys=False)
         return f"## Configuration for '{self.agent_name}':\n\n```yaml\n{yaml_str}```"
 
-    def update_own_config(  # noqa: C901, PLR0912, PLR0911
+    def update_own_config(  # noqa: C901, PLR0912, PLR0911, PLR0915
         self,
         display_name: str | None = None,
         role: str | None = None,
@@ -116,6 +124,14 @@ class SelfConfigTools(Toolkit):
         if load_error:
             return load_error
         assert config is not None
+
+        runtime_context = get_tool_runtime_context()
+        if runtime_context is None or not is_platform_administrator(
+            runtime_context.requester_id,
+            config,
+            runtime_context.runtime_paths,
+        ):
+            return f"{_PLATFORM_ADMIN_REQUIRED_MESSAGE}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
 
         if self.agent_name not in config.agents:
             return f"Error: Agent '{self.agent_name}' not found in configuration."
