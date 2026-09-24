@@ -3,6 +3,9 @@
 import hashlib
 import hmac
 import json
+import os
+import subprocess
+import sys
 import time
 from unittest.mock import MagicMock, Mock, patch
 
@@ -19,6 +22,22 @@ def _signed_headers(body: bytes, secret: str) -> dict[str, str]:
     timestamp = int(time.time())
     signature = hmac.new(secret.encode(), f"{timestamp}.{body.decode()}".encode(), hashlib.sha256).hexdigest()
     return {"Stripe-Signature": f"t={timestamp},v1={signature}"}
+
+
+def test_whitespace_webhook_secret_is_unconfigured() -> None:
+    """A whitespace-only secret is as forgeable as an empty one, so startup must treat it as missing."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STRIPE_WEBHOOK_SECRET")}
+    env |= {"STRIPE_SECRET_KEY": "sk_test", "STRIPE_WEBHOOK_SECRET": " \n"}
+    completed = subprocess.run(
+        [sys.executable, "-c", "import backend.config as c; print(repr(c.STRIPE_WEBHOOK_SECRET))"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert completed.stdout.strip() == "''"
+    assert "STRIPE_WEBHOOK_SECRET is not configured" in completed.stderr
 
 
 class TestWebhookEndpoints:
