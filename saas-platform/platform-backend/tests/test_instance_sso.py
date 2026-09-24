@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 from urllib.parse import parse_qs, urlparse
 
 import jwt
@@ -37,14 +37,24 @@ def owned_instance_lookups(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, s
         lookups.append((instance_id, account_id))
         if instance_id != _OWNED_INSTANCE_ID:
             return None
-        return {"instance_id": instance_id, "account_id": account_id}
+        return {"instance_id": instance_id, "account_id": account_id, "subscription_id": "sub-123"}
 
     monkeypatch.setattr(sso.instances_data, "get_owned_instance", _get_owned_instance)
-    monkeypatch.setattr(sso, "ensure_supabase", object)
+    _use_subscription(monkeypatch, {"id": "sub-123", "tier": "byok", "status": "active"})
     app.state.limiter = Limiter(key_func=get_remote_address)
     app.state.limiter.reset()
     limiter.reset()
     return lookups
+
+
+def _use_subscription(monkeypatch: pytest.MonkeyPatch, subscription: dict[str, str]) -> None:
+    subscription_query = MagicMock()
+    subscription_query.select.return_value = subscription_query
+    subscription_query.eq.return_value = subscription_query
+    subscription_query.limit.return_value = subscription_query
+    subscription_query.execute.return_value = Mock(data=[subscription])
+    supabase = Mock(table=Mock(return_value=subscription_query))
+    monkeypatch.setattr(sso, "ensure_supabase", lambda: supabase)
 
 
 def _authorize(client: TestClient, redirect_to: str, *, cookie: str | None = "supabase-access-token"):  # noqa: ANN202
@@ -116,6 +126,17 @@ def test_instance_sso_refuses_instances_the_user_does_not_own() -> None:
     assert "location" not in response.headers
 
 
+def test_instance_sso_refuses_instances_whose_subscription_disallows_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dashboard login follows the same subscription entitlement as hosted Matrix login."""
+    _use_subscription(monkeypatch, {"id": "sub-123", "tier": "starter", "status": "cancelled"})
+    client = TestClient(app)
+
+    response = _authorize(client, "https://1.mindroom.chat/")
+
+    assert response.status_code == 402
+    assert "location" not in response.headers
+
+
 @pytest.mark.parametrize(
     "redirect_to",
     [
@@ -171,6 +192,7 @@ def test_instance_sso_ticket_is_not_a_platform_credential(monkeypatch: pytest.Mo
             return None  # Supabase knows no session for a token it did not issue.
 
     monkeypatch.setattr(deps, "auth_client", Mock(auth=_SupabaseAuth()))
+    monkeypatch.setattr(sso, "verify_user", deps.verify_user)
     monkeypatch.setattr(matrix_oidc, "MATRIX_OIDC_ENABLED", True)
     monkeypatch.setattr(matrix_oidc, "MATRIX_OIDC_CLIENT_ID", "mindroom-synapse")
     monkeypatch.setattr(matrix_oidc, "PLATFORM_DOMAIN", "mindroom.chat")

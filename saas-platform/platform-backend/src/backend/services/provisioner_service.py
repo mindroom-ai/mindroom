@@ -623,6 +623,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             "--set",
             f"baseDomain={base_domain}",
             "--set",
+            f"platformDomain={PLATFORM_DOMAIN}",
+            "--set",
             f"accountId={account_id}",
             "--set",
             f"supabaseUrl={SUPABASE_URL or ''}",

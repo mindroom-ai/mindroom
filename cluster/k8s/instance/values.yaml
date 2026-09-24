@@ -1,5 +1,6 @@
 customer: demo
 baseDomain: mindroom.chat  # Base domain for all services
+platformDomain: ""  # Platform app/API domain when it differs from baseDomain
 storage: 10Gi  # More storage for Matrix data
 storageClassName: hcloud-volumes  # Override to local cluster storage class (for example `standard` in kind)
 storageAccessMode: ReadWriteOnce  # MindRoom storage access mode. Set ReadWriteMany for multi-node shared-worker storage.

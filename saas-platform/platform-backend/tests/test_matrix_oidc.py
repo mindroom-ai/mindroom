@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import jwt
+from backend.routes import sso
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
@@ -73,7 +74,7 @@ def test_matrix_oidc_authorize_redirects_anonymous_users_to_platform_login(monke
 
 
 def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -> None:
-    matrix_oidc = _patch_oidc(monkeypatch)
+    _patch_oidc(monkeypatch)
     verify_user = AsyncMock(
         return_value={
             "user_id": "user-123",
@@ -82,7 +83,7 @@ def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -
             "account": {"full_name": "Alice Example"},
         }
     )
-    monkeypatch.setattr(matrix_oidc, "verify_user", verify_user)
+    monkeypatch.setattr(sso, "verify_user", verify_user)
 
     instance_query = MagicMock()
     instance_query.select.return_value = instance_query
@@ -100,7 +101,7 @@ def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -
 
     supabase = MagicMock()
     supabase.table.side_effect = [instance_query, subscription_query]
-    monkeypatch.setattr(matrix_oidc, "ensure_supabase", lambda: supabase)
+    monkeypatch.setattr(sso, "ensure_supabase", lambda: supabase)
 
     client = TestClient(app)
     response = client.get(

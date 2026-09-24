@@ -22,9 +22,8 @@ from backend.config import (
     MATRIX_OIDC_PRIVATE_KEY,
     PLATFORM_DOMAIN,
 )
-from backend.deps import _extract_bearer_token, ensure_supabase, limiter, verify_user
-from backend.entitlements import assert_instance_entitlement
-from backend.services import instances_data
+from backend.deps import _extract_bearer_token, limiter
+from backend.routes.sso import assert_instance_login_allowed, platform_cookie_user, platform_login_redirect
 from cachetools import TTLCache
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
@@ -93,11 +92,6 @@ def _authorize_url(request: Request) -> str:
     return f"{_issuer()}/authorize{suffix}"
 
 
-def _platform_login_redirect(request: Request) -> RedirectResponse:
-    target = quote(_authorize_url(request), safe="")
-    return RedirectResponse(f"https://app.{PLATFORM_DOMAIN}/auth/login?redirect_to={target}")
-
-
 def _validate_redirect_uri(redirect_uri: str) -> str:
     parsed = urlparse(redirect_uri)
     if parsed.scheme != "https" or parsed.path != "/_synapse/client/oidc/callback":
@@ -112,21 +106,6 @@ def _validate_redirect_uri(redirect_uri: str) -> str:
     if not instance_id or "." in instance_id:
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
     return instance_id
-
-
-def _load_owned_instance(instance_id: str, account_id: str) -> dict[str, Any]:
-    instance = instances_data.get_owned_instance(ensure_supabase(), instance_id, account_id)
-    if instance is None:
-        raise HTTPException(status_code=403, detail="Instance not found or access denied")
-    return instance
-
-
-def _assert_instance_subscription_allows_login(instance: dict[str, Any]) -> None:
-    sb = ensure_supabase()
-    result = sb.table("subscriptions").select("*").eq("id", instance["subscription_id"]).limit(1).execute()
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Subscription not found")
-    assert_instance_entitlement(result.data[0], "sign in to")
 
 
 def _subject_from_user(user: dict[str, Any]) -> str:
@@ -301,17 +280,11 @@ async def authorize(
         raise HTTPException(status_code=400, detail="Invalid OIDC authorization request")
 
     instance_id = _validate_redirect_uri(redirect_uri)
-    token = request.cookies.get("mindroom_jwt")
-    if not token:
-        return _platform_login_redirect(request)
+    user = await platform_cookie_user(request)
+    if user is None:
+        return platform_login_redirect(_authorize_url(request))
 
-    try:
-        user = await verify_user(authorization=f"Bearer {token}", request=request)
-    except HTTPException:
-        return _platform_login_redirect(request)
-
-    instance = _load_owned_instance(instance_id, str(user["account_id"]))
-    _assert_instance_subscription_allows_login(instance)
+    assert_instance_login_allowed(instance_id, str(user["account_id"]))
     code = _sign_claims(
         _build_code_claims(user=user, instance_id=instance_id, redirect_uri=redirect_uri, scope=scope, nonce=nonce)
     )

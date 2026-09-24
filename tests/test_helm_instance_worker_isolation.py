@@ -791,6 +791,16 @@ def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
     assert yaml.safe_load(synapse_config)["password_config"] == {"enabled": True}
 
 
+def test_instance_chart_points_platform_login_at_platform_domain() -> None:
+    """Split platform and instance domains keep platform login and SSO on the platform hosts."""
+    docs = _render_chart(Path("cluster/k8s/instance"), "baseDomain=tenants.example.test", "platformDomain=example.test")
+    mindroom_env = _env_by_name(_container(_resource(docs, "Deployment", "mindroom-demo"), "mindroom"))
+
+    assert mindroom_env["MINDROOM_PUBLIC_URL"]["value"] == "https://demo.tenants.example.test"
+    assert mindroom_env["MINDROOM_PLATFORM_LOGIN_URL"]["value"] == "https://app.example.test/auth/login"
+    assert mindroom_env["MINDROOM_PLATFORM_SSO_URL"]["value"] == "https://api.example.test/instance-sso/authorize"
+
+
 def test_instance_chart_numeric_customer_uses_valid_instance_secret_name() -> None:
     """CI and production instance IDs are numeric and must still render valid Secret names."""
     docs = _render_chart(

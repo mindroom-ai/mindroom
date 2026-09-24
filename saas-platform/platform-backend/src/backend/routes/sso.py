@@ -4,12 +4,13 @@ import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from ipaddress import ip_address
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import urlencode, urlsplit
 
 import jwt
 from backend.config import INSTANCE_BASE_DOMAIN, PLATFORM_DOMAIN
 from backend.deps import _extract_bearer_token, ensure_supabase, limiter, verify_user
+from backend.entitlements import assert_instance_entitlement
 from backend.models import StatusResponse
 from backend.services import instances_data, provisioner_service
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
@@ -47,7 +48,7 @@ def _set_cookie(
 
 # LEGACY_COMPAT: Shared-domain SSO cookies sent to every tenant subdomain.
 # Legacy format: `mindroom_jwt` cookies with `Domain=.PLATFORM_DOMAIN` when the platform domain is an ordinary DNS name.
-# Last legacy release: v2026.9.270, which wrote them since v2026.6.147; replacement: the next release writes host-only cookies on the platform API host.
+# Last legacy release: v2026.9.278, which wrote them since v2026.6.147; replacement: the next release writes host-only cookies on the platform API host.
 # Handling: Setting or clearing the cookie also expires the shared-domain cookie so browsers stop sending platform tokens to tenant hosts; localhost, IP, and single-label domains never had one.
 # Coverage: saas-platform/platform-backend/tests/test_sso_cookie_attrs.py.
 def _legacy_shared_sso_cookie_domain() -> str | None:
@@ -121,9 +122,32 @@ def _instance_dashboard_target(redirect_to: str) -> tuple[str, str, str]:
     return instance_id, f"https://{hostname}", f"{path}?{parsed.query}" if parsed.query else path
 
 
-def _platform_login_redirect(redirect_to: str) -> RedirectResponse:
-    authorize_url = f"https://api.{PLATFORM_DOMAIN}/instance-sso/authorize?{urlencode({'redirect_to': redirect_to})}"
-    return RedirectResponse(f"https://app.{PLATFORM_DOMAIN}/auth/login?{urlencode({'redirect_to': authorize_url})}")
+def platform_login_redirect(return_to: str) -> RedirectResponse:
+    """Send the browser through platform login, then back to one platform API URL."""
+    return RedirectResponse(f"https://app.{PLATFORM_DOMAIN}/auth/login?{urlencode({'redirect_to': return_to})}")
+
+
+async def platform_cookie_user(request: Request) -> dict[str, Any] | None:
+    """Return the user signed in by the API-host cookie, or None when platform login must run first."""
+    token = request.cookies.get(SSO_COOKIE_NAME)
+    if not token:
+        return None
+    try:
+        return await verify_user(authorization=f"Bearer {token}", request=request)
+    except HTTPException:
+        return None
+
+
+def assert_instance_login_allowed(instance_id: str, account_id: str) -> None:
+    """Raise unless the account owns the instance and its subscription still allows signing in to it."""
+    sb = ensure_supabase()
+    instance = instances_data.get_owned_instance(sb, instance_id, account_id)
+    if instance is None:
+        raise HTTPException(status_code=403, detail="Instance not found or access denied")
+    result = sb.table("subscriptions").select("*").eq("id", instance["subscription_id"]).limit(1).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    assert_instance_entitlement(result.data[0], "sign in to")
 
 
 # response_model=None: the slowapi wrapper keeps FastAPI from resolving the RedirectResponse annotation.
@@ -135,16 +159,12 @@ async def authorize_instance_sso(request: Request, redirect_to: str) -> Redirect
     The platform cookie never leaves the API host, and the ticket is not a platform credential.
     """
     instance_id, origin, next_path = _instance_dashboard_target(redirect_to)
-    token = request.cookies.get(SSO_COOKIE_NAME)
-    if not token:
-        return _platform_login_redirect(redirect_to)
-    try:
-        user = await verify_user(authorization=f"Bearer {token}", request=request)
-    except HTTPException:
-        return _platform_login_redirect(redirect_to)
-
-    if instances_data.get_owned_instance(ensure_supabase(), instance_id, str(user["account_id"])) is None:
-        raise HTTPException(status_code=403, detail="Instance not found or access denied")
+    user = await platform_cookie_user(request)
+    if user is None:
+        return platform_login_redirect(
+            f"https://api.{PLATFORM_DOMAIN}/instance-sso/authorize?{urlencode({'redirect_to': redirect_to})}"
+        )
+    assert_instance_login_allowed(instance_id, str(user["account_id"]))
 
     now = int(datetime.now(UTC).timestamp())
     ticket = jwt.encode(

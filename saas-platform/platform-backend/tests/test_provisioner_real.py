@@ -207,6 +207,7 @@ class TestProvisionerCommandValidation:
             patch.multiple(
                 "backend.services.provisioner_service",
                 PROVISIONER_API_KEY="test-key",
+                PLATFORM_DOMAIN="platform.example.test",
                 INSTANCE_BASE_DOMAIN="local",
                 INSTANCE_STORAGE_CLASS_NAME="standard",
                 INSTANCE_MINDROOM_IMAGE="ghcr.io/mindroom-ai/mindroom:latest",
@@ -260,6 +261,7 @@ class TestProvisionerCommandValidation:
                 set_file_args[key] = value
 
         assert set_args["baseDomain"] == "local"
+        assert set_args["platformDomain"] == "platform.example.test"
         assert set_args["storageClassName"] == "standard"
         assert set_args["mindroom_image"] == "ghcr.io/mindroom-ai/mindroom:latest"
         assert set_args["mindroom_image_pull_policy"] == "IfNotPresent"
