@@ -88,6 +88,11 @@ agents:
 | `get_attachment(attachment_id, mindroom_output_path?, view=False)` | Return metadata, save bytes to a workspace-relative path, or send media/document content to the model with `view=True` |
 | `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`) |
 
+`register_attachment()` retains a copy of the file's current bytes in MindRoom's managed `incoming_media/` storage, and the attachment's `local_path` names that copy rather than the source file.
+Later edits to the source file, including replacing it with a symbolic link, do not change what the attachment ID views, saves, or sends.
+Workspace-relative registration opens the source without following symbolic links, so a linked file or directory below the workspace is rejected.
+Registered files are limited to 64 MiB, the same cap that applies to incoming Matrix media.
+Attachment IDs registered by earlier releases, which referenced the source file in place, are copied into managed storage on first use only when the source is still a regular file reached without symbolic links and its bytes match the recorded SHA-256; otherwise the ID stops resolving.
 By default, `get_attachment()` returns the attachment metadata response, including the runtime-local `local_path`.
 Use `get_attachment("att_...", view=True)` to inspect media from earlier in the conversation or a local file registered with `register_attachment(file_path)`.
 This sends the attachment bytes to the configured model, using native image, audio, video, or document inputs rather than putting binary data in tool text.
@@ -108,8 +113,9 @@ In shell tools, that workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in wor
 
 `matrix_message` accepts one ordered `attachments` list containing context attachment IDs (`att_*`) and local file paths.
 Local files are registered in the current context before sending.
-Relative paths resolve from the agent workspace when one is available.
-Relative paths must stay inside the workspace.
+With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
+Without a configured agent workspace, `workspace` mode only attaches `att_*` IDs.
 Use `matrix_message(attachments=["att_example", "exports/report.csv"])` to send attachment IDs and file paths in order to the current conversation.
 
 ### Why use this tool?

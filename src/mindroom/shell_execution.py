@@ -19,7 +19,12 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 
-from mindroom.shell_output_capture import CapturedShellStream, ShellOutputCapture, ShellOutputDestination
+from mindroom.shell_output_capture import (
+    CapturedShellStream,
+    ShellOutputCapture,
+    ShellOutputDestination,
+    format_shell_completion,
+)
 
 DEFAULT_RUN_TIMEOUT_SECONDS = 120
 
@@ -150,8 +155,9 @@ async def run_command(
     """Run one shell command; return output, an error message, or a background handle.
 
     When the command completes within ``timeout`` seconds the last ``tail``
-    lines of stdout are returned (or the stderr on non-zero exit). When the
-    timeout is exceeded the process keeps running under *registry* and a
+    lines of stdout are returned. On non-zero exit, useful stdout is preserved
+    together with stderr. When the timeout is exceeded, the process keeps
+    running under *registry* and a
     handle string is returned for ``check_command``/``kill_command``.
     Cancellation terminates the process group and drops any registered handle.
     """
@@ -252,14 +258,22 @@ async def _run_command_after_reservation(  # noqa: C901
             capture.close()
         raise
 
+    return_code = process.returncode
+    assert return_code is not None
     if capture is not None:
         capture.incomplete = stdout_reader.cancelled() or stderr_reader.cancelled()
         try:
-            return ShellRunResult(message=capture.publish(process.returncode), output_file_handled=True)
+            return ShellRunResult(message=capture.publish(return_code), output_file_handled=True)
         finally:
             capture.close()
-    if process.returncode != 0:
-        return ShellRunResult(message=f"Error: {stderr_buf.render()}")
+    if return_code != 0:
+        return ShellRunResult(
+            message=format_shell_completion(
+                stdout_buf.render(tail=tail),
+                stderr_buf.render(),
+                return_code=return_code,
+            ),
+        )
     return ShellRunResult(message=stdout_buf.render(tail=tail))
 
 

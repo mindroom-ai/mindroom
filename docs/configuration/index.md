@@ -577,6 +577,7 @@ agents:
     markdown: true                 # Optional: Override default (inherits from defaults section)
     worker_tools: [shell, file]    # Optional: Override default (inherits from defaults section)
     worker_scope: user_agent       # Optional: Reuse one proxied runtime per requester+agent
+    file_access: workspace         # Optional: workspace or unrestricted (inherits from defaults section)
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0, file, or none)
@@ -683,6 +684,7 @@ defaults:
   show_tool_calls: true            # Default: true (show tool details inline; hidden mode still allows generic worker warmup copy)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
+  file_access: workspace           # Default: workspace (path tools stay in the agent workspace; unrestricted allows any path)
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
   thread_summary_model: null       # Default: null (uses the default model)

@@ -145,6 +145,7 @@ Retention depends on the system component:
 - hosted non-critical audit logs are scheduled for deletion after 90 days and usage metrics after 365 days; selected security and deletion audit events are excluded from that ordinary cleanup
 - support emails and diagnostics may be retained for support and security purposes
 
+Registering a local or workspace file as an attachment retains a copy of its bytes in managed `incoming_media/` storage, subject to the same cleanup.
 Attachment cleanup does not delete unmanaged source or workspace files or copies retained by Matrix homeservers.
 Active attachment references and filesystem failures can preserve local media beyond 30 days.
 Scheduled cleanup describes the repository's configured policy, not proof that a particular deployment has completed every cleanup run.

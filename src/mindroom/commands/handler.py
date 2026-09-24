@@ -17,6 +17,7 @@ from mindroom.commands.desktop_commands import (
     handle_desktop_command,
 )
 from mindroom.commands.encryption_commands import handle_e2ee_command, handle_encrypt_command
+from mindroom.commands.mode_commands import handle_mode_command
 from mindroom.commands.model_commands import handle_model_command, handle_structured_model_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
 from mindroom.commands.room_model_commands import handle_room_model_command
@@ -28,7 +29,9 @@ from mindroom.entity_resolution import (
 )
 from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.room_membership import cached_member_ids
+from mindroom.message_target import MessageTarget
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.scheduling import (
@@ -54,7 +57,6 @@ if TYPE_CHECKING:
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
-    from mindroom.message_target import MessageTarget
     from mindroom.model_selection import CommandResultContent
     from mindroom.tool_system.plugins import PluginReloadResult
 
@@ -68,6 +70,7 @@ COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
         CommandType.EDIT_SCHEDULE,
         CommandType.DESKTOP,
         CommandType.MODEL,
+        CommandType.MODE,
         CommandType.ROOM_MODEL,
         CommandType.THREAD_MODE,
         CommandType.ENCRYPT,
@@ -333,6 +336,20 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             except Exception as exc:
                 context.logger.exception("Plugin reload command failed", error=str(exc))
                 response_text = f"❌ Plugin reload failed: {exc}"
+
+    elif command.type == CommandType.MODE:
+        response_text = handle_mode_command(
+            command.args.get("args_text", ""),
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            target=MessageTarget.resolve(
+                room.room_id,
+                context.stable_target.source_thread_id or EventInfo.from_event(event.source).thread_id,
+                event.event_id,
+            ),
+            requester_id=requester_user_id,
+            membership_index=context.agent_reply_memberships,
+        )
 
     elif command.type == CommandType.HI:
         candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)
