@@ -112,11 +112,16 @@ spec:
       && (!has(owner.blockOwnerDeletion) || owner.blockOwnerDeletion == false))
     message: MindRoom worker resources may only be owned by their own tenant's runtime Deployment.
     reason: Forbidden
+  # The selector matters as much as the template: its ReplicaSets adopt and delete any
+  # unowned pod it matches, so it must never match another tenant's pods.
   - expression: >-
       !variables.inspectsSpec
       || ("customer" in variables.podTemplateLabels
-      && variables.podTemplateLabels["customer"] == {{ $customer | toJson }})
-    message: MindRoom worker pod templates must carry their own customer label.
+      && variables.podTemplateLabels["customer"] == {{ $customer | toJson }}
+      && has(variables.target.spec.selector.matchLabels)
+      && "customer" in variables.target.spec.selector.matchLabels
+      && variables.target.spec.selector.matchLabels["customer"] == {{ $customer | toJson }})
+    message: MindRoom worker pod templates and selectors must carry their own customer label.
     reason: Forbidden
   - expression: >-
       !variables.inspectsSpec
@@ -195,6 +200,10 @@ spec:
       || variables.podSpec.nodeName == {{ $controlPlaneNodeName | toJson }}){{ else }}!has(variables.podSpec.nodeName){{ end }}
       && {{ if $runtimeClassName }}(has(variables.podSpec.runtimeClassName)
       && variables.podSpec.runtimeClassName == {{ $runtimeClassName | toJson }}){{ else }}!has(variables.podSpec.runtimeClassName){{ end }}
+      && !has(variables.podSpec.nodeSelector)
+      && !has(variables.podSpec.affinity)
+      && !has(variables.podSpec.topologySpreadConstraints)
+      && (!has(variables.podSpec.schedulerName) || variables.podSpec.schedulerName == "default-scheduler")
       && !has(variables.podSpec.priorityClassName)
       && !has(variables.podSpec.priority)
       && !has(variables.podSpec.tolerations)

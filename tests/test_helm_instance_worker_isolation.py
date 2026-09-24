@@ -784,6 +784,46 @@ def _main_container(deployment: dict[str, Any]) -> dict[str, Any]:
     return _pod_spec(deployment)["containers"][0]
 
 
+def _with_api_server_defaults(
+    deployment: dict[str, Any],
+    service: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Apply the defaulting the API server performs before validating admission sees an object."""
+    deployment, service = copy.deepcopy(deployment), copy.deepcopy(service)
+    deployment["spec"].update(
+        {"revisionHistoryLimit": 10, "progressDeadlineSeconds": 600, "strategy": {"type": "RollingUpdate"}},
+    )
+    _pod_spec(deployment).update(
+        {
+            "schedulerName": "default-scheduler",
+            "dnsPolicy": "ClusterFirst",
+            "restartPolicy": "Always",
+            "terminationGracePeriodSeconds": 30,
+        },
+    )
+    for container in _pod_spec(deployment)["containers"]:
+        container.update({"terminationMessagePath": "/dev/termination-log", "terminationMessagePolicy": "File"})
+        for port in container.get("ports", []):
+            port.setdefault("protocol", "TCP")
+    for volume in _pod_spec(deployment)["volumes"]:
+        if "configMap" in volume:
+            volume["configMap"].setdefault("defaultMode", 420)
+    service["spec"].update(
+        {
+            "type": "ClusterIP",
+            "sessionAffinity": "None",
+            "clusterIP": "10.43.12.34",
+            "clusterIPs": ["10.43.12.34"],
+            "ipFamilies": ["IPv4"],
+            "ipFamilyPolicy": "SingleStack",
+            "internalTrafficPolicy": "Cluster",
+        },
+    )
+    for port in service["spec"]["ports"]:
+        port.setdefault("protocol", "TCP")
+    return deployment, service
+
+
 def _victim_workload(name: str, app: str) -> dict[str, Any]:
     labels = {"app": app, "customer": "victim"}
     return {
@@ -862,12 +902,16 @@ def test_instance_chart_admits_the_backend_worker_lifecycle(
             **objects,
         )
 
+    defaulted_deployment, defaulted_service = _with_api_server_defaults(deployment, service)
+
     assert deployment["metadata"]["name"].startswith(f"{prefix}-")
     assert admit("CREATE", "deployments", obj=deployment) is None
+    assert admit("CREATE", "deployments", obj=defaulted_deployment) is None
     assert admit("UPDATE", "deployments", obj=scaled_down, old=deployment) is None
-    assert admit("DELETE", "deployments", old=deployment) is None
+    assert admit("DELETE", "deployments", old=defaulted_deployment) is None
     assert admit("CREATE", "services", obj=service) is None
-    assert admit("DELETE", "services", old=service) is None
+    assert admit("CREATE", "services", obj=defaulted_service) is None
+    assert admit("DELETE", "services", old=defaulted_service) is None
     assert admit("UPDATE", "secrets", obj=auth_secret) is None
 
 
@@ -899,7 +943,14 @@ def test_instance_chart_admits_the_backend_worker_lifecycle(
         ),
         (
             lambda d: d["spec"]["template"]["metadata"]["labels"].update({"app": "synapse", "customer": "v"}),
-            "pod templates must carry",
+            "pod templates and selectors",
+        ),
+        (
+            lambda d: (
+                d["spec"]["template"]["metadata"]["labels"].update({"app": "synapse"}),
+                d["spec"]["selector"].update({"matchLabels": {"app": "synapse"}}),
+            ),
+            "pod templates and selectors",
         ),
         (
             lambda d: _pod_spec(d).update({"serviceAccountName": "mindroom-worker-manager-v"}),
@@ -939,6 +990,38 @@ def test_instance_chart_admits_the_backend_worker_lifecycle(
         ),
         (lambda d: _main_container(d)["ports"][0].update({"hostPort": 8008}), "drop all capabilities"),
         (lambda d: _pod_spec(d).update({"nodeName": "victim-node"}), "may not choose their node"),
+        (
+            lambda d: _pod_spec(d).update({"nodeSelector": {"kubernetes.io/hostname": "victim-node"}}),
+            "may not choose their node",
+        ),
+        (
+            lambda d: _pod_spec(d).update(
+                {
+                    "affinity": {
+                        "podAffinity": {
+                            "requiredDuringSchedulingIgnoredDuringExecution": [
+                                {
+                                    "labelSelector": {"matchLabels": {"app": "synapse", "customer": "victim"}},
+                                    "topologyKey": "kubernetes.io/hostname",
+                                },
+                            ],
+                        },
+                    },
+                },
+            ),
+            "may not choose their node",
+        ),
+        (
+            lambda d: _pod_spec(d).update(
+                {
+                    "topologySpreadConstraints": [
+                        {"maxSkew": 1, "topologyKey": "kubernetes.io/hostname", "whenUnsatisfiable": "DoNotSchedule"},
+                    ],
+                },
+            ),
+            "may not choose their node",
+        ),
+        (lambda d: _pod_spec(d).update({"schedulerName": "permissive-scheduler"}), "may not choose their node"),
         (lambda d: _pod_spec(d).update({"priorityClassName": "system-node-critical"}), "may not choose their node"),
         (lambda d: _pod_spec(d).update({"tolerations": [{"operator": "Exists"}]}), "may not choose their node"),
         (lambda d: _pod_spec(d).update({"imagePullSecrets": [{"name": "ghcr-pull"}]}), "may not choose their node"),
@@ -955,6 +1038,7 @@ def test_instance_chart_admits_the_backend_worker_lifecycle(
         "env-other-secret",
         "init-container-envfrom-other-secret",
         "impersonate-other-synapse-pods",
+        "selector-adopts-other-pods",
         "run-as-other-worker-manager",
         "mount-api-token",
         "host-network",
@@ -970,6 +1054,10 @@ def test_instance_chart_admits_the_backend_worker_lifecycle(
         "selinux-spc",
         "host-port",
         "pin-node",
+        "node-selector",
+        "co-locate-with-victim",
+        "spread-across-nodes",
+        "custom-scheduler",
         "preempting-priority",
         "tolerate-all-taints",
         "borrow-pull-secret",
