@@ -14,7 +14,7 @@ Configured bot accounts and managed identities do not count as human aliases.
 The scheduler checks membership every 30 seconds while waiting and again before execution, including after a restart.
 A confirmed join for any equivalent human identity permits execution; otherwise, uncertain membership makes execution wait for a successful lookup.
 Membership checks use the runtime's current applied configuration, so revoking a human alias takes effect on the next check without recreating the runner.
-Legacy schedules without a recorded creator remain usable.
+Legacy schedules without a recorded creator remain usable when a MindRoom bot account wrote them.
 
 ## Commands
 
@@ -176,6 +176,11 @@ Edit or recreate a recurring schedule after an offset change if it must keep the
 ## Persistence
 
 Schedules are stored in Matrix room state and persist across restarts.
+
+MindRoom only lists, edits, cancels, restores, or runs schedule state whose Matrix sender is one of its bot accounts: the router, an agent, or a team, including agents and teams since removed from the configuration.
+Schedule state written by any other account, including a room admin or the internal `mindroom_user`, is ignored and logged once per state event, because a schedule's recorded creator is the requester its triggers run as.
+Ignored state is never canceled or overwritten automatically.
+Single-schedule reads request the full state event with `format=event` to learn its sender, which Synapse and Tuwunel support.
 
 New schedules use the live runtime to start their in-memory runners immediately.
 

@@ -140,7 +140,7 @@ class TodoPokeRuntimeCoordinator:
         agent_bot = await self._joined_agent_bot(room_id, agent_names)
         if agent_bot is None or agent_bot.client is None:
             return None
-        return await get_pending_schedule_thread_ids_for_room(agent_bot.client, room_id)
+        return await get_pending_schedule_thread_ids_for_room(agent_bot.client, room_id, self.runtime_paths)
 
     async def _send_poke(
         self,

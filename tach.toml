@@ -2391,7 +2391,6 @@ depends_on = [
     "mindroom.matrix.invited_rooms_store",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
-    "mindroom.matrix.users",
 ]
 
 [[modules]]
