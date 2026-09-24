@@ -1471,7 +1471,6 @@ _UNCONFINED_LOCAL_FILE_TOOLS = (
     "composio",
     "csv",
     "duckdb",
-    "e2b",
     "groq",
     "moviepy_video_tools",
     "newspaper",
@@ -1507,7 +1506,7 @@ def test_only_code_execution_tools_execute_code() -> None:
 
 def test_path_tools_follow_agent_file_access_and_receive_it() -> None:
     """Tools that take model-supplied paths follow and receive the agent file_access."""
-    for name in ("file", "coding", "attachments", "matrix_message", "gmail", "google_drive", "browser"):
+    for name in ("file", "coding", "attachments", "matrix_message", "gmail", "google_drive", "browser", "e2b"):
         metadata = TOOL_METADATA[name]
         assert metadata.file_access is ToolFileAccess.AGENT, name
         assert ToolManagedInitArg.FILE_ACCESS in metadata.managed_init_args, name
