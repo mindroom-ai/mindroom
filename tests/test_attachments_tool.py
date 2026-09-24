@@ -7,10 +7,11 @@ import base64
 import dataclasses
 import hashlib
 import json
+import os
 import stat
 import time
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -38,9 +39,6 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import bind_runtime_paths, make_latest_thread_event_id_mock, make_relation_lookup
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _tool_context(
@@ -148,7 +146,7 @@ async def test_attachments_tool_lists_context_attachments(tmp_path: Path) -> Non
     assert payload["attachment_ids"] == ["att_sample"]
     assert payload["attachments"][0]["attachment_id"] == "att_sample"
     assert payload["attachments"][0]["available"] is True
-    assert payload["attachments"][0]["local_path"] == str(sample_file.resolve())
+    assert payload["attachments"][0]["local_path"] == str(attachment.local_path)
 
 
 @pytest.mark.asyncio
@@ -172,7 +170,7 @@ async def test_attachments_tool_get_attachment_returns_local_path(tmp_path: Path
     assert payload["tool"] == "attachments"
     assert payload["attachment_id"] == "att_sample"
     assert payload["attachment"]["attachment_id"] == "att_sample"
-    assert payload["attachment"]["local_path"] == str(sample_file.resolve())
+    assert payload["attachment"]["local_path"] == str(attachment.local_path)
 
 
 @pytest.mark.asyncio
@@ -281,13 +279,14 @@ async def test_get_attachment_view_rejects_unusable_documents(tmp_path: Path, fi
 
 
 @pytest.mark.asyncio
-async def test_get_attachment_view_uses_local_filename_when_metadata_has_none(tmp_path: Path) -> None:
-    """Older attachment records need not carry an explicit filename."""
+async def test_get_attachment_view_uses_source_filename_when_none_is_given(tmp_path: Path) -> None:
+    """Registration keeps the source name because the retained copy has an opaque name."""
     local_path = tmp_path / "document.pdf"
     local_path.write_bytes(b"%PDF-1.4 document bytes")
     attachment = register_local_attachment(tmp_path, local_path, kind="file", mime_type="application/pdf")
     assert attachment is not None
-    assert attachment.filename is None
+    assert attachment.filename == "document.pdf"
+    assert attachment.local_path.name != "document.pdf"
     with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
         result = await AttachmentTools().get_attachment(attachment.attachment_id, view=True)
 
@@ -305,11 +304,11 @@ async def test_get_attachment_view_rejects_unusable_images(tmp_path: Path, case:
     tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     with tool_runtime_context(_tool_context(tmp_path)):
         registered = json.loads(await tool.register_attachment("plot.png"))
+        retained_path = Path(registered["attachment"]["local_path"])
         if case == "oversized":
-            with image_path.open("r+b") as image_file:
-                image_file.truncate(20 * 1024 * 1024 + 1)
+            os.truncate(retained_path, 20 * 1024 * 1024 + 1)
         elif case == "missing":
-            image_path.unlink()
+            retained_path.unlink()
         result = await tool.get_attachment(
             registered["attachment_id"],
             view=True,
@@ -979,10 +978,108 @@ async def test_attachments_tool_register_attachment_resolves_relative_paths_from
         payload = json.loads(await tool.register_attachment("scratch/generated.txt"))
 
     assert payload["status"] == "ok"
-    assert payload["attachment"]["local_path"] == str(generated_file.resolve())
     attachment = load_attachment(tmp_path, payload["attachment_id"])
     assert attachment is not None
-    assert attachment.local_path == generated_file.resolve()
+    assert payload["attachment"]["local_path"] == str(attachment.local_path)
+    assert attachment.local_path.parent == (tmp_path / "incoming_media").resolve()
+    assert attachment.local_path.read_text(encoding="utf-8") == "artifact"
+    assert attachment.filename == "generated.txt"
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_accepts_workspace_below_linked_ancestor(tmp_path: Path) -> None:
+    """A configured workspace reached through a linked ancestor directory still registers relative files."""
+    real_storage = tmp_path / "real"
+    (real_storage / "workspace" / "scratch").mkdir(parents=True)
+    (real_storage / "workspace" / "scratch" / "generated.txt").write_text("artifact", encoding="utf-8")
+    (tmp_path / "linked").symlink_to(real_storage)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path / "linked" / "workspace")
+
+    with tool_runtime_context(_tool_context(tmp_path)):
+        payload = json.loads(await tool.register_attachment("scratch/../scratch/generated.txt"))
+
+    assert payload["status"] == "ok"
+    assert Path(payload["attachment"]["local_path"]).read_text(encoding="utf-8") == "artifact"
+
+
+@pytest.mark.asyncio
+async def test_register_attachment_rejects_workspace_root_replaced_by_link(tmp_path: Path) -> None:
+    """A workspace root swapped for a link to primary storage must not be opened through the link."""
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    credentials = tmp_path / "credentials"
+    credentials.mkdir()
+    (credentials / "gmail_credentials.json").write_text("SECRET_TOKEN", encoding="utf-8")
+    (agent_root / "workspace").symlink_to(credentials)
+    tool = AttachmentTools(tool_output_workspace_root=agent_root / "workspace")
+
+    with tool_runtime_context(_tool_context(tmp_path)):
+        payload = json.loads(await tool.register_attachment("gmail_credentials.json"))
+
+    assert payload["status"] == "error"
+    assert not (tmp_path / "attachments").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use", ["view", "save", "send"])
+async def test_registered_workspace_file_swapped_for_link_never_reads_link_target(
+    tmp_path: Path,
+    use: str,
+) -> None:
+    """Sandboxed code replacing a registered workspace file must not redirect later primary reads or sends."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    secret = tmp_path / "config.yaml"
+    secret.write_text("SECRET_API_KEY", encoding="utf-8")
+    notes = workspace / "notes.txt"
+    notes.write_text("public notes", encoding="utf-8")
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    ctx = _tool_context(tmp_path, process_env={"MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS": "true"})
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file")) as send_file,
+    ):
+        attachment_id = json.loads(await tool.register_attachment("notes.txt"))["attachment_id"]
+        notes.unlink()
+        notes.symlink_to(secret)
+        if use == "view":
+            result = await tool.get_attachment(attachment_id, view=True)
+            assert isinstance(result, ToolResult)
+            assert result.files is not None
+            assert result.files[0].content == b"public notes"
+        elif use == "save":
+            payload = json.loads(await tool.get_attachment(attachment_id, mindroom_output_path="copy.txt"))
+            assert payload["status"] == "ok"
+            assert (workspace / "copy.txt").read_text(encoding="utf-8") == "public notes"
+        else:
+            payload = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment_id]))
+            assert payload["status"] == "ok"
+            uploaded = send_file.await_args.args[2]
+            assert not uploaded.is_relative_to(workspace)
+            assert uploaded.read_text(encoding="utf-8") == "public notes"
+            assert send_file.await_args.kwargs["filename"] == "notes.txt"
+
+
+@pytest.mark.asyncio
+async def test_get_attachment_view_rejects_linked_retained_media(tmp_path: Path) -> None:
+    """Reads of retained media must not follow a link even inside primary-owned storage."""
+    secret = tmp_path / "config.yaml"
+    secret.write_text("SECRET_API_KEY", encoding="utf-8")
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_text("hello", encoding="utf-8")
+    attachment = register_local_attachment(tmp_path, sample_file, kind="file", mime_type="text/plain")
+    assert attachment is not None
+    attachment.local_path.unlink()
+    attachment.local_path.symlink_to(secret)
+
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
+        result = await AttachmentTools().get_attachment(attachment.attachment_id, view=True)
+
+    assert isinstance(result, str)
+    payload = json.loads(result)
+    assert payload["status"] == "error"
+    assert "missing on disk" in payload["message"]
 
 
 @pytest.mark.asyncio
@@ -1049,12 +1146,13 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
     assert register_payload["status"] == "ok"
     assert register_payload["tool"] == "attachments"
     assert register_payload["attachment_id"].startswith("att_")
-    assert register_payload["attachment"]["local_path"] == str(generated_file.resolve())
+    assert Path(register_payload["attachment"]["local_path"]).read_text(encoding="utf-8") == "artifact"
     assert attachment_id in list_tool_runtime_attachment_ids(current_context)
     assert send_error is None
     assert send_result["status"] == "ok"
     assert send_result["resolved_attachment_ids"] == [attachment_id]
     mocked.assert_awaited_once()
+    assert mocked.await_args.kwargs["filename"] == "generated.txt"
 
 
 @pytest.mark.asyncio

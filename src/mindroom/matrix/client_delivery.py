@@ -596,6 +596,7 @@ async def _upload_file_as_mxc(
     file_path: Path,
     *,
     mimetype: str,
+    filename: str | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload a local file as MXC, encrypting payloads in encrypted rooms."""
     try:
@@ -608,7 +609,7 @@ async def _upload_file_as_mxc(
         client,
         room_id,
         file_bytes,
-        filename=file_path.name,
+        filename=filename or file_path.name,
         mimetype=mimetype,
     )
 
@@ -707,8 +708,12 @@ async def send_file_message(
     thread_id: str | None = None,
     caption: str | None = None,
     latest_thread_event_id: str | None = None,
+    filename: str | None = None,
 ) -> str | None:
-    """Upload a file and send it with the appropriate Matrix message type."""
+    """Upload a file and send it with the appropriate Matrix message type.
+
+    ``filename`` names the upload for recipients and defaults to the file's own name.
+    """
     resolved_path = Path(file_path).expanduser().resolve()
     if not resolved_path.is_file():
         logger.error("Cannot send non-file attachment", path=str(resolved_path))
@@ -716,8 +721,15 @@ async def send_file_message(
     if not _can_send_to_encrypted_room(client, room_id, operation="send_file_message"):
         return None
 
+    display_name = filename or resolved_path.name
     mimetype = _guess_mimetype(resolved_path)
-    mxc_uri, upload_payload = await _upload_file_as_mxc(client, room_id, resolved_path, mimetype=mimetype)
+    mxc_uri, upload_payload = await _upload_file_as_mxc(
+        client,
+        room_id,
+        resolved_path,
+        mimetype=mimetype,
+        filename=display_name,
+    )
     if mxc_uri is None or upload_payload is None:
         return None
 
@@ -728,11 +740,11 @@ async def send_file_message(
     msgtype = _msgtype_for_mimetype(mimetype)
     content: dict[str, Any] = {
         "msgtype": msgtype,
-        "body": caption or resolved_path.name,
+        "body": caption or display_name,
         "info": info,
     }
     if msgtype == "m.file":
-        content["filename"] = resolved_path.name
+        content["filename"] = display_name
     encrypted_file_payload = upload_payload.get("file")
     if isinstance(encrypted_file_payload, dict):
         content["file"] = encrypted_file_payload

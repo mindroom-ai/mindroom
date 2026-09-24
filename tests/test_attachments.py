@@ -120,12 +120,16 @@ def test_register_resolve_and_convert_attachment(tmp_path: Path) -> None:
     loaded = load_attachment(tmp_path, "att_payload")
     assert loaded is not None
     assert loaded.attachment_id == "att_payload"
-    assert loaded.local_path == file_path.resolve()
+    assert loaded.local_path == (tmp_path / "incoming_media" / "att_payload.zip").resolve()
+    assert loaded.local_path.read_bytes() == file_path.read_bytes()
     assert loaded.size_bytes == len(b"PK\x03\x04")
     assert loaded.content_sha256 == hashlib.sha256(file_path.read_bytes()).hexdigest()
 
     resolved = resolve_attachments(tmp_path, ["att_payload", "att_missing"])
     assert [record.attachment_id for record in resolved] == ["att_payload"]
+
+    file_path.write_bytes(b"replaced after registration")
+    assert load_attachment(tmp_path, "att_payload").local_path.read_bytes() == b"PK\x03\x04"
 
     resolved_records = resolve_scoped_attachments(tmp_path, ["att_payload"])
     _, _, files, videos = attachment_records_to_media(resolved_records)
@@ -133,7 +137,7 @@ def test_register_resolve_and_convert_attachment(tmp_path: Path) -> None:
     assert len(files) == 1
     assert files[0].id == "att_payload"
     assert files[0].filename == "payload.zip"
-    assert str(files[0].filepath) == str(file_path.resolve())
+    assert str(files[0].filepath) == str(registered.local_path)
     assert videos == []
 
 
@@ -246,6 +250,80 @@ async def test_register_media_attachment_rejects_payload_over_limit(
     assert not (tmp_path / "incoming_media").exists()
 
 
+def test_register_local_attachment_keeps_already_retained_media_in_place(tmp_path: Path) -> None:
+    """Media the primary already stored as the retained copy is hashed without being rewritten."""
+    media_path = tmp_path / "incoming_media" / "att_media.txt"
+    media_path.parent.mkdir()
+    media_path.write_text("payload", encoding="utf-8")
+    inode = media_path.stat().st_ino
+
+    record = register_local_attachment(
+        tmp_path,
+        media_path,
+        kind="file",
+        attachment_id="att_media",
+        mime_type="text/plain",
+    )
+
+    assert record is not None
+    assert record.local_path == media_path.resolve()
+    assert record.content_sha256 == hashlib.sha256(b"payload").hexdigest()
+    assert media_path.stat().st_ino == inode
+    assert list(media_path.parent.iterdir()) == [media_path]
+
+
+@pytest.mark.parametrize("linked", ["leaf", "parent"])
+def test_register_local_attachment_does_not_follow_links_below_source_root(tmp_path: Path, linked: str) -> None:
+    """A link swapped in after path validation must not let registration copy a file outside the root."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "notes.txt").write_text("SECRET_API_KEY", encoding="utf-8")
+    if linked == "leaf":
+        (workspace / "notes.txt").symlink_to(outside / "notes.txt")
+        local_path = workspace / "notes.txt"
+    else:
+        (workspace / "sub").symlink_to(outside)
+        local_path = workspace / "sub" / "notes.txt"
+
+    record = register_local_attachment(tmp_path, local_path, kind="file", source_root=workspace)
+
+    assert record is None
+    assert not any((tmp_path / "incoming_media").iterdir())
+    assert not (tmp_path / "attachments").exists()
+
+
+def test_register_local_attachment_rejects_sources_over_the_media_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retaining a copy must not let an oversized or sparse source consume primary storage."""
+    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
+    source = tmp_path / "large.bin"
+    source.write_bytes(b"123456")
+
+    record = register_local_attachment(tmp_path, source, kind="file", attachment_id="att_large")
+
+    assert record is None
+    assert not any((tmp_path / "incoming_media").iterdir())
+    assert load_attachment(tmp_path, "att_large") is None
+
+
+def test_load_attachment_rejects_records_outside_retained_media(tmp_path: Path) -> None:
+    """A record naming a path outside primary-owned media must never be handed to readers or senders."""
+    workspace_file = tmp_path / "workspace" / "notes.txt"
+    workspace_file.parent.mkdir()
+    workspace_file.write_text("notes", encoding="utf-8")
+    record_path = tmp_path / "attachments" / "att_unmanaged.json"
+    record_path.parent.mkdir()
+    record = AttachmentRecord(attachment_id="att_unmanaged", local_path=workspace_file, kind="file")
+    record_path.write_text(json.dumps(record.to_payload()), encoding="utf-8")
+
+    assert load_attachment(tmp_path, "att_unmanaged") is None
+    assert resolve_attachments(tmp_path, ["att_unmanaged"]) == []
+
+
 def test_attachment_records_to_media_includes_images(tmp_path: Path) -> None:
     """Image attachments should resolve into model image media."""
     image_path = tmp_path / "photo.png"
@@ -271,7 +349,7 @@ def test_attachment_records_to_media_includes_images(tmp_path: Path) -> None:
     assert audio == []
     assert len(images) == 1
     assert images[0].id == "att_image"
-    assert str(images[0].filepath) == str(image_path.resolve())
+    assert str(images[0].filepath) == str(registered.local_path)
     assert files == []
     assert videos == []
 
@@ -688,8 +766,8 @@ def test_attachment_cleanup_logs_scan_and_deletion_counts(tmp_path: Path) -> Non
 
     cleanup_log = mock_debug.call_args.kwargs
     assert cleanup_log["metadata_files_scanned"] == 2
-    assert cleanup_log["incoming_media_files_scanned"] == 1
-    assert cleanup_log["files_scanned"] == 3
+    assert cleanup_log["incoming_media_files_scanned"] == 2
+    assert cleanup_log["files_scanned"] == 4
     assert cleanup_log["expired_records_deleted"] == 0
     assert cleanup_log["files_deleted"] == 1
 
@@ -930,7 +1008,7 @@ def test_resolve_scoped_attachments_drops_cross_thread_ids(tmp_path: Path) -> No
 
     assert [record.attachment_id for record in resolved_records] == ["att_ok"]
     assert len(files) == 1
-    assert str(files[0].filepath) == str(file_path.resolve())
+    assert str(files[0].filepath) == str(allowed.local_path)
 
 
 def test_resolve_scoped_attachments_emits_payload_timing(tmp_path: Path) -> None:
@@ -1140,7 +1218,7 @@ async def test_cached_history_attachment_does_not_block_event_loop(
         return original_read(path, *args, **kwargs)
 
     def slow_stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
-        if path == file_path:
+        if path == record.local_path:
             pause()
         return original_stat(path, *args, **kwargs)
 
