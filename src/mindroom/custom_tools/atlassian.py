@@ -82,6 +82,8 @@ _CURSOR_PATTERN = re.compile(r"[A-Za-z0-9._~+/=%-]{1,2048}")
 _MIME_TYPE_PATTERN = re.compile(r"[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,127}")
 _MAX_FILENAME_CHARS = 200
 _DEFAULT_ISSUE_FIELDS = ("summary", "status", "assignee", "reporter", "priority", "issuetype", "updated")
+# Every field of an issue can be very large, so a single read adds only the description by default.
+_DEFAULT_ISSUE_READ_FIELDS = (*_DEFAULT_ISSUE_FIELDS, "description")
 _ATTACHMENT_USAGE = (
     "Usable in this turn only. Open it with get_attachment(attachment_id), or save it with "
     "get_attachment(attachment_id, mindroom_output_path=...); download it again in a later turn."
@@ -512,14 +514,16 @@ class AtlassianToolkit(Toolkit):
 
         Args:
             issue_key: Issue key such as PROJ-123.
-            fields: Optional Jira field IDs to include, such as ["summary", "status"]; Jira returns every field by default.
+            fields: Jira field IDs to include, such as ["summary", "labels"], or ["*all"] for every field.
+                By default: summary, status, assignee, reporter, priority, issuetype, updated, and description.
 
         """
         try:
             key = _issue_key(issue_key)
-            params: dict[str, str | int] = {"expand": "transitions"}
-            if requested_fields := _string_list(fields, "fields"):
-                params["fields"] = ",".join(requested_fields)
+            params: dict[str, str | int] = {
+                "expand": "transitions",
+                "fields": ",".join(_string_list(fields, "fields") or _DEFAULT_ISSUE_READ_FIELDS),
+            }
         except AtlassianError as exc:
             return self._error(exc)
 

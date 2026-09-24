@@ -341,7 +341,7 @@ async def test_jira_search_uses_enhanced_jql_search_and_pages(tmp_path: Path, mo
 
 @pytest.mark.asyncio
 async def test_jira_get_issue_lists_available_transitions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issue reads expand transitions so the model can pick a workflow step."""
+    """Issue reads expand transitions, and read the summary fields plus the description unless told otherwise."""
     tool, gateway = _connected(tmp_path, monkeypatch)
     gateway.route(
         "GET",
@@ -355,9 +355,12 @@ async def test_jira_get_issue_lists_available_transitions(tmp_path: Path, monkey
     )
 
     result = json.loads(await tool.jira_get_issue(issue_key="proj-7", fields=["summary", "status"]))
+    await tool.jira_get_issue(issue_key="PROJ-7")
 
-    assert gateway.product_requests()[0].url.params["expand"] == "transitions"
-    assert gateway.product_requests()[0].url.params["fields"] == "summary,status"
+    explicit, default = gateway.product_requests()
+    assert explicit.url.params["expand"] == default.url.params["expand"] == "transitions"
+    assert explicit.url.params["fields"] == "summary,status"
+    assert default.url.params["fields"] == "summary,status,assignee,reporter,priority,issuetype,updated,description"
     assert result["issue"]["transitions"] == [{"id": "31", "name": "Start", "to_status": "In Progress"}]
 
 

@@ -10,7 +10,7 @@ Additional Atlassian sites can be added as separate, independently connected too
 | Function | Product | Changes data | Purpose |
 | --- | --- | --- | --- |
 | `jira_search_issues` | Jira | no | Search issues with JQL, with `next_page_token` paging. |
-| `jira_get_issue` | Jira | no | Read one issue, including the transitions available from its current status. |
+| `jira_get_issue` | Jira | no | Read one issue's summary fields and description, or the requested `fields`, with the transitions available from its current status. |
 | `jira_create_issue` | Jira | yes | Create an issue from a project key, summary, issue type, optional plain-text description, and optional extra fields. |
 | `jira_update_issue` | Jira | yes | Update the summary, description, or other fields of an issue. |
 | `jira_add_comment` | Jira | yes | Add a plain-text comment to an issue. |
