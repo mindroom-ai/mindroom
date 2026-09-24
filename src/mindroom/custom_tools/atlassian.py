@@ -255,15 +255,18 @@ def _attachment_kind(mime_type: str) -> Literal["audio", "file", "image", "video
     return "video" if top_level == "video" else "file"
 
 
-def _issue_summary(issue: object, site: AtlassianSite) -> dict[str, object]:
+def _issue_reference(issue: object, site: AtlassianSite) -> dict[str, object]:
     issue_data = _mapping(issue)
     key = issue_data.get("key")
     return {
         "key": key,
         "id": issue_data.get("id"),
         "url": f"{site.url}/browse/{key}" if site.url and isinstance(key, str) else None,
-        "fields": issue_data.get("fields"),
     }
+
+
+def _issue_summary(issue: object, site: AtlassianSite) -> dict[str, object]:
+    return {**_issue_reference(issue, site), "fields": _mapping(issue).get("fields")}
 
 
 def _transition_summary(transition: object) -> dict[str, object]:
@@ -547,9 +550,7 @@ class AtlassianToolkit(Toolkit):
                 "/rest/api/3/issue",
                 json_body={"fields": issue_fields},
             )
-            issue = _issue_summary(data, site)
-            del issue["fields"]
-            return {"issue": issue}
+            return {"issue": _issue_reference(data, site)}
 
         return await self._call("jira", create)
 
@@ -591,9 +592,7 @@ class AtlassianToolkit(Toolkit):
                 f"/rest/api/3/issue/{key}",
                 json_body={"fields": issue_fields},
             )
-            issue = _issue_summary({"key": key}, site)
-            del issue["fields"]
-            return {"issue": issue, "updated_fields": sorted(issue_fields)}
+            return {"issue": _issue_reference({"key": key}, site), "updated_fields": sorted(issue_fields)}
 
         return await self._call("jira", update)
 
@@ -662,9 +661,7 @@ class AtlassianToolkit(Toolkit):
                     available_transitions=available,
                 )
             await request_json(access_token, site, "jira", "POST", path, json_body={"transition": {"id": match["id"]}})
-            issue = _issue_summary({"key": key}, site)
-            del issue["fields"]
-            return {"issue": issue, "transition": match}
+            return {"issue": _issue_reference({"key": key}, site), "transition": match}
 
         return await self._call("jira", transition_issue)
 
@@ -892,7 +889,9 @@ class AtlassianToolkit(Toolkit):
                 (
                     space.get("id")
                     for space in spaces or []
-                    if isinstance(space, dict) and space.get("key") == space_key and space.get("id")
+                    if isinstance(space, dict)
+                    and str(space.get("key")).casefold() == space_key.casefold()
+                    and space.get("id")
                 ),
                 None,
             )
