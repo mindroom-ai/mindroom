@@ -22190,6 +22190,7 @@ MindRoom currently ships three worker backend shapes:
 
 Each agent stores all its persistent data (context files, workspace files, memory, sessions, learning) in one directory: `agents/<name>/`.
 This directory is shared across all worker scopes — switching `worker_scope` changes how tool runtimes are isolated, not where agent data lives.
+Shared static runners are the exception: they never see this directory and work only in their own scratch storage.
 Worker runtimes may keep their own virtualenvs, caches, and scratch files, but those are not agent data.
 Multiple runtimes may access the same agent directory concurrently, so files and databases there must tolerate concurrent access.
 
@@ -22267,17 +22268,23 @@ This is the `workerBackend: static_runner` Helm mode.
 See `cluster/k8s/instance/templates/deployment-mindroom.yaml` for the full manifest.
 The sidecar gets:
 
-- Private `emptyDir` scratch volumes for worker-local files and caches, one of them mounted at the primary's storage path so absolute workspace paths from the primary resolve inside the sidecar.
+- Private `emptyDir` scratch volumes for worker-local files and caches, one of them mounted at the primary's storage path so absolute workspace paths from the primary resolve to scratch inside the sidecar.
 - Read-only access to the ConfigMap config for plugin tool registration.
+  With the runtime chart's `config.source: file`, it instead gets the read-only storage subtree holding the config file, as dedicated workers do.
 - The sandbox proxy token that authenticates requests from the primary runtime.
 
-The sidecar never mounts the primary storage PVC, so tool code cannot read persisted credentials, Matrix encryption keys, Matrix access tokens, sessions, or the live config that the primary hot-reloads.
-It never receives the credentials-encryption key; credential leases are resolved by the primary and delivered in memory for one call.
+The sidecar does not mount the rest of the primary storage PVC, so tool code cannot read persisted credentials, Matrix encryption keys, Matrix access tokens, or sessions from disk, and cannot modify the config that the primary hot-reloads.
+It never receives the credentials-encryption key.
+Settings saved for `shell`, `file`, and `python` reach it as single-use credential leases created by the primary; the charts set `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` for the proxied tools.
 Like the Compose topology, file and shell work in the sidecar stays in worker-local scratch, is not shared with the primary's agent workspaces, and is lost when the pod restarts.
+Agents with `memory_backend: file` persist memory through the `memory` tool, which runs in the primary runtime; memory files they write with `file`, `shell`, or `python` stay in sidecar scratch.
+Each scratch volume is capped by the chart's scratch size limit, and exceeding it evicts the pod.
 
 > [!WARNING]
-> All agents share one sidecar, so tool calls from different agents can see each other's scratch files and the runner's own proxy token.
-> Use dedicated Kubernetes workers when persistent agent workspaces or per-agent filesystem isolation are required.
+> The sidecar is not an isolation boundary between agents.
+> All proxied tool calls share one runner process, uid, and process namespace, so concurrent calls can read each other's scratch files, process environments, and the runner's proxy token.
+> The sidecar also shares the pod network namespace, so the primary API must require authentication, such as platform auth or `MINDROOM_API_KEY`.
+> Use dedicated Kubernetes workers when persistent agent workspaces or per-agent isolation are required.
 
 ### Kubernetes dedicated workers (`workerBackend: kubernetes`)
 
@@ -22700,6 +22707,7 @@ If you don't want a value to reach tools, don't export it.
 - Hook failures do not poison the worker; only the requesting tool call fails.
 
 This hook works identically for static sidecar, dedicated Docker, and dedicated Kubernetes worker backends because it runs inside the sandbox runner per request.
+A static sidecar reads the hook from its own scratch workspace, not from the primary's agent workspace.
 It is not a true container startup hook — it does not change pod templates, recreate Deployments, or alter Helm values.
 For an example, see `docs/tools/execution-and-coding.md`.
 
@@ -22865,7 +22873,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, M
 **Important notes:**
 
 - `worker_scope` does **not** change where agent data is stored.
-  All scopes read and write the same agent storage directory (`agents/<name>/`).
+  All scopes read and write the same agent storage directory (`agents/<name>/`), except that a shared static runner only sees its own scratch storage.
 - The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
   The Google Drive, Docs, Gmail, Calendar, and Sheets OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
   GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
@@ -23230,7 +23238,8 @@ The instance and runtime charts support two worker backend modes for worker-rout
 
 The dedicated-worker provisioning flow is implemented today.
 
-Both modes store agent data in the same per-agent directory structure.
+The primary runtime stores agent data in the same per-agent directory structure in both modes.
+Only dedicated workers mount those agent directories; the shared sidecar works in private scratch storage.
 
 | Helm value | Behavior | Best for |
 |------------|----------|----------|

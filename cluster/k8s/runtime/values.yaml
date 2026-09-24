@@ -321,6 +321,8 @@ workers:
       key: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
   staticRunner:
     port: 8766
+    # sizeLimit for each sidecar emptyDir scratch volume; exceeding it evicts the pod.
+    scratchSizeLimit: 4Gi
     resources:
       requests:
         cpu: 100m

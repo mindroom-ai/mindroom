@@ -180,7 +180,8 @@ The instance and runtime charts support two worker backend modes for worker-rout
 
 The dedicated-worker provisioning flow is implemented today.
 
-Both modes store agent data in the same per-agent directory structure.
+The primary runtime stores agent data in the same per-agent directory structure in both modes.
+Only dedicated workers mount those agent directories; the shared sidecar works in private scratch storage.
 
 | Helm value | Behavior | Best for |
 |------------|----------|----------|

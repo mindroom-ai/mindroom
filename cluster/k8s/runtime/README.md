@@ -105,7 +105,8 @@ Set `config.source: file` when another init container or content bundle places `
 In file mode, `config.path` must be an absolute container path.
 In file mode, the chart does not render or mount the runtime config ConfigMap.
 Dedicated Kubernetes workers receive the same config file path and do not receive worker ConfigMap settings.
-Dedicated Kubernetes workers also mount the storage subtree containing the config file read-only so content-bundle files under that subtree are visible without broad worker state access.
+Dedicated Kubernetes workers and the `static_runner` sidecar also mount the storage subtree containing the config file read-only so content-bundle files under that subtree are visible without broad worker state access.
+That subtree is the first directory below `storage.mountPath`, so keep the config outside directories that hold credentials or Matrix state.
 
 Use a content bundle as the source of truth for the runtime config:
 
@@ -624,7 +625,9 @@ workers:
 - Use `providerCredentials` to feed model-provider API keys from existing Kubernetes Secrets into the runtime's credential service.
 - Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime receives the Secret-backed key.
 - `workers.backend: static_runner` adds a sandbox-runner sidecar to the runtime pod.
-  The sidecar receives neither the storage PVC nor the credentials encryption key; its storage path is private `emptyDir` scratch, so file and shell work there does not persist in agent workspaces and a `config.source: file` config is not visible to it.
+  The sidecar receives neither the storage PVC nor the credentials encryption key; its storage path is private `emptyDir` scratch capped by `workers.staticRunner.scratchSizeLimit`, so file and shell work there does not persist in agent workspaces.
+  With `config.source: file`, the sidecar mounts only the storage subtree holding the config file, read-only, as dedicated workers do.
+  Saved settings for the tools in `workers.sandbox.proxyTools` reach the sidecar as single-use credential leases.
 - `workers.backend: kubernetes` lets the runtime create dedicated worker Deployments and Services on demand.
   In the release namespace, the chart stores derived worker tokens and optional credential-encryption keys as entries in one chart-created worker-auth Secret and grants only `get` and `patch` on that Secret.
   When `workers.kubernetes.namespace` points at a separate worker namespace, the chart uses per-worker auth Secrets and grants Secret CRUD only in that namespace.

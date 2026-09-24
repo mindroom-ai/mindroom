@@ -10,6 +10,7 @@
 {{- $approvedEgressTokenSecretKey := include "mindroom-runtime.approvedEgressTokenSecretKey" . -}}
 {{- $usesConfigMapConfig := include "mindroom-runtime.usesConfigMapConfig" . -}}
 {{- $configPath := include "mindroom-runtime.configPath" . -}}
+{{- $fileConfigStorageSubpath := include "mindroom-runtime.fileConfigStorageSubpath" . -}}
 {{- $workerConfigMapName := include "mindroom-runtime.workerConfigMapName" . -}}
 {{- $workerConfigKey := include "mindroom-runtime.workerConfigKey" . -}}
 {{- $workerConfigPath := include "mindroom-runtime.workerConfigPath" . -}}
@@ -245,6 +246,18 @@ spec:
             {{- if eq .Values.workers.backend "static_runner" }}
             - name: MINDROOM_SANDBOX_PROXY_URL
               value: {{ printf "http://localhost:%v" .Values.workers.staticRunner.port | quote }}
+            {{- /* The sidecar has no credential store, so saved tool settings reach it only as leases. */}}
+            {{- $credentialPolicy := dict }}
+            {{- range splitList "," .Values.workers.sandbox.proxyTools }}
+            {{- $tool := trim . }}
+            {{- if and $tool (ne $tool "*") }}
+            {{- $_ := set $credentialPolicy $tool (list $tool) }}
+            {{- end }}
+            {{- end }}
+            {{- if $credentialPolicy }}
+            - name: MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON
+              value: {{ $credentialPolicy | toJson | quote }}
+            {{- end }}
             {{- else if eq .Values.workers.backend "kubernetes" }}
             - name: MINDROOM_WORKER_COMPUTER_ENABLED
               value: {{ .Values.workers.computerEnabled | quote }}
@@ -504,8 +517,9 @@ spec:
         {{- if eq .Values.workers.backend "static_runner" }}
         {{- /*
         The runner executes untrusted tool code, so it must never see the runtime storage PVC
-        (credentials, Matrix keys and tokens, file-sourced config) or the credentials encryption key.
-        Its storage path is private emptyDir scratch that keeps the primary's path spelling.
+        (credentials, Matrix keys and tokens) or the credentials encryption key.
+        Its storage path is private emptyDir scratch that keeps the primary's path spelling;
+        a file-sourced config is visible only through its read-only storage subtree.
         */}}
         - name: sandbox-runner
           image: {{ include "mindroom-runtime.image" . | quote }}
@@ -551,6 +565,12 @@ spec:
             {{- end }}
             - name: sandbox-storage
               mountPath: {{ .Values.storage.mountPath }}
+            {{- with $fileConfigStorageSubpath }}
+            - name: {{ include "mindroom-runtime.storageVolumeName" $ }}
+              mountPath: {{ printf "%s/%s" (trimSuffix "/" (clean $.Values.storage.mountPath)) . | quote }}
+              subPath: {{ . | quote }}
+              readOnly: true
+            {{- end }}
             - name: sandbox-workspace
               mountPath: /app/workspace
         {{- end }}
@@ -585,10 +605,15 @@ spec:
             name: {{ include "mindroom-runtime.approvedEgressConfigMapName" . }}
         {{- end }}
         {{- if eq .Values.workers.backend "static_runner" }}
-        - name: sandbox-workspace
+        {{- range list "sandbox-workspace" "sandbox-storage" }}
+        - name: {{ . }}
+          {{- if $.Values.workers.staticRunner.scratchSizeLimit }}
+          emptyDir:
+            sizeLimit: {{ $.Values.workers.staticRunner.scratchSizeLimit | quote }}
+          {{- else }}
           emptyDir: {}
-        - name: sandbox-storage
-          emptyDir: {}
+          {{- end }}
+        {{- end }}
         {{- end }}
         {{- if .Values.workers.kubernetes.agentVault.accessTool.enabled }}
         - name: agent-vault-access-admin

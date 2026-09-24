@@ -33,6 +33,9 @@
 {{- if eq $workerBackend "static_runner" }}
 - name: MINDROOM_SANDBOX_PROXY_URL
   value: "http://localhost:8766"
+# The sidecar has no credential store, so saved tool settings reach it only as leases.
+- name: MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON
+  value: {{ dict "shell" (list "shell") "file" (list "file") "python" (list "python") | toJson | quote }}
 {{- else if eq $workerBackend "kubernetes" }}
 {{- $workerSeccomp := $values.kubernetesWorkerSeccompProfile -}}
 {{- if $workerSeccomp -}}
@@ -148,8 +151,14 @@ Its storage path is private emptyDir scratch that keeps the primary's path spell
 {{- end }}
 
 {{- define "mindroom.staticRunnerVolume" -}}
-- name: sandbox-workspace
+{{- $sizeLimit := .Values.sandboxRunnerScratchSizeLimit -}}
+{{- range list "sandbox-workspace" "sandbox-storage" }}
+- name: {{ . }}
+  {{- if $sizeLimit }}
+  emptyDir:
+    sizeLimit: {{ $sizeLimit | quote }}
+  {{- else }}
   emptyDir: {}
-- name: sandbox-storage
-  emptyDir: {}
+  {{- end }}
+{{- end }}
 {{- end }}
