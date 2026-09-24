@@ -238,10 +238,11 @@ def _owner_matrix_user_id_for_account(sb: Any, *, account_id: Any, instance_id: 
 
 def _append_matrix_oidc_helm_args(helm_args: list[str]) -> None:
     """Forward hosted Matrix OIDC settings to the instance chart."""
-    if INSTANCE_MATRIX_OIDC_ENABLED:
-        helm_args += ["--set", f"matrixOidc.enabled={INSTANCE_MATRIX_OIDC_ENABLED}"]
     if _env_flag_enabled(INSTANCE_MATRIX_OIDC_ENABLED):
+        # The chart only enables OIDC for the literal "true", which must agree with the owner authorization gate.
         helm_args += [
+            "--set",
+            "matrixOidc.enabled=true",
             "--set",
             "roomDefaults.joinPolicy=public",
             "--set",
