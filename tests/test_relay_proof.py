@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from mindroom import relay_proof
 from mindroom.constants import ORIGINAL_SENDER_KEY, RELAY_PROOF_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
@@ -98,3 +100,16 @@ def test_the_signing_key_is_persisted_once_and_kept_private(tmp_path: Path) -> N
     relay_proof._signing_keys.clear()
 
     assert relay_metadata_is_runtime_authored(content, test_runtime_paths(tmp_path))
+
+
+def test_a_symlinked_key_path_is_refused(tmp_path: Path) -> None:
+    """A link left in the storage root must not choose the key the runtime signs with."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    attacker_key = tmp_path / "attacker_key"
+    attacker_key.write_bytes(b"A" * 32)
+    runtime_paths.storage_root.mkdir(parents=True, exist_ok=True)
+    (runtime_paths.storage_root / "relay_signing_key").symlink_to(attacker_key)
+    relay_proof._signing_keys.clear()
+
+    with pytest.raises(OSError, match=r"Too many levels of symbolic links|symbolic link"):
+        sign_relay_metadata({ORIGINAL_SENDER_KEY: "@owner:localhost"}, runtime_paths)

@@ -420,6 +420,36 @@ async def test_matrix_api_rejects_deeply_nested_content_without_exhausting_the_s
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_reads_survive_deeply_nested_event_content() -> None:
+    """Proof stripping walks homeserver content, which can nest deeper than the interpreter's stack."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    deep: dict[str, object] = {}
+    cursor = deep
+    for _ in range(3000):
+        child: dict[str, object] = {}
+        cursor["n"] = child
+        cursor = child
+    cursor[RELAY_PROOF_KEY] = "deadbeef"
+    ctx.client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"msgtype": "m.text", "nested": deep, RELAY_PROOF_KEY: "deadbeef"},
+        event_type="com.example.state",
+        state_key="",
+        room_id=ctx.room_id,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_api(action="get_state", event_type="com.example.state"))
+
+    assert payload["status"] == "ok"
+    assert RELAY_PROOF_KEY not in payload["content"]
+    cursor = payload["content"]["nested"]
+    while "n" in cursor:
+        cursor = cursor["n"]
+    assert RELAY_PROOF_KEY not in cursor
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_send_event_records_threaded_room_message() -> None:
     """send_event should send successful threaded room messages with their thread relation."""
     tool = MatrixApiTools()

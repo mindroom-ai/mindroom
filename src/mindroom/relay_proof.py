@@ -27,6 +27,7 @@ from __future__ import annotations
 import hmac
 import os
 import secrets
+import stat
 from contextlib import suppress
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
@@ -111,8 +112,25 @@ def _load_or_create_signing_key(path: Path) -> bytes:
         with suppress(FileExistsError):
             os.link(temp_path, path)
         temp_path.unlink()
-    key = path.read_bytes()
+    key = _read_signing_key(path)
     if len(key) != _SIGNING_KEY_BYTES:
         msg = f"Relay signing key at {path} is corrupt; remove it so a new key is generated"
         raise RuntimeError(msg)
     return key
+
+
+def _read_signing_key(path: Path) -> bytes:
+    """Read the key without following a link, so a swapped path cannot choose it.
+
+    A symlink left in the storage root would otherwise select whatever 32 bytes
+    it points at, and the runtime would sign and verify requester claims with
+    key material someone else chose.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            msg = f"Relay signing key at {path} must be a regular file"
+            raise RuntimeError(msg)
+        return os.read(descriptor, _SIGNING_KEY_BYTES + 1)
+    finally:
+        os.close(descriptor)

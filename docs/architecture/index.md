@@ -82,6 +82,7 @@ MindRoom's architecture consists of several key components working together.
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
 | `turn_controller.py` | TurnController — owns one inbound turn from ingress to recorded outcome |
 | `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
+| `relay_proof.py` | Per-install keyed proofs binding a relayed requester identity to runtime authorship, so a managed account alone never vouches for it |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
 | `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
 | `ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
