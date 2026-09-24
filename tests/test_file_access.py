@@ -22,7 +22,9 @@ def test_workspace_mode_accepts_relative_and_absolute_paths_inside_workspace(tmp
     report.write_bytes(b"pdf")
     for raw in ("docs/report.pdf", str(report)):
         authorized = resolve_agent_file(raw, workspace_root=workspace, file_access="workspace", field_name="attachment")
-        assert authorized == AuthorizedFile(root=workspace, relative=Path("docs/report.pdf"), path=report.resolve())
+        assert authorized == AuthorizedFile(
+            root=workspace, relative=Path("docs/report.pdf"), display_path=str(report.resolve())
+        )
 
 
 def test_workspace_mode_accepts_symlinks_that_stay_inside_workspace(tmp_path: Path) -> None:
@@ -38,7 +40,7 @@ def test_workspace_mode_accepts_symlinks_that_stay_inside_workspace(tmp_path: Pa
         file_access="workspace",
         field_name="attachment",
     )
-    assert authorized.path == target.resolve()
+    assert authorized.display_path == str(target.resolve())
 
 
 def test_workspace_mode_rejects_paths_outside_workspace_and_escaping_symlinks(tmp_path: Path) -> None:
@@ -73,15 +75,15 @@ def test_unrestricted_mode_accepts_any_existing_regular_file(tmp_path: Path) -> 
         file_access="unrestricted",
         field_name="attachment",
     )
-    assert authorized.path == outside.resolve()
-    assert authorized.path.is_relative_to(authorized.root)
+    assert authorized.display_path == str(outside.resolve())
+    assert (authorized.root / authorized.relative) == outside.resolve()
     no_workspace = resolve_agent_file(
         str(outside),
         workspace_root=None,
         file_access="unrestricted",
         field_name="attachment",
     )
-    assert no_workspace.path == outside.resolve()
+    assert no_workspace.display_path == str(outside.resolve())
 
 
 def test_unrestricted_mode_resolves_relative_paths_against_workspace(tmp_path: Path) -> None:
@@ -95,7 +97,7 @@ def test_unrestricted_mode_resolves_relative_paths_against_workspace(tmp_path: P
         file_access="unrestricted",
         field_name="attachment",
     )
-    assert authorized.path == (workspace / "a.txt").resolve()
+    assert authorized.display_path == str((workspace / "a.txt").resolve())
 
 
 def test_unrestricted_mode_expands_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,7 +110,7 @@ def test_unrestricted_mode_expands_home(tmp_path: Path, monkeypatch: pytest.Monk
         file_access="unrestricted",
         field_name="attachment",
     )
-    assert authorized.path == (tmp_path / "notes.txt").resolve()
+    assert authorized.display_path == str((tmp_path / "notes.txt").resolve())
 
 
 def test_both_modes_reject_missing_files_and_directories(tmp_path: Path) -> None:

@@ -16,7 +16,6 @@ from uuid import uuid4
 from agno.media import Image
 
 from mindroom.file_access import resolve_agent_file
-from mindroom.path_confinement import open_regular_file_within_root
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,6 +24,7 @@ if TYPE_CHECKING:
     from PIL.Image import Image as PillowImage
 
     from mindroom.config.models import FileAccess
+    from mindroom.file_access import AuthorizedFile
 
 VIEWED_IMAGE_ID_PREFIX = "mindroom_viewed_"
 MAX_SOURCE_BYTES = 20 * 1024 * 1024
@@ -124,13 +124,10 @@ def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:  # 
     )
 
 
-def _read_image_within_root(root: Path, relative: Path) -> bytes:
+def _read_authorized_image(authorized: AuthorizedFile) -> bytes:
     """Read through directory descriptors so path swaps cannot escape the authorizing root."""
-    with (
-        open_regular_file_within_root(root, relative) as descriptor,
-        os.fdopen(descriptor, "rb", closefd=False) as file,
-    ):
-        if os.fstat(descriptor).st_size > MAX_SOURCE_BYTES:
+    with authorized.open() as file:
+        if os.fstat(file.fileno()).st_size > MAX_SOURCE_BYTES:
             message = f"Image exceeds the {MAX_SOURCE_BYTES}-byte source limit."
             raise ValueError(message)
         return file.read(MAX_SOURCE_BYTES + 1)
@@ -150,8 +147,8 @@ def view_agent_image(path: str, *, workspace: Path | None, file_access: FileAcce
             file_access=file_access,
             field_name="Image path",
         )
-        metadata["path"] = authorized.relative.as_posix() if file_access == "workspace" else str(authorized.path)
-        data = _read_image_within_root(authorized.root, authorized.relative)
+        metadata["path"] = authorized.relative.as_posix() if file_access == "workspace" else authorized.display_path
+        data = _read_authorized_image(authorized)
     except ValueError as exc:
         return media_error(str(exc), metadata=metadata)
     except OSError:

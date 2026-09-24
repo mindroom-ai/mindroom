@@ -44,7 +44,6 @@ from mindroom.matrix.olm_to_device import PinnedMatrixDevice
 from mindroom.media_delivery import image_result
 from mindroom.path_confinement import (
     open_directory_within_root,
-    open_regular_file_within_root,
     resolve_path_within_root,
 )
 from mindroom.server_fetch_url import validate_server_fetch_url
@@ -523,10 +522,10 @@ def _stage_browser_upload_paths(sources: list[AuthorizedFile], staging_dir: Path
     for index, source_file in enumerate(sources):
         # Open the canonical file relative to the root that authorized it, without following links.
         # Resolving a replaced child here would grant trust to its new destination.
-        with open_regular_file_within_root(source_file.root, source_file.relative) as descriptor:
-            destination = staging_dir / str(index) / source_file.path.name
+        with source_file.open() as source:
+            destination = staging_dir / str(index) / source_file.name
             destination.parent.mkdir(mode=0o700)
-            with os.fdopen(descriptor, "rb", closefd=False) as source, destination.open("xb") as output:
+            with destination.open("xb") as output:
                 shutil.copyfileobj(source, output, length=1024 * 1024)
         staged_paths.append(str(destination))
     return staged_paths
@@ -1358,7 +1357,7 @@ class BrowserTools(Toolkit):
             tab.upload_staging.append(staging)
         return {
             "action": "upload",
-            "paths": [str(source.path) for source in sources],
+            "paths": [source.display_path for source in sources],
             "profile": profile_name,
             "selector": selector,
             "status": "ok",
@@ -1993,7 +1992,7 @@ class BrowserTools(Toolkit):
             raise ValueError(error or f"Attachment is unavailable: {attachment_id}")
         # Records store canonical paths, so walk every component without following links.
         anchor = Path(local_path.anchor)
-        return AuthorizedFile(root=anchor, relative=local_path.relative_to(anchor), path=local_path)
+        return AuthorizedFile(root=anchor, relative=local_path.relative_to(anchor), display_path=str(local_path))
 
     @staticmethod
     def _remove_tab(state: _BrowserProfileState, target_id: str) -> None:

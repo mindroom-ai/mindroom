@@ -6,30 +6,48 @@ regular file the process can read.
 
 from __future__ import annotations
 
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 
-from mindroom.path_confinement import resolve_path_within_root
+from mindroom.path_confinement import open_regular_file_within_root, resolve_path_within_root
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
 
 
 @dataclass(frozen=True)
 class AuthorizedFile:
-    """An existing regular file and the no-follow open that keeps its authorization.
+    """An existing regular file whose authorization only survives a no-follow open below ``root``.
 
-    ``path`` is the canonical file. Descriptor readers open
-    ``open_regular_file_within_root(root, relative)``: ``root`` is the caller's
-    workspace spelling, so a workspace root replaced by a link is refused, or the
-    filesystem anchor in unrestricted mode; ``relative`` is the canonical path below it.
+    ``root`` is the caller's workspace spelling, so a workspace root replaced by a link
+    is refused, or the filesystem anchor in unrestricted mode; ``relative`` is the
+    canonical path below it. Read the file through :meth:`open`. The object carries no
+    reopenable full path on purpose: ``display_path`` is for messages and receipts only.
     """
 
     root: Path
     relative: Path
-    path: Path
+    display_path: str
+
+    @property
+    def name(self) -> str:
+        """Return the file name for staging copies, MIME guessing, and default titles."""
+        return self.relative.name
+
+    @contextmanager
+    def open(self) -> Iterator[BinaryIO]:
+        """Open the file below its authorizing root without following links or blocking on a FIFO."""
+        with (
+            open_regular_file_within_root(self.root, self.relative) as descriptor,
+            os.fdopen(descriptor, "rb", closefd=False) as file,
+        ):
+            yield file
 
 
 def agent_file_access(config: Config | None, agent_name: str | None) -> FileAccess:
@@ -78,4 +96,4 @@ def resolve_agent_file(
     if not resolved.is_file():
         msg = f"{field_name} '{raw_path}' is not a regular file."
         raise ValueError(msg)
-    return AuthorizedFile(root=root, relative=resolved.relative_to(canonical_root), path=resolved)
+    return AuthorizedFile(root=root, relative=resolved.relative_to(canonical_root), display_path=str(resolved))

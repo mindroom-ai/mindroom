@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
-import os
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path, PureWindowsPath
@@ -37,7 +36,6 @@ from mindroom.oauth.service import (
 )
 from mindroom.path_confinement import (
     open_directory_within_root,
-    open_regular_file_within_root,
     resolve_path_within_root,
 )
 from mindroom.tool_system.metadata import coerce_optional_finite_number
@@ -109,10 +107,7 @@ def _download_target_path(workspace_root: Path, filename: str, extension: str) -
 @contextmanager
 def _open_upload_media(authorized: AuthorizedFile, mime_type: str) -> Iterator[MediaIoBaseUpload]:
     """Stream the authorized file as an upload body, opened without following links swapped in after the check."""
-    with (
-        open_regular_file_within_root(authorized.root, authorized.relative) as descriptor,
-        os.fdopen(descriptor, "rb", closefd=False) as file,
-    ):
+    with authorized.open() as file:
         yield MediaIoBaseUpload(file, mimetype=mime_type)
 
 
@@ -302,9 +297,8 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
 
-        path = authorized.path
-        resolved_mime_type = mime_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        body: dict[str, object] = {"name": name or path.name}
+        resolved_mime_type = mime_type or mimetypes.guess_type(authorized.name)[0] or "application/octet-stream"
+        body: dict[str, object] = {"name": name or authorized.name}
         if folder_id:
             body["parents"] = [folder_id]
         try:
@@ -324,7 +318,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         except HttpError as exc:
             return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            log_error(f"Could not upload file '{path}': {exc}")
+            log_error(f"Could not upload file '{authorized.display_path}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
     async def _aupload_file(
@@ -363,9 +357,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                         ),
                     },
                 )
-            resolved_mime_type = (
-                mime_type or mimetypes.guess_type(authorized.path.name)[0] or "application/octet-stream"
-            )
+            resolved_mime_type = mime_type or mimetypes.guess_type(authorized.name)[0] or "application/octet-stream"
             service = cast("Any", self.service)
             with _open_upload_media(authorized, resolved_mime_type) as media_body:
                 updated_file = (

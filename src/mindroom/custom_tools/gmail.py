@@ -7,7 +7,6 @@ credentials stored in MindRoom's unified credentials location.
 from __future__ import annotations
 
 import json
-import os
 from functools import wraps
 from inspect import signature
 from pathlib import Path
@@ -25,7 +24,6 @@ from mindroom.file_access import resolve_agent_file
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
-from mindroom.path_confinement import open_regular_file_within_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -95,10 +93,7 @@ def _stage_attachments(
                 file_access=file_access,
                 field_name="Gmail attachment",
             )
-            with (
-                open_regular_file_within_root(authorized.root, authorized.relative) as descriptor,
-                os.fdopen(descriptor, "rb", closefd=False) as source,
-            ):
+            with authorized.open() as source:
                 data = source.read(remaining + 1)
         except (OSError, ValueError):
             msg = f"Gmail attachment must be a regular file {location}: {attachment}"
@@ -107,7 +102,7 @@ def _stage_attachments(
             msg = "Gmail attachments exceed the 25 MiB limit"
             raise ValueError(msg)
         remaining -= len(data)
-        destination = staging_dir / str(index) / authorized.path.name
+        destination = staging_dir / str(index) / authorized.name
         destination.parent.mkdir(mode=0o700)
         with destination.open("xb") as output:
             output.write(data)
