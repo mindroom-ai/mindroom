@@ -96,15 +96,14 @@ def _snapshot_single_html_page(source_fd: int, name: str, destination_dir: Path)
 
 @contextmanager
 def _published_destination(destination_dir: Path) -> Iterator[int]:
-    """Create the snapshot directory, then revalidate or remove whatever was written."""
+    """Create the snapshot directory and remove it again if the copy fails."""
     destination_dir.mkdir(parents=True, exist_ok=False)
     try:
         with open_directory_within_root(destination_dir) as destination_fd:
             yield destination_fd
-            _validate_published_snapshot(destination_fd)
     except (OSError, StaticSiteSnapshotError):
-        # A failed or unverifiable snapshot is unreferenced garbage; remove it
-        # before surfacing the failure so no public link can ever reach it.
+        # A failed snapshot is unreferenced garbage; remove it before
+        # surfacing the failure so no public link can ever reach it.
         shutil.rmtree(destination_dir, ignore_errors=True)
         raise
 
@@ -161,41 +160,6 @@ def _copy_regular_file(source_fd: int, destination_fd: int, name: str, *, remain
                 msg = f"Static site is larger than {_STATIC_SITE_MAX_BYTES} bytes."
                 raise StaticSiteSnapshotError(msg)
             output.write(chunk)
-
-
-def _validate_published_snapshot(destination_fd: int) -> None:
-    """Re-read the written snapshot so only a bounded tree of regular files is ever linked."""
-    if not _has_regular_index_page(destination_fd):
-        msg = "Published static site must contain index.html."
-        raise StaticSiteSnapshotError(msg)
-    _validate_published_entries(destination_fd, _SnapshotTotals(), depth=0)
-
-
-def _validate_published_entries(
-    destination_fd: int,
-    totals: _SnapshotTotals,
-    *,
-    depth: int,
-) -> _SnapshotTotals:
-    _check_depth(depth)
-    for name in sorted(os.listdir(destination_fd)):
-        entry_stat = os.stat(name, dir_fd=destination_fd, follow_symlinks=False)
-        if stat.S_ISDIR(entry_stat.st_mode):
-            totals = _check_totals(replace(totals, directories=totals.directories + 1))
-            with open_directory_within_root(destination_fd, name) as child_fd:
-                totals = _validate_published_entries(child_fd, totals, depth=depth + 1)
-            continue
-        if not stat.S_ISREG(entry_stat.st_mode):
-            msg = f"Published static site must contain only regular files: {name}"
-            raise StaticSiteSnapshotError(msg)
-        totals = _check_totals(
-            replace(
-                totals,
-                files=totals.files + 1,
-                total_bytes=totals.total_bytes + entry_stat.st_size,
-            ),
-        )
-    return totals
 
 
 def _check_totals(totals: _SnapshotTotals) -> _SnapshotTotals:

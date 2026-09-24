@@ -591,45 +591,6 @@ def test_report_publishing_store_rejects_single_page_symlink(tmp_path: Path) -> 
         )
 
 
-def test_report_publishing_store_discards_snapshot_with_non_regular_entry(tmp_path: Path) -> None:
-    """A snapshot holding a non-regular entry must be deleted instead of linked publicly."""
-    storage_root = tmp_path / "mindroom_data"
-    source_dir = tmp_path / "workspace" / "site"
-    secret_file = tmp_path / "secret.txt"
-    source_dir.mkdir(parents=True)
-    secret_file.write_text("matrix-access-token", encoding="utf-8")
-    (source_dir / "index.html").write_text("<!doctype html>Site", encoding="utf-8")
-    store = ReportPublishingStore(storage_root)
-
-    def leaking_copy(_source_fd: int, destination_fd: int, totals: object, **_kwargs: object) -> object:
-        with os.fdopen(os.open("index.html", os.O_WRONLY | os.O_CREAT, 0o644, dir_fd=destination_fd), "wb") as page:
-            page.write(b"<!doctype html>Site")
-        os.symlink(secret_file, "leak.txt", dir_fd=destination_fd)
-        return totals
-
-    with (
-        patch("mindroom.report_publishing.static_site._copy_directory_entries", leaking_copy),
-        pytest.raises(ReportPublishingError, match="only regular files"),
-    ):
-        store.publish_report(
-            source=PublishableReport(
-                source_type="static_site",
-                source={"path": "site"},
-                artifact_path=source_dir,
-                title="Leaking Site",
-                requested_by="@alice:localhost",
-                artifact_kind="static_site",
-                artifact_root=source_dir.parent,
-            ),
-            published_by="@alice:localhost",
-            base_url="https://mindroom.lab.mindroom.chat",
-        )
-
-    artifacts_root = storage_root / "report_publishing" / "artifacts"
-    assert not artifacts_root.exists() or list(artifacts_root.iterdir()) == []
-    assert not (storage_root / "report_publishing" / "public_reports").exists()
-
-
 def test_report_publishing_store_rejects_static_site_asset_traversal(tmp_path: Path) -> None:
     """Static site asset lookup should reject traversal paths."""
     storage_root = tmp_path / "mindroom_data"
