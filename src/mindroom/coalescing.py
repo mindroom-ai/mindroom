@@ -250,6 +250,11 @@ class CoalescingGate:
         """Return whether a lane or coalescing gate still owns one exact source."""
         return self._lanes.has_pending_source_event(source_event_id) or self._gate_owns_source_event(source_event_id)
 
+    def queued_pending_events(self, key: CoalescingKey) -> tuple[PendingEvent, ...]:
+        """Return the unclaimed events still queued under one coalescing key."""
+        gate = self._gates.get(key)
+        return tuple(queued.pending_event for queued in gate.queue) if gate is not None else ()
+
     def _gate_owns_source_event(self, source_event_id: str) -> bool:
         """Return whether one live coalescing gate owns this exact source."""
         return any(

@@ -1561,7 +1561,13 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(tmp_path: Path) -> None:
-    """A follow-up queued behind an active response never runs tools as a co-participant."""
+    """A follow-up queued behind an active response never runs tools as a co-participant.
+
+    Follow-ups held back by the requester split must not leave queued notices
+    pending, which would cut the earlier turn short and ask the model to resume
+    its work in the next requester's turn. A follow-up arriving during that turn
+    still signals it.
+    """
     bot = _make_bot(tmp_path, debounce_ms=0)
     install_direct_response_admission(bot)
     room = _make_room()
@@ -1586,7 +1592,15 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
-    runs: list[tuple[str | None, str | None, str]] = []
+    late_event = _text_event(
+        event_id="$bob-late",
+        body="one more thing",
+        sender="@bob:localhost",
+        server_timestamp=1003,
+        thread_id="$thread",
+    )
+    runs: list[tuple[str | None, str | None, str, list[str]]] = []
+    pending_after_late_follow_up: list[str] = []
 
     async def fake_ai_response(
         _ctx: object,
@@ -1601,8 +1615,14 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
                 tool_context.requester_id if tool_context is not None else None,
                 execution_identity.requester_id if execution_identity is not None else None,
                 prompt,
+                [message.event_id for message in queued_signal.pending_message_snapshot()],
             ),
         )
+        if prompt == "add me to administrators":
+            await bot._turn_controller.handle_text_event(room, late_event)
+            pending_after_late_follow_up.extend(
+                message.event_id for message in queued_signal.pending_message_snapshot()
+            )
         return "ok"
 
     await lifecycle_lock.acquire()
@@ -1632,10 +1652,17 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
         if lifecycle_lock.locked():
             lifecycle_lock.release()
 
-    assert runs == [
-        ("@alice:localhost", "@alice:localhost", "add me to administrators"),
-        ("@bob:localhost", "@bob:localhost", "thanks"),
+    assert [run[:2] for run in runs] == [
+        ("@alice:localhost", "@alice:localhost"),
+        ("@bob:localhost", "@bob:localhost"),
     ]
+    assert runs[0][2:] == ("add me to administrators", [])
+    assert pending_after_late_follow_up == ["$bob-late"]
+    bob_prompt, bob_pending = runs[1][2:]
+    assert "thanks" in bob_prompt
+    assert "one more thing" in bob_prompt
+    assert "add me to administrators" not in bob_prompt
+    assert bob_pending == []
 
 
 @pytest.mark.asyncio

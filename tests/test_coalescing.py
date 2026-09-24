@@ -975,6 +975,50 @@ async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> No
 
 
 @pytest.mark.asyncio
+async def test_active_follow_up_backlog_keeps_media_with_its_own_requester() -> None:
+    """Another requester's queued media never joins a follow-up turn's payload."""
+    calls: list[tuple[list[str], str, list[str]]] = []
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(
+            (
+                list(batch.handled_turn.source_event_ids),
+                batch.requester_user_id,
+                [media_event.event_id for media_event in batch.media_events],
+            ),
+        )
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    for event, source_kind, requester_user_id in (
+        (_text_event("$a1:localhost", "look at this", 1_000_000), MESSAGE_SOURCE_KIND, "@alice:localhost"),
+        (_image_event("$b1:localhost", 1_000_001), IMAGE_SOURCE_KIND, "@bob:localhost"),
+    ):
+        await _admit_ready(
+            gate,
+            key,
+            make_pending_event(
+                event,
+                room,
+                source_kind=source_kind,
+                requester_user_id=requester_user_id,
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            ),
+        )
+    await gate.drain_all()
+
+    assert calls == [
+        (["$a1:localhost"], "@alice:localhost", []),
+        (["$b1:localhost"], "@bob:localhost", ["$b1:localhost"]),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_media_tailed_follow_up_backlog_flushes_immediately_at_idle() -> None:
     """A follow-up backlog ending in media flushes at idle without a debounce wait.
 
