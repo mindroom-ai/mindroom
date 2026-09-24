@@ -182,8 +182,7 @@ The instance and runtime charts support two worker backend modes for worker-rout
 
 The dedicated-worker provisioning flow is implemented today.
 
-The primary runtime stores agent data in the same per-agent directory structure in both modes.
-Only dedicated workers mount those agent directories; the shared sidecar works in private scratch storage.
+Both modes store agent data in the same per-agent directory structure.
 
 | Helm value | Behavior | Best for |
 |------------|----------|----------|
@@ -195,8 +194,11 @@ Only dedicated workers mount those agent directories; the shared sidecar works i
 `workerBackend: static_runner` is the default.
 The primary runtime talks to a shared sidecar over `localhost`.
 This keeps the deployment simple, but all proxied tool calls share the same runner process.
-The runner does not mount the MindRoom storage PVC; its storage path is private `emptyDir` scratch, so file and shell work there does not persist in the primary's agent workspaces.
+The runner reads and writes the same agent storage directories as the main process by mounting only the storage PVC's `agents` and `private_instances` directories over its own `sandbox-runner` directory.
+It cannot see the credential store, Matrix state, or other primary runtime state, and it never receives the credential encryption key.
+The primary leases each proxied tool's saved settings to the runner per call.
 When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value; only the primary runtime receives it.
+See [Kubernetes shared sidecar](sandbox-proxy.md#kubernetes-shared-sidecar-workerbackend-static_runner) for the exact mounts and remaining limits.
 
 ### Dedicated Worker Mode
 

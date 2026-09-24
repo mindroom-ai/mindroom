@@ -10,6 +10,7 @@
 {{- $approvedEgressTokenSecretKey := include "mindroom-runtime.approvedEgressTokenSecretKey" . -}}
 {{- $usesConfigMapConfig := include "mindroom-runtime.usesConfigMapConfig" . -}}
 {{- $configPath := include "mindroom-runtime.configPath" . -}}
+{{- $storageRoot := trimSuffix "/" (clean .Values.storage.mountPath) -}}
 {{- $fileConfigStorageSubpath := include "mindroom-runtime.fileConfigStorageSubpath" . -}}
 {{- $workerConfigMapName := include "mindroom-runtime.workerConfigMapName" . -}}
 {{- $workerConfigKey := include "mindroom-runtime.workerConfigKey" . -}}
@@ -74,7 +75,7 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or (and .Values.stateStorage.enabled .Values.stateStorage.initPermissions.enabled) .Values.initContainers .Values.contentBundles }}
+      {{- if or (and .Values.stateStorage.enabled .Values.stateStorage.initPermissions.enabled) .Values.initContainers .Values.contentBundles (eq .Values.workers.backend "static_runner") }}
       initContainers:
 {{ if and .Values.stateStorage.enabled .Values.stateStorage.initPermissions.enabled }}
         - name: prepare-state-storage
@@ -146,6 +147,25 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{ end }}
         {{ end }}
+        {{- if eq .Values.workers.backend "static_runner" }}
+        # Create the sandbox runner's storage subPaths as the runtime user; kubelet would create missing ones as root.
+        - name: prepare-sandbox-runner-storage
+          image: {{ include "mindroom-runtime.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - mkdir
+            - -p
+            - {{ printf "%s/sandbox-runner" $storageRoot | quote }}
+            - {{ printf "%s/agents" $storageRoot | quote }}
+            - {{ printf "%s/private_instances" $storageRoot | quote }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
+              mountPath: {{ .Values.storage.mountPath }}
+        {{- end }}
       {{- end }}
       containers:
         - name: mindroom
@@ -246,23 +266,6 @@ spec:
             {{- if eq .Values.workers.backend "static_runner" }}
             - name: MINDROOM_SANDBOX_PROXY_URL
               value: {{ printf "http://localhost:%v" .Values.workers.staticRunner.port | quote }}
-            {{- /* The sidecar has no credential store, so saved tool settings reach it only as leases. */}}
-            {{- $credentialPolicy := dict }}
-            {{- range splitList "," .Values.workers.sandbox.proxyTools }}
-            {{- $tool := trim . }}
-            {{- if and $tool (ne $tool "*") }}
-            {{- $_ := set $credentialPolicy $tool (list $tool) }}
-            {{- end }}
-            {{- end }}
-            {{- range .Values.env.extra }}
-            {{- if eq (default "" .name) "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON" }}
-            {{- $credentialPolicy = dict }}
-            {{- end }}
-            {{- end }}
-            {{- if $credentialPolicy }}
-            - name: MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON
-              value: {{ $credentialPolicy | toJson | quote }}
-            {{- end }}
             {{- else if eq .Values.workers.backend "kubernetes" }}
             - name: MINDROOM_WORKER_COMPUTER_ENABLED
               value: {{ .Values.workers.computerEnabled | quote }}
@@ -521,10 +524,10 @@ spec:
             {{- end }}
         {{- if eq .Values.workers.backend "static_runner" }}
         {{- /*
-        The runner executes untrusted tool code, so it must never see the runtime storage PVC
-        (credentials, Matrix keys and tokens) or the credentials encryption key.
-        Its storage path is private emptyDir scratch that keeps the primary's path spelling;
-        a file-sourced config is visible only through its read-only storage subtree.
+        The runner executes agent tool code, so it must not see the credential store, Matrix state,
+        the primary's writable config, or the credentials encryption key.
+        It mounts only agent state from the PVC over its own private storage root,
+        and saved tool settings reach it as per-call leases from the primary.
         */}}
         - name: sandbox-runner
           image: {{ include "mindroom-runtime.image" . | quote }}
@@ -568,11 +571,18 @@ spec:
               subPath: {{ .Values.config.key }}
               readOnly: true
             {{- end }}
-            - name: sandbox-storage
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ .Values.storage.mountPath }}
+              subPath: sandbox-runner
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
+              mountPath: {{ printf "%s/agents" $storageRoot | quote }}
+              subPath: agents
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
+              mountPath: {{ printf "%s/private_instances" $storageRoot | quote }}
+              subPath: private_instances
             {{- with $fileConfigStorageSubpath }}
             - name: {{ include "mindroom-runtime.storageVolumeName" $ }}
-              mountPath: {{ printf "%s/%s" (trimSuffix "/" (clean $.Values.storage.mountPath)) . | quote }}
+              mountPath: {{ printf "%s/%s" $storageRoot . | quote }}
               subPath: {{ . | quote }}
               readOnly: true
             {{- end }}
@@ -610,15 +620,8 @@ spec:
             name: {{ include "mindroom-runtime.approvedEgressConfigMapName" . }}
         {{- end }}
         {{- if eq .Values.workers.backend "static_runner" }}
-        {{- range list "sandbox-workspace" "sandbox-storage" }}
-        - name: {{ . }}
-          {{- if $.Values.workers.staticRunner.scratchSizeLimit }}
-          emptyDir:
-            sizeLimit: {{ $.Values.workers.staticRunner.scratchSizeLimit | quote }}
-          {{- else }}
+        - name: sandbox-workspace
           emptyDir: {}
-          {{- end }}
-        {{- end }}
         {{- end }}
         {{- if .Values.workers.kubernetes.agentVault.accessTool.enabled }}
         - name: agent-vault-access-admin

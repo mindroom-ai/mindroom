@@ -33,9 +33,6 @@
 {{- if eq $workerBackend "static_runner" }}
 - name: MINDROOM_SANDBOX_PROXY_URL
   value: "http://localhost:8766"
-# The sidecar has no credential store, so saved tool settings reach it only as leases.
-- name: MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON
-  value: {{ dict "shell" (list "shell") "file" (list "file") "python" (list "python") | toJson | quote }}
 {{- else if eq $workerBackend "kubernetes" }}
 {{- $workerSeccomp := $values.kubernetesWorkerSeccompProfile -}}
 {{- if $workerSeccomp -}}
@@ -108,9 +105,10 @@
 {{- define "mindroom.staticRunnerContainer" -}}
 {{- $values := .values -}}
 {{- /*
-The runner executes untrusted tool code as the primary's uid, so it must never see the tenant storage PVC
-(credentials, Matrix keys and tokens, the live config) or the credentials encryption key.
-Its storage path is private emptyDir scratch that keeps the primary's path spelling.
+The runner executes agent tool code, so it must not see the tenant credential store, Matrix state,
+the live config the primary hot-reloads, or the credentials encryption key.
+It mounts only agent state from the PVC over its own private storage root,
+and saved tool settings reach it as per-call leases from the primary.
 */ -}}
 - name: sandbox-runner
   image: {{ $values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
@@ -137,8 +135,15 @@ Its storage path is private emptyDir scratch that keeps the primary's path spell
     mountPath: /app/config.yaml
     subPath: config.yaml
     readOnly: true
-  - name: sandbox-storage
+  - name: storage
     mountPath: {{ $values.storagePath }}
+    subPath: sandbox-runner
+  - name: storage
+    mountPath: {{ $values.storagePath }}/agents
+    subPath: agents
+  - name: storage
+    mountPath: {{ $values.storagePath }}/private_instances
+    subPath: private_instances
   - name: sandbox-workspace
     mountPath: /app/workspace
   resources:
@@ -151,14 +156,6 @@ Its storage path is private emptyDir scratch that keeps the primary's path spell
 {{- end }}
 
 {{- define "mindroom.staticRunnerVolume" -}}
-{{- $sizeLimit := .Values.sandboxRunnerScratchSizeLimit -}}
-{{- range list "sandbox-workspace" "sandbox-storage" }}
-- name: {{ . }}
-  {{- if $sizeLimit }}
-  emptyDir:
-    sizeLimit: {{ $sizeLimit | quote }}
-  {{- else }}
+- name: sandbox-workspace
   emptyDir: {}
-  {{- end }}
-{{- end }}
 {{- end }}

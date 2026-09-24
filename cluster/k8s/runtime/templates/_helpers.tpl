@@ -88,8 +88,8 @@ app.kubernetes.io/component: runtime
 {{- end -}}
 
 {{- /*
-First directory below storage.mountPath that holds a file-sourced config, or "" when there is none.
-Matches the read-only config subtree that dedicated Kubernetes workers mount.
+First path component below storage.mountPath that holds a file-sourced config, or "" when there is none.
+The static runner sidecar mounts it read-only, matching the config subtree dedicated Kubernetes workers mount.
 */ -}}
 {{- define "mindroom-runtime.fileConfigStorageSubpath" -}}
 {{- if eq (include "mindroom-runtime.configSource" .) "file" -}}

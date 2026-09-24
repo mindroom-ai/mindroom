@@ -30,7 +30,6 @@ sandboxRunnerResources:
   limits:
     memory: "1Gi"
     cpu: "500m"
-sandboxRunnerScratchSizeLimit: 4Gi  # sizeLimit for each sandbox-runner emptyDir scratch volume; exceeding it evicts the pod
 
 # Docker images
 mindroom_image: ghcr.io/mindroom-ai/mindroom:latest

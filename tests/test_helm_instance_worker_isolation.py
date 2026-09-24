@@ -145,17 +145,13 @@ def _env_by_name(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {env["name"]: env for env in container["env"]}
 
 
-def _mounted_volumes(
-    deployment: dict[str, Any],
-    container: dict[str, Any],
-) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    volumes = {volume["name"]: volume for volume in deployment["spec"]["template"]["spec"]["volumes"]}
-    return [(mount, volumes[mount["name"]]) for mount in container["volumeMounts"]]
-
-
-def _secret_refs(container: dict[str, Any]) -> list[dict[str, Any]]:
+def _secret_key_refs(container: dict[str, Any]) -> list[dict[str, Any]]:
     assert "envFrom" not in container
     return [env["valueFrom"]["secretKeyRef"] for env in container["env"] if "secretKeyRef" in env.get("valueFrom", {})]
+
+
+def _volumes_by_name(deployment: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {volume["name"]: volume for volume in deployment["spec"]["template"]["spec"]["volumes"]}
 
 
 def _instance_secret_hash(**overrides: str) -> str:
@@ -715,7 +711,7 @@ def test_instance_chart_exposes_public_matrix_url_to_desktop_pairing() -> None:
 
 
 def test_instance_chart_static_runner_withholds_credentials_encryption_key() -> None:
-    """Only the primary may receive the key that decrypts the tenant credential store."""
+    """Only the primary may receive the Secret-backed key that decrypts the tenant credential store."""
     credentials_encryption_key = "test-encryption-key"
     docs = _render_chart(
         Path("cluster/k8s/instance"),
@@ -741,7 +737,7 @@ def test_instance_chart_static_runner_withholds_credentials_encryption_key() -> 
             },
         },
     }
-    assert _secret_refs(runner_container) == [{"name": "mindroom-api-keys-demo", "key": "sandbox_proxy_token"}]
+    assert _secret_key_refs(runner_container) == [{"name": "mindroom-api-keys-demo", "key": "sandbox_proxy_token"}]
 
 
 def test_instance_chart_wires_credentials_encryption_env_when_key_is_unset() -> None:
@@ -752,7 +748,7 @@ def test_instance_chart_wires_credentials_encryption_env_when_key_is_unset() -> 
     runner_container = _container(deployment, "sandbox-runner")
     annotations = deployment["spec"]["template"]["metadata"]["annotations"]
 
-    assert _env_by_name(mindroom_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == {
+    expected_env = {
         "name": "MINDROOM_CREDENTIALS_ENCRYPTION_KEY",
         "valueFrom": {
             "secretKeyRef": {
@@ -761,54 +757,47 @@ def test_instance_chart_wires_credentials_encryption_env_when_key_is_unset() -> 
             },
         },
     }
+    assert _env_by_name(mindroom_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == expected_env
     assert "MINDROOM_CREDENTIALS_ENCRYPTION_KEY" not in _env_by_name(runner_container)
     assert annotations["mindroom.ai/instance-secret-hash"] == _instance_secret_hash()
 
 
-def test_instance_chart_static_runner_sees_only_scratch_storage() -> None:
-    """The default hosted sidecar must not reach tenant secrets or the config the primary hot-reloads."""
+def test_instance_chart_static_runner_mounts_only_agent_state() -> None:
+    """The sidecar keeps agent workspaces persistent without reaching tenant secrets or the live config."""
     deployment = _resource(_render_chart(Path("cluster/k8s/instance")), "Deployment", "mindroom-demo")
     mindroom_container = _container(deployment, "mindroom")
     runner_container = _container(deployment, "sandbox-runner")
+    volumes = _volumes_by_name(deployment)
 
-    assert (
-        {"name": "storage", "mountPath": "/mindroom_data"},
-        {
-            "name": "storage",
-            "persistentVolumeClaim": {"claimName": "mindroom-storage-demo"},
-        },
-    ) in _mounted_volumes(deployment, mindroom_container)
+    assert {"name": "storage", "mountPath": "/mindroom_data"} in mindroom_container["volumeMounts"]
     assert _env_by_name(mindroom_container)["MINDROOM_CONFIG_PATH"]["value"] == "/mindroom_data/config/config.yaml"
-    assert _mounted_volumes(deployment, runner_container) == [
-        (
-            {"name": "config", "mountPath": "/app/config.yaml", "subPath": "config.yaml", "readOnly": True},
-            {"name": "config", "configMap": {"name": "mindroom-config-demo"}},
-        ),
-        (
-            {"name": "sandbox-storage", "mountPath": "/mindroom_data"},
-            {"name": "sandbox-storage", "emptyDir": {"sizeLimit": "4Gi"}},
-        ),
-        (
-            {"name": "sandbox-workspace", "mountPath": "/app/workspace"},
-            {"name": "sandbox-workspace", "emptyDir": {"sizeLimit": "4Gi"}},
-        ),
+    assert runner_container["volumeMounts"] == [
+        {"name": "config", "mountPath": "/app/config.yaml", "subPath": "config.yaml", "readOnly": True},
+        {"name": "storage", "mountPath": "/mindroom_data", "subPath": "sandbox-runner"},
+        {"name": "storage", "mountPath": "/mindroom_data/agents", "subPath": "agents"},
+        {"name": "storage", "mountPath": "/mindroom_data/private_instances", "subPath": "private_instances"},
+        {"name": "sandbox-workspace", "mountPath": "/app/workspace"},
     ]
+    assert volumes["storage"] == {"name": "storage", "persistentVolumeClaim": {"claimName": "mindroom-storage-demo"}}
+    assert volumes["config"] == {"name": "config", "configMap": {"name": "mindroom-config-demo"}}
+    assert volumes["sandbox-workspace"] == {"name": "sandbox-workspace", "emptyDir": {}}
     assert _env_by_name(runner_container)["MINDROOM_STORAGE_PATH"]["value"] == "/mindroom_data"
+    assert _init_container(deployment, "prepare-sandbox-runner-storage")["command"] == [
+        "mkdir",
+        "-p",
+        "/mindroom_data/sandbox-runner",
+        "/mindroom_data/agents",
+        "/mindroom_data/private_instances",
+    ]
 
 
-def test_instance_chart_leases_saved_tool_settings_only_to_static_runner() -> None:
-    """Without a shared credential store, saved settings for proxied tools must travel as primary leases."""
-    static = _resource(_render_chart(Path("cluster/k8s/instance")), "Deployment", "mindroom-demo")
-    dedicated = _resource(_render_instance_chart(), "Deployment", "mindroom-demo")
+def test_instance_chart_dedicated_workers_skip_static_runner_storage() -> None:
+    """Dedicated workers need neither the sidecar nor its storage preparation."""
+    deployment = _resource(_render_instance_chart(), "Deployment", "mindroom-demo")
+    pod_spec = deployment["spec"]["template"]["spec"]
 
-    assert json.loads(
-        _env_by_name(_container(static, "mindroom"))["MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON"]["value"],
-    ) == {
-        "shell": ["shell"],
-        "file": ["file"],
-        "python": ["python"],
-    }
-    assert "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON" not in _env_by_name(_container(dedicated, "mindroom"))
+    assert [container["name"] for container in pod_spec["containers"]] == ["mindroom"]
+    assert [container["name"] for container in pod_spec["initContainers"]] == ["wait-for-synapse"]
 
 
 @pytest.mark.parametrize("secret_value", ["credentials_encryption_key", "platformSsoSecret"])
@@ -3034,19 +3023,29 @@ def test_runtime_chart_uses_default_worker_auth_secret() -> None:
     assert "data" not in worker_auth_secret
 
 
-def test_runtime_chart_static_runner_withholds_credentials_encryption_key() -> None:
-    """Only the primary may receive the optional credential key Secret."""
+@pytest.mark.parametrize(
+    ("proxy_tools_args", "proxy_tools"),
+    [((), "shell,file,python"), (("workers.sandbox.proxyTools=*",), "*")],
+)
+def test_runtime_chart_static_runner_withholds_key_and_mounts_only_agent_state(
+    proxy_tools_args: tuple[str, ...],
+    proxy_tools: str,
+) -> None:
+    """Only the primary receives the credential key, and the sidecar sees agent state but no other runtime storage."""
     docs = _render_chart(
         Path("cluster/k8s/runtime"),
         "workers.sandbox.proxyToken.value=test-token",
         "workers.sandbox.credentialsEncryptionKey.existingSecret=runtime-credentials",
         "eventCache.postgres.auth.password=test-password",
+        *proxy_tools_args,
         release_name="mindroom-runtime",
     )
     deployment = _resource(docs, "Deployment", "mindroom-runtime")
     mindroom_container = _container(deployment, "mindroom")
     runner_container = _container(deployment, "sandbox-runner")
+    volumes = _volumes_by_name(deployment)
 
+    assert _env_by_name(mindroom_container)["MINDROOM_SANDBOX_PROXY_TOOLS"]["value"] == proxy_tools
     assert _env_by_name(mindroom_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == {
         "name": "MINDROOM_CREDENTIALS_ENCRYPTION_KEY",
         "valueFrom": {
@@ -3056,171 +3055,94 @@ def test_runtime_chart_static_runner_withholds_credentials_encryption_key() -> N
             },
         },
     }
-    assert [ref["key"] for ref in _secret_refs(runner_container)] == ["MINDROOM_SANDBOX_PROXY_TOKEN"]
+    assert [ref["key"] for ref in _secret_key_refs(runner_container)] == ["MINDROOM_SANDBOX_PROXY_TOKEN"]
+    assert {"name": "storage", "mountPath": "/app/agent_data"} in mindroom_container["volumeMounts"]
+    assert runner_container["volumeMounts"] == [
+        {"name": "config", "mountPath": "/app/config.yaml", "subPath": "config.yaml", "readOnly": True},
+        {"name": "storage", "mountPath": "/app/agent_data", "subPath": "sandbox-runner"},
+        {"name": "storage", "mountPath": "/app/agent_data/agents", "subPath": "agents"},
+        {"name": "storage", "mountPath": "/app/agent_data/private_instances", "subPath": "private_instances"},
+        {"name": "sandbox-workspace", "mountPath": "/app/workspace"},
+    ]
+    assert volumes["storage"] == {
+        "name": "storage",
+        "persistentVolumeClaim": {"claimName": "mindroom-runtime-storage"},
+    }
+    assert volumes["sandbox-workspace"] == {"name": "sandbox-workspace", "emptyDir": {}}
+    assert _env_by_name(runner_container)["MINDROOM_STORAGE_PATH"]["value"] == "/app/agent_data"
+    assert _init_container(deployment, "prepare-sandbox-runner-storage")["command"] == [
+        "mkdir",
+        "-p",
+        "/app/agent_data/sandbox-runner",
+        "/app/agent_data/agents",
+        "/app/agent_data/private_instances",
+    ]
 
 
-def test_runtime_chart_static_runner_sees_only_scratch_storage_and_read_only_config() -> None:
-    """The static sidecar may read a file-sourced config but not the rest of runtime storage."""
+@pytest.mark.parametrize(
+    ("config_path", "expected_config_mount"),
+    [
+        (
+            "/app/agent_data/content-bundles/team/prod/agent-config.yaml",
+            {
+                "name": "storage",
+                "mountPath": "/app/agent_data/content-bundles",
+                "subPath": "content-bundles",
+                "readOnly": True,
+            },
+        ),
+        (
+            "/app/agent_data/config.yaml",
+            {"name": "storage", "mountPath": "/app/agent_data/config.yaml", "subPath": "config.yaml", "readOnly": True},
+        ),
+        ("/etc/mindroom/config.yaml", None),
+    ],
+)
+def test_runtime_chart_static_runner_reads_file_config_subtree_read_only(
+    config_path: str,
+    expected_config_mount: dict[str, Any] | None,
+) -> None:
+    """A file-sourced config is visible to the sidecar only through the read-only subtree dedicated workers mount."""
     docs = _render_chart(
         Path("cluster/k8s/runtime"),
-        "workers.backend=static_runner",
         "workers.sandbox.proxyToken.value=test-token",
         "eventCache.postgres.auth.password=test-password",
         "config.source=file",
-        "config.path=/app/agent_data/active/config.yaml",
-        release_name="mindroom-runtime",
-    )
-    deployment = _resource(docs, "Deployment", "mindroom-runtime")
-    mindroom_container = _container(deployment, "mindroom")
-    runner_container = _container(deployment, "sandbox-runner")
-    storage = {"name": "storage", "persistentVolumeClaim": {"claimName": "mindroom-runtime-storage"}}
-
-    assert ({"name": "storage", "mountPath": "/app/agent_data"}, storage) in _mounted_volumes(
-        deployment,
-        mindroom_container,
-    )
-    assert _mounted_volumes(deployment, runner_container) == [
-        (
-            {"name": "sandbox-storage", "mountPath": "/app/agent_data"},
-            {"name": "sandbox-storage", "emptyDir": {"sizeLimit": "4Gi"}},
-        ),
-        ({"name": "storage", "mountPath": "/app/agent_data/active", "subPath": "active", "readOnly": True}, storage),
-        (
-            {"name": "sandbox-workspace", "mountPath": "/app/workspace"},
-            {"name": "sandbox-workspace", "emptyDir": {"sizeLimit": "4Gi"}},
-        ),
-    ]
-    assert _env_by_name(runner_container)["MINDROOM_STORAGE_PATH"]["value"] == "/app/agent_data"
-
-
-@pytest.mark.parametrize(
-    ("settings", "expected_storage_mounts"),
-    [
-        ((), []),
-        (("config.source=file", "config.path=/etc/mindroom/config.yaml"), []),
-        (("config.source=file", "config.path=/app/agent_data2/active/config.yaml"), []),
-        (
-            (
-                "config.source=file",
-                "storage.mountPath=/app/agent_data/",
-                "config.path=/app/x/../agent_data/active/c.yaml",
-            ),
-            [{"name": "storage", "mountPath": "/app/agent_data/active", "subPath": "active", "readOnly": True}],
-        ),
-        (
-            ("config.source=file", "config.path=/app/agent_data/content-bundles/team/prod/agent-config.yaml"),
-            [
-                {
-                    "name": "storage",
-                    "mountPath": "/app/agent_data/content-bundles",
-                    "subPath": "content-bundles",
-                    "readOnly": True,
-                },
-            ],
-        ),
-    ],
-)
-def test_runtime_chart_static_runner_mounts_only_the_config_storage_subtree(
-    settings: tuple[str, ...],
-    expected_storage_mounts: list[dict[str, Any]],
-) -> None:
-    """The sidecar gets the same read-only config subtree as dedicated workers and nothing else from storage."""
-    docs = _render_chart(
-        Path("cluster/k8s/runtime"),
-        "eventCache.postgres.auth.password=test-password",
-        *settings,
+        f"config.path={config_path}",
         release_name="mindroom-runtime",
     )
     runner_container = _container(_resource(docs, "Deployment", "mindroom-runtime"), "sandbox-runner")
+    config_mounts = [mount for mount in runner_container["volumeMounts"] if mount.get("readOnly")]
 
-    assert [
-        mount for mount in runner_container["volumeMounts"] if mount["name"] == "storage"
-    ] == expected_storage_mounts
-
-
-@pytest.mark.parametrize(
-    ("settings", "expected_policy"),
-    [
-        ((), {"shell": ["shell"], "file": ["file"], "python": ["python"]}),
-        (("workers.sandbox.proxyTools=shell\\, coding",), {"shell": ["shell"], "coding": ["coding"]}),
-        (("workers.sandbox.proxyTools=*",), None),
-        (("workers.backend=kubernetes",), None),
-    ],
-)
-def test_runtime_chart_leases_saved_settings_for_static_runner_proxy_tools(
-    settings: tuple[str, ...],
-    expected_policy: dict[str, list[str]] | None,
-) -> None:
-    """Saved settings for each proxied tool reach the isolated sidecar only as primary leases."""
-    docs = _render_chart(
-        Path("cluster/k8s/runtime"),
-        "eventCache.postgres.auth.password=test-password",
-        "workers.sandbox.proxyToken.value=test-token",
-        *settings,
-        release_name="mindroom-runtime",
-    )
-    env = _env_by_name(_container(_resource(docs, "Deployment", "mindroom-runtime"), "mindroom"))
-    policy = env.get("MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON")
-
-    assert (json.loads(policy["value"]) if policy else None) == expected_policy
-
-
-def test_runtime_chart_operator_credential_policy_replaces_derived_policy() -> None:
-    """An explicit env.extra policy wins without rendering a duplicate env entry."""
-    docs = _render_chart(
-        Path("cluster/k8s/runtime"),
-        "eventCache.postgres.auth.password=test-password",
-        "workers.sandbox.proxyToken.value=test-token",
-        "env.extra[0].name=MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON",
-        "env.extra[0].value=operator-policy",
-        release_name="mindroom-runtime",
-    )
-    container = _container(_resource(docs, "Deployment", "mindroom-runtime"), "mindroom")
-
-    assert [env for env in container["env"] if env["name"] == "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON"] == [
-        {"name": "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON", "value": "operator-policy"},
+    assert config_mounts == ([expected_config_mount] if expected_config_mount is not None else [])
+    assert [mount for mount in runner_container["volumeMounts"] if mount["name"] == "storage"][:3] == [
+        {"name": "storage", "mountPath": "/app/agent_data", "subPath": "sandbox-runner"},
+        {"name": "storage", "mountPath": "/app/agent_data/agents", "subPath": "agents"},
+        {"name": "storage", "mountPath": "/app/agent_data/private_instances", "subPath": "private_instances"},
     ]
 
 
-def test_runtime_chart_static_runner_rejects_config_directly_in_storage_root() -> None:
-    """A single-file subPath would let kubelet create a directory where the primary expects its config."""
+@pytest.mark.parametrize("directory", ["agents", "private_instances", "sandbox-runner"])
+def test_runtime_chart_static_runner_rejects_file_config_in_sidecar_writable_storage(directory: str) -> None:
+    """The sidecar must not be able to rewrite the config the primary loads."""
     completed = _run_helm_template(
         Path("cluster/k8s/runtime"),
         "eventCache.postgres.auth.password=test-password",
         "config.source=file",
-        "config.path=/app/agent_data/config.yaml",
+        f"config.path=/app/agent_data/{directory}/config.yaml",
         release_name="mindroom-runtime",
     )
 
     assert completed.returncode != 0
-    assert "requires config.path in a directory below storage.mountPath" in completed.stderr
+    assert "the sandbox-runner sidecar can write those directories" in completed.stderr
 
 
-def test_instance_chart_static_runner_scratch_size_limit_can_be_disabled() -> None:
-    """An empty size limit still renders valid emptyDir volume sources."""
-    docs = _render_chart(Path("cluster/k8s/instance"), "sandboxRunnerScratchSizeLimit=")
-    volumes = _resource(docs, "Deployment", "mindroom-demo")["spec"]["template"]["spec"]["volumes"]
+def test_runtime_chart_dedicated_workers_skip_static_runner_storage() -> None:
+    """Dedicated workers need neither the sidecar nor its storage preparation."""
+    pod_spec = _resource(_render_runtime_chart(), "Deployment", "mindroom-runtime")["spec"]["template"]["spec"]
 
-    assert [volume for volume in volumes if volume["name"].startswith("sandbox-")] == [
-        {"name": "sandbox-workspace", "emptyDir": {}},
-        {"name": "sandbox-storage", "emptyDir": {}},
-    ]
-
-
-def test_runtime_chart_static_runner_scratch_size_limit_can_be_disabled() -> None:
-    """An empty size limit still renders valid emptyDir volume sources."""
-    docs = _render_chart(
-        Path("cluster/k8s/runtime"),
-        "eventCache.postgres.auth.password=test-password",
-        "workers.staticRunner.scratchSizeLimit=",
-        release_name="mindroom-runtime",
-    )
-    volumes = _resource(docs, "Deployment", "mindroom-runtime")["spec"]["template"]["spec"]["volumes"]
-
-    assert [volume for volume in volumes if volume["name"].startswith("sandbox-")] == [
-        {"name": "sandbox-workspace", "emptyDir": {}},
-        {"name": "sandbox-storage", "emptyDir": {}},
-    ]
+    assert [container["name"] for container in pod_spec["containers"]] == ["mindroom"]
+    assert "initContainers" not in pod_spec
 
 
 def test_runtime_chart_state_storage_renders_existing_pvc_mounts_and_init_permissions(tmp_path: Path) -> None:
