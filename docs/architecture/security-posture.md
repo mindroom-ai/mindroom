@@ -42,10 +42,12 @@ Every tool declares how its own file access relates to this setting.
 | Tool class | Tools | Behavior |
 |---|---|---|
 | Path tools | `file`, `coding`, `attachments`, `matrix_message`, `gmail`, `google_drive`, `browser` uploads | Follow the agent's `file_access` |
-| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `e2b`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `agentql`, `newspaper`, `slack`, `web_browser_tools`) | Always `unrestricted`, meaning not confined by `file_access`; only a worker isolates them, and authored config may only state `file_access: unrestricted` |
+| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `e2b`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `agentql`, `newspaper`, `slack`, `web_browser_tools`) | Always `unrestricted`, meaning not confined by `file_access`; authored config may only state `file_access: unrestricted` |
 | Other tools | Everything else | Take no local file paths |
 
 Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above carry it.
+A worker isolates unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `agentql`, `newspaper`, `web_browser_tools`).
+The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `e2b`, `browserbase`, `slack`), so enable them only for agents trusted with everything the primary runtime can reach.
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
 

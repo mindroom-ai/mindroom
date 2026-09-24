@@ -533,6 +533,7 @@ The full model, the `file_access` setting, and the list of intentional behaviors
 - **With workers, primary-process tools must not bypass the worker**: Tools that still run in the primary process (for example `browser`, `attachments`, `matrix_message`, `gmail`, and `google_drive`) follow the agent's `file_access` setting.
   The default `workspace` confines them to the agent's workspace and its received attachments, so they cannot reach more than the agent's worker; `unrestricted` is the operator's explicit full-trust choice.
   Tools that cannot yet be confined declare `file_access: unrestricted` in their metadata, which means not confined rather than executing code; code execution is a separate `executes_code` flag.
+  Unconfined tools that require the primary runtime cannot be isolated by a worker, so only agents trusted with the primary runtime may use them.
 - **Protect the primary from worker code**: Hardening against untrusted worker code is in scope, such as symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
 - **Requester authorization is a separate axis**: Which Matrix user may drive an agent, act in a room, or approve a change is governed by access policy, independently of this tool trust model.
 

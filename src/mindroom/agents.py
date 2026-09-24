@@ -895,6 +895,7 @@ def _render_tool_execution_environment(
     worker_scope: WorkerScope | None,
     file_access: FileAccess,
     unrestricted_tool_names: tuple[str, ...],
+    primary_only_unrestricted_tool_names: tuple[str, ...],
 ) -> str:
     """Describe effective per-tool execution routing and file access to the model."""
 
@@ -912,6 +913,11 @@ def _render_tool_execution_environment(
     if unrestricted_tool_names:
         file_access_lines.append(
             f"- Not confined by file_access (only a worker isolates them): {tool_list(unrestricted_tool_names)}.",
+        )
+    if primary_only_unrestricted_tool_names:
+        file_access_lines.append(
+            "- Not confined by file_access and unable to run in a worker (trusted primary runtime only): "
+            f"{tool_list(primary_only_unrestricted_tool_names)}.",
         )
 
     if not worker_routed_tool_names:
@@ -957,6 +963,19 @@ def _render_tool_execution_environment(
     lines.extend(file_access_lines)
     lines.append("- Execution location is determined per tool; this agent is not sandboxed as a whole.")
     return "\n".join(lines)
+
+
+def _unrestricted_tool_names(tool_names: tuple[str, ...], *, requires_primary_runtime: bool) -> tuple[str, ...]:
+    """Return sorted tools not confined by file_access, split by whether a worker can isolate them."""
+    return tuple(
+        sorted(
+            name
+            for name in tool_names
+            if name in TOOL_METADATA
+            and TOOL_METADATA[name].file_access is ToolFileAccess.UNRESTRICTED
+            and TOOL_METADATA[name].requires_primary_runtime is requires_primary_runtime
+        ),
+    )
 
 
 def _registry_tool_routes_through_worker(
@@ -1627,12 +1646,13 @@ def _build_agent_role_context(
             worker_routed_tool_names=worker_routed_tool_names,
             worker_scope=agent_runtime.execution.execution_scope,
             file_access=config.resolve_entity(agent_name).file_access,
-            unrestricted_tool_names=tuple(
-                sorted(
-                    name
-                    for name in (*local_tool_names, *worker_routed_tool_names)
-                    if name in TOOL_METADATA and TOOL_METADATA[name].file_access is ToolFileAccess.UNRESTRICTED
-                ),
+            unrestricted_tool_names=_unrestricted_tool_names(
+                (*local_tool_names, *worker_routed_tool_names),
+                requires_primary_runtime=False,
+            ),
+            primary_only_unrestricted_tool_names=_unrestricted_tool_names(
+                (*local_tool_names, *worker_routed_tool_names),
+                requires_primary_runtime=True,
             ),
         )
         workspace = agent_runtime.workspace

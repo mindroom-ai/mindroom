@@ -288,9 +288,14 @@ def _validate_authored_file_access(
     if metadata.file_access is ToolFileAccess.UNRESTRICTED:
         if value == "unrestricted":
             return remaining
+        isolation = (
+            "It cannot run in a worker, so enable it only for agents trusted with the primary runtime."
+            if metadata.requires_primary_runtime
+            else "Isolate it with worker_tools instead."
+        )
         msg = (
             f"{path}: {tool_name} is not confined by file_access, so its file access is always 'unrestricted'. "
-            "Isolate it with worker_tools instead."
+            f"{isolation}"
         )
         raise ToolConfigOverrideError(msg)
     msg = f"{path}: set file access per agent with agents.<name>.file_access or defaults.file_access, not per tool."

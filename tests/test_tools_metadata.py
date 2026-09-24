@@ -1491,6 +1491,22 @@ def test_file_access_on_code_tool_accepts_only_unrestricted() -> None:
             )
 
 
+def test_file_access_on_primary_only_unconfined_tool_does_not_suggest_worker_routing() -> None:
+    """Tools that cannot run in a worker must not be told to isolate themselves with worker_tools."""
+    validate_authored_tool_entry_overrides(
+        "duckdb",
+        {"file_access": "unrestricted"},
+        config_path_prefix="agents.a.tools",
+    )
+    with pytest.raises(ToolConfigOverrideError, match="trusted with the primary runtime") as exc_info:
+        validate_authored_tool_entry_overrides(
+            "duckdb",
+            {"file_access": "workspace"},
+            config_path_prefix="agents.a.tools",
+        )
+    assert "worker_tools" not in str(exc_info.value)
+
+
 def test_file_access_on_other_tools_points_to_agent_setting() -> None:
     """Per-tool file_access is refused for tools that follow or ignore the agent setting."""
     for tool_name in ("gmail", "calculator"):
