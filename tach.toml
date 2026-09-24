@@ -2098,9 +2098,9 @@ depends_on = [
     "mindroom.constants",
     "mindroom.custom_tools.todo_poke",
     "mindroom.custom_tools.todo_state",
-    "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.client_room_admin",
+    "mindroom.requester_identity",
     "mindroom.scheduling",
 ]
 

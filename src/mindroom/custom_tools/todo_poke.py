@@ -44,7 +44,7 @@ __all__ = [
 ]
 
 type _TodoScheduleQuery = Callable[[str, tuple[str, ...]], Awaitable[frozenset[str | None] | None]]
-type _TodoPokeSender = Callable[[str, str, str, str | None], Awaitable[str | None]]
+type _TodoPokeSender = Callable[[str, str, str, str | None, str], Awaitable[str | None]]
 type _StateWarningKey = tuple[str, str]
 
 _VALID_STATUSES = {"open", *TERMINAL_STATUSES}
@@ -89,6 +89,7 @@ class _TodoItemSnapshot:
     priority: str
     depends_on: tuple[str, ...]
     assigned_agent: str
+    requester_id: str
     updated_at: datetime
 
 
@@ -110,6 +111,7 @@ class _TodoSnapshotBatch:
 @dataclass(frozen=True, slots=True)
 class _TodoPokeScope:
     assigned_agent: str
+    requester_id: str
     room_id: str
     thread_id: str | None
     actionable_items: tuple[_TodoItemSnapshot, ...]
@@ -213,6 +215,12 @@ def _parse_item(raw_item: object) -> _TodoItemSnapshot:
         msg = "title must be a non-empty string"
         raise ValueError(msg)
 
+    # The todo tool records requester_id only when a human requester last shaped the item.
+    requester_id = item_data.get("requester_id", "")
+    if not isinstance(requester_id, str):
+        msg = "requester_id must be a string"
+        raise TypeError(msg)
+
     return _TodoItemSnapshot(
         item_id=_require_string(item_data, "id"),
         title=title,
@@ -220,6 +228,7 @@ def _parse_item(raw_item: object) -> _TodoItemSnapshot:
         priority=priority,
         depends_on=tuple(raw_dependencies),
         assigned_agent=_require_string(item_data, "assigned_agent", allow_empty=True),
+        requester_id=requester_id,
         updated_at=_parse_updated_at(_require_string(item_data, "updated_at")),
     )
 
@@ -373,7 +382,7 @@ def _poke_scopes(
 ) -> list[_TodoPokeScope]:
     scopes: list[_TodoPokeScope] = []
     for snapshot in snapshots:
-        items_by_agent: dict[str, list[_TodoItemSnapshot]] = {}
+        items_by_owner: dict[tuple[str, str], list[_TodoItemSnapshot]] = {}
         for item in snapshot.items:
             if item.item_id not in snapshot.actionable_item_ids or not item.assigned_agent:
                 continue
@@ -387,13 +396,25 @@ def _poke_scopes(
                     assigned_agent=item.assigned_agent,
                 )
                 continue
-            items_by_agent.setdefault(item.assigned_agent, []).append(item)
+            # A poke acts for the human who shaped the work, so the assignee's access policy applies to them.
+            if not item.requester_id:
+                _warn_state_once(
+                    "todo_poke_requester_missing",
+                    snapshot.source_path,
+                    "assigned todo has no recorded human requester",
+                    seen_warning_keys,
+                    item_id=item.item_id,
+                    assigned_agent=item.assigned_agent,
+                )
+                continue
+            items_by_owner.setdefault((item.assigned_agent, item.requester_id), []).append(item)
 
-        for assigned_agent in sorted(items_by_agent):
-            actionable_items = tuple(items_by_agent[assigned_agent])
+        for assigned_agent, requester_id in sorted(items_by_owner):
+            actionable_items = tuple(items_by_owner[assigned_agent, requester_id])
             scopes.append(
                 _TodoPokeScope(
                     assigned_agent=assigned_agent,
+                    requester_id=requester_id,
                     room_id=snapshot.room_id,
                     thread_id=snapshot.thread_id,
                     actionable_items=actionable_items,
@@ -406,7 +427,7 @@ def _poke_scopes(
 
 def _scope_key(scope: _TodoPokeScope) -> str:
     return json.dumps(
-        [scope.assigned_agent, scope.room_id, scope.thread_id],
+        [scope.assigned_agent, scope.room_id, scope.thread_id, scope.requester_id],
         separators=(",", ":"),
     )
 
@@ -645,6 +666,7 @@ async def _deliver_pokes(
                 scope.room_id,
                 _format_poke_message(scope),
                 scope.thread_id,
+                scope.requester_id,
             )
         except TodoPokeDeliveryUnavailableError:
             logger.debug(

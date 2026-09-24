@@ -15,9 +15,9 @@ from mindroom.custom_tools.todo_poke import (
     todo_poke_policy,
 )
 from mindroom.custom_tools.todo_state import state_root as todo_state_root
-from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms
+from mindroom.requester_identity import is_human_requester_id
 from mindroom.scheduling import get_pending_schedule_thread_ids_for_room
 
 if TYPE_CHECKING:
@@ -148,22 +148,31 @@ class TodoPokeRuntimeCoordinator:
         room_id: str,
         body: str,
         thread_id: str | None,
+        requester_id: str,
     ) -> str | None:
-        """Send one assigned-agent todo poke that enters normal dispatch."""
+        """Send one assigned-agent todo poke that enters normal dispatch on behalf of its human requester."""
         config = self.config_provider()
         if config is None:
             raise TodoPokeDeliveryUnavailableError
+        # A non-human original sender would leave the assignee's own identity as the requester,
+        # bypassing its reply access policy and running tools without a human principal.
+        if not is_human_requester_id(requester_id, config, self.runtime_paths):
+            logger.warning(
+                "todo_poke_requester_rejected",
+                assigned_agent=agent_name,
+                room_id=room_id,
+                requester_id=requester_id,
+            )
+            return None
         agent_bot = await self._joined_agent_bot(room_id, (agent_name,))
         if agent_bot is None or agent_bot.client is None:
             raise TodoPokeDeliveryUnavailableError
 
-        original_sender = mindroom_user_id(config, self.runtime_paths)
-        extra_content = {ORIGINAL_SENDER_KEY: original_sender} if original_sender is not None else None
         return await agent_bot._hook_send_message(
             room_id,
             body,
             thread_id,
             "todo_poke",
-            extra_content,
+            {ORIGINAL_SENDER_KEY: requester_id},
             trigger_dispatch=True,
         )

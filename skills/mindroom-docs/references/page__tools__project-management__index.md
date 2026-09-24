@@ -93,6 +93,8 @@ get_pull_request("mindroom-ai/mindroom", 123)
 `todo` exposes `plan()`, `add_todo()`, `list_todos()`, `update_todo()`, `apply_template()`, and `list_templates()`.
 Todo items are scoped to the current Matrix room and resolved thread, so separate threads can carry independent plans.
 Each item can have a priority, dependency list, status, and assigned agent name.
+Assigning work to an agent, or changing work assigned to an agent, is refused unless the requester may address that agent in the current room under its `access` policy.
+Each item records the human requester who last created or changed it.
 State is stored under `mindroom_data/todo/` and survives restarts.
 Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
 
@@ -107,6 +109,8 @@ A failed send is recorded like any other attempt, so the retry waits out the cha
 Future persisted timestamps beyond the relevant cooldown or backstop window are treated as elapsed so clock skew cannot mute valid work indefinitely.
 Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
 Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
+Each poke carries the item's recorded human requester as its original sender, so the assigned agent applies its normal reply access and tool authorization to that human.
+Items without a recorded human requester, such as items written by automation turns, are never poked, and one poke never mixes items from different requesters.
 
 | Environment variable | Default | Behavior |
 | --- | --- | --- |
