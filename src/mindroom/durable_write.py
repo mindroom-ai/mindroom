@@ -180,7 +180,8 @@ def fsync_directory_durable(directory: Path) -> None:
     """Flush one supported directory update and propagate durability failures."""
     if not _DIRECTORY_FSYNC_SUPPORTED:
         return
-    directory_fd = os.open(directory, os.O_RDONLY)
+    # O_DIRECTORY fails fast on a FIFO swapped in at the name instead of blocking the open.
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(directory_fd)
     finally:
