@@ -61,6 +61,7 @@ if TYPE_CHECKING:
 
     from playwright.async_api import Download
 
+    from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
 
 _DEFAULT_PROFILE = "mindroom"
@@ -553,6 +554,7 @@ class BrowserTools(Toolkit):
         device_ed25519: str | None = None,
         timeout_seconds: float = 90.0,
         tool_output_workspace_root: Path | None = None,
+        file_access: FileAccess = "workspace",
     ) -> None:
         super().__init__(name="browser", tools=[self.browser])
         apply_toolkit_function_aliases(self, {"browser": "browser_control"})
@@ -580,6 +582,7 @@ class BrowserTools(Toolkit):
         self._lock = asyncio.Lock()
         self._configured_output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
         self._workspace_root = tool_output_workspace_root.resolve() if tool_output_workspace_root is not None else None
+        self._file_access = file_access
         if self._configured_output_dir is not None:
             self._configured_output_dir.mkdir(parents=True, exist_ok=True)
         self._close_task: asyncio.Task[None] | None = None

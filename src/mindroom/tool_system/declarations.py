@@ -92,6 +92,14 @@ class ToolExecutionTarget(str, Enum):
     WORKER = "worker"
 
 
+class ToolFileAccess(str, Enum):
+    """How a tool's own local file access relates to the agent ``file_access`` setting."""
+
+    NONE = "none"  # takes no local file paths
+    AGENT = "agent"  # follows the agent's file_access setting
+    UNRESTRICTED = "unrestricted"  # runs arbitrary programs; cannot be confined in-process, only by a worker
+
+
 class ToolManagedInitArg(str, Enum):
     """Explicit MindRoom-managed constructor inputs."""
 
@@ -103,6 +111,7 @@ class ToolManagedInitArg(str, Enum):
     WORKER_TOOLS_OVERRIDE = "worker_tools_override"
     CURRENT_ROOM_ID = "current_room_id"
     AGENT_NAME = "agent_name"
+    FILE_ACCESS = "file_access"
 
 
 @dataclass
@@ -129,6 +138,7 @@ class ToolValidationInfo:
     config_fields: tuple[ConfigField, ...] = ()
     agent_override_fields: tuple[ConfigField, ...] = ()
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
+    file_access: ToolFileAccess = ToolFileAccess.NONE
     supports_toolkit_filters: bool = False
     requires_room_context: bool = False
     requires_primary_runtime: bool = False
@@ -156,6 +166,7 @@ class ToolMetadata:
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY
     requires_primary_runtime: bool = False
     consumes_workspace_paths: bool = False
+    file_access: ToolFileAccess = ToolFileAccess.NONE
     requires_room_context: bool = False
     icon: str | None = None
     icon_color: str | None = None

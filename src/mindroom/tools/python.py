@@ -11,6 +11,7 @@ from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
+    ToolFileAccess,
     ToolStatus,
 )
 from mindroom.tool_system.dependencies import install_command_for_current_python
@@ -64,6 +65,7 @@ def _python_tools_runtime() -> tuple[Any, Any, Any, Any]:
     display_name="Python Tools",
     description="Execute Python code, manage files, and install packages",
     category=ToolCategory.DEVELOPMENT,
+    file_access=ToolFileAccess.UNRESTRICTED,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,

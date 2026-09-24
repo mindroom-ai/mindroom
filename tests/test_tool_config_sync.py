@@ -10,6 +10,7 @@ from agno.tools import Toolkit
 
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
+from mindroom.config.models import FileAccess
 from mindroom.constants import RuntimePaths
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, validate_authored_tool_entry_overrides
@@ -359,6 +360,7 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
         tool_class.__init__,
         globalns=tool_class.__init__.__globals__
         | {
+            "FileAccess": FileAccess,
             "ResolvedWorkerTarget": ResolvedWorkerTarget,
             "RuntimePaths": RuntimePaths,
         },

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constructor annotations.
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from agno.tools.file import FileTools as AgnoFileTools
 from agno.utils.log import log_debug, log_error
@@ -15,6 +15,8 @@ from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
+    ToolFileAccess,
+    ToolManagedInitArg,
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -26,6 +28,9 @@ from mindroom.tools.path_safety import (
     resolve_base_dir_path,
     split_search_pattern,
 )
+
+if TYPE_CHECKING:
+    from mindroom.config.models import FileAccess
 
 
 class _MindRoomFileTools(AgnoFileTools):
@@ -49,9 +54,11 @@ class _MindRoomFileTools(AgnoFileTools):
         exclude_patterns: list[str] | None = None,
         all: bool = False,  # noqa: A002
         restrict_to_base_dir: bool = True,
+        file_access: FileAccess = "workspace",
         **kwargs: object,
     ) -> None:
         self.restrict_to_base_dir = restrict_to_base_dir
+        self._file_access = file_access
         super().__init__(
             base_dir=base_dir,
             enable_save_file=enable_save_file,
@@ -258,6 +265,8 @@ class _MindRoomFileTools(AgnoFileTools):
     display_name="File Tools",
     description="Read, write, list, and search files in the agent workspace",
     category=ToolCategory.DEVELOPMENT,
+    file_access=ToolFileAccess.AGENT,
+    managed_init_args=(ToolManagedInitArg.FILE_ACCESS,),
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,

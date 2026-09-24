@@ -24,7 +24,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
-from mindroom.tool_system.declarations import SetupType, ToolValidationInfo
+from mindroom.tool_system.declarations import SetupType, ToolFileAccess, ToolValidationInfo
 from mindroom.tool_system.metadata import (
     _AUTHORED_OVERRIDE_INHERIT,
     ConfigField,
@@ -39,6 +39,7 @@ from mindroom.tool_system.metadata import (
     get_tool_by_name,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
+    validate_authored_tool_entry_overrides,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry_state import (
@@ -52,6 +53,7 @@ from mindroom.tool_system.registry_state import (
     restore_tool_registry_snapshot,
 )
 from mindroom.tool_system.worker_routing import (
+    ResolvedWorkerTarget,
     ToolExecutionIdentity,
     resolve_worker_target,
 )
@@ -1334,3 +1336,173 @@ def test_resolved_tool_state_cache_evicts_on_config_gc(
         assert not metadata_module._RESOLVED_TOOL_STATE_CACHE
     finally:
         metadata_module.clear_resolved_tool_state_cache()
+
+
+def test_code_execution_tools_declare_unrestricted_file_access() -> None:
+    """Tools that run arbitrary programs cannot be confined in-process."""
+    for name in ("shell", "python", "docker", "script", "claude_agent"):
+        assert TOOL_METADATA[name].file_access is ToolFileAccess.UNRESTRICTED, name
+
+
+def test_path_tools_follow_agent_file_access_and_receive_it() -> None:
+    """Tools that take model-supplied paths follow and receive the agent file_access."""
+    for name in ("file", "coding", "attachments", "matrix_message", "gmail", "google_drive", "browser"):
+        metadata = TOOL_METADATA[name]
+        assert metadata.file_access is ToolFileAccess.AGENT, name
+        assert ToolManagedInitArg.FILE_ACCESS in metadata.managed_init_args, name
+
+
+def test_tools_default_to_no_file_access() -> None:
+    """Tools without local file paths declare no file access."""
+    assert TOOL_METADATA["calculator"].file_access is ToolFileAccess.NONE
+
+
+def _file_access_worker_target(agent_name: str) -> ResolvedWorkerTarget:
+    return resolve_worker_target(
+        None,
+        agent_name,
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name=agent_name,
+            requester_id="@user:localhost",
+            room_id="!room:localhost",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session",
+        ),
+        tenant_id=None,
+        account_id=None,
+    )
+
+
+def test_get_tool_by_name_passes_agent_file_access(tmp_path: Path) -> None:
+    """The managed file_access arg resolves the constructing agent's setting; unknowns stay confined."""
+    tool_name = "test_file_access_tool"
+
+    class FileAccessToolkit(Toolkit):
+        def __init__(self, *, file_access: str) -> None:
+            self.file_access = file_access
+            super().__init__(name=tool_name, tools=[])
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="File Access Tool",
+        description="Test-only toolkit for file_access injection.",
+        category=ToolCategory.DEVELOPMENT,
+        file_access=ToolFileAccess.AGENT,
+        managed_init_args=(ToolManagedInitArg.FILE_ACCESS,),
+    )
+    def _file_access_tool_factory() -> type[FileAccessToolkit]:
+        return FileAccessToolkit
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    config = Config.model_validate(
+        {
+            "defaults": {"file_access": "unrestricted"},
+            "agents": {
+                "admin": {"display_name": "Admin", "file_access": "unrestricted"},
+                "plain": {"display_name": "Plain", "file_access": "workspace"},
+            },
+        },
+    )
+
+    def build(runtime_config: Config | None, worker_target: ResolvedWorkerTarget | None) -> str:
+        tool = get_tool_by_name(
+            tool_name,
+            runtime_paths,
+            runtime_config=runtime_config,
+            worker_target=worker_target,
+            disable_sandbox_proxy=True,
+        )
+        assert isinstance(tool, FileAccessToolkit)
+        return tool.file_access
+
+    try:
+        assert build(config, _file_access_worker_target("admin")) == "unrestricted"
+        assert build(config, _file_access_worker_target("plain")) == "workspace"
+        assert build(None, _file_access_worker_target("admin")) == "workspace"
+        assert build(config, None) == "workspace"
+        assert build(config, _file_access_worker_target("stranger")) == "workspace"
+    finally:
+        TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+
+
+def test_file_access_on_code_tool_accepts_only_unrestricted() -> None:
+    """Code tools accept an explicit no-op unrestricted file_access and nothing else."""
+    validated = validate_authored_tool_entry_overrides(
+        "shell",
+        {"file_access": "unrestricted"},
+        config_path_prefix="agents.a.tools",
+    )
+    assert "file_access" not in validated
+    for value in ("workspace", True, None):
+        with pytest.raises(ToolConfigOverrideError, match="worker_tools"):
+            validate_authored_tool_entry_overrides(
+                "shell",
+                {"file_access": value},
+                config_path_prefix="agents.a.tools",
+            )
+
+
+def test_file_access_on_other_tools_points_to_agent_setting() -> None:
+    """Per-tool file_access is refused for tools that follow or ignore the agent setting."""
+    for tool_name in ("gmail", "calculator"):
+        with pytest.raises(ToolConfigOverrideError, match=r"agents\.<name>\.file_access|defaults\.file_access"):
+            validate_authored_tool_entry_overrides(
+                tool_name,
+                {"file_access": "unrestricted"},
+                config_path_prefix="agents.a.tools",
+            )
+
+
+def test_file_access_rules_survive_the_validation_snapshot() -> None:
+    """Worker validation snapshots keep each tool's file-access class."""
+    snapshot = {
+        "runner": ToolValidationInfo(name="runner", file_access=ToolFileAccess.UNRESTRICTED),
+        "reader": ToolValidationInfo(name="reader", file_access=ToolFileAccess.AGENT),
+    }
+    restored = deserialize_tool_validation_snapshot(serialize_tool_validation_snapshot(snapshot))
+    assert restored["runner"].file_access is ToolFileAccess.UNRESTRICTED
+    assert restored["reader"].file_access is ToolFileAccess.AGENT
+    validate_authored_tool_entry_overrides("runner", {"file_access": "unrestricted"}, tool_metadata=restored)
+    with pytest.raises(ToolConfigOverrideError, match=r"defaults\.file_access"):
+        validate_authored_tool_entry_overrides("reader", {"file_access": "unrestricted"}, tool_metadata=restored)
+
+
+def test_deserialize_tool_validation_snapshot_rejects_unknown_file_access() -> None:
+    """Validation snapshot payloads type-check the file-access class strictly."""
+    with pytest.raises(TypeError, match="file_access"):
+        deserialize_tool_validation_snapshot({"shell": {"file_access": "sometimes"}})
+
+
+def test_config_load_rejects_workspace_file_access_on_shell(tmp_path: Path) -> None:
+    """Config runtime validation applies the file_access authored-key rules."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    def validate(value: str) -> None:
+        Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "router": {"model": "default"},
+                "agents": {
+                    "code": {
+                        "display_name": "Code",
+                        "model": "default",
+                        "tools": [{"shell": {"file_access": value}}],
+                    },
+                },
+            },
+            runtime_paths,
+        )
+
+    validate("unrestricted")
+    with pytest.raises(ConfigRuntimeValidationError, match="worker_tools"):
+        validate("workspace")

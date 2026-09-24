@@ -8,6 +8,7 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     display_name="Gmail",
     description="Search, read, send, and organize email in Gmail",
     category=ToolCategory.EMAIL,
+    file_access=ToolFileAccess.AGENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
     requires_primary_runtime=True,
@@ -101,6 +103,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.RUNTIME_CONFIG,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
+        ToolManagedInitArg.FILE_ACCESS,
     ),
     dependencies=["google-api-python-client", "google-auth", "google-auth-oauthlib", "google-auth-httplib2"],
     docs_url="https://docs.agno.com/tools/toolkits/social/gmail",

@@ -31,6 +31,7 @@ from mindroom.requester_identity import is_human_requester_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
+    from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.matrix.message_extras import MessageExtraSection
 
@@ -67,7 +68,13 @@ class MatrixMessageTools(Toolkit):
     _MAX_READ_LIMIT: ClassVar[int] = 50
     _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset({"send", "read", "edit", "react"})
 
-    def __init__(self, *, tool_output_workspace_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        tool_output_workspace_root: Path | None = None,
+        file_access: FileAccess = "workspace",
+    ) -> None:
+        self._file_access = file_access
         self._operations = matrix_conversation_operations.MatrixMessageOperations(
             tool_output_workspace_root=tool_output_workspace_root,
         )

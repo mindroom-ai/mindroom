@@ -21,6 +21,7 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     ToolAuthoredOverrideValidator,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolMetadata,
     ToolValidationInfo,
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
     from agno.tools import Toolkit
 
     from mindroom.config.main import Config
+    from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
 
@@ -268,6 +270,31 @@ def _validate_authored_override_value(
     return value
 
 
+def _validate_authored_file_access(
+    tool_name: str,
+    overrides: dict[str, object],
+    metadata: ToolMetadata | ToolValidationInfo,
+    *,
+    config_path_prefix: str | None,
+) -> dict[str, object]:
+    """Check an authored per-tool ``file_access`` key and drop it; it is never a constructor argument."""
+    if "file_access" not in overrides:
+        return overrides
+    remaining = dict(overrides)
+    value = remaining.pop("file_access")
+    path = _override_path(tool_name, "file_access", config_path_prefix=config_path_prefix)
+    if metadata.file_access is ToolFileAccess.UNRESTRICTED:
+        if value == "unrestricted":
+            return remaining
+        msg = (
+            f"{path}: {tool_name} runs arbitrary programs, so its file access is always 'unrestricted'. "
+            "Isolate it with worker_tools instead."
+        )
+        raise ToolConfigOverrideError(msg)
+    msg = f"{path}: set file access per agent with agents.<name>.file_access or defaults.file_access, not per tool."
+    raise ToolConfigOverrideError(msg)
+
+
 def _validate_authored_overrides(
     tool_name: str,
     overrides: dict[str, object] | None,
@@ -285,6 +312,12 @@ def _validate_authored_overrides(
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
+    overrides = _validate_authored_file_access(
+        tool_name,
+        overrides,
+        metadata,
+        config_path_prefix=config_path_prefix,
+    )
     fields_by_name = {
         field.name: field
         for field in _authored_tool_config_fields(
@@ -585,26 +618,29 @@ def _build_managed_tool_init_kwargs(
     worker_tools_override: list[str] | None,
 ) -> dict[str, object]:
     """Build declared MindRoom-managed constructor kwargs for one tool."""
-    init_kwargs: dict[str, object] = {}
-    for init_arg in metadata.managed_init_args:
-        if init_arg == ToolManagedInitArg.RUNTIME_PATHS:
-            init_kwargs[init_arg.value] = runtime_paths
-        elif init_arg == ToolManagedInitArg.CREDENTIALS_MANAGER:
-            init_kwargs[init_arg.value] = credentials_manager
-        elif init_arg == ToolManagedInitArg.WORKER_TARGET:
-            init_kwargs[init_arg.value] = worker_target
-        elif init_arg == ToolManagedInitArg.RUNTIME_CONFIG:
-            init_kwargs[init_arg.value] = runtime_config
-        elif init_arg == ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT:
-            init_kwargs[init_arg.value] = tool_output_workspace_root
-        elif init_arg == ToolManagedInitArg.WORKER_TOOLS_OVERRIDE:
-            init_kwargs[init_arg.value] = worker_tools_override
-        elif init_arg == ToolManagedInitArg.CURRENT_ROOM_ID:
-            execution_identity = worker_target.execution_identity if worker_target is not None else None
-            init_kwargs[init_arg.value] = execution_identity.room_id if execution_identity is not None else None
-        elif init_arg == ToolManagedInitArg.AGENT_NAME:
-            init_kwargs[init_arg.value] = worker_target.routing_agent_name if worker_target is not None else None
-    return init_kwargs
+    execution_identity = worker_target.execution_identity if worker_target is not None else None
+    managed_values: dict[ToolManagedInitArg, Callable[[], object]] = {
+        ToolManagedInitArg.RUNTIME_PATHS: lambda: runtime_paths,
+        ToolManagedInitArg.CREDENTIALS_MANAGER: lambda: credentials_manager,
+        ToolManagedInitArg.WORKER_TARGET: lambda: worker_target,
+        ToolManagedInitArg.RUNTIME_CONFIG: lambda: runtime_config,
+        ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT: lambda: tool_output_workspace_root,
+        ToolManagedInitArg.WORKER_TOOLS_OVERRIDE: lambda: worker_tools_override,
+        ToolManagedInitArg.CURRENT_ROOM_ID: lambda: (
+            execution_identity.room_id if execution_identity is not None else None
+        ),
+        ToolManagedInitArg.AGENT_NAME: lambda: worker_target.routing_agent_name if worker_target is not None else None,
+        ToolManagedInitArg.FILE_ACCESS: lambda: _managed_file_access(runtime_config, worker_target),
+    }
+    return {init_arg.value: managed_values[init_arg]() for init_arg in metadata.managed_init_args}
+
+
+def _managed_file_access(runtime_config: Config | None, worker_target: ResolvedWorkerTarget | None) -> FileAccess:
+    """Resolve the constructing agent's file_access; anything unknown stays confined to the workspace."""
+    agent_name = worker_target.routing_agent_name if worker_target is not None else None
+    if runtime_config is None or agent_name is None or agent_name not in runtime_config.agents:
+        return "workspace"
+    return runtime_config.resolve_entity(agent_name).file_access
 
 
 def _resolve_tool_credentials_manager(
@@ -1122,6 +1158,7 @@ def _tool_validation_snapshot_from_state(
             config_fields=tuple(metadata.config_fields or ()),
             agent_override_fields=tuple(metadata.agent_override_fields or ()),
             authored_override_validator=metadata.authored_override_validator,
+            file_access=metadata.file_access,
             supports_toolkit_filters=metadata.supports_toolkit_filters,
             requires_room_context=metadata.requires_room_context,
             requires_primary_runtime=metadata.requires_primary_runtime,
@@ -1267,6 +1304,7 @@ def serialize_tool_validation_snapshot(
             "config_fields": [asdict(field) for field in info.config_fields],
             "agent_override_fields": [asdict(field) for field in info.agent_override_fields],
             "authored_override_validator": info.authored_override_validator.value,
+            "file_access": info.file_access.value,
             "supports_toolkit_filters": info.supports_toolkit_filters,
             "requires_room_context": info.requires_room_context,
             "requires_primary_runtime": info.requires_primary_runtime,
@@ -1336,6 +1374,12 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 f"authored_override_validator '{raw_validator}'."
             )
             raise TypeError(msg) from exc
+        raw_file_access = raw_info_mapping.get("file_access", ToolFileAccess.NONE.value)
+        try:
+            file_access = ToolFileAccess(raw_file_access)
+        except ValueError as exc:
+            msg = f"Tool validation snapshot entry for '{tool_name}' has unsupported file_access '{raw_file_access}'."
+            raise TypeError(msg) from exc
         raw_runtime_loadable = _deserialize_tool_validation_bool(
             raw_info_mapping,
             tool_name=tool_name,
@@ -1377,6 +1421,7 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 field_name=f"{tool_name}.agent_override_fields",
             ),
             authored_override_validator=authored_override_validator,
+            file_access=file_access,
             supports_toolkit_filters=raw_supports_toolkit_filters,
             requires_room_context=raw_requires_room_context,
             requires_primary_runtime=raw_requires_primary_runtime,
@@ -1397,6 +1442,7 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value
         tool_dict["default_execution_target"] = metadata.default_execution_target.value
+        tool_dict["file_access"] = metadata.file_access.value
         if metadata.oauth_fallback_fields:
             tool_dict["oauth_fallback_fields"] = list(metadata.oauth_fallback_fields)
         else:

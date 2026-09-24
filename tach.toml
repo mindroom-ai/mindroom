@@ -5222,6 +5222,7 @@ expose = [
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
     "ToolExecutionTarget",
+    "ToolFileAccess",
     "ToolManagedInitArg",
     "ToolMetadata",
     "ToolStatus",
@@ -5230,6 +5231,13 @@ expose = [
     "tool_schema_source",
 ]
 from = ["mindroom.tool_system.declarations"]
+
+[[interfaces]]
+expose = [
+    "AuthorizedFile",
+    "resolve_agent_file",
+]
+from = ["mindroom.file_access"]
 
 [[interfaces]]
 expose = [
@@ -6735,6 +6743,10 @@ depends_on = ["mindroom.config.judgment", "mindroom.judgment.client", "mindroom.
 [[modules]]
 path = "mindroom.path_confinement"
 depends_on = []
+
+[[modules]]
+path = "mindroom.file_access"
+depends_on = ["mindroom.path_confinement"]
 
 [[modules]]
 path = "mindroom.config.mid_turn"

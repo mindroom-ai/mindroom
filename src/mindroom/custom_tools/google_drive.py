@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.config.main import Config
+    from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -113,6 +114,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         worker_target: ResolvedWorkerTarget | None = None,
         runtime_config: Config | None = None,
         tool_output_workspace_root: Path | None = None,
+        file_access: FileAccess = "workspace",
         write: bool = True,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
@@ -148,6 +150,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             kwargs["quota_project_id"] = quota_project_id
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
+        self._file_access = file_access
         self._workspace_root = tool_output_workspace_root
         defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
         creds = self._initialize_oauth_client(

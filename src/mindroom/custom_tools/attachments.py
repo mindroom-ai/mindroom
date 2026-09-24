@@ -49,6 +49,7 @@ from mindroom.tool_system.sandbox_proxy import (
 from mindroom.workspaces import resolve_workspace_relative_path
 
 if TYPE_CHECKING:
+    from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -430,9 +431,11 @@ class AttachmentTools(Toolkit):
         worker_target: ResolvedWorkerTarget | None = None,
         worker_tools_override: list[str] | None = None,
         tool_output_workspace_root: Path | None = None,
+        file_access: FileAccess = "workspace",
     ) -> None:
         self._runtime_paths = runtime_paths
         self._worker_target = worker_target
+        self._file_access = file_access
         self._worker_tools_override = worker_tools_override
         self._tool_output_workspace_root = tool_output_workspace_root
         super().__init__(
