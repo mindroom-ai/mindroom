@@ -1667,9 +1667,27 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
     assert bob_pending == []
 
 
+@pytest.mark.parametrize(
+    ("dispatched_count", "answered_count"),
+    [
+        pytest.param(3, 3, id="later_message_queued_behind_other_requester"),
+        pytest.param(2, 2, id="later_message_still_resolving"),
+        pytest.param(1, 0, id="no_other_requester_waiting"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_split_follow_up_run_is_not_superseded_by_its_requesters_later_run(tmp_path: Path) -> None:
-    """A requester's later queued run waits behind another requester, so it cannot absorb the earlier run."""
+async def test_follow_up_run_is_superseded_only_when_no_other_requester_waits(
+    tmp_path: Path,
+    dispatched_count: int,
+    answered_count: int,
+) -> None:
+    """A requester's newer message absorbs an earlier backlog run only if it cannot land behind another requester.
+
+    Alice's newer message is visible in the thread either queued behind Bob's
+    run or still resolving outside the backlog; while Bob waits, absorbing
+    Alice's first run would answer her after him. With nobody else waiting,
+    the newer message supersedes the earlier run as it would outside a backlog.
+    """
     bot = _make_bot(tmp_path, debounce_ms=0)
     install_direct_response_admission(bot)
     room = _make_room()
@@ -1678,6 +1696,7 @@ async def test_split_follow_up_run_is_not_superseded_by_its_requesters_later_run
         ("$bob", "bob middle", "@bob:localhost", 1002),
         ("$alice-last", "alice last", "@alice:localhost", 1003),
     ]
+    dispatched_messages = messages[:dispatched_count]
     history = thread_history_result(
         [
             make_visible_message(sender="@alice:localhost", body="root", event_id="$thread", timestamp=1000),
@@ -1712,7 +1731,7 @@ async def test_split_follow_up_run_is_not_superseded_by_its_requesters_later_run
                 new=AsyncMock(return_value=history),
             ),
         ):
-            for event_id, body, sender, timestamp in messages:
+            for event_id, body, sender, timestamp in dispatched_messages:
                 await bot._turn_controller.handle_text_event(
                     room,
                     _text_event(
@@ -1724,7 +1743,9 @@ async def test_split_follow_up_run_is_not_superseded_by_its_requesters_later_run
                     ),
                 )
             follow_up_key = active_follow_up_coalescing_key(room.room_id, "$thread")
-            await _wait_for(lambda: len(bot._coalescing_gate.queued_pending_events(follow_up_key)) == len(messages))
+            await _wait_for(
+                lambda: len(bot._coalescing_gate.queued_pending_events(follow_up_key)) == len(dispatched_messages),
+            )
 
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
@@ -1736,11 +1757,7 @@ async def test_split_follow_up_run_is_not_superseded_by_its_requesters_later_run
         if lifecycle_lock.locked():
             lifecycle_lock.release()
 
-    assert runs == [
-        ("@alice:localhost", "alice first"),
-        ("@bob:localhost", "bob middle"),
-        ("@alice:localhost", "alice last"),
-    ]
+    assert runs == [(sender, body) for _event_id, body, sender, _timestamp in messages[:answered_count]]
 
 
 @pytest.mark.asyncio
