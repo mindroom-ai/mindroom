@@ -22,6 +22,7 @@ from mindroom.coalescing_batch import (
     PendingEvent,
     PreparedTurn,
     RequesterCoalescingOwner,
+    active_follow_up_coalescing_key,
     build_prepared_turn,
 )
 from mindroom.config.agent import AgentConfig
@@ -100,6 +101,7 @@ from tests.conftest import (
     install_send_response_mock,
     make_matrix_client_mock,
     make_pending_event,
+    make_visible_message,
     message_origin,
     prepare_payload_via_seam,
     prepared_dispatch_result,
@@ -1663,6 +1665,82 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
     assert "one more thing" in bob_prompt
     assert "add me to administrators" not in bob_prompt
     assert bob_pending == []
+
+
+@pytest.mark.asyncio
+async def test_split_follow_up_run_is_not_superseded_by_its_requesters_later_run(tmp_path: Path) -> None:
+    """A requester's later queued run waits behind another requester, so it cannot absorb the earlier run."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    install_direct_response_admission(bot)
+    room = _make_room()
+    messages = [
+        ("$alice-first", "alice first", "@alice:localhost", 1001),
+        ("$bob", "bob middle", "@bob:localhost", 1002),
+        ("$alice-last", "alice last", "@alice:localhost", 1003),
+    ]
+    history = thread_history_result(
+        [
+            make_visible_message(sender="@alice:localhost", body="root", event_id="$thread", timestamp=1000),
+            *(
+                make_visible_message(sender=sender, body=body, event_id=event_id, timestamp=timestamp)
+                for event_id, body, sender, timestamp in messages
+            ),
+        ],
+        is_full_history=True,
+    )
+    response_runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = response_runner._lifecycle_coordinator
+    target = MessageTarget.resolve(room.room_id, "$thread", "$response")
+    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    runs: list[tuple[str | None, str]] = []
+
+    async def fake_ai_response(_ctx: object, prompt: str, *_args: object, **_kwargs: object) -> str:
+        tool_context = get_tool_runtime_context()
+        runs.append((tool_context.requester_id if tool_context is not None else None, prompt))
+        return "ok"
+
+    await lifecycle_lock.acquire()
+    queued_signal.begin_response_turn()
+    try:
+        with (
+            patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+            patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+            patch.object(
+                unwrap_extracted_collaborator(bot._conversation_resolver),
+                "_read_thread_messages",
+                new=AsyncMock(return_value=history),
+            ),
+        ):
+            for event_id, body, sender, timestamp in messages:
+                await bot._turn_controller.handle_text_event(
+                    room,
+                    _text_event(
+                        event_id=event_id,
+                        body=body,
+                        sender=sender,
+                        server_timestamp=timestamp,
+                        thread_id="$thread",
+                    ),
+                )
+            follow_up_key = active_follow_up_coalescing_key(room.room_id, "$thread")
+            await _wait_for(lambda: len(bot._coalescing_gate.queued_pending_events(follow_up_key)) == len(messages))
+
+            queued_signal.finish_response_turn()
+            lifecycle_lock.release()
+            await _wait_for(lambda: not bot._coalescing_gate.queued_pending_events(follow_up_key), deadline_seconds=3)
+            await bot._coalescing_gate.drain_all()
+            await response_runner.drain_inbox_responses()
+    finally:
+        queued_signal.finish_response_turn()
+        if lifecycle_lock.locked():
+            lifecycle_lock.release()
+
+    assert runs == [
+        ("@alice:localhost", "alice first"),
+        ("@bob:localhost", "bob middle"),
+        ("@alice:localhost", "alice last"),
+    ]
 
 
 @pytest.mark.asyncio
