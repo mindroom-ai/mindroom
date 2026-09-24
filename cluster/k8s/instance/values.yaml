@@ -52,9 +52,6 @@ roomDefaults:
   admins: []
 matrixAutoJoinRoomKeys: []
 matrixHomeserverStartupTimeoutSeconds: 0  # 0 means wait forever for Matrix at startup.
-# `kubernetes` needs a DNS-label customer and Kubernetes 1.30+: it adds a ValidatingAdmissionPolicy
-# that keeps this tenant's worker-manager writes inside its own resources in the shared namespace.
-# Install it with `--atomic` by an identity that can create that cluster-scoped policy.
 workerBackend: static_runner  # `static_runner` keeps the shared sidecar; `kubernetes` creates dedicated worker pods
 # Dedicated browser/display only: requires kubernetes, user_agent scope and browser worker_tools.
 # Configure MINDROOM_COMPUTER_ALLOWED_ORIGINS on the primary runtime; see docs/tools/worker-computer.md.

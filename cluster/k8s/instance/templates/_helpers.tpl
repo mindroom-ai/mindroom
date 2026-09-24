@@ -22,33 +22,6 @@
 {{- end -}}
 {{- end }}
 
-{{- /*
-Tenant-scoped dedicated-worker name prefix.
-Worker resource names are derived from the worker key, so every tenant in the shared
-`mindroom-instances` namespace must start from its own prefix: it keeps two tenants from
-generating the same worker name, and it is what the worker-manager admission policy scopes
-create and update requests to.
-The customer must be a DNS label so normalization leaves it unchanged and distinct customers
-always get distinct prefixes. Hyphens are allowed: `mindroom-worker-a-` also starts the names of
-customer `a-b`, so the policy matches the exact `{prefix}-{24 hex digest}` shape instead of a bare
-prefix, and a digest never contains the hyphen that separates `b` from its own digest.
-Normalization mirrors `_digest_and_safe_prefix` in `mindroom.tool_system.worker_routing`, and the
-38-character limit is the longest prefix `worker_id_for_key` keeps beside its 24-character digest
-in a 63-character name; a longer prefix would be truncated at runtime and could collide.
-*/ -}}
-{{- define "mindroom.workerNamePrefix" -}}
-{{- $customer := toString .customer -}}
-{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $customer) -}}
-{{- fail "workerBackend=kubernetes requires a customer that is a DNS label (lowercase letters, digits and inner hyphens) so worker names stay tenant-scoped" -}}
-{{- end -}}
-{{- $prefix := printf "%s-%s" (.kubernetesWorkerNamePrefix | default "mindroom-worker") $customer -}}
-{{- $normalized := trimAll "-" (regexReplaceAll "[^a-z0-9-]+" (lower $prefix) "-") -}}
-{{- if or (eq $normalized "") (gt (len $normalized) 38) -}}
-{{- fail "kubernetesWorkerNamePrefix combined with customer must normalize to 1-38 characters of [a-z0-9-]" -}}
-{{- end -}}
-{{- $normalized -}}
-{{- end }}
-
 {{- define "mindroom.workerBackendEnv" -}}
 {{- $workerBackend := .workerBackend -}}
 {{- $instanceNamespace := .instanceNamespace -}}
@@ -109,7 +82,7 @@ in a 63-character name; a longer prefix would be truncated at runtime and could 
 - name: MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS
   value: {{ $values.kubernetesWorkerReadyTimeoutSeconds | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_NAME_PREFIX
-  value: {{ include "mindroom.workerNamePrefix" $values | quote }}
+  value: {{ $values.kubernetesWorkerNamePrefix | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS
   value: {{ $values.kubernetesWorkerEnableServiceLinks | quote }}
 {{- with $values.kubernetesWorkerRuntimeClassName }}
