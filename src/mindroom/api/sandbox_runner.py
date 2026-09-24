@@ -280,8 +280,6 @@ def _upstream_tool_validation_snapshot(runtime_paths: RuntimePaths) -> dict[str,
     # that published digest a file in the worker state root proves nothing.
     if not os.environ.get(SANDBOX_STARTUP_MANIFEST_PATH_ENV, "").strip():
         return {}
-    if not _startup_manifest_path_from_env().exists():
-        return {}
     startup_runtime_paths, tool_validation_snapshot = constants.deserialize_startup_manifest(
         _startup_manifest_from_env(),
     )

@@ -121,6 +121,13 @@ def test_sandbox_runner_script_writes_startup_manifest_expected_by_app() -> None
     assert "MINDROOM_RUNTIME_PATHS_JSON" not in text
 
 
+def test_sandbox_runner_script_does_not_resolve_its_interpreter_through_path() -> None:
+    """Dedicated workers put a worker-writable venv first on PATH, so PID 1 must not look up bash there."""
+    text = _SANDBOX_RUNNER_SCRIPT.read_text(encoding="utf-8")
+
+    assert text.startswith("#!/bin/bash\n")
+
+
 def test_sandbox_runner_script_publishes_startup_manifest_digest() -> None:
     """A self-derived manifest must ship the digest the runner verifies it against."""
     text = _SANDBOX_RUNNER_SCRIPT.read_text(encoding="utf-8")

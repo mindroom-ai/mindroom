@@ -1,7 +1,6 @@
 """Shared constants and runtime path helpers for the mindroom package."""
 
 import hashlib
-import hmac
 import json
 import os
 import re
@@ -462,8 +461,7 @@ def read_verified_startup_manifest(manifest_path: Path, *, expected_sha256: str)
         msg = "A published startup manifest digest is required before reading sandbox-runner startup state."
         raise RuntimeError(msg)
     raw_manifest = manifest_path.read_bytes()
-    actual_digest = hashlib.sha256(raw_manifest).hexdigest()
-    if not hmac.compare_digest(actual_digest, expected_digest):
+    if hashlib.sha256(raw_manifest).hexdigest() != expected_digest:
         msg = (
             f"Sandbox startup manifest at {manifest_path} does not match the digest published by the "
             "primary; refusing to start from a manifest the worker could have rewritten."

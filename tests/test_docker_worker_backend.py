@@ -1599,9 +1599,7 @@ def test_docker_backend_publishes_startup_manifest_digest_in_container_env(
     manifest_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / ".runtime" / "startup_manifest.json"
     env = fake_client.containers.run_calls[0]["environment"]
     assert isinstance(env, dict)
-    assert (
-        env["MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-    )
+    assert env["MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
 
 
 def test_docker_backend_republishes_startup_manifest_before_restarting_container(

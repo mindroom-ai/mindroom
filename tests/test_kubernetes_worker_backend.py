@@ -1142,8 +1142,7 @@ def test_kubernetes_worker_publishes_startup_manifest_digest_in_pod_env(tmp_path
     )
 
     assert (
-        env_values["MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256"]
-        == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        env_values["MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     )
 
 

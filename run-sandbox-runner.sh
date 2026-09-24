@@ -1,4 +1,6 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# Absolute interpreter: Kubernetes dedicated workers put the worker-writable
+# venv first on PATH, so `env bash` would let tool code choose PID 1.
 set -euo pipefail
 
 cd /app/workspace 2>/dev/null || true
