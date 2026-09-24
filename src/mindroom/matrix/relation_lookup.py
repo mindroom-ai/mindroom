@@ -46,10 +46,6 @@ class _SupportsClient(Protocol):
 
 logger = get_logger(__name__)
 
-# Client errors that answer for the moment -- credentials, a slow request, a
-# rate limit -- rather than for the event the request names.
-_RETRYABLE_CLIENT_ERROR_STATUSES = frozenset({401, 408, 429})
-
 # Keyed by (room, event). Set for the duration of one turn and discarded with
 # it, so a stale answer cannot outlive the turn that read it.
 _TURN_EVENT_INFO: ContextVar[dict[tuple[str, str], EventInfo | None] | None] = ContextVar(
@@ -206,12 +202,16 @@ class RelationLookup:
 def _refuses_event(response: nio.RoomGetEventError) -> bool:
     """Return whether the homeserver's refusal holds for every later request for this event.
 
-    A hidden event stays hidden, and an event ID the server rejects as
-    malformed stays malformed. Anything else -- a server error, a timeout, an
-    expired token -- may answer differently next time.
+    Only two answers are about the event itself: ``M_FORBIDDEN`` (hidden
+    from this account, for example history from before it joined) and a
+    plain 400 for an event ID the server rejects as malformed. A missing
+    event (404 ``M_NOT_FOUND``) never reaches here. Every other answer --
+    another 403 or 404 errcode such as ``M_CONSENT_NOT_GIVEN`` or
+    ``M_UNRECOGNIZED``, 401, 408, 429, a server error -- is about the
+    account, the deployment, or the moment, and may change on retry.
     """
     if response.status_code == "M_FORBIDDEN":
         return True
     transport = response.transport_response
     status = transport.status if isinstance(transport, ClientResponse) else None
-    return status is not None and 400 <= status < 500 and status not in _RETRYABLE_CLIENT_ERROR_STATUSES
+    return status == 400 and response.status_code != "M_UNRECOGNIZED"
