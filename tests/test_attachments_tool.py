@@ -1059,6 +1059,7 @@ async def test_registered_workspace_file_swapped_for_link_never_reads_link_targe
             assert not uploaded.is_relative_to(workspace)
             assert uploaded.read_text(encoding="utf-8") == "public notes"
             assert send_file.await_args.kwargs["filename"] == "notes.txt"
+            assert send_file.await_args.kwargs["mimetype"] == "text/plain"
 
 
 @pytest.mark.asyncio

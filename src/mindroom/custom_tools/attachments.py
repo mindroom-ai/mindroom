@@ -295,7 +295,7 @@ def _resolve_attachment_file_path(
             requested_path,
             field_name="attachment file path",
         )
-        # Open below the configured root so a root replaced by a link after validation fails closed.
+        # Open below the configured root, so replacing the root entry itself with a link fails closed.
         local_path = lexical_root / resolved_path.relative_to(lexical_root.resolve())
     except ValueError as exc:
         return None, None, str(exc)
@@ -386,6 +386,7 @@ async def send_resolved_attachments(
                 room_id,
                 attachment.local_path,
                 filename=attachment.filename,
+                mimetype=attachment.mime_type,
                 thread_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
             )

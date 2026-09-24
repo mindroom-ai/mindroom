@@ -457,7 +457,8 @@ In shell tools, the agent workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; i
 The path must be relative to the workspace and must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, start with `~`, or contain `$` or `%` characters.
 `register_attachment()` turns a local file path into a new context-scoped `att_*` ID and appends that ID to the current runtime context so later tool calls in the same run can reuse it.
 Relative `register_attachment()` paths resolve from the agent workspace when one is available, and they must stay inside that workspace.
-Registration copies the file's current bytes into managed attachment storage without following symbolic links, so later edits or replacement of the source file do not change the attachment.
+Registration copies the file's current bytes into managed attachment storage, so later edits or replacement of the source file do not change the attachment.
+Workspace-relative paths are opened without following symbolic links.
 Attachment records include kind, filename, MIME type, room ID, thread ID, sender, creation time, and an `available` flag that reports whether the local file still exists.
 This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`.
 

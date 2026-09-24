@@ -94,7 +94,7 @@ agents:
 
 `register_attachment()` retains a copy of the file's current bytes in MindRoom's managed `incoming_media/` storage, and the attachment's `local_path` names that copy rather than the source file.
 Later edits to the source file, including replacing it with a symbolic link, do not change what the attachment ID views, saves, or sends.
-Registration opens the source without following symbolic links, so a linked file or directory below the workspace is rejected.
+Workspace-relative registration opens the source without following symbolic links, so a linked file or directory below the workspace is rejected.
 Registered files are limited to 64 MiB, the same cap that applies to incoming Matrix media.
 By default, `get_attachment()` returns the attachment metadata response, including the runtime-local `local_path`.
 Use `get_attachment("att_...", view=True)` to inspect media from earlier in the conversation or a local file registered with `register_attachment(file_path)`.
