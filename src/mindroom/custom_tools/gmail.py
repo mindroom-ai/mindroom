@@ -54,7 +54,7 @@ _GMAIL_SEND_SCOPES = frozenset(
         "https://www.googleapis.com/auth/gmail.send",
     },
 )
-# Gmail's message size limit, which also bounds attachment bytes held in memory.
+# Bounds raw attachment bytes held in memory, matching upstream's per-file draft limit.
 _MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 
@@ -71,11 +71,15 @@ def _stage_attachments(workspace_root: Path | None, attachments: object, staging
     if not isinstance(requested, list | tuple) or not all(isinstance(path, str) for path in requested):
         msg = "Gmail attachments must be file paths"
         raise ValueError(msg)
+    try:
+        canonical_root = workspace_root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        msg = "Gmail attachments require an existing agent workspace"
+        raise ValueError(msg) from None
     remaining = _MAX_ATTACHMENT_BYTES
     staged_paths: list[str] = []
     for index, attachment in enumerate(requested):
         try:
-            canonical_root = workspace_root.resolve(strict=True)
             path = resolve_path_within_root(
                 canonical_root,
                 Path(attachment).expanduser(),

@@ -699,6 +699,24 @@ def test_gmail_attachments_require_workspace(
         api_call.assert_not_called()
 
 
+def test_gmail_attachments_require_existing_workspace(
+    mock_credentials_manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """A configured but missing workspace directory must refuse attachments as a tool error."""
+    gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, tmp_path / "missing")
+
+    result = gmail_tools.functions["send_email"].entrypoint(
+        **_ATTACHMENT_CALLS["send_email"],
+        attachments="report.txt",
+    )
+
+    assert json.loads(result) == {"error": "Gmail attachments require an existing agent workspace"}
+    for api_call in _gmail_api_calls(service):
+        api_call.assert_not_called()
+
+
 @pytest.mark.parametrize("function_name", sorted(_ATTACHMENT_CALLS))
 def test_gmail_attachments_inside_workspace_are_sent(
     function_name: str,
@@ -814,6 +832,10 @@ def test_gmail_attachment_tests_cover_every_upstream_attachment_function(
     }
 
     assert attachment_functions == set(_ATTACHMENT_CALLS)
+    # The staging wrapper is synchronous; an async attachment function needs its own wrapper.
+    assert not any(
+        "attachments" in signature(function.entrypoint).parameters for function in gmail_tools.async_functions.values()
+    )
 
 
 def test_gmail_attachment_confinement_runs_on_agno_function_call_path(
