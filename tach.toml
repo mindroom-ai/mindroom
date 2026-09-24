@@ -957,6 +957,7 @@ visibility = [
     "mindroom.api.connections",
     "mindroom.api.oauth",
     "mindroom.api.tools",
+    "mindroom.custom_tools.atlassian",
     "mindroom.custom_tools.config_manager",
     "mindroom.custom_tools.google_drive",
     "mindroom.custom_tools.github",
@@ -4140,6 +4141,14 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.google_workspaces"
+depends_on = [
+    "mindroom.tool_system",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tool_system.atlassian_connections"
 depends_on = [
     "mindroom.tool_system",
     "mindroom.tool_system.catalog",

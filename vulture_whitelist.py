@@ -5,6 +5,10 @@ _.validate_template  # Pydantic field validator (src/mindroom/config/personal_ro
 _.validate_commands  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
 _.unique_services  # Pydantic field validator (src/mindroom/tool_system/google_workspaces.py)
 _.normalize_domains  # Pydantic field validator (src/mindroom/tool_system/google_workspaces.py)
+_.canonical_site_url  # Pydantic field validator (src/mindroom/tool_system/atlassian_connections.py)
+_.canonical_cloud_id  # Pydantic field validator (src/mindroom/tool_system/atlassian_connections.py)
+_.unique_products  # Pydantic field validator (src/mindroom/tool_system/atlassian_connections.py)
+_.pinned_site  # Pydantic model validator (src/mindroom/tool_system/atlassian_connections.py)
 desktop_native_app  # Typer dispatches the native desktop helper command (src/mindroom/cli/desktop.py)
 # Regenerate with:
 #   uv run vulture --make-whitelist src/mindroom --min-confidence 60 --sort-by-size | perl -pe 's/\.py:\d+/.py/g' > vulture_whitelist.py
