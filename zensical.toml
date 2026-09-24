@@ -78,6 +78,7 @@ nav = [
     { "Agent Orchestration" = "architecture/orchestration.md" },
     { "Migration Boundaries" = "architecture/migrations.md" },
     { "Agno Compatibility" = "architecture/agno-compatibility.md" },
+    { "Security Posture" = "architecture/security-posture.md" },
     { "History Compaction" = "architecture/compaction.md" },
   ] },
   { "Deployment" = [

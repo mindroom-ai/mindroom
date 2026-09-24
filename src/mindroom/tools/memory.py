@@ -9,6 +9,7 @@ is NOT added to ``TOOL_REGISTRY`` (no generic factory).
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolMetadata,
     ToolStatus,
 )
@@ -17,6 +18,7 @@ from mindroom.tool_system.registration import register_builtin_tool_metadata
 register_builtin_tool_metadata(
     ToolMetadata(
         name="memory",
+        file_access=ToolFileAccess.NONE,
         display_name="Agent Memory",
         description="Save, find, and update information the agent remembers",
         category=ToolCategory.PRODUCTIVITY,

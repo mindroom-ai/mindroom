@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="redshift",
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="Amazon Redshift",
     description="Query Amazon Redshift data warehouse - list tables, run SQL, and export results",
     category=ToolCategory.DEVELOPMENT,

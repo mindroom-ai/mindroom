@@ -7,6 +7,8 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
+
 from mindroom import constants, runtime_env_policy
 from mindroom.api import sandbox_exec
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
@@ -507,6 +509,7 @@ def test_worker_extra_env_drops_protected_controls_but_keeps_runner_timeout() ->
         "MINDROOM_API_KEY": "runtime-api-key",
         "MINDROOM_CONFIG_PATH": "/unsafe/config.yaml",
         "MINDROOM_LOCAL_CLIENT_SECRET": "runtime-client-secret",
+        "MINDROOM_PLATFORM_SSO_SECRET": "runtime-dashboard-signing-key",
         "MINDROOM_SHARED_CREDENTIALS_PATH": "/unsafe/shared-credentials",
         "MINDROOM_STORAGE_PATH": "/unsafe/storage",
         "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
@@ -525,6 +528,15 @@ def test_worker_extra_env_drops_protected_controls_but_keeps_runner_timeout() ->
         "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
         "MINDROOM_WORKER_TOOL_VALUE": "visible",
     }
+
+
+@pytest.mark.parametrize("name", ["MINDROOM_API_KEY", "MINDROOM_PLATFORM_SSO_SECRET"])
+def test_dashboard_credentials_stay_out_of_tool_env(name: str) -> None:
+    """Dashboard credentials and signing keys never reach shell passthrough or trusted tool env."""
+    assert not runtime_env_policy.is_shell_passthrough_allowed_env_name(name)
+    assert not runtime_env_policy.is_trusted_tool_runtime_process_env_name(name)
+    assert not runtime_env_policy.is_trusted_tool_runtime_env_file_name(name)
+    assert not runtime_env_policy.is_isolated_worker_runtime_env_name(name)
 
 
 def test_runtime_control_env_literals_stay_in_policy_module() -> None:

@@ -9,6 +9,7 @@ from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="usage_stats",
+    file_access=ToolFileAccess.NONE,
     display_name="Usage Statistics",
     description="Inspect retained token usage without modifying session storage",
     category=ToolCategory.INFORMATION,

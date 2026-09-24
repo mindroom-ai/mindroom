@@ -343,6 +343,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -353,6 +354,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="greeter",
+    file_access=ToolFileAccess.NONE,
     display_name="Greeter",
     description="A simple greeting tool",
     category=ToolCategory.DEVELOPMENT,
@@ -397,8 +399,16 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 | `display_name` | string | Human-readable name shown in the dashboard |
 | `description` | string | Brief description of what the tool does |
 | `category` | `ToolCategory` | Category for dashboard grouping (see values below) |
+| `file_access` | `ToolFileAccess` | How the tool reaches local files, which decides how the agent `file_access` setting and worker routing apply to it (see values below) |
 
 `ToolCategory` values: `COMMUNICATION`, `DEVELOPMENT`, `EMAIL`, `ENTERTAINMENT`, `INFORMATION`, `INTEGRATIONS`, `PRODUCTIVITY`, `RESEARCH`, `SMART_HOME`, `SOCIAL`.
+
+`ToolFileAccess` values:
+- `NONE`: the tool takes no local file paths.
+- `AGENT`: the tool resolves every model-supplied path through `mindroom.file_access.resolve_agent_file` and follows the agent's `file_access` setting; add it to `tests/test_file_access_contract.py` when contributing it to MindRoom.
+- `UNCONFINED`: the tool reaches local files in a way `file_access` does not confine, such as running programs, queries, or model-chosen paths.
+
+See [Security Posture](architecture/security-posture.md#file-access) for how each class is treated.
 
 **Optional fields:**
 
@@ -464,12 +474,14 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 @register_tool_with_metadata(
     name="weather",
+    file_access=ToolFileAccess.NONE,
     display_name="Weather",
     description="Get current weather data",
     category=ToolCategory.INFORMATION,
@@ -512,12 +524,13 @@ Example:
 
 ```python
 from agno.tools import Toolkit
-from mindroom.tool_system.declarations import ToolCategory, ToolManagedInitArg
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 
 @register_tool_with_metadata(
     name="needs_runtime",
+    file_access=ToolFileAccess.NONE,
     display_name="Needs Runtime",
     description="Example tool that needs runtime paths",
     category=ToolCategory.DEVELOPMENT,
@@ -557,6 +570,7 @@ from agno.tools.mcp import MCPTools
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -572,6 +586,8 @@ class FilesystemMCPTools(MCPTools):
 
 @register_tool_with_metadata(
     name="mcp_filesystem",
+    # The filesystem server reads local paths that file_access cannot confine.
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="MCP Filesystem",
     description="Tools from an MCP filesystem server",
     category=ToolCategory.DEVELOPMENT,

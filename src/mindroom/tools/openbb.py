@@ -6,7 +6,7 @@ import importlib
 import os
 from typing import TYPE_CHECKING, cast
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -29,6 +29,7 @@ def _load_openbb_tools() -> type[OpenBBTools]:
 
 @register_tool_with_metadata(
     name="openbb",
+    file_access=ToolFileAccess.NONE,
     display_name="OpenBB",
     description="Get stock prices, company news, price targets, and company profiles from OpenBB financial platform",
     category=ToolCategory.PRODUCTIVITY,

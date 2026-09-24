@@ -1662,6 +1662,7 @@ agents:
     markdown: true                 # Optional: Override default (inherits from defaults section)
     worker_tools: [shell, file]    # Optional: Override default (inherits from defaults section)
     worker_scope: user_agent       # Optional: Reuse one proxied runtime per requester+agent
+    file_access: workspace         # Optional: workspace or unrestricted (inherits from defaults section)
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0, file, or none)
@@ -1768,6 +1769,7 @@ defaults:
   show_tool_calls: true            # Default: true (show tool details inline; hidden mode still allows generic worker warmup copy)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
+  file_access: workspace           # Default: workspace (path tools stay in the agent workspace; unrestricted allows any path)
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
   thread_summary_model: null       # Default: null (uses the default model)
@@ -2543,6 +2545,7 @@ agents:
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Routed tools may still show generic worker warmup text such as `Preparing isolated worker...`, but that copy never includes tool identifiers or tool-trace metadata. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
 | `worker_scope` | string | `null` | How sandbox runtimes are shared for non-private agents. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` already defines the requester partition for that agent |
+| `file_access` | string | `null` | Which files path-taking tools (`file`, `coding`, `attachments`, `matrix_message`, `gmail`, `google_drive`, `browser` uploads) may use. `workspace`: the agent workspace and its attachments. `unrestricted`: any path the tool's process can reach. Code-execution tools such as `shell` and `python` are always unrestricted; isolate them with `worker_tools`. Inherits from `defaults.file_access` (default: `workspace`). See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/) |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Allowed agent names for `run_subagent`, including itself if listed (see [Agent Delegation](#agent-delegation)) |
 | `thread_exports` | bool or object | `null` | Continuously export every thread from rooms this agent is joined to as YAML under `<workspace>/thread_exports/`. `true` enables the defaults; an object sets `invited_rooms` and `private_room_scope` (see [Thread Exports](#thread-exports)) |
@@ -4396,7 +4399,7 @@ agents:
     role: Help in chat
     tools:
       - shell
-      - coding: {defer: true, initial: true, restrict_to_base_dir: false}
+      - coding: {defer: true, initial: true}
       - searxng: {defer: true, host: https://search.example.test, fixed_max_results: 10}
       - name: serper
         defer: true
@@ -4481,6 +4484,7 @@ In normal `config.yaml` authoring, `base_dir` is therefore usually runtime-manag
 
 Those workspace-backed agents also receive the optional `mindroom_output_path` argument on eligible tools.
 Set it to a workspace-relative file path to save the full supported tool output to that file and return a compact receipt to the model.
+Paths inside a `.git` directory are refused.
 When `mindroom_output_path` is omitted, MindRoom automatically saves supported tool outputs larger than `defaults.tool_output_auto_save_threshold_bytes` to `mindroom_tool_outputs/` inside the workspace and returns a compact receipt with the path, size, format, threshold, and preview.
 The default automatic-save threshold is 50 KiB.
 Agents without a resolved workspace do not receive this argument.
@@ -4505,8 +4509,7 @@ agents:
     tools:
       - coding
       - file
-      - python:
-          restrict_to_base_dir: true
+      - python
       - shell:
           extra_env_passthrough:
             - GITHUB_TOKEN
@@ -4531,7 +4534,9 @@ Choose a destination shared with the tools that need the files, or generate work
 ### What It Does
 
 `file` exposes `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
-Paths resolve against `base_dir` and reject escapes by default; set `restrict_to_base_dir: false` to allow outside paths.
+Paths resolve against `base_dir` and follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: `workspace` (the default) rejects escapes, and `unrestricted` allows any path the tool's process can reach.
+`save_file()`, `replace_file_chunk()`, and `delete_file()` refuse any path inside a `.git` directory, because MindRoom runs Git in knowledge checkouts that may sit inside agent workspaces.
+This is defense in depth: code-execution tools and tools that accept arbitrary output paths can still write there, so the dashboard's knowledge Git listing does not trust a checkout's config.
 `read_file()` enforces `max_file_length` and `max_file_lines`, and it tells the caller to use chunk reads when a file is too large.
 `search_files()` uses glob patterns relative to `base_dir` rather than full-text search.
 `search_content()` searches text-file contents and skips paths matching `exclude_patterns`.
@@ -4542,7 +4547,6 @@ MindRoom marks `file` as worker-routed by default, so it usually executes in the
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working root when an agent workspace exists, otherwise the current directory. This field is not normally authored inline in `config.yaml`. |
-| `restrict_to_base_dir` | `boolean` | `no` | `true` | Keep file access inside `base_dir`; set to `false` to allow outside paths. |
 | `enable_save_file` | `boolean` | `no` | `true` | Enable `save_file()`. |
 | `enable_read_file` | `boolean` | `no` | `true` | Enable `read_file()`. |
 | `enable_delete_file` | `boolean` | `no` | `false` | Enable `delete_file()`. |
@@ -4677,7 +4681,6 @@ MindRoom marks `python` as worker-routed by default, so sandbox execution is the
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working root when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
 | `safe_globals` | `text` | `no` | `null` | Advanced raw constructor input that maps to the upstream `safe_globals` dict parameter. |
 | `safe_locals` | `text` | `no` | `null` | Advanced raw constructor input that maps to the upstream `safe_locals` dict parameter. |
-| `restrict_to_base_dir` | `boolean` | `no` | `true` | Constrain the file helper methods to `base_dir`. |
 
 ### Example
 
@@ -4685,8 +4688,7 @@ MindRoom marks `python` as worker-routed by default, so sandbox execution is the
 agents:
   analyst:
     tools:
-      - python:
-          restrict_to_base_dir: true
+      - python
 ```
 
 ```python
@@ -4700,7 +4702,7 @@ list_files()
 
 ### Notes
 
-- `restrict_to_base_dir` only constrains the file helper paths, not what arbitrary Python code can do once executed.
+- `python` runs arbitrary code, so its file helpers are never confined to `base_dir` and its [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) is always `unrestricted`; isolate it with `worker_tools`.
 - `safe_globals` and `safe_locals` are exposed directly from the upstream constructor and are mainly useful for advanced programmatic wiring, not typical hand-written YAML.
 - If you need runtime-scoped environment isolation, rely on worker-routed execution instead of assuming in-process Python emulation is a security boundary.
 - Worker-routed `python` execution also receives `.mindroom/worker-env.sh` overlay env via `os.environ` (e.g., `PIP_INDEX_URL`). See "Workspace env hook" in `docs/deployment/sandbox-proxy.md`.
@@ -4718,7 +4720,8 @@ list_files()
 If exact matching fails, `edit_file()` falls back to whitespace-and-Unicode-normalized fuzzy matching.
 `grep()` prefers `rg` when available and falls back to Python regex search otherwise.
 `find_files()` filters hidden and gitignored paths, and `ls()` keeps dotfiles visible while adding `/` markers to directories.
-Path resolution stays inside `base_dir` by default; set `restrict_to_base_dir: false` to allow outside paths.
+Path resolution follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: `workspace` (the default) stays inside `base_dir`, and `unrestricted` allows outside paths.
+`write_file()` and `edit_file()` refuse any path inside a `.git` directory.
 MindRoom marks `coding` as worker-routed by default.
 
 ### Configuration
@@ -4726,7 +4729,6 @@ MindRoom marks `coding` as worker-routed by default.
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working directory for code operations when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
-| `restrict_to_base_dir` | `boolean` | `no` | `true` | Keep code operations inside `base_dir`; set to `false` to allow outside paths. |
 
 ### Example
 
@@ -5480,8 +5482,8 @@ MindRoom exposes `google_drive_list_files()`, `google_drive_search_files()`, `go
 `google_drive_search_files()` searches Drive metadata.
 `google_drive_read_file()` reads Google Workspace files and non-Google files up to the configured `max_read_size`.
 `google_drive_download_file()` downloads a Drive file, exporting Google Workspace files to their best native format, for example a complete Google Sheets workbook as `.xlsx`.
-`google_drive_upload_file()` uploads a local file and resolves relative paths from the agent workspace.
-`google_drive_update_file(file_id, local_path, mime_type=None)` replaces an existing binary file's contents from a file inside the agent workspace.
+`google_drive_upload_file()` uploads a local file, resolves relative paths from the agent workspace, and follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting for which local files it may read.
+`google_drive_update_file(file_id, local_path, mime_type=None)` replaces an existing binary file's contents from a local file under the same `file_access` rule.
 Native Google Workspace files require their respective Workspace APIs for content updates.
 `google_drive_create_folder()` creates a folder under the Drive root or an optional parent.
 `google_drive_move_file()` moves a file to a new parent and can rename it in the same request.
@@ -6971,6 +6973,11 @@ Agno's normal agent-session persistence can retain model-visible screenshot pixe
 Playwright MCP briefly writes its requested screenshot into the local browser workspace, and MindRoom reads and removes that exact scratch file before returning the tool result.
 Safari and other unsupported browsers can still be operated through the separate accessibility-first `desktop` tool.
 For the host target, `output_dir` defaults to `<storage>/browser` for screenshots, PDFs, and other artifacts.
+Which files `upload` may read follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
+With the default `workspace`, host `upload` accepts files in that artifact directory, files in the agent's workspace (absolute or workspace-relative paths), and `att_*` IDs of attachments available in the current conversation; use `./` for a workspace file whose name starts with `att_`.
+Everything else under the runtime storage root, including credentials, encryption keys, Matrix state, sessions, and other agents' workspaces, is rejected, so `output_dir` must not point at runtime state.
+On a routed worker, `workspace` mode reads only files inside the worker workspace.
+With `unrestricted`, `upload` accepts any existing file its process can read, which on a routed worker is the worker container.
 The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
 
@@ -8581,7 +8588,8 @@ matrix_message(action="react", event_id="$event123", message="✅")
 See [Matrix Message Full Semantics](https://docs.mindroom.chat/tools/matrix-message/) for the complete argument schema, conversation selection, attachments, and collapsible sections.
 Use `matrix_room(action="threads")` for thread discovery and `matrix_room(action="room-info")` for current targeting metadata.
 `attachments` accepts up to five ordered context-scoped `att_*` IDs or file paths.
-Relative paths resolve from the agent workspace and must stay inside it.
+With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
 When sending to a recipient, all files arrive before the task text starts its response.
 For durable text-only retries, supply `idempotency_key`; the same requester, agent, room, and key reuse the first prepared payload and receipt for eight days after completion.
 Send results include the conversation `thread_id` and delivered event IDs, including partial delivery details on failure.
@@ -8973,7 +8981,10 @@ Use `mindroom_output_path` before handing attachments to worker-routed workspace
 In shell tools, the agent workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in worker-routed shell and python tools it is also `~` and `$HOME`, so a saved path like `incoming/file.txt` can also be read as `~/incoming/file.txt`.
 The path must be relative to the workspace and must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, start with `~`, or contain `$` or `%` characters.
 `register_attachment()` turns a local file path into a new context-scoped `att_*` ID and appends that ID to the current runtime context so later tool calls in the same run can reuse it.
-Relative `register_attachment()` paths resolve from the agent workspace when one is available, and they must stay inside that workspace.
+`register_attachment()` paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: with the default `workspace`, they resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
+Absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace, so `~/incoming/file.txt` is rejected here.
+Without a configured agent workspace, `workspace` mode refuses path-based registration and only existing `att_*` IDs can be attached; `unrestricted` mode still accepts absolute paths.
+Registration copies the file's current bytes into managed attachment storage without following symbolic links, so later edits or replacement of the source file do not change the attachment.
 Attachment records include kind, filename, MIME type, room ID, thread ID, sender, creation time, and an `available` flag that reports whether the local file still exists.
 This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`.
 
@@ -9178,7 +9189,9 @@ Oversized existing files fail closed before JSON parsing and are never discarded
 ## Attachments
 
 Each `attachments` entry is a context-scoped `att_*` ID or a local file path.
-Relative paths resolve from the agent workspace when configured.
+With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
+With `workspace` file access and no configured workspace, only `att_*` IDs are accepted.
 Use `./att_filename` for a local filename that starts with `att_`.
 All references are resolved before any message is sent.
 Files retain their input order.
@@ -9861,7 +9874,11 @@ The default MindRoom Gmail toolkit exposes 26 functions for stars, drafts, messa
 Its exact function names are `apply_label()`, `create_draft_email()`, `delete_custom_label()`, `get_draft()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `get_emails_from_user()`, `get_latest_emails()`, `get_message()`, `get_starred_emails()`, `get_thread()`, `get_unread_emails()`, `list_custom_labels()`, `list_drafts()`, `mark_email_as_read()`, `mark_email_as_unread()`, `remove_label()`, `search_emails()`, `search_threads()`, `send_email()`, `send_email_reply()`, `send_email_to_self()`, `star_email()`, `unstar_email()`, and `update_draft()`.
 `send_email_to_self(subject, body)` derives its sole recipient from the connected Gmail profile and accepts no recipient, CC, BCC, or attachment arguments.
 The function follows the configured tool approval policy, so operators can match `send_email_to_self` separately from other send functions.
-Draft and send operations accept local file-system paths for attachments.
+Draft and send operations accept attachment file paths that the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting allows: inside the agent workspace by default, or any readable file when it is `unrestricted`.
+Relative attachment paths resolve from the workspace root; with `workspace` file access, paths that resolve outside it, including through symlinks, are rejected before any file is read or Gmail request is made, and an agent without a workspace cannot attach files.
+Attachments are read through no-follow file descriptors, so a path component swapped for a symlink after validation is refused.
+Attachments are limited to 25 MiB in total per message.
+With `unrestricted` file access, attachments work without a workspace; relative paths then resolve from the MindRoom process working directory.
 
 ### Configuration
 
@@ -9903,7 +9920,7 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 - The configuration flags listed above can disable their corresponding methods; `include_tools` and `exclude_tools` can further filter the constructed toolkit.
 - Agno's optional archive, trash, attachment-download, raw label-modification, label-listing, and draft-send methods are not exposed through MindRoom's authored selector fields.
 - `include_tools` filters existing functions and cannot enable those additional SDK methods.
-- Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
+- Attachment arguments are agent-workspace file paths in the primary runtime, not Matrix attachment IDs.
 
 ## [`slack`]
 
@@ -12004,6 +12021,7 @@ manage_team(
 `get_own_config()` returns the current agent's authored YAML block.
 `update_own_config()` only changes fields that you pass explicitly.
 On this branch, `update_own_config()` can modify `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.
+`update_own_config()` requires a requester listed in `administrators`, like [`config_manager`], and every call raises an approval card even when `tool_approval.default` is `auto_approve`.
 The update path validates tool names against the live registry and validates knowledge base IDs against the current config.
 It also preserves inline tool overrides for retained tools when a string-only tool list is provided.
 Updates are validated through `AgentConfig.model_validate()` before the file is saved.
@@ -14315,6 +14333,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -14325,6 +14344,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="greeter",
+    file_access=ToolFileAccess.NONE,
     display_name="Greeter",
     description="A simple greeting tool",
     category=ToolCategory.DEVELOPMENT,
@@ -14369,8 +14389,16 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 | `display_name` | string | Human-readable name shown in the dashboard |
 | `description` | string | Brief description of what the tool does |
 | `category` | `ToolCategory` | Category for dashboard grouping (see values below) |
+| `file_access` | `ToolFileAccess` | How the tool reaches local files, which decides how the agent `file_access` setting and worker routing apply to it (see values below) |
 
 `ToolCategory` values: `COMMUNICATION`, `DEVELOPMENT`, `EMAIL`, `ENTERTAINMENT`, `INFORMATION`, `INTEGRATIONS`, `PRODUCTIVITY`, `RESEARCH`, `SMART_HOME`, `SOCIAL`.
+
+`ToolFileAccess` values:
+- `NONE`: the tool takes no local file paths.
+- `AGENT`: the tool resolves every model-supplied path through `mindroom.file_access.resolve_agent_file` and follows the agent's `file_access` setting; add it to `tests/test_file_access_contract.py` when contributing it to MindRoom.
+- `UNCONFINED`: the tool reaches local files in a way `file_access` does not confine, such as running programs, queries, or model-chosen paths.
+
+See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/#file-access) for how each class is treated.
 
 **Optional fields:**
 
@@ -14436,12 +14464,14 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 @register_tool_with_metadata(
     name="weather",
+    file_access=ToolFileAccess.NONE,
     display_name="Weather",
     description="Get current weather data",
     category=ToolCategory.INFORMATION,
@@ -14484,12 +14514,13 @@ Example:
 
 ```python
 from agno.tools import Toolkit
-from mindroom.tool_system.declarations import ToolCategory, ToolManagedInitArg
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 
 @register_tool_with_metadata(
     name="needs_runtime",
+    file_access=ToolFileAccess.NONE,
     display_name="Needs Runtime",
     description="Example tool that needs runtime paths",
     category=ToolCategory.DEVELOPMENT,
@@ -14529,6 +14560,7 @@ from agno.tools.mcp import MCPTools
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -14544,6 +14576,8 @@ class FilesystemMCPTools(MCPTools):
 
 @register_tool_with_metadata(
     name="mcp_filesystem",
+    # The filesystem server reads local paths that file_access cannot confine.
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="MCP Filesystem",
     description="Tools from an MCP filesystem server",
     category=ToolCategory.DEVELOPMENT,
@@ -17296,6 +17330,11 @@ agents:
 | `get_attachment(attachment_id, mindroom_output_path?, view=False)` | Return metadata, save bytes to a workspace-relative path, or send media/document content to the model with `view=True` |
 | `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`) |
 
+`register_attachment()` retains a copy of the file's current bytes in MindRoom's managed `incoming_media/` storage, and the attachment's `local_path` names that copy rather than the source file.
+Later edits to the source file, including replacing it with a symbolic link, do not change what the attachment ID views, saves, or sends.
+Workspace-relative registration opens the source without following symbolic links, so a linked file or directory below the workspace is rejected.
+Registered files are limited to 64 MiB, the same cap that applies to incoming Matrix media.
+Attachment IDs registered by earlier releases, which referenced the source file in place, are copied into managed storage on first use only when the source is still a regular file reached without symbolic links and its bytes match the recorded SHA-256; otherwise the ID stops resolving.
 By default, `get_attachment()` returns the attachment metadata response, including the runtime-local `local_path`.
 Use `get_attachment("att_...", view=True)` to inspect media from earlier in the conversation or a local file registered with `register_attachment(file_path)`.
 This sends the attachment bytes to the configured model, using native image, audio, video, or document inputs rather than putting binary data in tool text.
@@ -17316,8 +17355,9 @@ In shell tools, that workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in wor
 
 `matrix_message` accepts one ordered `attachments` list containing context attachment IDs (`att_*`) and local file paths.
 Local files are registered in the current context before sending.
-Relative paths resolve from the agent workspace when one is available.
-Relative paths must stay inside the workspace.
+With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
+Without a configured agent workspace, `workspace` mode only attaches `att_*` IDs.
 Use `matrix_message(attachments=["att_example", "exports/report.csv"])` to send attachment IDs and file paths in order to the current conversation.
 
 ### Why use this tool?
@@ -19976,6 +20016,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/knowledge/legacy_metadata.py`][knowledge-legacy] | Knowledge parsing sees absent or empty optional filter fields. | Current parsing still rejects unknown fields; missing corpus settings retain empty historical sentinels and rebuild only when the corresponding current corpus-compatibility value differs. |
 | [`src/mindroom/matrix/legacy_state.py`][matrix-legacy-state] | Matrix state has accounts without a domain or a noncanonical serialized shape. | Runtime-domain resolution, parsing, caching, and atomic persistence stay in `matrix/state.py`; rewrites happen only when data differs. |
 | [`src/mindroom/config/legacy_fields.py`][config-legacy] | Agent or defaults validation sees a retired field. | Pydantic remains the strict validation boundary and the helper provides directed replacement errors. |
+| [`src/mindroom/tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] | Authored tool override validation sees a retired per-tool field such as `restrict_to_base_dir`. | `tool_system/metadata.py` keeps authored-override validation and raises the directed replacement error the helper names. |
 | [`src/mindroom/legacy_streaming.py`][legacy-streaming] | Streaming replay encounters body-only `[cancelled]` or `[error]` suffixes (each preceded by one space). | Current markers stay in `streaming.py`; `execution_preparation.py` gives recognized structured status precedence and delegates body fallback to the streaming reader. |
 | [`src/mindroom/legacy_revision_replay.py`][legacy-revision-replay] | Turn-record merges and redaction cleanup encounter reconstructed revision provenance from pre-v2026.9.43 summaries. | Current revision facts win, storage mutation stays in `turn_store.py`, and source-only summary ownership applies only to labeled historical replay. |
 | [`src/mindroom/event_journal/legacy_schema.py`][journal-legacy-schema] | A journal lacks Nio-owned `matrix_sync_consumers`, or a current approval generation has executable calls without toolkit origins. | Schema setup preserves history and frozen deliveries while retiring obsolete work; unresumable approvals enter normal failure recovery before another card decision. |
@@ -19985,6 +20026,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/oauth/legacy_credentials.py`][oauth-legacy-credentials] | The OAuth SQLite store normalizes a retired field or verifies a lossless requester binding. | The store retains schema, scope, revision, reset-receipt, transaction, and rollback ownership; old OAuth JSON is not adopted. |
 | [`src/mindroom/matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | Nio first takes durable ownership of a pre-durable crypto store. | Nio's file lease and account/device checks protect keys and trust while only retired recovery rows are cleared. |
 | [`src/mindroom/script_runs/legacy_recovery.py`][script-legacy-recovery] and [`src/mindroom/workers/backends/kubernetes.py`][kubernetes-worker-backend] | Script-runtime startup encounters an unversioned recovery signature or a v2 digest from before the optional seccomp or RuntimeClass fields. | Only an exact recomputation permits migration; pre-seccomp workers require an unset current seccomp policy, an unset RuntimeClass retains the pre-RuntimeClass digest bytes, and the current store owns atomic signature replacement and rejects concurrent revocation or signature changes. |
+| [`src/mindroom/legacy_attachments.py`][legacy-attachments] | `load_attachment` finds a record whose `local_path` is outside the current `incoming_media/` directory. | A no-follow walk from the filesystem root and the recorded SHA-256 gate a capped retained copy; the owner rewrites the record atomically and rejects anything unverifiable. |
 | [`src/mindroom/desktop/legacy_command_journal.py`][desktop-legacy-journal] | The desktop SQLite journal finds JSON v1 receipts during its one-time import. | Historical validation stays isolated; the journal retains file permissions, atomic import, replay tombstones, response delivery state, sequence maxima, and admission capacity. |
 
 ## Python provenance and regression coverage
@@ -20011,14 +20053,16 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`knowledge/legacy_metadata.py`][knowledge-legacy] | [Knowledge indexing tests][knowledge-indexing-tests] use independently written metadata from each field boundary and check preservation, nonmutation, repeated normalization, and corpus/query compatibility. |
 | [`matrix/legacy_state.py`][matrix-legacy-state] and [`matrix/users.py`][matrix-users] | [Matrix identity][matrix-identity-tests] and [agent manager][matrix-agent-tests] tests preserve durable account state, verify stable reloads, and exercise the missing-request fallback without network registration. |
 | [`config/legacy_access.py`][access-legacy] and [`config/legacy_fields.py`][config-legacy] | [Access migration tests][access-migration-tests] cover validated conversion, exact backup bytes, stable publication, and rejection paths; [configuration tests][agent-config-tests] cover every directed retired-field error. |
+| [`tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] | [Tool metadata tests][tool-metadata-tests] cover the directed `restrict_to_base_dir` rejection for the `file`, `coding`, and `python` tools. |
 | [`legacy_private_storage.py`][private-legacy] and [`legacy_private_storage_aliases.py`][private-legacy-aliases] | [Private-storage tests][private-storage-tests] cover verified owner relocation, content preservation, historical aliases, and tamper rejection. |
 | [`oauth/legacy_credentials.py`][oauth-legacy-credentials] and [`oauth/credential_store.py`][oauth-store] | [OAuth store tests][oauth-store-tests] cover literal SQLite bindings, publication normalization, the removed JSON reader, reconnect disposition, and inert old files. |
 | [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
 | [`legacy_streaming.py`][legacy-streaming] and [`execution_preparation.py`][execution-preparation] | [Partial-reply][partial-reply-tests] and [streaming][streaming-tests] tests cover bounded historical suffixes, exact stripping order, current structured-status precedence, and interruption classification. |
 | [`legacy_revision_replay.py`][legacy-revision-replay] | [Revision replay][legacy-revision-replay-tests], [turn-store][turn-store-tests], and [handled-turn][handled-turn-tests] tests cover reconstruction, monotonic preservation, historical and modern selection, and cold-reopen cleanup. |
 | [`session_storage_preflight.py`][session-preflight] | [Session recovery tests][session-recovery-tests] cover schema-based archive, locks, rollback recovery, unrelated tables, current corruption, and byte preservation without inventing one release cutoff. |
+| [`legacy_attachments.py`][legacy-attachments] | [Attachment tests][attachment-tests] cover verified adoption and record rewrite, independence from later source swaps, and rejection of planted leaf or ancestor links, changed bytes, and missing digests. |
 | [`desktop/legacy_command_journal.py`][desktop-legacy-journal] | [Desktop journal tests][desktop-journal-tests] cover bodyless started receipts, retained sequence high-watermarks, deferred response replay, repeated opens, and independent current admission capacity. |
-| [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert exact shared-domain and host-only expiry cookies on both endpoints and retain current host-only behavior for localhost, IP addresses, and single-label hosts. |
+| [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
 
 This index intentionally excludes current authoring shorthands, protocol adapters, recovery rules, and caches that tolerate unknown versions because those are active interfaces rather than evidence of a retired native writer.
 Sparse publication, job, and failure fields in [`knowledge/index_metadata.py`][knowledge-index] remain a current writer contract: the writer still omits optional values and the reader accepts those sparse in-progress and failed records.
@@ -20076,6 +20120,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S18 | Isolated | [`session_storage_preflight.py`][session-preflight] archives incompatible owned sessions; MindRoom does not invoke Agno's historical migration manager. |
 | S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob scrub and double-JSON decoding; other Agno readers remain dependency-owned. |
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
+| S21 | Isolated | [`legacy_attachments.py`][legacy-attachments] adopts in-place attachment records into verified retained copies; [`attachments.py`][attachments] keeps copying, record publication, and retention cleanup. |
 
 ## Configuration and credentials
 
@@ -20093,6 +20138,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | C10 | Tiny retained default | [`cli/owner.py`][cli-owner] replaces both old and current owner placeholders during pairing. |
 | C11 | Current behavior | [`constants.py`][constants] owns current config, environment, and path selection without relocating data. |
 | C12 | Current behavior | [`cli/local_stack.py`][local-stack] retains existing local-chat flags and container names. |
+| C13 | Isolated | [`tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] names the retired per-tool `restrict_to_base_dir` override and its replacement guidance; [`tool_system/metadata.py`][tool-metadata] raises the directed error during authored-override validation. |
 | A1 | Current behavior | [`credentials.py`][credentials] uses JSON, including its encrypted envelope, for generic services. |
 | A2 | Current behavior | [`credentials_sync.py`][credentials-sync] treats missing `_source` as manually owned instead of overwriting it from the environment. |
 | A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
@@ -20129,7 +20175,7 @@ These rows are checked manually because the original inventory used section head
 | D1 | Dependency-owned | [`matrix/legacy_crypto_upgrade.py`][crypto-upgrade] isolates the pre-durable cutoff, while Nio owns its current SQLite schema and preserves crypto and trust records. |
 | D2 | Dependency-owned | [`knowledge/indexing_config.py`][knowledge-settings] owns corpus compatibility, while Chroma owns storage-engine migrations. |
 | D3 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history-table rewrite and possibly external default history path to Mem0. |
-| D4 | Current behavior | [The three SaaS SQL files][saas-migrations] remain explicit migrations for authoritative account, subscription, instance, payment, usage, audit, and grant data. |
+| D4 | Current behavior | [The four SaaS SQL files][saas-migrations] remain explicit migrations for authoritative account, subscription, instance, payment, usage, audit, and grant data. |
 | D5 | Current behavior | [SSO cookie cleanup][sso], [Terraform relocation][terraform-state], and [root service-worker cleanup][client-chart] remain deployment-owned; logger aliases and UI preferences are current state. |
 | D6 | Current behavior | [Worker protocol checks][worker-compat] and [desktop protocol checks][desktop-protocol] protect current execution, identity reuse, metadata recovery, and replay gates. |
 | D7 | Current behavior | [Provider][claude-compat], [Matrix protocol][event-info], dependency, and [cancellation][cancellation] adapters remain necessary after database reset. |
@@ -20181,6 +20227,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [crypto-upgrade]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/legacy_crypto_upgrade.py
 [desktop-legacy-journal]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/desktop/legacy_command_journal.py
 [desktop-journal-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_desktop_command_journal.py
+[attachment-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_attachments.py
 [desktop-protocol]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/desktop/protocol.py
 [egress-policy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/egress/policy.py
 [event-info]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/event_info.py
@@ -20199,6 +20246,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [legacy-revision-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_revision_replay.py
 [legacy-streaming]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_streaming.py
 [legacy-approval]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_approval_payloads.py
+[legacy-attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_attachments.py
 [legacy-approval-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_approval_recovery.py
 [legacy-delivery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_delivery_payloads.py
 [legacy-handled]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_handled_turns.py
@@ -20242,6 +20290,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [turn-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/turn_store.py
 [todo-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/custom_tools/todo_state.py
 [tool-metadata]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/metadata.py
+[tool-legacy-overrides]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/legacy_tool_overrides.py
 [trigger-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/store.py
 [usage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/usage_stats_storage.py
 [visible-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/visible_response_reconciliation.py
@@ -20251,6 +20300,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [streaming]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/streaming.py
 [access-migration-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_access_migration.py
 [agent-config-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_agents.py
+[tool-metadata-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_tools_metadata.py
 [agent-runs-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_agent_storage_runs.py
 [approval-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_tool_approval.py
 [cli-connect-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_cli_connect.py
@@ -20344,6 +20394,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, and leaves temporary audio after encoding failures. | Use a portable font default, forward styles, preserve complete glyph bounds, advance wrapped words, and clean owned audio files on every exit; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; regressions in `tests/test_moviepy_video_tools.py`, `tests/test_moviepy_caption_layout.py`, and `tests/test_moviepy_caption_output.py`. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
+| FileTools content search relativizes hits and exclusions against `base_dir`, so it cannot search other directories. | Tracking gap: accept an absolute search directory outside `base_dir` and report absolute hit paths; no matching issue or PR identified. | `tools/file.py`; unrestricted outside-directory coverage in `tests/test_coding_tools.py`. |
 | Concise PubMed output drops title/year when the abstract is short or absent. | Keep identifying metadata independent of summary truncation. | `tools/pubmed.py`; real parsing/formatting tests cover short, absent, and long abstracts in both output modes. |
 | Luma video creation omits the required model argument in both public methods. | Tracking gap: no matching upstream issue or fix has been verified; pass a configurable model on both creation paths. | `tools/lumalabs.py`; real factory and SDK transport coverage in `tests/test_lumalabs_tool.py`. |
 | Todoist project discovery treats SDK pages as individual projects. | Flatten project pages and serialize SDK date fields safely. | `tools/todoist.py`; project discovery tests cover multiple pages, empty results, and provider errors. |
@@ -20420,6 +20471,7 @@ Small owner-adjacent boundaries use the same source records:
 | Owner | Agno adaptation | Retained application behavior |
 | --- | --- | --- |
 | `knowledge/collections.py` | Operator-aware scoped deletion and probing ambiguous collection-deletion outcomes. | Source batching, collection ownership, client closure, and storage reclamation. |
+| `tools/file.py` | Unrestricted outside-directory content search through a shallow copy rooted at the searched directory, with hits rewritten to absolute paths. | Workspace-mode refusal, blocked-path messages, and Agno's inside-workspace search remain unchanged. |
 | `tools/pubmed.py` | Concise article formatting that retains title/year at every abstract length. | Existing result-limit behavior, XML parsing, expanded output, and fetch-error text. |
 | `tools/todoist.py` | Page flattening and SDK project serialization for `get_projects`. | Existing credential construction, registered operations, and structured provider errors. |
 | `custom_tools/google_calendar.py` | Broad construction-time scope markers alongside granular credentials. | OAuth scope selection, credential ownership, and tool permissions. |
@@ -20451,6 +20503,98 @@ Application request-log context, canonical replay, OAuth policy, and ordinary pu
 A merged PR does not by itself prove that the pinned SDK supplies the complete replacement.
 For example, Agno's typed embedding errors do not replace MindRoom's request/validation hooks, and its existing `after_tool_results` callback does not expose the mutable message surface used by queued notices.
 The Responses completion fix also has a separate removal condition from protection against retrying retained partial output.
+
+# Security Posture
+
+This page records MindRoom's security model and the behaviors that are intentional.
+Reviewers and agents must check a suspected vulnerability against this page before reporting or fixing it.
+If a finding contradicts an intentional behavior below, do not change the code.
+Raise the posture itself with the maintainers instead, and explain which scenario the current posture fails to protect.
+
+## Trust model
+
+A worker container, reached through the sandbox proxy, is the only security boundary between an agent and the MindRoom runtime.
+Everything else in this page follows from that rule.
+
+Tools that run arbitrary programs cannot be confined inside the process that runs them.
+A shell or Python tool can start any program, and that program ignores any path or command check MindRoom applies in-process.
+MindRoom therefore never filters the paths, commands, or imports of code-execution tools as a security measure.
+They are isolated only by routing them to a worker with `worker_tools`.
+
+An agent whose code-execution tools run in the primary process is trusted with everything that process can reach.
+Restricting that agent's other tools protects nothing, because its shell can already read, write, and upload the same files.
+
+An agent whose code-execution tools run in a worker must not reach more through its primary-process tools than its worker can.
+Several tools run in the primary process by default even when code tools use workers, for example `browser`, `attachments`, `matrix_message`, `gmail`, and `google_drive`.
+Those tools follow the agent's `file_access` setting, so the default keeps them inside the agent workspace.
+
+Hardening that protects the primary runtime and other tenants from untrusted worker code is always in scope.
+Examples are symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
+
+Which Matrix user may drive an agent, act in a room, or approve a change is a separate question.
+Access policy and requester authorization govern it, independently of the tool trust model.
+
+## File access
+
+`defaults.file_access` sets the default and `agents.<name>.file_access` overrides it for one agent.
+
+| Value | Path tools may use |
+|---|---|
+| `workspace` (default) | Files inside the agent workspace and attachments available in the conversation |
+| `unrestricted` | Any file the tool's process can reach; on a worker that is the worker container |
+
+Every tool declares how its own file access relates to this setting.
+
+| Tool class | Tools | Behavior |
+|---|---|---|
+| Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused |
+| Worker path tools | `file`, `coding` | Follow the agent's `file_access` with lexical path checks only; they run in a worker by default, and the known gap below covers routing them to the primary process |
+| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `e2b`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `agentql`, `newspaper`, `slack`, `web_browser_tools`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
+| Other tools | Everything else | Take no local file paths |
+
+MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.
+Every tool, including plugin tools, must declare its class when it registers, so a tool cannot silently default to taking no paths.
+Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above carry it.
+A worker isolates unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `agentql`, `newspaper`, `web_browser_tools`).
+The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `e2b`, `browserbase`, `slack`), so enable them only for agents trusted with everything the primary runtime can reach.
+MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
+The model sees the effective file access and the unconfined tools in its tool execution environment description.
+
+## Known gaps
+
+These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
+
+- The unconfined non-code tools listed above do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
+- `file` and `coding` confine paths lexically but do not open through no-follow descriptors, so when an operator routes them to the primary process while worker code shares the workspace, a link swapped into the workspace can redirect them; they run in a worker by default, where worker code already shares their trust.
+- `tests/test_file_access_contract.py` holds every tool that follows `file_access` to the confinement scenarios and the descriptor-based path tools also to the link-swap scenarios; a tool must be added there before it can be declared, and `file` and `coding` are explicitly exempt from the link-swap scenarios until they read through descriptors.
+- SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
+
+## Intentional behaviors
+
+Do not report or "fix" these; they are deliberate.
+
+- Code-execution tools in the primary process can read, write, and upload anything the MindRoom process can reach.
+- No in-process path, command, or import filter is added to `shell`, `python`, or any other code-execution tool.
+- An operator who runs MindRoom without workers, for example inside a dedicated LXC container or VM, has chosen full trust; `file_access: unrestricted` matches that choice.
+- `file_access: unrestricted`, or unconfined tools in the primary process, are allowed together with worker routing; they log a warning instead of failing.
+- Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
+- With `file_access: workspace`, the browser, attachments, `matrix_message`, Gmail, and Google Drive may still use every file in the agent workspace.
+- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail and Google Drive take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
+- `register_attachment` copies the file's current bytes into managed attachment storage, so later edits or replacement of the source file never change what the attachment sends.
+- `mindroom_output_path`, attachment saves, Google Drive downloads, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
+- Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
+
+## Reviewing security findings
+
+Classify every finding before proposing a change.
+
+1. Name the boundary it crosses: worker to primary, tenant to tenant, Matrix user to agent, or none.
+2. Check whether the agent involved is trusted under the trust model above.
+3. Check the intentional behaviors list.
+4. Only a finding that crosses a real boundary and matches no intentional behavior is a bug.
+
+A fix that restricts a trusted setup, or that blocks workspace and attachment flows an agent legitimately needs, is not a security fix.
+When a maintainer rejects a finding as intended behavior, add it to the list above in the same change so the next reviewer does not rediscover it.
 
 # History compaction
 
@@ -23145,6 +23289,7 @@ Restrict access to both the instance Secret and every retained Helm release Secr
 Deleting the local file or changing future values does not remove credentials from older Helm release revisions.
 The chart passes the same token to the runtime and sandbox runner; the default file and shell tools need it to acquire the static runner.
 The provisioner supplies this token automatically, while a direct install must provide it.
+Browser dashboard login through the platform also needs `platformSsoSecret` set to the key the platform derives for that instance; without it the instance accepts only Supabase bearer tokens.
 
 ```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \

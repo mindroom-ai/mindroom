@@ -25,7 +25,7 @@ from mindroom.egress.policy import (
     resolve_worker_egress_policy,
 )
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -373,6 +373,7 @@ class _ApprovedEgressTools(Toolkit):
 
 @register_tool_with_metadata(
     name="approved_egress",
+    file_access=ToolFileAccess.NONE,
     display_name="Network Access Requests",
     description="Request approval for temporary access to a blocked website or service",
     category=ToolCategory.INTEGRATIONS,

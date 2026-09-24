@@ -62,6 +62,7 @@
 - [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/)
 - [Migration Boundaries](https://docs.mindroom.chat/architecture/migrations/)
 - [Agno Compatibility](https://docs.mindroom.chat/architecture/agno-compatibility/)
+- [Security Posture](https://docs.mindroom.chat/architecture/security-posture/)
 - [History Compaction](https://docs.mindroom.chat/architecture/compaction/)
 - [Overview](https://docs.mindroom.chat/deployment/)
 - [Nio 1.0 Upgrade](https://docs.mindroom.chat/deployment/nio-upgrade/)
