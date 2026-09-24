@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
+from structlog.testing import capture_logs
 
 import mindroom.matrix.rooms as matrix_rooms
 import mindroom.orchestrator as orchestrator_module
@@ -1449,6 +1450,41 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_initialize_and_reload_warn_about_foreign_homeserver_authorities(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Startup and every applied reload must name authorities homed on another homeserver."""
+    warning = (
+        "Administrators, room invitees, or room admins are on another homeserver; remove them unless you trust them"
+    )
+
+    def write_config(*, administrators: list[str], invite_users: list[str]) -> None:
+        config_data = {
+            "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
+            "router": {"model": "default"},
+            "agents": {"assistant": {"display_name": "Assistant", "model": "default", "rooms": ["lobby"]}},
+            "administrators": administrators,
+            "room_defaults": {"invite_users": invite_users},
+        }
+        (tmp_path / "config.yaml").write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
+
+    _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
+    write_config(administrators=["@owner:localhost"], invite_users=["@test:m-test-4.mindroom.chat"])
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    with capture_logs() as startup_logs:
+        await orchestrator.initialize()
+
+    write_config(administrators=["@owner:localhost", "@admin:remote.example"], invite_users=["@owner:localhost"])
+    with capture_logs() as reload_logs:
+        updated = await orchestrator.config_reload._update_config()
+
+    assert updated is True
+    assert [log["user_ids"] for log in startup_logs if log["event"] == warning] == [["@test:m-test-4.mindroom.chat"]]
+    assert [log["user_ids"] for log in reload_logs if log["event"] == warning] == [["@admin:remote.example"]]
 
 
 @pytest.mark.asyncio
