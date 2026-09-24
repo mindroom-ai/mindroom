@@ -1633,7 +1633,7 @@ See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for th
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `CUSTOMER_ID` | Tenant identity for worker key derivation (SaaS platform only) | _(none)_ |
-| `ACCOUNT_ID` | Account identity for worker key derivation (SaaS platform only) | _(none)_ |
+| `ACCOUNT_ID` | Supabase user ID of the instance owner, used for worker key derivation (SaaS platform only). Required whenever `SUPABASE_URL` and `SUPABASE_ANON_KEY` enable Supabase auth, because it is the only dashboard/API authorization check; while it is unset, the dashboard API refuses every request. Without Supabase auth it does not change the dashboard authentication mode. | _(none)_ |
 
 ## Basic Structure
 
@@ -18738,6 +18738,9 @@ Dashboard configuration access follows deployment authentication.
 Standalone deployments check `MINDROOM_API_KEY` when configured; Supabase deployments validate the user's token and enforce the instance account ID when configured.
 Without an API key, standalone dashboard and configuration API access is unauthenticated.
 Set `MINDROOM_API_KEY` before exposing a standalone instance outside a trusted local environment.
+Setting either `SUPABASE_URL` or `SUPABASE_ANON_KEY` selects Supabase authentication, so standalone mode never applies once one of them is set.
+If only one of them is set, or both are set without a non-empty `ACCOUNT_ID`, the runtime answers every dashboard request with HTTP 503 instead of falling back to unauthenticated or unbound access.
+`ACCOUNT_ID` alone does not select Supabase authentication, so a standalone instance that sets it for worker key derivation keeps using `MINDROOM_API_KEY`.
 These operator authentication checks are independent of the Matrix `administrators` list.
 
 With trusted upstream auth and no `MINDROOM_CONNECTIONS_AGENT`, every gateway-authenticated user can read and change dashboard configuration, regardless of `administrators`.
@@ -23459,6 +23462,7 @@ All endpoints require bearer token (`PROVISIONER_API_KEY`).
 
 For new instances, supply the real account UUID, subscription row UUID, and matching tier, and omit `instance_id`.
 Supplying `instance_id` selects an update of an existing instance; a missing row returns `404`.
+Every request, including re-provisioning, must supply the owner's `account_id`, because it is the instance's only Supabase authorization binding; requests without one return `400`.
 The account must have an email for owner identity derivation.
 Replace the placeholders in this operator request with those database values:
 

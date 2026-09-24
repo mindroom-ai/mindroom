@@ -303,11 +303,6 @@ class TestCredentialsAPI:
                     **dict(runtime_paths.process_env),
                     "CUSTOMER_ID": "tenant-123",
                     "ACCOUNT_ID": "account-456",
-                    # A hosted tenant identity requires hosted auth; open access is refused.
-                    "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-                    "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
-                    "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
-                    "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
                 },
             ),
         )
@@ -330,10 +325,7 @@ class TestCredentialsAPI:
         )
         assert expected_worker_key is not None
         _publish_committed_runtime_config(client.app, config)
-        response = client.get(
-            "/api/credentials/openai/api-key?agent_name=general",
-            headers=trusted_upstream_headers(),
-        )
+        response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 200
         mock_credentials_manager.for_worker.assert_called_once_with(expected_worker_key)

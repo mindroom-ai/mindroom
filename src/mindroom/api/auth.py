@@ -157,38 +157,32 @@ def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None 
     )
 
 
-def hosted_auth_configuration_error(settings: _ApiAuthSettings) -> str | None:
-    """Return why hosted dashboard auth is configured but cannot authenticate anyone."""
-    if settings.trusted_upstream.enabled or (settings.supabase_url and settings.supabase_anon_key):
+def _hosted_auth_configuration_error(settings: _ApiAuthSettings) -> str | None:
+    """Return why Supabase dashboard auth is intended but cannot safely authenticate anyone."""
+    # Only the Supabase settings select Supabase auth; ACCOUNT_ID alone (worker key derivation)
+    # leaves the runtime in standalone mode, where MINDROOM_API_KEY applies.
+    if settings.trusted_upstream.enabled or not (settings.supabase_url or settings.supabase_anon_key):
         return None
-    configured = [
-        name
-        for name, value in (
-            ("SUPABASE_URL", settings.supabase_url),
-            ("SUPABASE_ANON_KEY", settings.supabase_anon_key),
-            ("MINDROOM_PLATFORM_LOGIN_URL", settings.platform_login_url),
-            ("ACCOUNT_ID", settings.account_id),
+    if not (settings.supabase_url and settings.supabase_anon_key):
+        return (
+            "Supabase dashboard authentication is incomplete: SUPABASE_URL and SUPABASE_ANON_KEY must be set together"
         )
-        if value
-    ]
-    if not configured:
-        return None
-    return (
-        f"Hosted dashboard authentication is incomplete (configured: {', '.join(configured)}); "
-        "SUPABASE_URL and SUPABASE_ANON_KEY are both required to validate dashboard users"
-    )
+    # Every user of the shared Supabase project holds a valid token, so ACCOUNT_ID is the only owner binding.
+    if settings.account_id is None or not settings.account_id.strip():
+        return "Supabase dashboard authentication is enabled but ACCOUNT_ID is not set"
+    return None
 
 
 def _require_complete_dashboard_auth(settings: _ApiAuthSettings) -> None:
     """Refuse every request rather than downgrading a partial hosted setup to open access."""
-    configuration_error = hosted_auth_configuration_error(settings)
+    configuration_error = _hosted_auth_configuration_error(settings)
     if configuration_error is not None:
         raise HTTPException(status_code=503, detail=configuration_error)
 
 
 def report_dashboard_auth_configuration(runtime_paths: RuntimePaths, account_id: str | None) -> None:
     """Log loudly at startup when hosted dashboard auth is configured but unusable."""
-    configuration_error = hosted_auth_configuration_error(
+    configuration_error = _hosted_auth_configuration_error(
         _build_auth_settings(runtime_paths, account_id=account_id),
     )
     if configuration_error is not None:
@@ -1044,7 +1038,7 @@ async def authenticate_user(
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    if auth_state.settings.account_id and user.id != auth_state.settings.account_id:
+    if user.id != auth_state.settings.account_id:
         raise HTTPException(status_code=403, detail="Forbidden")
 
     _require_browser_mutation_origin(request, auth_state.settings, authorization)

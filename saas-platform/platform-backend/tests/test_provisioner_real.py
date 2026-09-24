@@ -723,7 +723,7 @@ class TestProvisionerRealScenarios:
                     with pytest.raises(Exception) as exc_info:
                         await provision_instance(
                             None,  # request
-                            {"subscription_id": "sub-123", "tier": "byok"},
+                            {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
                             "Bearer test-key",  # authorization
                             None,  # background_tasks
                         )

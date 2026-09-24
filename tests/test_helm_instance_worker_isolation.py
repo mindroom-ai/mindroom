@@ -272,43 +272,44 @@ def test_instance_chart_rejects_unsupported_worker_seccomp_profile() -> None:
 
 
 @pytest.mark.parametrize(
-    ("set_args", "message"),
+    "set_args",
     [
-        (("supabaseUrl=https://supabase.test", "accountId=account-123"), "must be set together"),
-        (("supabaseAnonKey=anon-key", "accountId=account-123"), "must be set together"),
-        (("supabaseUrl=https://supabase.test", "supabaseAnonKey=anon-key"), "accountId is required"),
-        (("accountId=account-123",), "accountId requires"),
+        ("supabaseUrl=https://supabase.test", "accountId=account-123"),
+        ("supabaseAnonKey=anon-key", "accountId=account-123"),
     ],
 )
-def test_instance_chart_rejects_incomplete_hosted_auth(set_args: tuple[str, ...], message: str) -> None:
-    """An instance that looks hosted but cannot authenticate anyone must not render."""
+def test_instance_chart_rejects_partial_supabase_auth(set_args: tuple[str, ...]) -> None:
+    """Half a Supabase pair would render an instance whose dashboard cannot authenticate anyone."""
     completed = _run_helm_template(Path("cluster/k8s/instance"), "customer=tenant42", *set_args)
 
     assert completed.returncode != 0
-    assert message in completed.stderr
+    assert "supabaseUrl and supabaseAnonKey must be set together" in completed.stderr
 
 
-def test_instance_chart_sets_platform_login_only_for_authenticated_instances() -> None:
-    """Hosted intent is only advertised when some dashboard auth mode can actually validate users."""
-
-    def _instance_env(*set_args: str) -> dict[str, dict[str, Any]]:
-        docs = _render_chart(Path("cluster/k8s/instance"), "customer=tenant42", "baseDomain=example.test", *set_args)
-        return _env_by_name(_container(_resource(docs, "Deployment", "mindroom-tenant42"), "mindroom"))
-
-    unauthenticated = _instance_env()
-    with_supabase = _instance_env(
-        "accountId=account-123",
-        "supabaseUrl=https://supabase.test",
+@pytest.mark.parametrize("account_id_args", [(), ("accountId=",), ("accountId=  ",)])
+def test_instance_chart_requires_account_id_with_supabase_auth(account_id_args: tuple[str, ...]) -> None:
+    """Supabase auth without an owner account binding would admit every user of the Supabase project."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/instance"),
+        "supabaseUrl=https://project.supabase.example",
         "supabaseAnonKey=anon-key",
-    )
-    with_trusted_upstream = _instance_env(
-        "trustedUpstreamAuth.enabled=true",
-        "trustedUpstreamAuth.userIdHeader=X-Trusted-User",
+        set_string_args=account_id_args,
     )
 
-    assert "MINDROOM_PLATFORM_LOGIN_URL" not in unauthenticated
-    assert with_supabase["MINDROOM_PLATFORM_LOGIN_URL"]["value"] == "https://app.example.test/auth/login"
-    assert with_trusted_upstream["MINDROOM_PLATFORM_LOGIN_URL"]["value"] == "https://app.example.test/auth/login"
+    assert completed.returncode != 0
+    assert "accountId is required when supabaseUrl and supabaseAnonKey are set" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "supabase_args",
+    [("supabaseUrl=https://project.supabase.example", "supabaseAnonKey=anon-key"), ()],
+)
+def test_instance_chart_renders_account_id(supabase_args: tuple[str, ...]) -> None:
+    """The owner binding reaches the runtime with Supabase auth, and alone it stays a plain worker identity."""
+    docs = _render_chart(Path("cluster/k8s/instance"), *supabase_args, "accountId=account-owner")
+    env = _env_by_name(_container(_resource(docs, "Deployment", "mindroom-demo"), "mindroom"))
+
+    assert env["ACCOUNT_ID"]["value"] == "account-owner"
 
 
 def test_instance_chart_sets_public_url_for_oauth_redirects() -> None:

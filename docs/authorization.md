@@ -158,8 +158,9 @@ Dashboard configuration access follows deployment authentication.
 Standalone deployments check `MINDROOM_API_KEY` when configured; Supabase deployments validate the user's token and enforce the instance account ID when configured.
 Without an API key, standalone dashboard and configuration API access is unauthenticated.
 Set `MINDROOM_API_KEY` before exposing a standalone instance outside a trusted local environment.
-Standalone mode is only entered when no hosted authentication is configured at all.
-If any of `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `MINDROOM_PLATFORM_LOGIN_URL`, or `ACCOUNT_ID` is set while `SUPABASE_URL` and `SUPABASE_ANON_KEY` are not both set, the runtime treats hosted authentication as misconfigured and answers every dashboard request with HTTP 503 instead of falling back to unauthenticated access.
+Setting either `SUPABASE_URL` or `SUPABASE_ANON_KEY` selects Supabase authentication, so standalone mode never applies once one of them is set.
+If only one of them is set, or both are set without a non-empty `ACCOUNT_ID`, the runtime answers every dashboard request with HTTP 503 instead of falling back to unauthenticated or unbound access.
+`ACCOUNT_ID` alone does not select Supabase authentication, so a standalone instance that sets it for worker key derivation keeps using `MINDROOM_API_KEY`.
 These operator authentication checks are independent of the Matrix `administrators` list.
 
 With trusted upstream auth and no `MINDROOM_CONNECTIONS_AGENT`, every gateway-authenticated user can read and change dashboard configuration, regardless of `administrators`.

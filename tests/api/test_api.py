@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
+from structlog.testing import capture_logs
 
 from mindroom import constants, frontend_assets
 from mindroom.api import auth, config_lifecycle, frontend, homeassistant_integration, main
@@ -256,7 +257,7 @@ def test_init_supabase_auth_returns_none_without_credentials(tmp_path: Path) -> 
     # A missing client must never be read as "no hosted auth configured".
     for partial_env in ({"SUPABASE_URL": "https://supabase.test"}, {"SUPABASE_ANON_KEY": "anon-key"}):
         settings = auth._build_auth_settings(_runtime_paths(tmp_path, process_env=partial_env))
-        assert auth.hosted_auth_configuration_error(settings) is not None
+        assert auth._hosted_auth_configuration_error(settings) is not None
 
 
 @pytest.mark.parametrize(
@@ -265,6 +266,10 @@ def test_init_supabase_auth_returns_none_without_credentials(tmp_path: Path) -> 
         ({}, None),
         ({"SUPABASE_URL": "https://supabase.test", "SUPABASE_ANON_KEY": "anon-key"}, "account-123"),
         ({"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true", "MINDROOM_PLATFORM_LOGIN_URL": "https://app/login"}, None),
+        # ACCOUNT_ID and the platform login URL alone do not select Supabase auth; standalone rules apply.
+        ({}, "account-123"),
+        ({"MINDROOM_PLATFORM_LOGIN_URL": "https://app.example.com/auth/login"}, None),
+        ({"MINDROOM_API_KEY": "operator-key", "MINDROOM_PLATFORM_LOGIN_URL": "https://app/login"}, "account-123"),
     ],
 )
 def test_hosted_auth_configuration_error_accepts_complete_setups(
@@ -272,33 +277,38 @@ def test_hosted_auth_configuration_error_accepts_complete_setups(
     process_env: dict[str, str],
     account_id: str | None,
 ) -> None:
-    """A runtime with no hosted indicators, a full Supabase pair, or trusted upstream is complete."""
+    """Standalone, a bound Supabase pair, or trusted upstream auth is a usable configuration."""
     settings = auth._build_auth_settings(_runtime_paths(tmp_path, process_env=process_env), account_id=account_id)
-    assert auth.hosted_auth_configuration_error(settings) is None
+    assert auth._hosted_auth_configuration_error(settings) is None
+
+
+_SUPABASE_PAIR = {"SUPABASE_URL": "https://supabase.test", "SUPABASE_ANON_KEY": "anon-key"}
 
 
 @pytest.mark.parametrize(
-    ("process_env", "account_id"),
+    ("process_env", "account_id", "missing"),
     [
-        ({"SUPABASE_URL": "https://supabase.test"}, None),
-        ({"SUPABASE_ANON_KEY": "anon-key"}, None),
-        ({"MINDROOM_PLATFORM_LOGIN_URL": "https://app.example.com/auth/login"}, None),
-        ({}, "account-123"),
-        # Whitespace-only values still signal hosted intent; they must never read as "unset".
-        ({"SUPABASE_URL": "   "}, None),
-        ({}, "   "),
-        # An operator key must not excuse an incomplete hosted configuration either.
-        ({"SUPABASE_URL": "https://supabase.test", "MINDROOM_API_KEY": "operator-key"}, None),
+        ({"SUPABASE_URL": "https://supabase.test"}, "account-123", "SUPABASE_ANON_KEY"),
+        ({"SUPABASE_ANON_KEY": "anon-key"}, "account-123", "SUPABASE_ANON_KEY"),
+        # Whitespace-only Supabase values still signal hosted intent; they must never read as "unset".
+        ({"SUPABASE_URL": "   "}, None, "SUPABASE_ANON_KEY"),
+        # An operator key must not excuse an incomplete Supabase configuration either.
+        ({"SUPABASE_URL": "https://supabase.test", "MINDROOM_API_KEY": "operator-key"}, None, "SUPABASE_ANON_KEY"),
+        # Every user of the shared Supabase project holds a valid token, so the owner binding is mandatory.
+        (_SUPABASE_PAIR, None, "ACCOUNT_ID"),
+        (_SUPABASE_PAIR, "", "ACCOUNT_ID"),
+        (_SUPABASE_PAIR, "   ", "ACCOUNT_ID"),
     ],
 )
 def test_hosted_auth_configuration_error_flags_partial_setups(
     tmp_path: Path,
     process_env: dict[str, str],
     account_id: str | None,
+    missing: str,
 ) -> None:
-    """Any hosted indicator without a usable Supabase pair must be reported as misconfigured."""
+    """Any Supabase setting without a usable, owner-bound Supabase pair must be reported as misconfigured."""
     settings = auth._build_auth_settings(_runtime_paths(tmp_path, process_env=process_env), account_id=account_id)
-    assert "SUPABASE_ANON_KEY" in (auth.hosted_auth_configuration_error(settings) or "")
+    assert missing in (auth._hosted_auth_configuration_error(settings) or "")
 
 
 def test_init_supabase_auth_raises_when_auto_install_disabled(
@@ -573,6 +583,36 @@ def test_initialize_api_app_initializes_fresh_app_state(tmp_path: Path) -> None:
     assert main._app_context(fresh_app).config_data == {}
     assert hasattr(config_lifecycle.require_api_state(fresh_app).config_lock, "acquire")
     assert auth._app_auth_state(fresh_app).runtime_paths == runtime_paths
+
+
+@pytest.mark.parametrize("account_id", [None, "", "   "])
+def test_initialize_api_app_logs_error_for_supabase_without_account_id(
+    tmp_path: Path,
+    account_id: str | None,
+) -> None:
+    """Enabling Supabase auth without an instance owner is reported as a hard error at startup."""
+    process_env = {"SUPABASE_URL": "https://supabase.example.com", "SUPABASE_ANON_KEY": "anon-key"}
+    if account_id is not None:
+        process_env["ACCOUNT_ID"] = account_id
+
+    with capture_logs() as logs:
+        main.initialize_api_app(FastAPI(), _runtime_paths(tmp_path, process_env=process_env))
+
+    assert any(log["log_level"] == "error" and "ACCOUNT_ID" in log["detail"] for log in logs)
+
+
+def test_initialize_api_app_does_not_log_error_for_bound_supabase_auth(tmp_path: Path) -> None:
+    """A Supabase instance bound to its owner starts without the configuration error."""
+    process_env = {
+        "SUPABASE_URL": "https://supabase.example.com",
+        "SUPABASE_ANON_KEY": "anon-key",
+        "ACCOUNT_ID": "account-owner",
+    }
+
+    with capture_logs() as logs:
+        main.initialize_api_app(FastAPI(), _runtime_paths(tmp_path, process_env=process_env))
+
+    assert not any(log["log_level"] == "error" for log in logs)
 
 
 def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
@@ -5344,17 +5384,18 @@ def test_api_key_keeps_oauth_callbacks_open(
     assert "OAuth state is invalid or expired" in response.json()["detail"]
 
 
-def _use_incomplete_hosted_auth_runtime(hosted_env: dict[str, str]) -> None:
-    """Reinitialize the API app with a partial hosted-auth environment and no operator key."""
+def _reinitialize_api_app_with_env(extra_env: dict[str, str]) -> None:
+    """Reinitialize the API app with extra auth environment on top of the test runtime."""
     runtime_paths = main._app_runtime_paths(main.app)
     main.initialize_api_app(
         main.app,
         constants.resolve_primary_runtime_paths(
             config_path=runtime_paths.config_path,
             storage_path=runtime_paths.storage_root,
-            process_env={**dict(runtime_paths.process_env), **hosted_env},
+            process_env={**dict(runtime_paths.process_env), **extra_env},
         ),
     )
+    config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
 
 
 @pytest.mark.parametrize(
@@ -5362,8 +5403,6 @@ def _use_incomplete_hosted_auth_runtime(hosted_env: dict[str, str]) -> None:
     [
         {"SUPABASE_URL": "https://supabase.test"},
         {"SUPABASE_ANON_KEY": "anon-key"},
-        {"MINDROOM_PLATFORM_LOGIN_URL": "https://app.example.com/auth/login"},
-        {"ACCOUNT_ID": "account-123"},
     ],
 )
 def test_incomplete_hosted_auth_refuses_admin_api_without_credentials(
@@ -5371,7 +5410,7 @@ def test_incomplete_hosted_auth_refuses_admin_api_without_credentials(
     hosted_env: dict[str, str],
 ) -> None:
     """A partial hosted configuration must fail closed, never grant the standalone administrator."""
-    _use_incomplete_hosted_auth_runtime(hosted_env)
+    _reinitialize_api_app_with_env(hosted_env)
 
     saved = test_client.put("/api/config/save", json={"agents": {}}, headers={"Origin": "http://testserver"})
     credential = test_client.get("/api/credentials/openai/api-key?include_value=true")
@@ -5391,11 +5430,28 @@ def test_incomplete_hosted_auth_does_not_serve_dashboard(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
-    _use_incomplete_hosted_auth_runtime({"SUPABASE_URL": "https://supabase.test"})
+    _reinitialize_api_app_with_env({"SUPABASE_URL": "https://supabase.test"})
 
     response = test_client.get("/agents", follow_redirects=False)
 
     assert response.status_code == 503
+
+
+def test_api_key_standalone_with_account_id_and_login_url_keeps_working(test_client: TestClient) -> None:
+    """ACCOUNT_ID and the platform login URL alone must not lock an API-key-protected standalone runtime."""
+    _reinitialize_api_app_with_env(
+        {
+            "MINDROOM_API_KEY": "operator-key",
+            "ACCOUNT_ID": "account-123",
+            "MINDROOM_PLATFORM_LOGIN_URL": "https://app.example.com/auth/login",
+        },
+    )
+
+    anonymous = test_client.post("/api/config/load")
+    authorized = test_client.post("/api/config/load", headers={"Authorization": "Bearer operator-key"})
+
+    assert anonymous.status_code == 401
+    assert authorized.status_code == 200
 
 
 def _set_platform_auth(
@@ -5403,7 +5459,7 @@ def _set_platform_auth(
     valid_tokens: set[str],
     platform_login_url: str = "https://platform.example.com/login",
     public_url: str | None = None,
-    account_id: str | None = None,
+    account_id: str | None = "user-123",
     user_id: str = "user-123",
 ) -> None:
     """Configure the API module for platform-managed cookie auth tests."""
@@ -5442,13 +5498,50 @@ def _set_platform_auth(
 def test_supabase_cookie_auth_allows_access(
     test_client: TestClient,
 ) -> None:
-    """Platform requests should authenticate from the mindroom_jwt cookie."""
+    """Platform requests should authenticate the instance owner from the mindroom_jwt cookie."""
     valid_cookie_token = "valid-cookie-token"  # noqa: S105
-    _set_platform_auth(valid_tokens={valid_cookie_token})
+    _set_platform_auth(valid_tokens={valid_cookie_token}, account_id="user-123", user_id="user-123")
     test_client.cookies.set("mindroom_jwt", valid_cookie_token)
 
     response = test_client.post("/api/config/load", headers={"Origin": "http://testserver"})
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize("account_id", [None, "", "   "])
+def test_supabase_auth_without_account_id_refuses_requests(
+    test_client: TestClient,
+    account_id: str | None,
+) -> None:
+    """Supabase auth must fail closed when no instance owner is bound."""
+    valid_token = "valid-token"  # noqa: S105
+    _set_platform_auth(valid_tokens={valid_token}, account_id=account_id, user_id="other-user")
+
+    bearer_response = test_client.put(
+        "/api/config/save",
+        json={"agents": {}},
+        headers={"Authorization": f"Bearer {valid_token}"},
+    )
+    test_client.cookies.set("mindroom_jwt", valid_token)
+    cookie_response = test_client.post("/api/config/load", headers={"Origin": "http://testserver"})
+
+    for response in (bearer_response, cookie_response):
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Supabase dashboard authentication is enabled but ACCOUNT_ID is not set"
+
+
+def test_supabase_bearer_auth_rejects_non_owner(
+    test_client: TestClient,
+) -> None:
+    """A valid token for another user of the shared Supabase project must not reach admin routes."""
+    valid_token = "valid-token"  # noqa: S105
+    _set_platform_auth(valid_tokens={valid_token}, account_id="account-owner", user_id="other-user")
+
+    response = test_client.put(
+        "/api/config/save",
+        json={"agents": {}},
+        headers={"Authorization": f"Bearer {valid_token}"},
+    )
+    assert response.status_code == 403
 
 
 def test_platform_frontend_redirects_to_login_when_cookie_missing(

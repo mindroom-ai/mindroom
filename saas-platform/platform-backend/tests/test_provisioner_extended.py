@@ -171,6 +171,34 @@ class TestProvisionerExtended:
                     assert exc_info.value.status_code == 503
                     assert "Kubectl command not found" in str(exc_info.value.detail)
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"subscription_id": "sub-123", "tier": "byok"},
+            {"subscription_id": "sub-123", "account_id": None, "tier": "byok"},
+            {"subscription_id": "sub-123", "account_id": "", "tier": "byok"},
+            {"subscription_id": "sub-123", "account_id": "   ", "tier": "byok"},
+            {"subscription_id": "sub-123", "account_id": 123, "tier": "byok"},
+        ],
+    )
+    def test_provision_rejects_missing_account_id(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: Mock,
+        mock_helm: Mock,
+        valid_auth: dict,
+        payload: dict,
+    ):
+        """Provisioning must bind every instance to its owner account before any side effects."""
+        response = client.post("/system/provision", json=payload, headers=valid_auth)
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "account_id is required"
+        mock_supabase.table.assert_not_called()
+        mock_kubectl.assert_not_called()
+        mock_helm.assert_not_called()
+
     def test_provision_namespace_creation_failure(
         self, client: TestClient, mock_supabase: MagicMock, mock_kubectl: Mock, valid_auth: dict
     ):

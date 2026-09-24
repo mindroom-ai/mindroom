@@ -499,6 +499,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     _require_instance_dashboard_auth()
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
+    # This is the instance's only Supabase authorization binding; the runtime refuses every login without it.
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise HTTPException(status_code=400, detail="account_id is required")
     tier = data.get("tier", "free")
     existing_instance_id = data.get("instance_id")  # For re-provisioning
 
