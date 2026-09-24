@@ -4,20 +4,22 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
-import json
 import os
 import re
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from mindroom import yaml_io
 from mindroom.atomic_file import atomic_write_bytes_at
+from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.skills import list_skill_listings
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
 _NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n(.+)\Z", re.DOTALL)
@@ -25,6 +27,18 @@ _SECRET = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:sk-|ghp_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{12,}"
     r"|(?i:password|api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*[\"']?[^\s\"']{8,}",
 )
+
+
+class _JournalEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    source: str
+    markdown: str
+    previous: list[str]
+    base_hash: str | None
+
+
+_JOURNAL = TypeAdapter(dict[str, _JournalEntry])
 
 
 def digest(content: str) -> str:
@@ -35,34 +49,29 @@ def digest(content: str) -> str:
 @contextmanager
 def _directory(path: Path) -> Iterator[int]:
     """Open or create a directory without following any symlink component."""
-    descriptor = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for component in path.parts[1:]:
-            with suppress(FileExistsError):
-                os.mkdir(component, mode=0o700, dir_fd=descriptor)
-            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
-            os.close(descriptor)
-            descriptor = child
-    except OSError as exc:
-        msg = "Unsafe skill path"
-        os.close(descriptor)
-        raise ValueError(msg) from exc
-    try:
+    with ExitStack() as stack:
+        try:
+            descriptor = stack.enter_context(
+                open_directory_within_root(Path(path.anchor), path.relative_to(path.anchor), create=True, mode=0o700),
+            )
+        except OSError as exc:
+            msg = "Unsafe skill path"
+            raise ValueError(msg) from exc
         yield descriptor
-    finally:
-        os.close(descriptor)
 
 
 def _read(descriptor: int, filename: str) -> str | None:
     try:
-        file_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptor)
+        with (
+            open_regular_file_within_root(descriptor, filename) as file_fd,
+            os.fdopen(file_fd, closefd=False) as stream,
+        ):
+            return stream.read()
     except FileNotFoundError:
         return None
     except OSError as exc:
         msg = "Unsafe skill file"
         raise ValueError(msg) from exc
-    with os.fdopen(file_fd) as stream:
-        return stream.read()
 
 
 class SkillStore:
@@ -75,7 +84,7 @@ class SkillStore:
         """Capture all existing workspace names, including manually authored skills."""
         return {
             entry.name: digest(self.read_skill(entry.path))
-            for entry in list_skill_listings([self.workspace / "skills"])
+            for entry in list_skill_listings([self.workspace / "skills"], read_text=self.read_skill)
         }
 
     def read_skill(self, path: Path) -> str:
@@ -89,9 +98,9 @@ class SkillStore:
     def owned_names(self) -> set[str]:
         """Identify unedited learner-owned files for review context."""
         with _directory(self.workspace) as descriptor:
-            state = json.loads(_read(descriptor, ".skill-learning.json") or "{}")
+            state = _JOURNAL.validate_json(_read(descriptor, ".skill-learning.json") or "{}")
         snapshot = self.snapshot()
-        return {name for name, entry in state.items() if snapshot.get(name) == digest(entry["markdown"])}
+        return {name for name, entry in state.items() if snapshot.get(name) == digest(entry.markdown)}
 
     def publish(
         self,
@@ -130,38 +139,38 @@ class SkillStore:
         expected: dict[str, str],
         source: str,
     ) -> bool:
-        state = json.loads(_read(workspace_fd, ".skill-learning.json") or "{}")
+        state = _JOURNAL.validate_json(_read(workspace_fd, ".skill-learning.json") or "{}")
         previous = state.get(name)
         with _directory(self.workspace / "skills" / name) as skill_fd:
             current = _read(skill_fd, "SKILL.md")
             current_hash = digest(current) if current is not None else None
-            if previous and previous["source"] == source and previous["markdown"] == markdown and current == markdown:
+            if previous and previous.source == source and previous.markdown == markdown and current == markdown:
                 return False
             if current_hash != expected.get(name):
                 msg = "Skill changed during review"
                 raise ValueError(msg)
-            recovering = bool(previous and previous["source"] == source and previous["markdown"] == markdown)
+            recovering = bool(previous and previous.source == source and previous.markdown == markdown)
             if recovering:
-                if current_hash != previous.get("base_hash"):
+                if previous is None or current_hash != previous.base_hash:
                     msg = "Skill changed during recovery"
                     raise ValueError(msg)
             elif action == "create":
                 if current is not None or name in {existing.lower() for existing in self.snapshot()}:
                     msg = "Skill already exists"
                     raise ValueError(msg)
-            elif action != "update" or not previous or current_hash != digest(previous["markdown"]):
+            elif action != "update" or not previous or current_hash != digest(previous.markdown):
                 msg = "Skill is not learner-owned or was edited"
                 raise ValueError(msg)
             if not recovering:
-                history = previous["previous"] + [previous["markdown"]] if previous else []
-                state[name] = {
-                    "source": source,
-                    "markdown": markdown,
-                    "previous": history[-5:],
-                    "base_hash": current_hash,
-                }
+                history = [*previous.previous, previous.markdown] if previous else []
+                state[name] = _JournalEntry(
+                    source=source,
+                    markdown=markdown,
+                    previous=history[-5:],
+                    base_hash=current_hash,
+                )
             # Journal first: replay can recognize a published file after a crash before queue acknowledgement.
-            atomic_write_bytes_at(workspace_fd, ".skill-learning.json", json.dumps(state).encode(), file_mode=0o600)
+            atomic_write_bytes_at(workspace_fd, ".skill-learning.json", _JOURNAL.dump_json(state), file_mode=0o600)
             atomic_write_bytes_at(skill_fd, "SKILL.md", markdown.encode(), file_mode=0o600)
         return True
 

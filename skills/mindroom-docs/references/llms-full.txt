@@ -987,8 +987,8 @@ Voice duration does not increase token totals, request rows, or AI reply counts,
 Only new recorded calls appear; older voice duration and usage never reported or saved cannot be reconstructed.
 These rows contain no audio, transcripts, conversation IDs, or provider session IDs and are restricted to organization reports.
 
-Portable compaction summaries, background memory auto-flush extraction, and embedded Dynamic Workflow participants contribute their returned provider counters to token totals and model, user, and daily views, including retries and rejected outputs.
-Their request rows use `kind: compaction_summary`, `kind: memory_auto_flush`, or `kind: dynamic_workflow`; ordinary run requests use `kind: run`.
+Portable compaction summaries, background memory auto-flush extraction, automatic skill reviews, and embedded Dynamic Workflow participants contribute their returned provider counters to token totals and model, user, and daily views, including retries and rejected outputs.
+Their request rows use `kind: compaction_summary`, `kind: memory_auto_flush`, `kind: dynamic_workflow`, or `kind: skill_learning`; ordinary run requests use `kind: run`.
 Helpers contribute zero to `run_count`, preserving its AI reply count meaning.
 Embedded workflow usage belongs to the exact caller conversation scope bound by the response runtime, including its private or team store, rather than the participant's synthetic session.
 Helpers use the current trusted requester and remain unattributed when unavailable.
@@ -2522,7 +2522,7 @@ agents:
 | `tools` | list | `[]` | Agent-specific tool entries — plain strings or single-key dicts with config overrides (see [Tools](https://docs.mindroom.chat/tools/) and [Per-Agent Tool Configuration](#per-agent-tool-configuration)); effective tools are `tools + defaults.tools` with duplicates removed |
 | `include_default_tools` | bool | `true` | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out |
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/)) |
-| `skill_learning` | object | disabled | Opt-in background Markdown skill learning; see [Automatic skill learning](https://docs.mindroom.chat/skills/#automatic-skill-learning) for settings, scope and costs. Separate from Agno `learning_mode`. |
+| `skill_learning` | object | disabled | [Automatic skill learning](#automatic-skill-learning) settings; separate from Agno `learning_mode`. |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
 | `participation` | object or null | `null` | Opt into adaptive replies in existing multi-human threads across authorized rooms, including ad hoc rooms; see [Adaptive Participation](#adaptive-participation) |
@@ -3214,6 +3214,24 @@ An existing shell-enabled agent can select [minimal mode](https://docs.mindroom.
 Minimal mode presents one Bash tool and discovers other tools through `mindroom-agent`.
 It keeps the same identity, workspace, memory, history, and permissions.
 The optional `minimal_instructions` list defaults to `[]` and supplies concise guidance on every minimal request; ordinary instructions remain available through CLI context discovery.
+
+
+## Automatic skill learning
+
+`agents.<name>.skill_learning` controls optional background review of completed standalone-agent turns.
+All fields are optional; unknown fields are rejected.
+
+| Field | Type | Default | Bounds and behavior |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Enable reviews that create or update learner-owned workspace Markdown skills. |
+| `model` | string or null | `null` | Reviewer model alias; null uses the agent's configured model. |
+| `cooldown_seconds` | integer | `300` | 0–86400 seconds; coalesce completed turns before review. |
+| `max_input_chars` | integer | `24000` | 1000–100000 characters combined across trace and skill context. |
+| `max_output_chars` | integer | `12000` | 500–32000 characters per generated `SKILL.md`. |
+| `timeout_seconds` | integer | `60` | 1–300 seconds per model review. |
+| `max_attempts` | integer | `3` | 1–5 review or publication attempts per queued generation. |
+
+Reviews incur additional model usage; see [Automatic skill learning](https://docs.mindroom.chat/skills/#automatic-skill-learning) for workspace ownership, minimal-mode deferral, retry behavior and rollback.
 
 # Model Configuration
 
@@ -14207,9 +14225,17 @@ Publication uses the resolved private workspace for private agents. Shared agent
 
 Only learner-owned files can be updated. Bundled, plugin, user-managed and manually authored workspace skill names are protected. The publisher rejects traversal, symlink paths, malformed frontmatter, oversized output and common credential-like strings. The reviewer is also instructed to omit credentials, personal facts and raw transcripts. These checks do not replace reviewing generated instructions before relying on them for sensitive work.
 
-The durable `skill_learning.db` queue stores scope metadata, source revision hashes and pending publication proposals, not raw conversation transcripts. Reviews run serially, at most four per cycle, with bounded retry attempts and exponential delay. Shutdown cancels work; pending proposals survive restart. Current configuration, private ownership and file revisions are checked again before publication. An interrupted publication is replayed by content hash; manually edited files are preserved.
+The durable `skill_learning.db` queue stores scope metadata, source revision hashes and pending publication proposals, not raw conversation transcripts. Reviews run serially across processes sharing the storage root, at most four per cycle, with bounded retry attempts and exponential delay. Shutdown cancels work; pending proposals survive restart. Current configuration, private ownership and file revisions are checked again before publication. An interrupted publication is replayed by content hash; manually edited files are preserved.
 
 Each workspace retains source revision and up to five previous versions per learned skill in `.skill-learning.json`. To roll back, disable learning and restore the chosen `previous` Markdown value to `skills/<name>/SKILL.md`. The manual edit prevents subsequent automatic replacement. To remove a learned skill, disable learning and delete its skill directory. Diagnostic logs report the agent, review outcome and source revision hash.
+
+
+The reviewer receives only effective eligible skills, honoring configured global allowlists and workspace precedence.
+Workspace descriptions and Markdown receive the same credential-pattern redaction as persisted traces; this does not classify or remove arbitrary personal information.
+Oversized traces retain complete role-bearing message objects and mark shortened text with `[truncated]`.
+Exhausted proposals are discarded without acknowledging newer queued generations, which receive a fresh review budget.
+Failure logs include the phase, exception type, attempt count, exhaustion state and bounded code locations, without exception messages, source lines, local variables or transcript content.
+All configuration fields, defaults and bounds are listed in the [agent configuration reference](https://docs.mindroom.chat/configuration/agents/#automatic-skill-learning).
 
 # Plugins
 
@@ -19446,6 +19472,8 @@ MindRoom's architecture consists of several key components working together.
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
+| `skill_learning/worker.py` | Opt-in durable review queue, bounded no-tool inference, cross-process serialization and generation-aware retry completion |
+| `skill_learning/store.py` | Confined Markdown publication, validated ownership journal, revision checks and crash replay |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |

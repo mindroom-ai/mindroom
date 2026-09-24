@@ -7331,6 +7331,7 @@ visibility = ["mindroom.config.agent"]
 [[modules]]
 path = "mindroom.skill_learning.worker"
 depends_on = [
+    "mindroom.file_locks",
     "mindroom.agent_modes",
     "mindroom.agent_storage",
     "mindroom.helper_usage",
@@ -7347,5 +7348,5 @@ visibility = ["mindroom.orchestrator", "mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.skill_learning.store"
-depends_on = ["mindroom.atomic_file", "mindroom.redaction", "mindroom.tool_system.skills"]
+depends_on = ["mindroom.atomic_file", "mindroom.path_confinement", "mindroom.redaction", "mindroom.tool_system.skills"]
 visibility = ["mindroom.skill_learning.worker"]

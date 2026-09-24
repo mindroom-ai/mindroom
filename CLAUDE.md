@@ -209,6 +209,8 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
+| `skill_learning/worker.py` | Opt-in durable review queue, bounded no-tool inference, cross-process serialization and generation-aware retry completion |
+| `skill_learning/store.py` | Confined Markdown publication, validated ownership journal, revision checks and crash replay |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `credentials.py` | Unified credential management (CredentialsManager) |

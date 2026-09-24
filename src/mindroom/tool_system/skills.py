@@ -7,7 +7,7 @@ import os
 import platform
 import re
 import shutil
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -16,6 +16,7 @@ import json5
 from agno.skills import LocalSkills, Skills
 from agno.skills.errors import SkillValidationError
 from agno.skills.loaders import SkillLoader
+from agno.skills.skill import Skill
 
 from mindroom import yaml_io
 from mindroom.constants import runtime_env_values
@@ -25,7 +26,6 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_functio
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
-    from agno.skills.skill import Skill
     from agno.tools.function import Function
 
     from mindroom.config.main import Config
@@ -61,6 +61,7 @@ class _MindroomSkillsLoader(SkillLoader):
     env_vars: Mapping[str, str] | None = None
     credential_keys: set[str] | None = None
     block_script_execution: bool = False
+    read_text: Callable[[Path], str] | None = None
 
     def load(self) -> list[Skill]:
         """Return the eligible skills for the configured roots and allowlist."""
@@ -78,7 +79,7 @@ class _MindroomSkillsLoader(SkillLoader):
 
         skills_by_name: dict[str, Skill] = {}
         for root in _unique_paths(self.roots):
-            for skill in _load_root_skills(root):
+            for skill in _load_root_skills(root, read_text=self.read_text):
                 normalized = _normalize_skill(skill)
                 if normalized is None:
                     continue
@@ -136,6 +137,8 @@ class _MindroomSkills(Skills):
             except SkillValidationError:
                 raise
             except Exception as exc:
+                if isinstance(loader, _MindroomSkillsLoader) and loader.read_text is not None:
+                    raise
                 logger.warning("Error loading skills", loader=repr(loader), error=str(exc))
 
         logger.debug("Loaded skills", count=len(self._skills))
@@ -175,6 +178,7 @@ def build_agent_skills(
     *,
     skill_roots: Sequence[Path] | None = None,
     workspace_skills_root: Path | None = None,
+    workspace_read_text: Callable[[Path], str] | None = None,
     env_vars: Mapping[str, str] | None = None,
     credential_keys: set[str] | None = None,
     output_file_policy: ToolOutputFilePolicy | None = None,
@@ -208,6 +212,7 @@ def build_agent_skills(
         env_vars=env_vars,
         credential_keys=resolved_credential_keys,
         block_script_execution=True,
+        read_text=workspace_read_text,
     )
 
     loaders: list[SkillLoader]
@@ -294,7 +299,11 @@ def _resolve_configured_skill_roots(skill_roots: Sequence[Path] | None = None) -
     return _unique_paths(list(skill_roots) if skill_roots is not None else _get_default_skill_roots())
 
 
-def list_skill_listings(roots: Sequence[Path] | None = None) -> list[_SkillListing]:
+def list_skill_listings(
+    roots: Sequence[Path] | None = None,
+    *,
+    read_text: Callable[[Path], str] | None = None,
+) -> list[_SkillListing]:
     """Return skill listings with precedence rules applied."""
     roots = list(roots or _get_default_skill_roots())
     bundled_root = _get_bundled_skills_dir().expanduser().resolve()
@@ -308,6 +317,7 @@ def list_skill_listings(roots: Sequence[Path] | None = None) -> list[_SkillListi
             resolved_frontmatter = _resolve_skill_frontmatter(
                 skill_dir,
                 allow_missing_frontmatter=True,
+                read_text=read_text,
             )
             if resolved_frontmatter is None:
                 continue
@@ -395,9 +405,13 @@ def _read_skill_frontmatter(
     skill_path: Path,
     *,
     allow_missing: bool = False,
+    read_text: Callable[[Path], str] | None = None,
 ) -> dict[str, Any] | None:
+    # An injected reader owns confinement and must be allowed to reject unsafe entries.
+    content = read_text(skill_path) if read_text is not None else None
     try:
-        content = skill_path.read_text(encoding="utf-8")
+        if content is None:
+            content = skill_path.read_text(encoding="utf-8")
     except Exception as exc:
         logger.warning("Failed to read skill file", path=str(skill_path), error=str(exc))
         return None
@@ -413,6 +427,8 @@ def _read_skill_frontmatter(
     try:
         frontmatter = yaml_io.safe_load(frontmatter_text) or {}
     except Exception as exc:
+        if read_text is not None:
+            raise
         logger.warning("Failed to parse skill frontmatter", path=str(skill_path), error=str(exc))
         return None
 
@@ -443,10 +459,12 @@ def _resolve_skill_frontmatter(
     skill_dir: Path,
     *,
     allow_missing_frontmatter: bool = False,
+    read_text: Callable[[Path], str] | None = None,
 ) -> _ResolvedSkillFrontmatter | None:
     frontmatter = _read_skill_frontmatter(
         skill_dir / _SKILL_FILENAME,
         allow_missing=allow_missing_frontmatter,
+        read_text=read_text,
     )
     if frontmatter is None:
         return None
@@ -467,9 +485,13 @@ def _resolve_skill_frontmatter(
     )
 
 
-def _load_root_skills(root: Path) -> list[Skill]:
+def _load_root_skills(root: Path, *, read_text: Callable[[Path], str] | None = None) -> list[Skill]:
     if not root.exists() or not root.is_dir():
         return []
+
+    if read_text is not None:
+        # Guarded callers must never pass their files through Agno's pathname reader or its cache.
+        return [_skill_from_markdown(folder, read_text(folder / _SKILL_FILENAME)) for folder in _iter_skill_dirs(root)]
 
     resolved_root = root.expanduser().resolve()
     snapshot = tuple(_snapshot_skill_files(resolved_root))
@@ -488,6 +510,27 @@ def _load_root_skills(root: Path) -> list[Skill]:
 
     _SKILL_CACHE[resolved_root] = (snapshot, skills)
     return skills
+
+
+def _skill_from_markdown(folder: Path, content: str) -> Skill:
+    match = _FRONTMATTER_PATTERN.match(content)
+    frontmatter = yaml_io.safe_load(match.group(1)) or {} if match else {}
+    if not isinstance(frontmatter, dict):
+        msg = "Skill frontmatter must be a mapping"
+        raise TypeError(msg)
+    metadata = frontmatter.get("metadata")
+    if isinstance(metadata, str):
+        metadata = json5.loads(metadata) if metadata.strip() else None
+    return Skill(
+        name=frontmatter.get("name", folder.name),
+        description=frontmatter.get("description", ""),
+        instructions=match.group(2).strip() if match else content,
+        source_path=str(folder),
+        metadata=metadata,
+        license=frontmatter.get("license"),
+        compatibility=frontmatter.get("compatibility"),
+        allowed_tools=frontmatter.get("allowed-tools"),
+    )
 
 
 def _normalize_skill(skill: Skill) -> Skill | None:

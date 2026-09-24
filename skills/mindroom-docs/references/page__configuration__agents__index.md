@@ -150,7 +150,7 @@ agents:
 | `tools` | list | `[]` | Agent-specific tool entries — plain strings or single-key dicts with config overrides (see [Tools](https://docs.mindroom.chat/tools/) and [Per-Agent Tool Configuration](#per-agent-tool-configuration)); effective tools are `tools + defaults.tools` with duplicates removed |
 | `include_default_tools` | bool | `true` | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out |
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/)) |
-| `skill_learning` | object | disabled | Opt-in background Markdown skill learning; see [Automatic skill learning](https://docs.mindroom.chat/skills/#automatic-skill-learning) for settings, scope and costs. Separate from Agno `learning_mode`. |
+| `skill_learning` | object | disabled | [Automatic skill learning](#automatic-skill-learning) settings; separate from Agno `learning_mode`. |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
 | `participation` | object or null | `null` | Opt into adaptive replies in existing multi-human threads across authorized rooms, including ad hoc rooms; see [Adaptive Participation](#adaptive-participation) |
@@ -842,3 +842,21 @@ An existing shell-enabled agent can select [minimal mode](https://docs.mindroom.
 Minimal mode presents one Bash tool and discovers other tools through `mindroom-agent`.
 It keeps the same identity, workspace, memory, history, and permissions.
 The optional `minimal_instructions` list defaults to `[]` and supplies concise guidance on every minimal request; ordinary instructions remain available through CLI context discovery.
+
+
+## Automatic skill learning
+
+`agents.<name>.skill_learning` controls optional background review of completed standalone-agent turns.
+All fields are optional; unknown fields are rejected.
+
+| Field | Type | Default | Bounds and behavior |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Enable reviews that create or update learner-owned workspace Markdown skills. |
+| `model` | string or null | `null` | Reviewer model alias; null uses the agent's configured model. |
+| `cooldown_seconds` | integer | `300` | 0–86400 seconds; coalesce completed turns before review. |
+| `max_input_chars` | integer | `24000` | 1000–100000 characters combined across trace and skill context. |
+| `max_output_chars` | integer | `12000` | 500–32000 characters per generated `SKILL.md`. |
+| `timeout_seconds` | integer | `60` | 1–300 seconds per model review. |
+| `max_attempts` | integer | `3` | 1–5 review or publication attempts per queued generation. |
+
+Reviews incur additional model usage; see [Automatic skill learning](https://docs.mindroom.chat/skills/#automatic-skill-learning) for workspace ownership, minimal-mode deferral, retry behavior and rollback.

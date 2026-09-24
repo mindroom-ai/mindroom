@@ -60,6 +60,8 @@ MindRoom's architecture consists of several key components working together.
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
+| `skill_learning/worker.py` | Opt-in durable review queue, bounded no-tool inference, cross-process serialization and generation-aware retry completion |
+| `skill_learning/store.py` | Confined Markdown publication, validated ownership journal, revision checks and crash replay |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
