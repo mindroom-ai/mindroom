@@ -364,6 +364,26 @@ async def enrich_with_time(ctx):
 
 The `persist` option only affects `message:enrich` items because `system:enrich` items are already current-turn context.
 
+### Enrichment in minimal mode
+
+`EnrichmentItem.minimal_required` defaults to `False`.
+In minimal mode, optional system and transient message enrichment remains available through the CLI's enrichment context document instead of being placed directly in the prompt.
+Set `minimal_required=True` when an item must remain visible without a tool call: system enrichment stays in the system prompt, and transient message enrichment stays in the current-turn context message.
+Persisted message enrichment still follows the ordinary history policy.
+Standard mode is unaffected by this flag.
+
+Return an `EnrichmentItem` directly to set the flag; `ctx.add_metadata()` and `ctx.add_instruction()` do not accept it:
+
+```python
+@hook("system:enrich")
+async def required_instruction(ctx):
+    return EnrichmentItem(
+        key="required_policy",
+        text="Use the approved project directory for all file changes.",
+        minimal_required=True,
+    )
+```
+
 ### Performance
 
 Enrichment hooks run concurrently with per-hook timeouts.

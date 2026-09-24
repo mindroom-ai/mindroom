@@ -174,7 +174,7 @@ mindroom run
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
 | **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
-| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup\|status\|confirm\|rotate\|disconnect]`, `!model [name\|list\|reset]`, `!room_model [name\|list\|reset]` (set/reset require a room admin), `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi`; commands are normally handled by the router, while a Desktop-enabled agent can handle `!desktop` directly in a room containing only it and the requester |
+| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup\|status\|confirm\|rotate\|disconnect]`, `!mode <agent> minimal\|standard\|show\|reset` (minimal requires a dedicated Docker worker), `!model [name\|list\|reset]`, `!room_model [name\|list\|reset]` (set/reset require a room admin), `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi`; commands are normally handled by the router, while a Desktop-enabled agent can handle `!desktop` directly in a room containing only it and the requester |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
@@ -215,7 +215,7 @@ mindroom run
 - [Image Messages](https://docs.mindroom.chat/images/) - Image analysis with vision models
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Context-scoped file and video handling
 - [Streaming Responses](https://docs.mindroom.chat/streaming/) - Progressive message edits with presence-based gating
-- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup|status|confirm|rotate|disconnect]`, `!model [name|list|reset]`, `!room_model [name|list|reset]` (set/reset require a room admin), `!thread_mode [room|thread|reset|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
+- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup|status|confirm|rotate|disconnect]`, `!mode <agent> minimal|standard|show|reset` (minimal requires a dedicated Docker worker), `!model [name|list|reset]`, `!room_model [name|list|reset]` (set/reset require a room admin), `!thread_mode [room|thread|reset|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
 - [Interactive Q&A](https://docs.mindroom.chat/interactive/) - Clickable multiple-choice questions via Matrix reactions
 - [Authorization](https://docs.mindroom.chat/authorization/) - User and room access control
 - [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Optional root Matrix Space for grouping managed rooms
@@ -2420,6 +2420,9 @@ agents:
       - Use clear variable names
       - Add comments for complex logic
 
+    # Concise guidance included on every minimal-mode request (default: [])
+    minimal_instructions: []
+
     # Rooms to join (will be created if they don't exist)
     rooms:
       - lobby
@@ -3202,6 +3205,14 @@ agents:
     include_default_tools: false
     tools: [duckduckgo]
 ```
+
+## Conversation mode
+
+Standard mode is the default.
+An existing shell-enabled agent can select [minimal mode](https://docs.mindroom.chat/tools/agent-cli/) per conversation with `!mode <agent> minimal`.
+Minimal mode presents one Bash tool and discovers other tools through `mindroom-agent`.
+It keeps the same identity, workspace, memory, history, and permissions.
+The optional `minimal_instructions` list defaults to `[]` and supplies concise guidance on every minimal request; ordinary instructions remain available through CLI context discovery.
 
 # Model Configuration
 
@@ -4442,6 +4453,182 @@ Loaded state is keyed by the exact `(agent, session_id)` pair.
 Two agents in the same Matrix thread do not share loaded tools.
 Native tool-search sessions neither read nor write this state.
 
+## Minimal mode
+
+[Minimal mode](https://docs.mindroom.chat/tools/agent-cli/) keeps configured tool authorization separate from provider schema presentation.
+Every minimal request exposes one Bash tool; the agent discovers and calls authorized tools through `mindroom-agent`.
+Loading or unloading a toolkit retains the existing session state and continuation timing while the next minimal request still exposes only Bash.
+
+# Minimal Agent Mode
+
+Minimal mode gives an existing agent a short prompt and one Bash tool.
+The agent uses `mindroom-agent` inside its shell worker to discover and call its other tools.
+Its identity, model, workspace, memory, history, and tool permissions stay tied to the same agent.
+Standard mode is the default.
+
+## Select a mode
+
+In the conversation, use:
+
+```text
+!mode helper minimal
+!mode helper show
+!mode helper standard
+!mode helper reset
+```
+
+The selection uses the selected agent's conversation scope.
+For a thread-mode agent, issue the command inside an existing thread; for a room-mode agent, it applies to the room.
+Private-agent selections retain the requester's private storage scope.
+Teams and the OpenAI-compatible API do not use these Matrix conversation overrides.
+An active response keeps the mode it started with.
+Reset removes the saved override and restores the standard default.
+Selecting minimal mode does not grant shell access or add tools.
+If the deployment or agent cannot support minimal mode, the command reports why and keeps the previous selection.
+
+## Instructions and context
+
+Minimal mode replaces the automatically assembled long prompt with discovery guidance and optional `minimal_instructions`:
+
+```yaml
+agents:
+  helper:
+    display_name: Helper
+    tools: [shell]
+    minimal_instructions:
+      - Read the project instructions before changing files.
+```
+
+Role, ordinary instructions, context, and tool guidance remain available through `mindroom-agent context`.
+The short prompt identifies the agent, lists loaded workspace context files, and names the toolkits available through `mindroom-agent`.
+File memory adds the workspace-relative `MEMORY.md` and `memory/` locations using the agent's existing memory configuration.
+File contents are not automatically added to the minimal prompt.
+Command syntax and interactive-question guidance are available through `mindroom-agent --help` and its context commands.
+Custom `minimal_instructions` are appended after this generated prompt.
+Moving guidance out of the initial prompt changes when the model sees it.
+Use `minimal_instructions` for concise guidance that should be present on every minimal request.
+Use the agent's existing memory system for durable notes and `minimal_instructions` for custom minimal-mode guidance.
+Switching modes does not create a second workspace or memory store.
+
+## Discover and call tools
+
+```bash
+mindroom-agent --help
+mindroom-agent tools list
+mindroom-agent tools search calendar
+mindroom-agent tools describe TOOLKIT FUNCTION
+mindroom-agent tools call TOOLKIT FUNCTION --json '{"argument":"value"}'
+mindroom-agent calls get CALL_ID
+mindroom-agent calls wait CALL_ID
+```
+
+Tool names are qualified by toolkit.
+Discovery and calls use the current agent's permissions and requester context.
+Calling a tool returns JSON containing its call ID and current status.
+Top-level `--help` lists every command, including `calls wait CALL_ID` for queued, running, or waiting calls.
+Use command-specific `--help` for arguments and options.
+Use `calls wait` when the result is still queued, running, or waiting for a decision.
+It polls for up to 30 seconds by default, then returns the current receipt with exit code `3` if still pending.
+Use `--timeout SECONDS` to choose another polling budget; reaching it does not cancel the tool.
+Waiting pauses that shell command and its owning response; other conversations can continue.
+New tool calls and schema preparation require an active Bash call.
+Background shell commands that submit new work after Bash has returned are rejected instead of being queued for a later call.
+
+Arguments can also come from `--json-file arguments.json` or `--json-stdin`.
+These three JSON input options are mutually exclusive and require a JSON object.
+Omitting them supplies an empty object.
+Use `--call-id UUID` when the caller needs to retain a known ID before submission.
+Reusing an ID with the same tool and arguments joins the existing live call; different arguments are rejected.
+
+| Command | Options |
+| --- | --- |
+| `tools list` | `--cursor`, `--limit` (default 100) |
+| `tools search QUERY` | `--toolkit`, `--limit` (default 20) |
+| `tools describe TOOLKIT FUNCTION` | None |
+| `tools call TOOLKIT FUNCTION` | `--call-id`, `--json`, `--json-file`, `--json-stdin` |
+| `calls get CALL_ID` | None |
+| `calls wait CALL_ID` | `--timeout` (polling seconds, default 30) |
+| `context list` | `--cursor`, `--limit` (default 100) |
+| `context read NAME` | `--offset` (default 0), `--limit` (default 8000) |
+
+## Read context and large results
+
+```bash
+mindroom-agent context list
+mindroom-agent context read NAME --offset 0 --limit 8000
+```
+
+Use names returned by context discovery.
+Context reads do not accept arbitrary filesystem paths.
+Large schemas provide a context name for paged readback.
+Large tool results provide a bounded preview and a workspace artifact path containing the full output.
+Images, audio, and files remain available through the normal response attachment handling.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Discovery succeeded or the call completed |
+| `1` | Call failed or was cancelled |
+| `2` | Invalid input or rejected request |
+| `3` | Call remains queued, running, or waiting |
+| `4` | Authority or transport unavailable; submission outcome may be unknown |
+
+Exit code `3` is an unfinished call, so scripts using `set -e` must handle it explicitly.
+After an uncertain submission, retain the original call ID and check it before deciding what to do next.
+Submitting a fresh ID may repeat a side effect.
+
+## Approvals, shell lifetime, and restart
+
+Calls use the agent's existing approval rules and interactive response handling.
+An approval decision applies to the saved tool and arguments.
+The isolated worker remains owned by the response across its live waits and continuations, then retires when the response ends.
+Each Bash command starts a fresh shell; workspace files persist, while shell variables and working-directory changes do not carry into the next command.
+Background command handles belong to that response's worker.
+
+CLI tool calls count against the agent's `max_tool_calls_per_turn` budget; calls past it return a failed receipt.
+One response keeps at most 1024 call receipts and runs at most 64 CLI operations at once; further submissions are rejected with an explanatory error.
+Ordinary call results and duplicate-call tracking live only as long as their response owner.
+They are unavailable after process restart.
+Pending approvals use existing durable approval recovery.
+If a pending approval outlasts the CLI grant's 24-hour limit, its live shell retires and the approval resumes with a fresh worker after the decision.
+Recovery does not directly rerun a saved outer Bash script, and an already claimed interrupted approval is not dispatched again.
+When the recovered approval is for the outer Bash command itself, the agent is told that the command was not run and can issue it again.
+A recovered approval streams its progress into the paused reply through the same continuation driver as a standard approval.
+If MindRoom stops abruptly while a Bash call is running, that unfinished turn is left out of later model history.
+Normal agent restart behavior still applies to subsequent model decisions; this is not a guarantee against repeating semantically equivalent work.
+
+## Deployment requirements
+
+The first supported profile requires a dedicated Docker worker with the `mindroom-agent` CLI installed and the agent's existing shell permission.
+Local and static shell runners are unsupported.
+Docker worker images from earlier releases lack the CLI routes; minimal mode reports that the image must be updated, while standard mode keeps using them.
+Configure the existing Docker worker backend and separate origins for `MINDROOM_AGENT_CLI_GATEWAY_URL` and `MINDROOM_AGENT_CLI_PRIMARY_URL`.
+The primary API must require `MINDROOM_API_KEY` authentication.
+Unauthenticated OpenAI execution and spoofable trusted-upstream header authentication are unsupported.
+
+The CLI gateway forwards only `POST /api/agent-cli/operations` and `GET /api/agent-cli/calls/<call-id>`.
+Other API and worker-control routes must not be forwarded by that gateway.
+Startup checks verify those routes and reject unsupported authentication setups.
+The Docker profile isolates processes, mounted state, and injected credentials; it is not a network sandbox.
+Outbound internet, LAN services, and cloud metadata endpoints remain reachable when the deployment's network allows them.
+Operators must block access to network-provided credentials, including cloud metadata, through their deployment's egress controls.
+The startup probes check MindRoom's protected routes; they do not certify isolation from arbitrary network services.
+
+Provider credentials stay at the tools' existing authorized execution locations.
+The shell receives a grant for its own active response, not provider or administrator credentials.
+That grant is readable by its authorized shell and cannot select another agent, requester, or conversation.
+The grant is bearer authority: a process that can read and export it can use the same scoped permissions from any host that can reach the gateway, until expiry or revocation.
+The external MCP gateway keeps its separate authentication and compatible-tool restrictions; minimal mode does not widen its exposed tool set.
+
+## Compare modes
+
+Run the same tasks with the same agent, model, tool configuration, and starting workspace in both modes.
+Compare task success, input and output tokens, elapsed time, editing failures, and discovery calls.
+Include tool-heavy work, approval waits, and tasks that depend on long instructions.
+Record model and configuration versions with the results.
+A smaller initial prompt alone does not establish lower total cost or better task quality.
+
 # Execution & Coding
 
 Use these tools to inspect and edit local files, run shell commands or Python, work in a code-aware workspace, manage Docker resources, and generate local artifacts such as exports and charts.
@@ -4599,7 +4786,8 @@ save_file("temporary notes\n", "scratch/notes.txt")
 Plain command strings and single-item argv lists that look shell-like run through `bash -c`, using the prepared execution environment without sourcing login profiles on every call.
 Pass `["bash", "-lc", "command"]` explicitly when login-shell initialization is needed.
 Explicit multi-item argv lists run directly without shell parsing.
-If the command exits within `timeout`, the tool returns the last `tail` lines of stdout, or stderr on non-zero exit.
+If the command exits within `timeout`, the tool returns the last `tail` lines of stdout.
+On non-zero exit, useful stdout is preserved together with stderr.
 Shell output is also capped to the most recent 51200 bytes, with a truncation notice when older output is dropped.
 If the timeout is exceeded, the process keeps running in the background and the tool returns a `shell:...` handle.
 Use `check_shell_command(handle)` to poll a backgrounded command and `kill_shell_command(handle)` to stop it.
@@ -15128,6 +15316,26 @@ async def enrich_with_time(ctx):
 
 The `persist` option only affects `message:enrich` items because `system:enrich` items are already current-turn context.
 
+### Enrichment in minimal mode
+
+`EnrichmentItem.minimal_required` defaults to `False`.
+In minimal mode, optional system and transient message enrichment remains available through the CLI's enrichment context document instead of being placed directly in the prompt.
+Set `minimal_required=True` when an item must remain visible without a tool call: system enrichment stays in the system prompt, and transient message enrichment stays in the current-turn context message.
+Persisted message enrichment still follows the ordinary history policy.
+Standard mode is unaffected by this flag.
+
+Return an `EnrichmentItem` directly to set the flag; `ctx.add_metadata()` and `ctx.add_instruction()` do not accept it:
+
+```python
+@hook("system:enrich")
+async def required_instruction(ctx):
+    return EnrichmentItem(
+        key="required_policy",
+        text="Use the approved project directory for all file changes.",
+        minimal_required=True,
+    )
+```
+
 ### Performance
 
 Enrichment hooks run concurrently with per-hook timeouts.
@@ -17397,6 +17605,7 @@ Commands start with `!` and are normally handled by the router agent.
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
 | `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent |
+| `!mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
 | `!room_model [name\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) |
 | `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room |
@@ -17439,7 +17648,7 @@ Display available commands or get detailed help on a specific topic.
 !help edit_schedule
 ```
 
-**Topics:** `schedule`, `config`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
+**Topics:** `schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
 
 ### `!hi`
 
@@ -17581,6 +17790,31 @@ Only the same Matrix requester in the same agent scope can confirm the matching 
 `!desktop rotate` starts the same flow while leaving the current target active until confirmation.
 The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
 See [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) for local login and allowlist instructions.
+
+### `!mode`
+
+Switch one agent's tool interface for its next Matrix response in the current conversation.
+Minimal mode exposes only Bash to the model; the agent's configured tools remain available through the MindRoom CLI.
+Standard mode restores the usual tool interface.
+
+```
+!mode helper minimal
+!mode helper show
+!mode helper standard
+!mode helper reset
+```
+
+The choice survives restarts without changing `config.yaml`.
+For agents using threads, run the command inside an existing thread and continue talking to the agent in that same thread.
+For agents using `thread_mode: room`, the choice applies to the whole room, including commands sent from a thread.
+Private agents store the choice separately for each requester.
+Other agents and conversations are unaffected; teams and OpenAI-compatible API requests do not use this selection.
+
+You must be authorized to use the named agent.
+Minimal mode requires the agent's existing run, check, and kill shell permissions, a canonical workspace, and a supported dedicated Docker worker deployment.
+Unsupported deployment settings are rejected before saving the choice.
+If shell permissions or deployment settings later change, minimal responses fail closed.
+Run `!mode helper standard` or `!mode helper reset` in the same conversation to remove the saved choice and restore standard mode.
 
 ### `!model`
 
@@ -19157,6 +19391,7 @@ MindRoom's architecture consists of several key components working together.
 ## Components
 
 - [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/) - How MindRoom connects to Matrix
+- [Internal Turn CLI](https://docs.mindroom.chat/architecture/agent-cli/) - Minimal-mode discovery, response ownership, and approval recovery
 - [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/) - How agents are managed
 - [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) - The inbound turn pipeline and its module boundaries
 - [Migration and Compatibility Boundaries](https://docs.mindroom.chat/architecture/migrations/) - Current owners for historical formats, dependency migrations, and retained compatibility
@@ -19183,6 +19418,16 @@ MindRoom's architecture consists of several key components working together.
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
+| `minimal_agent.py` | Same live Agent with one provider-facing Bash tool and hidden canonical tool preparation |
+| `agent_cli/` | Response-owned CLI grants, call admission, worker leases, discovery, and result projection |
+| `agent_modes.py` | Conversation-scoped standard/minimal selection persistence |
+| `cli_approval_recovery.py` | Exact saved CLI approval execution through rebuilt canonical bindings and ordinary interrupted-response recovery |
+| `cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and terminal cleanup |
+| `commands/mode_commands.py` | Authorized agent mode selection with canonical session scope and deployment preflight |
+| `api/agent_cli.py` | Authenticated transport for response-owned CLI operations and live call receipts |
+| `api/sandbox_runner_cli.py` | Worker CLI grant installation, network verification, and pinned shell transport |
+| `tool_system/agent_tool_calls.py` | Prepared live-Agent catalog and serialized native execution of qualified tools |
+| `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
 | `shell_output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
 | `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
@@ -20369,7 +20614,7 @@ Paths are relative to `src/mindroom/`.
 | Claude requests include sampling controls rejected in supported modes. | [Issue #9931](https://github.com/agno-agi/agno/issues/9931), [PR #9933](https://github.com/agno-agi/agno/pull/9933), both open. | `agno_compat_claude.py`; check top-level parameters and `extra_body` for the same model generations. |
 | Vertex Claude tool definitions contain rejected provider-level `strict` fields. | [Issue #6599](https://github.com/agno-agi/agno/issues/6599), open; [PR #6923](https://github.com/agno-agi/agno/pull/6923), closed without merge. | `agno_compat_vertex_claude_tools.py`; preserve schema properties named `strict`. |
 | Knowledge search failures become plausible empty results. | [Issue #10150](https://github.com/agno-agi/agno/issues/10150), [PR #10152](https://github.com/agno-agi/agno/pull/10152), both open. | `agno_compat_knowledge.py`; insertion failures and validation need separate work. |
-| Prepared requests and effective tools require private Agent/Team APIs. | [Issue #7806](https://github.com/agno-agi/agno/issues/7806), [PR #7807](https://github.com/agno-agi/agno/pull/7807), both open. | `agno_compat_prepared_tools.py`; an inspection API must also support executable run-context/media bindings to replace the RTC path. |
+| Prepared requests and effective tools require private Agent/Team APIs. | [Issue #7806](https://github.com/agno-agi/agno/issues/7806), [PR #7807](https://github.com/agno-agi/agno/pull/7807), both open. | `agno_compat_prepared_tools.py`; an inspection API must also support executable run-context/media bindings to replace the RTC and live-turn catalog paths. |
 | Async runs lack supported persistence hooks for synchronous storage owners. | [Issue #10149](https://github.com/agno-agi/agno/issues/10149), open; [PR #10148](https://github.com/agno-agi/agno/pull/10148), open and partial. | `agno_compat_session_persistence.py`; the PR only routes Agent startup through the awaitable read path. Agent/Team writes and owner dispatch remain. |
 
 [PR #9814](https://github.com/agno-agi/agno/pull/9814) is merged, and its typed embedding errors are present in the pinned Agno 3.0.9 embedder.
@@ -20384,6 +20629,10 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 
 | Observed gap or required extension point | Next upstream work | Local evidence |
 | --- | --- | --- |
+| Provider history is not available before an outer Bash call completes. | Expose a public pre-dispatch callback with actual provider history and propagating session/run persistence. Verified against Agno 3.0.9; no issue or PR identified. | `agno_compat_cli_checkpoint.py`; exact instance-bound batch capture includes resolved fallback models and excludes inner dispatch. |
+| Hidden nested control calls cannot stop their owning provider call through a public per-execution signal. | Expose a public per-call stop signal. Verified against installed Agno; no issue or PR identified. | `agno_compat_prepared_tools.py`; retain a shallow Function copy on the owning FunctionCall until Agno builds its result. |
+| Async model tool execution leaves generator consumers and synchronous threads alive after cancellation. | Own cancellation and cleanup for both execution paths. Reproduced against installed Agno 3.0.9; no issue or PR identified. | `agno_compat_prepared_tools.py`; public FunctionCall overrides fence late starts and settle consumers without replacing normal execution/hooks. |
+| Tool preparation does not expose the per-run Function copy the provider calls. | Expose the bound per-run Function from public preparation; no issue or PR identified. | `agno_compat_prepared_tools.py`; BashPresentationFunction reports its prepared copy so the CLI checkpoint can match provider calls exactly. |
 | ModelsLab polls a local artifact UUID and discards completed URLs and wait outcomes. | Poll the provider job ID, accept numeric ETAs, retain completed outputs, and distinguish retryable status failures from terminal rejection. | `tools/agno_compat_modelslabs.py`; `tests/test_modelslabs_tool.py`. |
 | MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, and leaves temporary audio after encoding failures. | Use a portable font default, forward styles, preserve complete glyph bounds, advance wrapped words, and clean owned audio files on every exit; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; regressions in `tests/test_moviepy_video_tools.py`, `tests/test_moviepy_caption_layout.py`, and `tests/test_moviepy_caption_output.py`. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
@@ -20445,7 +20694,8 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
 | `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media, asynchronous post-batch checkpoint chaining, and resumed-response callbacks, the per-loop model request gate, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices and mid-turn judgments, the model-call cap and its warning, request logging, media fallback, provider stream retries, prompt caching, and participation decisions remain in their owning modules. |
-| `agno_compat_prepared_tools.py` | Private Agent/Team tool preparation and temporary Team instruction restoration. | `history/prompt_tokens.py` owns estimation/cache policy; `matrix_rtc/call_tools.py` owns execution context, authorization, and LiveKit conversion. |
+| `agno_compat_cli_checkpoint.py` | Task-scoped real provider batch snapshots, including resolved fallback instances, keyed by exact FunctionCall identity. The response lifetime resolves lazy prepared bindings per pull; completed sibling Bash media stays in native result messages. | `agent_cli/turn.py` owns admission and calls the existing propagating `agent_storage` boundary before binding or effects; `cli_approval_recovery.py` persists interrupted-replay sessions through the same `save_cli_session` boundary. |
+| `agno_compat_prepared_tools.py` | Private Agent/Team tool preparation, temporary instruction restoration, call-local result-stream/thread lifetime ownership, per-execution stop signaling, and reporting the Bash facade's actual per-run Function copy. | `history/prompt_tokens.py` owns estimation/cache policy; `matrix_rtc/call_tools.py` owns voice policy; `tool_system/agent_tool_calls.py` owns qualified live-turn bindings and serialized execution. |
 | `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners keep the newest four marked viewed images within a 10 MiB aggregate limit, disclose omissions without changing stored artifacts, and charge provider visual estimates or a conservative fallback in replay planning. |
 | `tool_system/agno_compat_tool_hooks.py` | Private FunctionCall sync/async hook-chain adaptation. | `tool_system/tool_hooks.py` owns deferred-result handling, synchronous execution, approvals, dispatch, and cancellation. |
 | `tool_system/agno_compat_function_schema.py` | Per-Function schema processor binding and rebinding after copies. | `tool_system/output_files.py` retains schema transformation, workspace/path rules, execution, and receipts. |
@@ -22091,6 +22341,11 @@ The gateway does not provide process isolation for native integrations.
 The gateway does not automatically retry an invocation whose outcome is unknown.
 Upstream MCP reconnection can refresh a failed session for a later call without replaying the failed action.
 Existing tool-specific authorization, provider scopes, worker isolation, and filters remain authoritative.
+
+## Agent CLI
+
+The [minimal-mode agent CLI](https://docs.mindroom.chat/tools/agent-cli/) belongs to an active agent response and uses a separate restricted gateway.
+It does not change external MCP authentication, saved selections, or compatible-tool restrictions.
 
 # Docker Deployment
 

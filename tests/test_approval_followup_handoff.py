@@ -220,7 +220,9 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(
         target: MessageTarget,
         tool_trace_collector: list[ToolTraceEntry],
         progress: ProgressPublisher | None,
+        cli_approval_handler: object = None,
     ) -> CompletedApprovalRun | PausedAttempt:
+        assert cli_approval_handler is None
         del request, tool_trace_collector, progress
         generations.append(continuation.generation)
         assert continuation.continuation_count == 2
@@ -304,7 +306,9 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
         target: MessageTarget,
         tool_trace_collector: list[ToolTraceEntry],
         progress: ProgressPublisher | None,
+        cli_approval_handler: object = None,
     ) -> PausedAttempt:
+        assert cli_approval_handler is None
         del continuation, request, target, tool_trace_collector, progress
         order.append("first batch")
         batch_started.set()

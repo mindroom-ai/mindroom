@@ -13,7 +13,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from contextlib import redirect_stderr, redirect_stdout, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -90,6 +90,7 @@ if TYPE_CHECKING:
 
     from agno.tools.toolkit import Toolkit
 
+    from mindroom.api.sandbox_runner_cli import CliWorkerRuntime
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.catalog import ToolValidationInfo
@@ -550,12 +551,21 @@ class SandboxRunnerViewFileResponse(BaseModel):
     failure_kind: Literal["tool", "worker"] | None = None
 
 
+@dataclass
+class _SandboxRunnerCliState:
+    """Single-turn CLI slot: fenced before installation, then holding the installed runtime."""
+
+    install_started: bool = False
+    runtime: CliWorkerRuntime | None = None
+
+
 @dataclass(frozen=True)
 class _SandboxRunnerContext:
     runtime_paths: RuntimePaths
     config: Config
     tool_metadata: dict[str, Any]
     runner_token: str | None
+    cli: _SandboxRunnerCliState = field(default_factory=_SandboxRunnerCliState)
 
 
 @dataclass(frozen=True)
@@ -594,6 +604,11 @@ def app_runtime_paths(app: FastAPI) -> RuntimePaths:
 def app_runtime_config(app: FastAPI) -> Config:
     """Return sandbox runner config stored on the FastAPI app."""
     return _app_context(app).config
+
+
+def app_cli_state(app: FastAPI) -> _SandboxRunnerCliState:
+    """Return the sandbox runner's single-turn CLI slot stored on the FastAPI app."""
+    return _app_context(app).cli
 
 
 def resolve_script_state_workspace(

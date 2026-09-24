@@ -159,7 +159,8 @@ save_file("temporary notes\n", "scratch/notes.txt")
 Plain command strings and single-item argv lists that look shell-like run through `bash -c`, using the prepared execution environment without sourcing login profiles on every call.
 Pass `["bash", "-lc", "command"]` explicitly when login-shell initialization is needed.
 Explicit multi-item argv lists run directly without shell parsing.
-If the command exits within `timeout`, the tool returns the last `tail` lines of stdout, or stderr on non-zero exit.
+If the command exits within `timeout`, the tool returns the last `tail` lines of stdout.
+On non-zero exit, useful stdout is preserved together with stderr.
 Shell output is also capped to the most recent 51200 bytes, with a truncation notice when older output is dropped.
 If the timeout is exceeded, the process keeps running in the background and the tool returns a `shell:...` handle.
 Use `check_shell_command(handle)` to poll a backgrounded command and `kill_shell_command(handle)` to stop it.
