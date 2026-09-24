@@ -215,6 +215,11 @@ def _app_auth_state(api_app: FastAPI) -> ApiAuthState:
     """Return the committed auth state for one API app instance."""
     app_state = config_lifecycle.app_state(api_app)
     api_state = config_lifecycle.require_api_state(api_app)
+    # Snapshots are published whole, so a cached state is read without contending with config writers.
+    snapshot = api_state.snapshot
+    state = cast("ApiAuthState | None", snapshot.auth_state)
+    if state is not None and state.runtime_paths == snapshot.runtime_paths:
+        return state
     with api_state.config_lock:
         snapshot = api_state.snapshot
         state = cast("ApiAuthState | None", snapshot.auth_state)
@@ -1027,6 +1032,19 @@ def _require_browser_mutation_origin(
     if origin is None:
         raise HTTPException(403, "Browser changes require a valid public origin")
     require_same_origin(request, origin)
+
+
+def unauthenticated_dashboard_runtime(api_app: FastAPI) -> RuntimePaths | None:
+    """Return the runtime when its dashboard serves every request as the administrator without a credential."""
+    auth_state = _app_auth_state(api_app)
+    # These are the credentials `authenticate_user` checks before its credential-free branch.
+    if (
+        auth_state.settings.trusted_upstream.enabled
+        or auth_state.supabase_auth is not None
+        or auth_state.settings.mindroom_api_key
+    ):
+        return None
+    return auth_state.runtime_paths
 
 
 async def authenticate_user(

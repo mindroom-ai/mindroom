@@ -503,7 +503,7 @@ def test_api_lifespan_syncs_env_credentials_on_startup(
     )
     monkeypatch.setattr(main, "_watch_config", _fake_watch_config)
 
-    with TestClient(main.app) as client:
+    with TestClient(main.app, base_url="http://localhost") as client:
         assert client.get("/api/health").status_code == 200
 
     assert len(sync_calls) == 1
@@ -794,7 +794,7 @@ def test_api_lifespan_loads_config_from_injected_runtime(
     monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
     monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
 
-    with TestClient(main.app) as client:
+    with TestClient(main.app, base_url="http://localhost") as client:
         response = client.post("/api/config/load")
 
     assert response.status_code == 200
@@ -2532,7 +2532,7 @@ def test_homeassistant_connect_rejects_draft_execution_scope_override(
     api_key_client: TestClient,
 ) -> None:
     """Home Assistant connect must reject draft-only execution-scope overrides."""
-    api_key_client.headers["Origin"] = "http://testserver"
+    api_key_client.headers["Origin"] = "http://localhost"
     config = _config_with_worker_scope("user")
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
@@ -2612,7 +2612,7 @@ def test_spotify_connect_uses_pending_oauth_state(
 
 def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: TestClient) -> None:
     """Spotify connect must reject draft-only execution-scope overrides."""
-    api_key_client.headers["Origin"] = "http://testserver"
+    api_key_client.headers["Origin"] = "http://localhost"
     config = _config_with_worker_scope("user")
 
     main.initialize_api_app(
@@ -2927,7 +2927,7 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
     monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
 
-    with TestClient(main.app) as client:
+    with TestClient(main.app, base_url="http://localhost") as client:
         response = client.put(
             "/api/config/save",
             json={
@@ -3288,7 +3288,7 @@ def test_api_config_load_accepts_missing_plugin_path_in_degraded_mode(temp_confi
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
     assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is True
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
 
     response = client.post("/api/config/load")
 
@@ -3303,7 +3303,7 @@ def test_api_config_load_returns_422_for_malformed_yaml(temp_config_file: Path) 
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
     config_lifecycle.load_config_into_app(runtime_paths, main.app)
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
 
     response = client.post("/api/config/load")
 
@@ -3317,7 +3317,7 @@ def test_api_config_load_does_not_serve_stale_cache_after_invalid_reload(temp_co
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
     config_lifecycle.load_config_into_app(runtime_paths, main.app)
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
 
     initial_response = client.post("/api/config/load")
     assert initial_response.status_code == 200
@@ -3629,7 +3629,10 @@ def test_exported_app_cors_uses_reinitialized_runtime(tmp_path: Path) -> None:
     """The exported API app should derive CORS from its current runtime paths."""
     runtime_paths = _runtime_paths(
         tmp_path,
-        process_env={"MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS": "https://dashboard.example.test"},
+        process_env={
+            "MINDROOM_API_KEY": "test-key",
+            "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS": "https://dashboard.example.test",
+        },
     )
     main.initialize_api_app(main.app, runtime_paths)
 
@@ -3853,8 +3856,8 @@ def test_frontend_login_propagates_trusted_upstream_auth_misconfiguration(
         ({}, 403),
         ({"Origin": "null"}, 403),
         ({"Origin": "https://other.example.org"}, 403),
-        ({"Origin": "http://testserver", "Sec-Fetch-Site": "cross-site"}, 403),
-        ({"Origin": "http://testserver"}, 200),
+        ({"Origin": "http://localhost", "Sec-Fetch-Site": "cross-site"}, 403),
+        ({"Origin": "http://localhost"}, 200),
         ({"Authorization": "Bearer "}, 403),
         ({"Authorization": "Basic test-key"}, 403),
         ({"Authorization": "Bearer test-key"}, 200),
@@ -3875,7 +3878,7 @@ def test_cookie_mutations_require_browser_origin(
     ("public_url", "origin", "expected"),
     [
         ("https://public.example.org/dashboard", "https://public.example.org", 200),
-        ("https://public.example.org", "http://testserver", 403),
+        ("https://public.example.org", "http://localhost", 403),
         ("missing-scheme", "://", 403),
     ],
 )
@@ -3899,7 +3902,7 @@ def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClien
     assert response.status_code == 200
     assert response.cookies.get("mindroom_api_key") == "test-key"
 
-    response = api_key_client.post("/api/config/load", headers={"Origin": "http://testserver"})
+    response = api_key_client.post("/api/config/load", headers={"Origin": "http://localhost"})
     assert response.status_code == 200
 
 
@@ -4244,7 +4247,7 @@ def api_key_client(temp_config_file: Path) -> TestClient:
         supabase_auth=None,
     )
     config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
-    return TestClient(main.app)
+    return TestClient(main.app, base_url="http://localhost")
 
 
 def test_api_key_health_stays_open(api_key_client: TestClient) -> None:
@@ -5366,7 +5369,7 @@ def _set_platform_auth(
 def _platform_sso_token(
     token_type: str,
     *,
-    audience: str = "http://testserver",
+    audience: str = "http://localhost",
     subject: str = "user-123",
     secret: str = _PLATFORM_SSO_SECRET,
     lifetime_seconds: int = 60,
@@ -5424,7 +5427,7 @@ def test_platform_sso_ticket_exchange_sets_host_only_session(test_client: TestCl
 
     session_token = set_cookie.split(";", 1)[0].split("=", 1)[1]
     _use_platform_session(test_client, session_token)
-    assert test_client.post("/api/config/load", headers={"Origin": "http://testserver"}).status_code == 200
+    assert test_client.post("/api/config/load", headers={"Origin": "http://localhost"}).status_code == 200
 
 
 def test_platform_sso_ticket_is_single_use(test_client: TestClient) -> None:
@@ -5491,7 +5494,7 @@ def test_platform_sso_tickets_and_sessions_are_not_interchangeable(test_client: 
     _set_platform_auth(valid_tokens=set())
 
     _use_platform_session(test_client, _platform_ticket())
-    assert test_client.post("/api/config/load", headers={"Origin": "http://testserver"}).status_code == 401
+    assert test_client.post("/api/config/load", headers={"Origin": "http://localhost"}).status_code == 401
 
     test_client.cookies.clear()
     response = test_client.get(
@@ -5528,7 +5531,7 @@ def test_platform_sso_is_disabled_without_instance_secret(test_client: TestClien
     assert response.status_code == 404
 
     _use_platform_session(test_client, _platform_session())
-    assert test_client.post("/api/config/load", headers={"Origin": "http://testserver"}).status_code == 401
+    assert test_client.post("/api/config/load", headers={"Origin": "http://localhost"}).status_code == 401
 
 
 def test_platform_runtime_ignores_platform_api_cookie(test_client: TestClient) -> None:
@@ -5537,7 +5540,7 @@ def test_platform_runtime_ignores_platform_api_cookie(test_client: TestClient) -
     _set_platform_auth(valid_tokens={supabase_token})
     test_client.cookies.set("mindroom_jwt", supabase_token)
 
-    response = test_client.post("/api/config/load", headers={"Origin": "http://testserver"})
+    response = test_client.post("/api/config/load", headers={"Origin": "http://localhost"})
 
     assert response.status_code == 401
 

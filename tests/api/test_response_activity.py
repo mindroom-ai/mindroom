@@ -247,7 +247,10 @@ async def test_embedded_api_binds_and_clears_live_gate(
 
     async def serve(server: object) -> None:
         del server
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=main.app),
+            base_url="http://localhost",
+        ) as client:
             response = await client.get("/api/responses/activity")
         assert response.status_code == 200
         assert response.json()["active_matrix_operations"] == 1

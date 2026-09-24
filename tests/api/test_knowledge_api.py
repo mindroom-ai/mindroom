@@ -136,7 +136,7 @@ def _test_client(tmp_path: Path) -> TestClient:
     runtime_paths = _runtime_paths(tmp_path)
     main.initialize_api_app(main.app, runtime_paths)
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
-    return TestClient(main.app)
+    return TestClient(main.app, base_url="http://localhost")
 
 
 class _RecordingRefreshScheduler:
@@ -651,7 +651,7 @@ def test_api_lifespan_does_not_schedule_all_configured_knowledge_bases(tmp_path:
 
     with (
         patch("mindroom.knowledge.refresh_scheduler.KnowledgeRefreshScheduler.schedule_refresh") as schedule,
-        TestClient(main.app) as client,
+        TestClient(main.app, base_url="http://localhost") as client,
     ):
         assert client.get("/api/health").status_code == 200
 
@@ -668,7 +668,7 @@ def test_api_lifespan_prefers_orchestrator_refresh_scheduler(tmp_path: Path) -> 
     try:
         with (
             patch("mindroom.api.main.KnowledgeRefreshScheduler") as api_owned_scheduler,
-            TestClient(main.app) as client,
+            TestClient(main.app, base_url="http://localhost") as client,
         ):
             assert client.get("/api/health").status_code == 200
             assert config_lifecycle.app_state(client.app).knowledge_refresh_scheduler is scheduler

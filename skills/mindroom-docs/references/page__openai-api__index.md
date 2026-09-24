@@ -34,6 +34,8 @@ OPENAI_COMPAT_ALLOW_UNAUTHENTICATED=true
 ```
 
 Without either of these, the API returns 401 on all requests.
+Unauthenticated access only answers requests addressed to a loopback name, an IP address, or a host allowed by `MINDROOM_DASHBOARD_ALLOWED_HOSTS`, and refuses browser requests from other sites.
+A client that reaches MindRoom by another host name, such as `http://host.docker.internal:8765/v1`, needs that name in `MINDROOM_DASHBOARD_ALLOWED_HOSTS` or an API key.
 
 ### 2. Start MindRoom
 
