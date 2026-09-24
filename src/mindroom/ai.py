@@ -25,6 +25,8 @@ from agno.run.agent import (
 from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
+from mindroom.agent_cli.events import stream_cli_events
+from mindroom.agent_cli.lifetime import cli_control_executions
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.agno_compat_session_persistence import drain_agent_cancellation
@@ -46,7 +48,7 @@ from mindroom.delegation.lifecycle import (
     note_child_run_id,
     observe_child_event,
 )
-from mindroom.error_handling import get_user_friendly_error_message, run_error_event_text
+from mindroom.error_handling import get_user_friendly_error_message, run_error_event_exception
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history.interrupted_replay import (
     persist_interrupted_replay,
@@ -80,6 +82,7 @@ from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
+from mindroom.minimal_agent import MinimalAgent
 from mindroom.pre_model_preparation import (
     build_agent_off_loop,
     close_unreturned_agent,
@@ -109,6 +112,7 @@ from mindroom.response_turn import (
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
+    AuditedToolExecution,
     CollectedStreamPresentation,
     StreamingToolTracker,
     complete_pending_tool_block,
@@ -726,7 +730,7 @@ def _track_stream_tool_completed(
     agent_name: str,
 ) -> None:
     """Track completed tool-call metadata for streaming output."""
-    if event.tool is not None:
+    if event.tool is not None and not isinstance(event.tool, AuditedToolExecution):
         state.completed_tool_executions.append(event.tool)
     completion = state.tool_tracker.complete(event.tool)
     if completion is None:
@@ -993,8 +997,27 @@ async def _close_agent_on_preparation_failure(
         raise
 
 
+def _minimal_turn_enrichment(
+    agent: MinimalAgent,
+    ctx: ResponseTurnContext,
+    session_preamble: str,
+    transient_memory: str,
+) -> str:
+    """Keep optional current context discoverable and trusted runtime assignments inline."""
+    agent.response_context = ctx
+    agent.context_documents["memory"] = render_transient_context((session_preamble, transient_memory))
+    agent.context_documents["enrichment"] = render_enrichment_block(
+        [*ctx.system_enrichment_items, *ctx.transient_enrichment_items],
+    )
+    required_system = [item for item in ctx.system_enrichment_items if item.minimal_required]
+    agent.system_message = agent.bootstrap_message
+    if required_system:
+        agent.system_message += "\n" + _render_system_enrichment_context(required_system)
+    return render_enrichment_block([item for item in ctx.transient_enrichment_items if item.minimal_required])
+
+
 @timed("system_prompt_assembly")
-async def _prepare_agent_and_prompt(
+async def _prepare_agent_and_prompt(  # noqa: PLR0915 - preserve standard preparation beside explicit minimal context
     ctx: ResponseTurnContext,
     *,
     prompt: str,
@@ -1059,6 +1082,7 @@ async def _prepare_agent_and_prompt(
                 dynamic_tool_continuation=True,
                 supports_native_tool_approval=supports_native_tool_approval,
                 eager_deferred_tools=eager_deferred_tools,
+                agent_mode=ctx.agent_mode,
             )
             prewarm_agent_model_client(
                 agent,
@@ -1142,18 +1166,26 @@ async def _prepare_agent_and_prompt(
         shared_scope_storage=scope_context.storage if scope_context is not None else None,
         caller_owned_agent=reusable_agent,
     ):
-        _append_additional_context(agent, prompt_parts.session_preamble)
-        if ctx.system_enrichment_items:
-            _append_additional_context(
+        if isinstance(agent, MinimalAgent):
+            transient_turn_context = _minimal_turn_enrichment(
                 agent,
-                _render_system_enrichment_context(ctx.system_enrichment_items),
-            )
-        transient_turn_context = render_transient_context(
-            (
+                ctx,
+                prompt_parts.session_preamble,
                 prompt_parts.transient_turn_context,
-                render_enrichment_block(list(ctx.transient_enrichment_items)),
-            ),
-        )
+            )
+        else:
+            _append_additional_context(agent, prompt_parts.session_preamble)
+            if ctx.system_enrichment_items:
+                _append_additional_context(
+                    agent,
+                    _render_system_enrichment_context(ctx.system_enrichment_items),
+                )
+            transient_turn_context = render_transient_context(
+                (
+                    prompt_parts.transient_turn_context,
+                    render_enrichment_block(list(ctx.transient_enrichment_items)),
+                ),
+            )
 
         prepared_execution = await prepare_agent_execution_context(
             ctx,
@@ -1292,6 +1324,8 @@ async def _prepare_agent_run_context(
             model_params=model_params_payload(agent.model) if agent.model is not None else {},
             extra_metadata=deep_merge_metadata(ctx.matrix_run_metadata, run_extra_content),
         )
+        if ctx.agent_mode == "minimal":
+            metadata = dict(metadata or {}) | {"agent_mode": "minimal"}
         if turn_recorder is not None:
             turn_recorder.set_run_metadata(metadata)
 
@@ -1461,7 +1495,7 @@ async def ai_response(  # noqa: C901, PLR0915
     """
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
-    if collect_streamed_response:
+    if collect_streamed_response or ctx.agent_mode == "minimal":
         return await _collect_response_body_with_trace(
             stream_agent_response(
                 ctx,
@@ -1697,6 +1731,7 @@ async def ai_response(  # noqa: C901, PLR0915
             runtime_model_name=prepared_run.runtime_model_name,
             output_tokens=_usage_metric_int(response.metrics, "output_tokens"),
             tool_executions=tuple(response.tools or ()),
+            control_executions=cli_control_executions(prepared_run.agent),
             completed_tools=tuple(response_tool_trace),
             metadata_content=metadata_content,
         )
@@ -1834,12 +1869,13 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
                 continue
 
             if isinstance(event, RunErrorEvent):
-                error_text = run_error_event_text(event)
-                logger.error("Agent run error during streaming", agent=agent_name, error=error_text)
-                state.user_error = Exception(error_text)
+                state.user_error = run_error_event_exception(event)
+                logger.error("Agent run error during streaming", agent=agent_name, error=str(state.user_error))
                 return
 
             logger.debug("Skipping stream event", event_type=type(event).__name__)
+    except ResponsePausedForApproval:
+        raise
     except Exception as e:
         logger.exception("Error during streaming AI response")
         state.stream_exception = e
@@ -1892,6 +1928,8 @@ async def _stream_agent_attempt_chunks(
         )
         if transform_events is not None:
             stream_generator = transform_events(stream_generator)
+        if run_context.turn.agent_mode == "minimal":
+            stream_generator = stream_cli_events(stream_generator)
         chunks = _process_stream_events(
             stream_generator,
             state=state,
@@ -1903,6 +1941,8 @@ async def _stream_agent_attempt_chunks(
         async with closing_async_stream(provider_stream), closing_async_stream(stream_generator), aclosing(chunks):
             async for stream_chunk in chunks:
                 yield stream_chunk
+    except ResponsePausedForApproval:
+        raise
     except Exception as e:
         logger.exception("Error starting streaming AI response")
         state.user_error = e
@@ -1936,6 +1976,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     attempt_model_runtime: ai_runtime.AttemptModelRuntime | None = None,
     reusable_agent: Agent | None = None,
     resumed_attempt: ResumedAttempt | None = None,
+    initial_continuation_count: int = 0,
     on_completed: Callable[[CompletedAttempt], None] | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
@@ -1979,6 +2020,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
             The caller must serialize uses and close its runtime database handles.
         resumed_attempt: Restored attempt to settle before preparing a fresh model request.
+        initial_continuation_count: Same-turn attempts consumed before the first fresh request.
         on_completed: Optional sink for the terminal typed attempt, independent of display metadata.
 
     Yields:
@@ -2325,6 +2367,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 runtime_model_name=prepared_run.runtime_model_name,
                 output_tokens=state.request_metric_totals.get("output_tokens"),
                 tool_executions=tuple(state.completed_tool_executions),
+                control_executions=cli_control_executions(prepared_run.agent),
                 completed_tools=tuple(state.completed_tools),
                 metadata_content=metadata_content,
             ),
@@ -2351,6 +2394,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             on_completed=on_completed,
         ),
         resumed_attempt=resumed_attempt,
+        initial_continuation_count=initial_continuation_count,
         continuation=_initial_agent_continuation(
             prompt=prompt,
             model_prompt=model_prompt,

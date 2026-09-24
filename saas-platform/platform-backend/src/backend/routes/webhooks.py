@@ -328,6 +328,11 @@ async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
     request: Request, stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None
 ) -> dict[str, Any]:
     """Handle incoming Stripe webhook events."""
+    # An empty secret makes the HMAC signature forgeable, so refuse every event.
+    if not STRIPE_WEBHOOK_SECRET:
+        logger.error("STRIPE_WEBHOOK_SECRET is not configured; rejecting Stripe webhook")
+        raise HTTPException(status_code=503, detail="Webhook not configured")
+
     if not stripe_signature:
         raise HTTPException(status_code=400, detail="Missing signature")
 

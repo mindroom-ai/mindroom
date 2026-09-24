@@ -307,6 +307,30 @@ async def test_run_shell_command_returns_error_on_nonzero_exit(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_run_shell_command_preserves_stdout_receipt_on_nonzero_exit(tmp_path: Path) -> None:
+    """A nonterminal CLI receipt on stdout must retain its continuation handle."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint(["bash", "-c", 'printf \'{"status":"queued","call_id":"call-1"}\'; exit 3'])
+
+    assert result == 'Error: {"status":"queued","call_id":"call-1"}'
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_preserves_both_failure_streams(tmp_path: Path) -> None:
+    """Useful stdout must not displace the existing stderr failure detail."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint(["bash", "-c", "printf receipt; printf warning >&2; exit 3"])
+
+    assert result == "Error: receipt\nStderr:\nwarning"
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
 async def test_run_shell_command_returns_after_foreground_exit_with_inherited_pipe_child(tmp_path: Path) -> None:
     """Regression: tmux/auth helpers/watchers/daemons can inherit pipes after foreground exit."""

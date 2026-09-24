@@ -7,8 +7,10 @@ import base64
 import dataclasses
 import hashlib
 import json
+import os
 import stat
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -40,7 +42,7 @@ from tests.authorization_helpers import (
 from tests.conftest import bind_runtime_paths, make_latest_thread_event_id_mock, make_relation_lookup
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from mindroom.config.models import FileAccess
 
 
 def _tool_context(
@@ -148,7 +150,7 @@ async def test_attachments_tool_lists_context_attachments(tmp_path: Path) -> Non
     assert payload["attachment_ids"] == ["att_sample"]
     assert payload["attachments"][0]["attachment_id"] == "att_sample"
     assert payload["attachments"][0]["available"] is True
-    assert payload["attachments"][0]["local_path"] == str(sample_file.resolve())
+    assert payload["attachments"][0]["local_path"] == str(attachment.local_path)
 
 
 @pytest.mark.asyncio
@@ -172,7 +174,7 @@ async def test_attachments_tool_get_attachment_returns_local_path(tmp_path: Path
     assert payload["tool"] == "attachments"
     assert payload["attachment_id"] == "att_sample"
     assert payload["attachment"]["attachment_id"] == "att_sample"
-    assert payload["attachment"]["local_path"] == str(sample_file.resolve())
+    assert Path(payload["attachment"]["local_path"]).read_bytes() == attachment.local_path.read_bytes()
 
 
 @pytest.mark.asyncio
@@ -281,13 +283,14 @@ async def test_get_attachment_view_rejects_unusable_documents(tmp_path: Path, fi
 
 
 @pytest.mark.asyncio
-async def test_get_attachment_view_uses_local_filename_when_metadata_has_none(tmp_path: Path) -> None:
-    """Older attachment records need not carry an explicit filename."""
+async def test_get_attachment_view_uses_source_filename_when_none_is_given(tmp_path: Path) -> None:
+    """Registration keeps the source name because the retained copy has an opaque name."""
     local_path = tmp_path / "document.pdf"
     local_path.write_bytes(b"%PDF-1.4 document bytes")
     attachment = register_local_attachment(tmp_path, local_path, kind="file", mime_type="application/pdf")
     assert attachment is not None
-    assert attachment.filename is None
+    assert attachment.filename == "document.pdf"
+    assert attachment.local_path.name != "document.pdf"
     with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
         result = await AttachmentTools().get_attachment(attachment.attachment_id, view=True)
 
@@ -305,11 +308,11 @@ async def test_get_attachment_view_rejects_unusable_images(tmp_path: Path, case:
     tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     with tool_runtime_context(_tool_context(tmp_path)):
         registered = json.loads(await tool.register_attachment("plot.png"))
+        retained_path = Path(registered["attachment"]["local_path"])
         if case == "oversized":
-            with image_path.open("r+b") as image_file:
-                image_file.truncate(20 * 1024 * 1024 + 1)
+            os.truncate(retained_path, 20 * 1024 * 1024 + 1)
         elif case == "missing":
-            image_path.unlink()
+            retained_path.unlink()
         result = await tool.get_attachment(
             registered["attachment_id"],
             view=True,
@@ -946,7 +949,7 @@ async def test_matrix_message_attachments_cross_room_send_does_not_inherit_sourc
 @pytest.mark.asyncio
 async def test_attachments_tool_register_attachment_uses_resolved_thread_scope(tmp_path: Path) -> None:
     """Registering from a thread-start context should persist the resolved thread root."""
-    tool = AttachmentTools()
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _tool_context_with_thread_scope(
@@ -979,10 +982,294 @@ async def test_attachments_tool_register_attachment_resolves_relative_paths_from
         payload = json.loads(await tool.register_attachment("scratch/generated.txt"))
 
     assert payload["status"] == "ok"
-    assert payload["attachment"]["local_path"] == str(generated_file.resolve())
     attachment = load_attachment(tmp_path, payload["attachment_id"])
     assert attachment is not None
-    assert attachment.local_path == generated_file.resolve()
+    assert Path(payload["attachment"]["local_path"]).read_bytes() == attachment.local_path.read_bytes()
+    assert attachment.local_path.parent == (tmp_path / "incoming_media").resolve()
+    assert attachment.local_path.read_text(encoding="utf-8") == "artifact"
+    assert attachment.filename == "generated.txt"
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_accepts_workspace_below_linked_ancestor(tmp_path: Path) -> None:
+    """A configured workspace reached through a linked ancestor directory still registers relative files."""
+    real_storage = tmp_path / "real"
+    (real_storage / "workspace" / "scratch").mkdir(parents=True)
+    (real_storage / "workspace" / "scratch" / "generated.txt").write_text("artifact", encoding="utf-8")
+    (tmp_path / "linked").symlink_to(real_storage)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path / "linked" / "workspace")
+
+    with tool_runtime_context(_tool_context(tmp_path)):
+        payload = json.loads(await tool.register_attachment("scratch/../scratch/generated.txt"))
+
+    assert payload["status"] == "ok"
+    assert Path(payload["attachment"]["local_path"]).read_text(encoding="utf-8") == "artifact"
+
+
+@pytest.mark.asyncio
+async def test_register_attachment_rejects_workspace_root_replaced_by_link(tmp_path: Path) -> None:
+    """A workspace root swapped for a link to primary storage must not be opened through the link."""
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    credentials = tmp_path / "credentials"
+    credentials.mkdir()
+    (credentials / "gmail_credentials.json").write_text("SECRET_TOKEN", encoding="utf-8")
+    (agent_root / "workspace").symlink_to(credentials)
+    tool = AttachmentTools(tool_output_workspace_root=agent_root / "workspace")
+
+    with tool_runtime_context(_tool_context(tmp_path)):
+        payload = json.loads(await tool.register_attachment("gmail_credentials.json"))
+
+    assert payload["status"] == "error"
+    assert not (tmp_path / "attachments").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use", ["view", "save", "send"])
+async def test_registered_workspace_file_swapped_for_link_never_reads_link_target(
+    tmp_path: Path,
+    use: str,
+) -> None:
+    """Sandboxed code replacing a registered workspace file must not redirect later primary reads or sends."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    secret = tmp_path / "config.yaml"
+    secret.write_text("SECRET_API_KEY", encoding="utf-8")
+    notes = workspace / "notes.txt"
+    notes.write_text("public notes", encoding="utf-8")
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    ctx = _tool_context(tmp_path, process_env={"MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS": "true"})
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file")) as send_file,
+    ):
+        attachment_id = json.loads(await tool.register_attachment("notes.txt"))["attachment_id"]
+        notes.unlink()
+        notes.symlink_to(secret)
+        if use == "view":
+            result = await tool.get_attachment(attachment_id, view=True)
+            assert isinstance(result, ToolResult)
+            assert result.files is not None
+            assert result.files[0].content == b"public notes"
+        elif use == "save":
+            payload = json.loads(await tool.get_attachment(attachment_id, mindroom_output_path="copy.txt"))
+            assert payload["status"] == "ok"
+            assert (workspace / "copy.txt").read_text(encoding="utf-8") == "public notes"
+        else:
+            payload = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment_id]))
+            assert payload["status"] == "ok"
+            uploaded = send_file.await_args.args[2]
+            assert not uploaded.is_relative_to(workspace)
+            assert uploaded.read_text(encoding="utf-8") == "public notes"
+            assert send_file.await_args.kwargs["filename"] == "notes.txt"
+            assert send_file.await_args.kwargs["mimetype"] == "text/plain"
+
+
+@pytest.mark.asyncio
+async def test_get_attachment_view_rejects_linked_retained_media(tmp_path: Path) -> None:
+    """Reads of retained media must not follow a link even inside primary-owned storage."""
+    secret = tmp_path / "config.yaml"
+    secret.write_text("SECRET_API_KEY", encoding="utf-8")
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_text("hello", encoding="utf-8")
+    attachment = register_local_attachment(tmp_path, sample_file, kind="file", mime_type="text/plain")
+    assert attachment is not None
+    attachment.local_path.unlink()
+    attachment.local_path.symlink_to(secret)
+
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
+        result = await AttachmentTools().get_attachment(attachment.attachment_id, view=True)
+
+    assert isinstance(result, str)
+    payload = json.loads(result)
+    assert payload["status"] == "error"
+    assert "missing on disk" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_accepts_absolute_workspace_paths(tmp_path: Path) -> None:
+    """An absolute path inside the workspace should still register."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    generated_file = workspace / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    ctx = _tool_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.register_attachment(str(generated_file)))
+
+    assert payload["status"] == "ok"
+    assert Path(payload["attachment"]["local_path"]).read_bytes() == generated_file.read_bytes()
+
+
+def _outside_workspace_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Create a workspace beside readable secrets reachable by path, link, and ``~``."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "secret.txt").write_text("secret", encoding="utf-8")
+    (outside_dir / ".env").write_text("MINDROOM_API_KEY=secret", encoding="utf-8")
+    (workspace / "workspace_link").symlink_to(outside_dir)
+    monkeypatch.setenv("HOME", str(outside_dir))
+    return workspace
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "requested_path",
+    ["/etc/passwd", "~/.env", "workspace_link/secret.txt", "../outside/secret.txt"],
+)
+async def test_attachments_tool_register_attachment_rejects_paths_outside_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested_path: str,
+) -> None:
+    """Absolute, home-relative, symlinked, and traversal paths must not escape the workspace."""
+    workspace = _outside_workspace_secrets(tmp_path, monkeypatch)
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    ctx = _tool_context(tmp_path)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.register_local_attachment") as mocked_register,
+    ):
+        payload = json.loads(await tool.register_attachment(requested_path))
+
+    assert payload["status"] == "error"
+    assert "inside the agent workspace" in payload["message"]
+    mocked_register.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_reports_os_errors(tmp_path: Path) -> None:
+    """An OS-level path error must become an error payload, not an exception."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    ctx = _tool_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.register_attachment("a" * 300))
+
+    assert payload["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_requires_a_workspace(tmp_path: Path) -> None:
+    """Without a workspace root, path registration must fail closed and read no file."""
+    generated_file = tmp_path / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    tool = AttachmentTools()
+    ctx = _tool_context(tmp_path)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.register_local_attachment") as mocked_register,
+    ):
+        payload = json.loads(await tool.register_attachment(str(generated_file)))
+
+    assert payload["status"] == "error"
+    assert "requires an agent workspace" in payload["message"]
+    mocked_register.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("file_access", ["workspace", "unrestricted"])
+@pytest.mark.parametrize(
+    ("requested_path", "expected_name"),
+    [
+        ("{outside}/secret.txt", "secret.txt"),
+        ("~/.env", ".env"),
+        ("workspace_link/secret.txt", "secret.txt"),
+        ("../outside/secret.txt", "secret.txt"),
+    ],
+)
+async def test_attachments_tool_register_attachment_outside_workspace_follows_file_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_access: FileAccess,
+    requested_path: str,
+    expected_name: str,
+) -> None:
+    """Unrestricted agents register any readable file; workspace agents keep the rejection."""
+    workspace = _outside_workspace_secrets(tmp_path, monkeypatch)
+    tool = AttachmentTools(tool_output_workspace_root=workspace, file_access=file_access)
+
+    with tool_runtime_context(_tool_context(tmp_path)):
+        payload = json.loads(await tool.register_attachment(requested_path.format(outside=tmp_path / "outside")))
+
+    if file_access == "workspace":
+        assert payload["status"] == "error"
+        assert "inside the agent workspace" in payload["message"]
+        return
+    assert payload["status"] == "ok"
+    assert Path(payload["attachment"]["local_path"]).read_bytes() == (tmp_path / "outside" / expected_name).read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_unrestricted_needs_no_workspace(tmp_path: Path) -> None:
+    """Unrestricted file access registers absolute paths even without an agent workspace."""
+    generated_file = tmp_path / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    tool = AttachmentTools(file_access="unrestricted")
+
+    with tool_runtime_context(_tool_context(tmp_path)):
+        payload = json.loads(await tool.register_attachment(str(generated_file)))
+
+    assert payload["status"] == "ok"
+    assert Path(payload["attachment"]["local_path"]).read_bytes() == generated_file.read_bytes()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "requested_path",
+    ["/etc/passwd", "~/.env", "workspace_link/secret.txt", "../outside/secret.txt"],
+)
+async def test_matrix_message_attachments_reject_paths_outside_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested_path: str,
+) -> None:
+    """matrix_message must not upload files resolved outside the agent workspace."""
+    workspace = _outside_workspace_secrets(tmp_path, monkeypatch)
+    ctx = _tool_context(tmp_path)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.register_local_attachment") as mocked_register,
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        result = json.loads(
+            await MatrixMessageTools(tool_output_workspace_root=workspace).matrix_message(
+                attachments=[requested_path],
+            ),
+        )
+
+    assert result["status"] == "error"
+    assert "inside the agent workspace" in result["message"]
+    mocked_register.assert_not_called()
+    mocked.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_attachments_require_a_workspace(tmp_path: Path) -> None:
+    """Without a workspace root, matrix_message must accept only att_* IDs."""
+    generated_file = tmp_path / "generated.txt"
+    generated_file.write_text("artifact", encoding="utf-8")
+    ctx = _tool_context(tmp_path)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        result = json.loads(await MatrixMessageTools().matrix_message(attachments=[str(generated_file)]))
+
+    assert result["status"] == "error"
+    assert "requires an agent workspace" in result["message"]
+    mocked.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1029,7 +1316,7 @@ async def test_matrix_message_attachments_inherits_resolved_thread_scope(tmp_pat
 @pytest.mark.asyncio
 async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_path: Path) -> None:
     """Registering a file should make it available for matrix_message_attachments in the same context."""
-    tool = AttachmentTools()
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _tool_context(tmp_path)
@@ -1049,18 +1336,19 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
     assert register_payload["status"] == "ok"
     assert register_payload["tool"] == "attachments"
     assert register_payload["attachment_id"].startswith("att_")
-    assert register_payload["attachment"]["local_path"] == str(generated_file.resolve())
+    assert Path(register_payload["attachment"]["local_path"]).read_text(encoding="utf-8") == "artifact"
     assert attachment_id in list_tool_runtime_attachment_ids(current_context)
     assert send_error is None
     assert send_result["status"] == "ok"
     assert send_result["resolved_attachment_ids"] == [attachment_id]
     mocked.assert_awaited_once()
+    assert mocked.await_args.kwargs["filename"] == "generated.txt"
 
 
 @pytest.mark.asyncio
 async def test_attachments_tool_register_attachment_infers_file_metadata(tmp_path: Path) -> None:
     """Registering a local path should preserve filename, MIME type, and media kind."""
-    tool = AttachmentTools()
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "clip.wav"
     generated_file.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
     ctx = _tool_context(tmp_path)
@@ -1084,7 +1372,7 @@ async def test_attachments_tool_register_attachment_infers_file_metadata(tmp_pat
 @pytest.mark.asyncio
 async def test_attachments_tool_register_attachment_available_after_task_boundary(tmp_path: Path) -> None:
     """Registered attachments should remain available when a later tool call runs in another task."""
-    tool = AttachmentTools()
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _tool_context(tmp_path)
@@ -1153,7 +1441,11 @@ async def test_matrix_message_attachments_sends_local_file_paths_by_auto_registe
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
         with tool_runtime_context(ctx):
-            result = json.loads(await MatrixMessageTools().matrix_message(attachments=[str(generated_file)]))
+            result = json.loads(
+                await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
+                    attachments=[str(generated_file)],
+                ),
+            )
         send_error = result.get("message") if result["status"] == "error" else None
         current_context = get_tool_runtime_context()
         assert current_context is not None
@@ -1164,33 +1456,6 @@ async def test_matrix_message_attachments_sends_local_file_paths_by_auto_registe
     assert result["newly_registered_attachment_ids"] == result["resolved_attachment_ids"]
     assert result["newly_registered_attachment_ids"][0] in list_tool_runtime_attachment_ids(current_context)
     mocked.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_matrix_message_attachments_rejects_workspace_relative_file_path_escape(tmp_path: Path) -> None:
-    """Workspace-relative attachment paths must not resolve outside the agent workspace."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    outside_file = tmp_path / "outside.txt"
-    outside_file.write_text("secret", encoding="utf-8")
-    ctx = _tool_context(tmp_path)
-
-    with (
-        tool_runtime_context(ctx),
-        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
-    ):
-        with tool_runtime_context(ctx):
-            result = json.loads(
-                await MatrixMessageTools(tool_output_workspace_root=workspace).matrix_message(
-                    attachments=["../outside.txt"],
-                ),
-            )
-        send_error = result.get("message") if result["status"] == "error" else None
-
-    assert result["status"] == "error"
-    assert send_error is not None
-    assert "workspace" in send_error
-    mocked.assert_not_awaited()
 
 
 def test_tool_runtime_context_none_temporarily_clears_nested_scope(tmp_path: Path) -> None:

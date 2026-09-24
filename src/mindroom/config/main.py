@@ -61,6 +61,7 @@ from mindroom.config.models import (
     DebugConfig,
     DefaultsConfig,
     EffectiveToolConfig,
+    FileAccess,
     ModelConfig,
     RouterConfig,
     ToolConfigEntry,
@@ -1248,6 +1249,13 @@ class Config(BaseModel):
         """Return the effective per-turn tool-call budget for one configured agent or team."""
         override = self._configured_entity(entity_name).max_tool_calls_per_turn
         return override if override is not None else self.defaults.max_tool_calls_per_turn
+
+    def _agent_file_access(self, entity_name: str) -> FileAccess:
+        """Return the effective file access for one agent; every non-agent scope inherits the default."""
+        agent_config = self.agents.get(entity_name)
+        if agent_config is None or agent_config.file_access is None:
+            return self.defaults.file_access
+        return agent_config.file_access
 
     def _default_compaction_config(self) -> CompactionConfig:
         """Return the effective destructive compaction config for defaults-only scope."""

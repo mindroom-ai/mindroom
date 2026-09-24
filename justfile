@@ -233,6 +233,10 @@ test-live-journal-gate *args:
     uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45 --restart-interval 5 {{args}}
     uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression {{args}}
 
+# Opt-in Docker minimal-mode smoke; use a built worker image and a persistent evidence directory
+test-minimal-agent-worker-smoke image evidence_dir:
+    uv run python -m tests.manual.minimal_agent_worker_smoke --image {{quote(image)}} --evidence-dir {{quote(evidence_dir)}}
+
 # Check for public symbols that should be private
 check-module-privacy:
     uv run privata --methods .

@@ -179,7 +179,7 @@ def test_config_accepts_inline_deferred_tool_flags(tmp_path: Path) -> None:
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         "shell",
-        {"coding": {"defer": True, "initial": True, "restrict_to_base_dir": False}},
+        {"file": {"defer": True, "initial": True, "enable_delete_file": True}},
         {"name": "searxng", "defer": True, "overrides": {"fixed_max_results": 10}},
     ]
 
@@ -188,14 +188,14 @@ def test_config_accepts_inline_deferred_tool_flags(tmp_path: Path) -> None:
     entries = config.agents["code"].tools
     assert [(entry.name, entry.defer, entry.initial) for entry in entries] == [
         ("shell", False, False),
-        ("coding", True, True),
+        ("file", True, True),
         ("searxng", True, False),
     ]
-    assert entries[1].overrides == {"restrict_to_base_dir": False}
+    assert entries[1].overrides == {"enable_delete_file": True}
     assert entries[2].overrides == {"fixed_max_results": 10}
     assert config.authored_model_dump()["agents"]["code"]["tools"] == [
         "shell",
-        {"coding": {"restrict_to_base_dir": False, "defer": True, "initial": True}},
+        {"file": {"enable_delete_file": True, "defer": True, "initial": True}},
         {"searxng": {"fixed_max_results": 10, "defer": True}},
     ]
 
