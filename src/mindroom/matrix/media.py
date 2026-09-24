@@ -185,9 +185,14 @@ async def fetch_matrix_thumbnail(
     return thumbnail.body, thumbnail.content_type
 
 
+def media_size_exceeds_limit(size_bytes: int) -> bool:
+    """Return whether a media size exceeds the runtime ingestion cap."""
+    return size_bytes > _matrix_media_max_bytes
+
+
 def media_payload_exceeds_limit(media_bytes: bytes | None) -> bool:
     """Return whether a Matrix media payload exceeds the runtime ingestion cap."""
-    return media_bytes is not None and len(media_bytes) > _matrix_media_max_bytes
+    return media_bytes is not None and media_size_exceeds_limit(len(media_bytes))
 
 
 @dataclass(frozen=True, slots=True)
