@@ -54,11 +54,14 @@ Agents can join existing rooms, create new rooms with AI-generated topics, respo
 
 Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_rooms_exist()` (public). DM rooms can be detected with `async is_dm_room(client, room_id) -> bool`.
 
-Any account on a shared homeserver can publish a managed alias such as `#lobby:<server>` first, or point it at another room, so a resolved alias alone never makes a room managed.
+Any account on a shared homeserver can publish, repoint, or delete a managed alias such as `#lobby:<server>`, so a resolved alias alone never makes a room managed.
 A room already recorded in `matrix_state.yaml` for its key stays in use, and an alias that now resolves elsewhere only logs `managed_alias_points_elsewhere`.
-An unrecorded key adopts its alias target only when the router created that room, with no additional room version 12 creators, and the room publishes the alias as its canonical or alternative alias.
+When the alias of a recorded room is deleted, the router points it back at that room, and replaces the room with a new aliased one only when the router can no longer read the room or is no longer joined to it.
+An unrecorded key adopts its alias target only when the router created that room, with no additional room version 12 creators, and the router itself set the alias as the room's canonical alias.
 Otherwise the router logs `managed_alias_target_refused`, never joins that room, and creates and records a fresh room without the alias, which later passes keep using.
-If the alias lookup or the target's state read fails transiently, a recorded room stays in use and an unrecorded key is retried on the next pass.
+If the alias lookup or a state read fails transiently, a recorded room stays in use and an unrecorded key is retried on the next pass.
+A fresh room without the alias that is lost before its record is saved, for example by a crash, stays unrecorded, and the next pass creates another.
+Reconciliation logs `managed_room_created_by_another_account` for a recorded room or Space that another account created, which earlier releases could adopt from a squatted alias.
 
 ## Threading (MSC3440)
 

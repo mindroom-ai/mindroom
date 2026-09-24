@@ -238,12 +238,33 @@ def _alias_target_problem(state_events: list[dict[str, Any]], router_user_id: st
     additional_creators = create_content.get("additional_creators", []) if isinstance(create_content, dict) else []
     if create_event.get("sender") != router_user_id or additional_creators not in ([], [router_user_id]):
         return f"created by {create_event.get('sender')}, additional creators {additional_creators}"
-    # Any account may point an alias at any room, including one the router created for another key.
-    canonical_content = state.get(("m.room.canonical_alias", ""), {}).get("content")
-    canonical = canonical_content if isinstance(canonical_content, dict) else {}
-    alt_aliases = canonical.get("alt_aliases")
-    if canonical.get("alias") != room_alias and not (isinstance(alt_aliases, list) and room_alias in alt_aliases):
-        return f"does not publish {room_alias} as its canonical alias"
+    # Any account may point an alias at any room, and members with enough power may publish it there,
+    # so only the canonical alias the router set when creating the room binds the alias to it.
+    canonical_event = state.get(("m.room.canonical_alias", ""), {})
+    canonical_content = canonical_event.get("content")
+    if (
+        canonical_event.get("sender") != router_user_id
+        or not isinstance(canonical_content, dict)
+        or canonical_content.get("alias") != room_alias
+    ):
+        return f"its canonical alias is not {room_alias} as set by the router"
+    return None
+
+
+async def _get_room_state(
+    client: nio.AsyncClient,
+    room_id: str,
+    room_alias: str,
+) -> nio.RoomGetStateResponse | nio.RoomGetStateError | None:
+    """Read full room state with event senders, returning a denial as is and None after a transient failure."""
+    try:
+        response = await client.room_get_state(room_id)
+    except (aiohttp.ClientError, TimeoutError, ValueError):
+        logger.warning("managed_alias_room_state_unreadable", room_alias=room_alias, room_id=room_id, exc_info=True)
+        return None
+    if isinstance(response, nio.RoomGetStateResponse) or response.status_code in _DENIED_ROOM_STATE_ERROR_CODES:
+        return response
+    logger.warning("managed_alias_room_state_unreadable", room_alias=room_alias, room_id=room_id, error=str(response))
     return None
 
 
@@ -253,19 +274,14 @@ async def _verify_alias_target(
     room_alias: str,
 ) -> str | _AliasResolution:
     """Return an unrecorded alias target when the router created it for this alias, or how to proceed instead."""
-    try:
-        response = await client.room_get_state(room_id)
-    except (aiohttp.ClientError, TimeoutError, ValueError):
-        logger.warning("managed_alias_target_unreadable", room_alias=room_alias, room_id=room_id, exc_info=True)
+    response = await _get_room_state(client, room_id, room_alias)
+    if response is None:
         return _AliasResolution.RETRY_LATER
-    if isinstance(response, nio.RoomGetStateResponse) and response.room_id == room_id:
-        problem = _alias_target_problem(response.events, str(client.user_id), room_alias)
-    elif isinstance(response, nio.RoomGetStateError) and response.status_code in _DENIED_ROOM_STATE_ERROR_CODES:
+    if isinstance(response, nio.RoomGetStateError):
         # The router can read every room it created and is still joined to, so a denial is definitive.
         problem = f"its state is not readable by the router ({response.status_code})"
     else:
-        logger.warning("managed_alias_target_unreadable", room_alias=room_alias, room_id=room_id, error=str(response))
-        return _AliasResolution.RETRY_LATER
+        problem = _alias_target_problem(response.events, str(client.user_id), room_alias)
     if problem is None:
         return room_id
     logger.error(
@@ -273,9 +289,32 @@ async def _verify_alias_target(
         room_alias=room_alias,
         room_id=room_id,
         reason=problem,
-        hint="Another account published this alias first; MindRoom creates and records a room without it instead.",
+        hint="The alias points at a room the router did not create for it; MindRoom creates a room without the alias.",
     )
     return _AliasResolution.CREATE_WITHOUT_ALIAS
+
+
+async def _republish_missing_alias(client: nio.AsyncClient, room_alias: str, room_id: str) -> bool:
+    """Point a deleted managed alias back at its recorded room, returning False only when the router lost the room."""
+    response = await _get_room_state(client, room_id, room_alias)
+    if isinstance(response, nio.RoomGetStateError):
+        return False
+    if response is None:
+        return True
+    members = {event["state_key"]: event["content"] for event in response.events if event["type"] == "m.room.member"}
+    membership = members.get(client.user_id)
+    if not isinstance(membership, dict) or membership.get("membership") != "join":
+        return False
+    put_response = await client.room_put_alias(room_alias, room_id)
+    if not isinstance(put_response, nio.RoomPutAliasResponse):
+        # Another account may have taken the alias meanwhile; the recorded room stays in use regardless.
+        logger.warning(
+            "managed_alias_republish_failed",
+            room_alias=room_alias,
+            room_id=room_id,
+            error=str(put_response),
+        )
+    return True
 
 
 async def _resolve_managed_alias(
@@ -286,11 +325,13 @@ async def _resolve_managed_alias(
     """Return the room to use for one managed alias, or how to proceed without one.
 
     A recorded room stays authoritative because any account on a shared
-    homeserver may publish or repoint a managed alias.
+    homeserver may publish, repoint, or delete a managed alias.
     Only an unrecorded alias target is verified before adoption.
     """
     response = await client.room_resolve_alias(room_alias)
     if isinstance(response, nio.RoomResolveAliasError) and response.status_code == "M_NOT_FOUND":
+        if recorded_room_id is not None and await _republish_missing_alias(client, room_alias, recorded_room_id):
+            return recorded_room_id
         return _AliasResolution.CREATE_WITH_ALIAS
     if not isinstance(response, nio.RoomResolveAliasResponse):
         logger.warning("managed_alias_lookup_failed", room_alias=room_alias, error=str(response))
@@ -352,7 +393,7 @@ async def _ensure_room_exists(
             logger.info("managed_room_state_updated", room_key=room_key, room_id=resolution, room_alias=full_alias)
         return resolution
 
-    # The alias is missing or held by another account, so create the room
+    # Either the alias is missing and the router lost any recorded room, or another account holds the alias
     if existing_room is not None:
         # Remove stale entry from state
         logger.debug("managed_room_state_entry_removed", room_key=room_key)
@@ -374,6 +415,7 @@ async def _ensure_room_exists(
 
     if created_room_id:
         # Record the managed alias even when another account holds it, so local lookups never resolve elsewhere.
+        # An alias-less room lost before this record is saved stays untracked, and the next pass creates another.
         _add_room(room_key, created_room_id, full_alias, room_name, runtime_paths)
         logger.info("managed_room_created", room_key=room_key, room_id=created_room_id, room_alias=full_alias)
 
@@ -458,6 +500,17 @@ async def ensure_all_rooms_exist(
     return room_ids
 
 
+def _flag_room_created_by_another_account(client: nio.AsyncClient, snapshot: RoomStateSnapshot) -> None:
+    """Flag a recorded managed room or Space another account created, which earlier releases adopted unverified."""
+    if snapshot.creator != client.user_id:
+        logger.error(
+            "managed_room_created_by_another_account",
+            room_id=snapshot.room_id,
+            creator=snapshot.creator,
+            hint="Its creator controls membership; remove its matrix_state.yaml entry unless you trust that account.",
+        )
+
+
 async def reconcile_managed_rooms(
     client: nio.AsyncClient,
     config: Config,
@@ -476,6 +529,7 @@ async def reconcile_managed_rooms(
                     snapshot = await read_room_state(client, room_id)
                     if snapshot is None:
                         continue
+                    _flag_room_created_by_another_account(client, snapshot)
                     membership = snapshot.events.get(("m.room.member", client.user_id), {})
                     if membership.get("membership") != "join":
                         logger.warning("Managed room is not joined; skipping policy", room_id=room_id)
@@ -569,6 +623,7 @@ async def ensure_root_space(
     snapshot = await read_room_state(client, root_space_id) if root_space_id is not None else None
     if root_space_id is None or snapshot is None:
         return None
+    _flag_room_created_by_another_account(client, snapshot)
     if not await ensure_room_name(client, root_space_id, config.matrix_space.name, snapshot=snapshot):
         logger.warning("Failed to set root space name; skipping child linking", space_id=root_space_id)
         return None

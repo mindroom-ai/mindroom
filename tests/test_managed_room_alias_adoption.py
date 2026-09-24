@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import aiohttp
 import nio
 import pytest
+from nio.responses import RoomPutAliasError
+from structlog.testing import capture_logs
 
 from mindroom.access_policy import resolve_room_policy
 from mindroom.matrix import rooms as matrix_rooms
@@ -81,6 +83,9 @@ def _room_state(
     *,
     creator: str = _ROUTER,
     additional_creators: list[str] | None = None,
+    canonical_sender: str | None = None,
+    canonical_content: dict[str, object] | None = None,
+    membership: str = "join",
 ) -> nio.RoomGetStateResponse:
     create_content: dict[str, object] = {"room_version": "12"}
     if additional_creators is not None:
@@ -88,7 +93,13 @@ def _room_state(
     return nio.RoomGetStateResponse(
         [
             {"type": "m.room.create", "state_key": "", "sender": creator, "content": create_content},
-            {"type": "m.room.canonical_alias", "state_key": "", "sender": creator, "content": {"alias": alias}},
+            {
+                "type": "m.room.canonical_alias",
+                "state_key": "",
+                "sender": canonical_sender or creator,
+                "content": canonical_content or {"alias": alias},
+            },
+            {"type": "m.room.member", "state_key": _ROUTER, "sender": _ROUTER, "content": {"membership": membership}},
         ],
         room_id,
     )
@@ -145,15 +156,35 @@ async def test_unrecorded_alias_target_created_by_router_is_adopted(config: Conf
 @pytest.mark.parametrize(
     "state_response",
     [
-        pytest.param(lambda alias: _room_state(_THEIRS, alias, creator=_SQUATTER), id="other-creator"),
+        pytest.param(lambda alias: _room_state(_THEIRS, alias, creator=_SQUATTER), id="squatter-room"),
+        pytest.param(
+            lambda alias: _room_state(_THEIRS, alias, creator=_SQUATTER, canonical_sender=_ROUTER),
+            id="other-creator-with-router-alias-event",
+        ),
         pytest.param(
             lambda alias: _room_state(_THEIRS, alias, additional_creators=[_SQUATTER]),
             id="other-additional-creator",
         ),
         pytest.param(lambda _alias: _room_state(_THEIRS, "#dev:localhost"), id="router-room-of-another-alias"),
         pytest.param(
+            lambda alias: _room_state(_THEIRS, alias, canonical_sender=_SQUATTER),
+            id="canonical-alias-set-by-another-member",
+        ),
+        pytest.param(
+            lambda alias: _room_state(
+                _THEIRS,
+                alias,
+                canonical_content={"alias": "#dev:localhost", "alt_aliases": [alias]},
+            ),
+            id="alias-only-in-alt-aliases",
+        ),
+        pytest.param(
             lambda _alias: nio.RoomGetStateError("not in room", "M_FORBIDDEN", room_id=_THEIRS),
             id="state-denied",
+        ),
+        pytest.param(
+            lambda _alias: nio.RoomGetStateError("unknown room", "M_NOT_FOUND", room_id=_THEIRS),
+            id="state-not-found",
         ),
     ],
 )
@@ -236,6 +267,109 @@ async def test_transient_alias_lookup_failure_never_forgets_or_creates(
     client.room_get_state.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "put_alias_response",
+    [nio.RoomPutAliasResponse("#lobby:localhost", _OURS), RoomPutAliasError("taken", "M_UNKNOWN")],
+    ids=["republished", "retaken"],
+)
+async def test_deleted_alias_of_recorded_room_is_republished_without_leaving_the_room(
+    config: Config,
+    create_room: AsyncMock,
+    put_alias_response: nio.RoomPutAliasResponse | RoomPutAliasError,
+) -> None:
+    """Whoever deletes a managed alias cannot move MindRoom off the recorded room it is still joined to."""
+    _record_lobby(config, _OURS)
+    alias = _lobby_alias(config)
+    client = _client(alias, _OURS)
+    client.room_resolve_alias.return_value = nio.RoomResolveAliasError("missing", "M_NOT_FOUND")
+    client.room_get_state.return_value = _room_state(_OURS, alias, creator=_SQUATTER)
+    client.room_put_alias.return_value = put_alias_response
+
+    assert await _ensure_lobby(client, config) == _OURS
+
+    assert _recorded_lobby(config) == _OURS
+    client.room_put_alias.assert_awaited_once_with(alias, _OURS)
+    create_room.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state_response",
+    [
+        pytest.param(nio.RoomGetStateError("not in room", "M_FORBIDDEN", room_id=_OURS), id="state-denied"),
+        pytest.param(_room_state(_OURS, "#lobby:localhost", membership="leave"), id="router-left"),
+    ],
+)
+async def test_deleted_alias_of_lost_recorded_room_creates_an_aliased_room(
+    config: Config,
+    create_room: AsyncMock,
+    state_response: nio.RoomGetStateResponse | nio.RoomGetStateError,
+) -> None:
+    """A recorded room the router can no longer use is replaced by a new room with the managed alias."""
+    _record_lobby(config, _OURS)
+    client = _client(_lobby_alias(config), _OURS)
+    client.room_resolve_alias.return_value = nio.RoomResolveAliasError("missing", "M_NOT_FOUND")
+    client.room_get_state.return_value = state_response
+
+    assert await _ensure_lobby(client, config) == _FRESH
+
+    assert _recorded_lobby(config) == _FRESH
+    assert create_room.await_args.kwargs["alias"] == managed_room_alias_localpart("lobby", runtime_paths_for(config))
+    client.room_put_alias.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deleted_alias_of_recorded_room_is_kept_through_a_transient_read_failure(
+    config: Config,
+    create_room: AsyncMock,
+) -> None:
+    """An unreadable recorded room keeps its record, and the alias is republished on a later pass."""
+    _record_lobby(config, _OURS)
+    client = _client(_lobby_alias(config), _OURS)
+    client.room_resolve_alias.return_value = nio.RoomResolveAliasError("missing", "M_NOT_FOUND")
+    client.room_get_state.return_value = nio.RoomGetStateError("slow down", "M_LIMIT_EXCEEDED", room_id=_OURS)
+
+    assert await _ensure_lobby(client, config) == _OURS
+
+    assert _recorded_lobby(config) == _OURS
+    client.room_put_alias.assert_not_awaited()
+    create_room.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_flags_recorded_room_created_by_another_account(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorded room adopted before verification is reported, but still reconciled."""
+    reconcile = AsyncMock()
+    monkeypatch.setattr(matrix_rooms, "_reconcile_joined_existing_room", reconcile)
+    client = _client(_lobby_alias(config), _THEIRS)
+    client.room_get_state.return_value = _room_state(_THEIRS, _lobby_alias(config), creator=_SQUATTER)
+
+    with capture_logs() as logs:
+        snapshots = await matrix_rooms.reconcile_managed_rooms(
+            client,
+            config,
+            runtime_paths_for(config),
+            {"lobby": _THEIRS},
+        )
+
+    assert _THEIRS in snapshots
+    reconcile.assert_awaited_once()
+    flagged = [log for log in logs if log["event"] == "managed_room_created_by_another_account"]
+    assert flagged == [
+        {
+            "event": "managed_room_created_by_another_account",
+            "room_id": _THEIRS,
+            "creator": _SQUATTER,
+            "hint": ANY,
+            "log_level": "error",
+        },
+    ]
+
+
 async def _ensure_space(client: AsyncMock, config: Config) -> str | None:
     return await matrix_rooms._ensure_root_space_exists(client, config, runtime_paths_for(config))
 
@@ -303,6 +437,42 @@ async def test_squatted_root_space_alias_gets_a_fresh_space(
     assert _recorded_space(config) == _FRESH
     create_space.assert_awaited_once()
     join.assert_awaited_once_with(client, _FRESH)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state_response", "expected"),
+    [
+        pytest.param(_room_state(_OURS, "#space:localhost"), _OURS, id="still-joined"),
+        pytest.param(nio.RoomGetStateError("not in room", "M_FORBIDDEN", room_id=_OURS), _FRESH, id="lost"),
+    ],
+)
+async def test_deleted_alias_of_recorded_root_space(
+    config: Config,
+    space_calls: tuple[AsyncMock, AsyncMock],
+    state_response: nio.RoomGetStateResponse | nio.RoomGetStateError,
+    expected: str,
+) -> None:
+    """A deleted Space alias is republished on a Space the router still holds, and recreated otherwise."""
+    create_space, _join = space_calls
+    state = MatrixState.load(runtime_paths_for(config))
+    state.set_space_room_id(_OURS)
+    state.save(runtime_paths_for(config))
+    alias = _space_alias(config)
+    client = _client(alias, _OURS)
+    client.room_resolve_alias.return_value = nio.RoomResolveAliasError("missing", "M_NOT_FOUND")
+    client.room_get_state.return_value = state_response
+    client.room_put_alias.return_value = nio.RoomPutAliasResponse(alias, _OURS)
+
+    assert await _ensure_space(client, config) == expected
+
+    assert _recorded_space(config) == expected
+    if expected == _OURS:
+        client.room_put_alias.assert_awaited_once_with(alias, _OURS)
+        create_space.assert_not_awaited()
+    else:
+        client.room_put_alias.assert_not_awaited()
+        assert create_space.await_args.kwargs["alias"] == managed_space_alias_localpart(runtime_paths_for(config))
 
 
 @pytest.mark.asyncio
