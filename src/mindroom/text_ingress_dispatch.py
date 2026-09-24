@@ -267,9 +267,20 @@ async def _blocked_before_plan(
         await visible_responses.settle_source_events_ignored(prepared.handled_turn)
         return True
 
+    coalescing_key = prepared.turn.ingress.coalescing_key
     may_be_superseded = (
         prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
         and prepared.handled_turn.replay_sources_all_from_requester(requester_user_id)
+        # While another requester's follow-ups still wait in the backlog, a
+        # newer message from this requester may only be answered after them,
+        # so letting it absorb this turn would answer out of receipt order.
+        and not (
+            coalescing_key is not None
+            and controller.deps.coalescing_gate.follow_up_backlog_queues_other_requester(
+                coalescing_key,
+                requester_user_id,
+            )
+        )
     )
     if prepared.replay_guard.degraded:
         skips_turn = await controller._has_newer_unresponded_journal_thread_event(
