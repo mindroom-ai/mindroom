@@ -48,7 +48,7 @@ from mindroom.matrix.journal_ingress import (
     ingestion_timeline_views,
     parse_journal_event,
 )
-from mindroom.pending_event_worker import _BATCH_SIZE, PendingEventWorker
+from mindroom.pending_event_worker import _BATCH_SIZE, _MAX_EVENT_FAILURES, PendingEventWorker
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
 from tests.conftest import request_envelope
 from tests.journal_helpers import admit_dispatch_event
@@ -2643,6 +2643,46 @@ class TestRoomRetryBackoff:
             assert retry_sleeps[-1][0] == 1
         finally:
             await worker.stop()
+
+    @pytest.mark.parametrize("settle_fails_once", [False, True])
+    async def test_an_event_that_keeps_failing_is_abandoned_so_its_room_moves_on(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        *,
+        settle_fails_once: bool,
+    ) -> None:
+        """A failure the event itself causes repeats on every retry, and the lane is ordered.
+
+        Without a bound one such event holds up every later event in its room
+        forever, across restarts. Abandoning it is still a durable settlement,
+        so one that did not commit leaves the event owed and retried.
+        """
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$poison":
+                msg = "relation target unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$poison", ts=1_000))
+        await TestPendingEventWorker._admit(alice, text_event("$later", ts=2_000))
+        store = _FlakyReplayView(alice, fail_settle={"$poison"} if settle_fails_once else set())
+        worker = PendingEventWorker(store=cast("Any", store), handle=handle)
+        failures = _MAX_EVENT_FAILURES + (1 if settle_fails_once else 0)
+        worker.start()
+        try:
+            for index in range(failures - 1):
+                await _eventually(lambda index=index: len(retry_sleeps) > index)
+                retry_sleeps[index][1].set()
+            await _eventually_async(lambda: alice.pending(room_id=ROOM))
+        finally:
+            await worker.stop()
+
+        assert attempts == ["$poison"] * failures + ["$later"]
+        assert not await alice.is_pending("$poison")
 
     async def test_each_room_wakes_at_its_own_retry_without_new_admission(
         self,

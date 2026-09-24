@@ -261,6 +261,8 @@ Interactive selections use the selecting source as their history boundary while 
 `TurnDispatchOutcome.DEFERRED` means live downstream work owns the source, so `JournalDispatcher` leaves the row pending and `PendingEventWorker` tracks its in-memory owner.
 `TurnDispatchOutcome.INTENTIONALLY_IGNORED` means the callback is complete and the journal row may settle immediately.
 There is deliberately no persisted deferred state: after a restart, an unsettled row replays because the former in-memory owner no longer exists.
+A callback that raises leaves its row pending at the head of its room lane, which retries it with capped backoff and settles it with a `pending_event_abandoned` error after ten consecutive failures so later events in the room are not held behind it.
+A message or media event whose relation target the homeserver refuses to serve (`RelatedEventUnavailableError`) cannot be placed in a conversation on any retry, so `TurnController` settles it as intentionally ignored.
 
 ## Completed Simplifications
 

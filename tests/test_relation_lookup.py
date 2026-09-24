@@ -5,11 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import nio
 import pytest
+from aiohttp import ClientResponse
 
 from mindroom.matrix.relation_lookup import RelationLookup
+from mindroom.matrix.thread_membership import RelatedEventUnavailableError
 
 pytestmark = pytest.mark.asyncio
 
@@ -195,6 +198,33 @@ class TestEventInfo:
 
         with pytest.raises(RuntimeError, match="Failed to resolve related Matrix event"):
             await lookup(FakeRelations(), client).event_info(ROOM, "$secret")
+
+    async def test_a_refusal_that_holds_for_every_retry_says_so(self) -> None:
+        """A hidden event stays hidden, so its caller must stop rather than retry."""
+        client = FakeClient(error=nio.RoomGetEventError.from_dict({"errcode": "M_FORBIDDEN", "error": "nope"}))
+
+        with pytest.raises(RelatedEventUnavailableError):
+            await lookup(FakeRelations(), client).event_info(ROOM, "$secret")
+
+    @pytest.mark.parametrize(
+        ("http_status", "permanent"),
+        [(400, True), (414, True), (401, False), (408, False), (429, False), (500, False), (502, False)],
+    )
+    async def test_only_a_client_error_about_the_event_is_permanent(
+        self,
+        http_status: int,
+        *,
+        permanent: bool,
+    ) -> None:
+        """A malformed event ID is refused forever; a server or credential problem is not."""
+        error = nio.RoomGetEventError("refused")
+        error.transport_response = MagicMock(spec=ClientResponse, status=http_status)
+        client = FakeClient(error=error)
+
+        with pytest.raises(RuntimeError, match="Failed to resolve related Matrix event") as raised:
+            await lookup(FakeRelations(), client).event_info(ROOM, "not-an-event-id")
+
+        assert isinstance(raised.value, RelatedEventUnavailableError) is permanent
 
     async def test_without_a_client_nothing_can_be_resolved(self) -> None:
         """Without a client nothing can be resolved."""

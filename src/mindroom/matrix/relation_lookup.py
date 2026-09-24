@@ -23,9 +23,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 import nio
+from aiohttp import ClientResponse
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_membership import RelatedEventUnavailableError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -43,6 +45,10 @@ class _SupportsClient(Protocol):
 
 
 logger = get_logger(__name__)
+
+# Client errors that answer for the moment -- credentials, a slow request, a
+# rate limit -- rather than for the event the request names.
+_RETRYABLE_CLIENT_ERROR_STATUSES = frozenset({401, 408, 429})
 
 # Keyed by (room, event). Set for the duration of one turn and discarded with
 # it, so a stale answer cannot outlive the turn that read it.
@@ -169,7 +175,8 @@ class RelationLookup:
         existing. A caller resolving a reply target cannot tell an event that
         was deleted from one the homeserver merely refused to serve, and
         silently treating the second as the first would attach the turn to the
-        wrong conversation.
+        wrong conversation. A refusal no retry can change raises
+        ``RelatedEventUnavailableError``.
         """
         memo = _TURN_EVENT_INFO.get()
         key = (room_id, event_id.strip())
@@ -191,4 +198,20 @@ class RelationLookup:
             return None
         detail = response.message if isinstance(response, nio.RoomGetEventError) else "unknown error"
         msg = f"Failed to resolve related Matrix event {event_id}: {detail}"
+        if isinstance(response, nio.RoomGetEventError) and _refuses_event(response):
+            raise RelatedEventUnavailableError(msg)
         raise RuntimeError(msg)
+
+
+def _refuses_event(response: nio.RoomGetEventError) -> bool:
+    """Return whether the homeserver's refusal holds for every later request for this event.
+
+    A hidden event stays hidden, and an event ID the server rejects as
+    malformed stays malformed. Anything else -- a server error, a timeout, an
+    expired token -- may answer differently next time.
+    """
+    if response.status_code == "M_FORBIDDEN":
+        return True
+    transport = response.transport_response
+    status = transport.status if isinstance(transport, ClientResponse) else None
+    return status is not None and 400 <= status < 500 and status not in _RETRYABLE_CLIENT_ERROR_STATUSES
