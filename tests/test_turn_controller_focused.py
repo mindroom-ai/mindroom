@@ -1613,11 +1613,11 @@ async def test_unmentioned_managed_attachment_settles_before_unavailable_thread_
 
 
 @pytest.mark.asyncio
-async def test_managed_primary_cannot_settle_human_source_in_mixed_follow_up_batch(
+async def test_managed_follow_up_cannot_settle_human_source_queued_before_it(
     config: Config,
     tmp_path: Path,
 ) -> None:
-    """Whole-batch suppression requires every replayable source to share one requester."""
+    """Mixed-requester backlogs dispatch per requester, so managed chatter settles only itself."""
     harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
     human_event = _text_event(
@@ -1673,9 +1673,8 @@ async def test_managed_primary_cannot_settle_human_source_in_mixed_follow_up_bat
         )
     await gate.drain_all()
 
-    source_event_ids = tuple(event.event_id for event in (human_event, managed_event))
-    assert harness.ignored_dispatch_sources == []
-    assert retried_batches == [source_event_ids]
+    assert harness.ignored_dispatch_sources == [(managed_event.event_id,)]
+    assert retried_batches == [(human_event.event_id,)]
     assert reader.read.await_count + reader.read_strict.await_count > 0
     assert harness.policy.plan_turn_calls == 0
     assert harness.runner.requests == []
@@ -4751,9 +4750,10 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
     tmp_path: Path,
     mode: str,
 ) -> None:
-    """Active backlogs keep one ordered turn, selecting participation only for untagged multi-human context."""
+    """Active backlogs dispatch one ordered turn per requester, selecting participation for multi-human context."""
     config.agents["general"].participation = ParticipationConfig(debounce_seconds=30)
     first_sender = _SENDER if mode == "single_human" else "@other:localhost"
+    expected_batch_count = 1 if mode == "single_human" else 2
     history = thread_history_result(
         [
             make_visible_message(sender=first_sender, body="earlier", event_id=_THREAD_ROOT),
@@ -4776,7 +4776,8 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
         batches.append(batch)
         await harness.controller.handle_prepared_turn(batch)
         await harness.runner.settle_inbox_responses()
-        dispatched.set()
+        if len(batches) == expected_batch_count:
+            dispatched.set()
 
     gate = CoalescingGate(
         dispatch_turn=dispatch_batch,
@@ -4807,17 +4808,25 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
         idle.set()
         async with asyncio.timeout(1):
             await dispatched.wait()
-        assert len(batches) == len(harness.runner.requests) == 1
-        batch = batches[0]
-        assert batch.ingress.coalescing_key == key
-        assert batch.handled_turn.source_event_ids == ("$first:localhost", "$second:localhost")
-        assert batch.handled_turn.source_event_metadata["$first:localhost"].sender == first_sender
-        assert batch.handled_turn.source_event_metadata["$second:localhost"].sender == _SENDER
-        request = harness.runner.requests[0]
-        assert request.user_id == _SENDER
-        assert "first follow-up" in request.prompt
-        assert "extra context" in request.prompt
-        assert (request.participation is not None) == (mode == "multi_human")
+        assert len(batches) == len(harness.runner.requests) == expected_batch_count
+        assert all(batch.ingress.coalescing_key == key for batch in batches)
+        if mode == "single_human":
+            expected_turns = [(("$first:localhost", "$second:localhost"), _SENDER, (True, True), False)]
+        else:
+            expected_turns = [
+                (("$first:localhost",), first_sender, (True, False), False),
+                (("$second:localhost",), _SENDER, (False, True), mode == "multi_human"),
+            ]
+        assert [
+            (
+                batch.handled_turn.source_event_ids,
+                request.user_id,
+                ("first follow-up" in request.prompt, "extra context" in request.prompt),
+                request.participation is not None,
+            )
+            for batch, request in zip(batches, harness.runner.requests, strict=True)
+        ] == expected_turns
+        assert [batch.requester_user_id for batch in batches] == [requester for _, requester, _, _ in expected_turns]
     finally:
         idle.set()
         await gate.drain_all()

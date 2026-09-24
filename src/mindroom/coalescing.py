@@ -20,6 +20,7 @@ from .coalescing_batch import (
     build_prepared_turn,
     coalescing_owner_log_label,
     is_active_follow_up_coalescing_key,
+    pending_event_requester_user_id,
 )
 from .coalescing_cleanup import (
     ClaimedSegmentOwner,
@@ -201,9 +202,10 @@ class CoalescingGate:
     A live batch ending in media waits the debounce window for more attachments or a trailing
     caption (a continuous attachment stream extends the window without
     bound). Follow-up backlogs queued behind an active response are exempt:
-    they flush as one combined turn as soon as the conversation idles, since
-    later ingress is admitted under the conversation's live key and could
-    never join the held backlog.
+    they flush as soon as the conversation idles, since later ingress is
+    admitted under the conversation's live key and could never join the held
+    backlog. Each consecutive same-requester run flushes as its own turn, so
+    no sender's messages execute under another sender's identity.
     """
 
     def __init__(
@@ -1146,17 +1148,30 @@ class CoalescingGate:
         if not gate.queue:
             gate.drain_all_requested = False
 
+    @staticmethod
+    def _front_same_requester_run_length(key: CoalescingKey, gate: _GateEntry, count: int) -> int:
+        """Cap a front run at its first requester change so each turn runs as its own sender."""
+        front_requester_user_id = pending_event_requester_user_id(key, gate.queue[0].pending_event)
+        for index, queued in enumerate(islice(gate.queue, count)):
+            if pending_event_requester_user_id(key, queued.pending_event) != front_requester_user_id:
+                return index
+        return count
+
     async def _dispatch_active_follow_up_backlog(self, key: CoalescingKey, gate: _GateEntry) -> bool:
-        """Dispatch the post-idle active-response backlog as one receive-ordered batch."""
+        """Dispatch the post-idle active-response backlog as receive-ordered per-requester batches."""
         if not is_active_follow_up_coalescing_key(key):
             return False
         front = gate.queue[0]
         if self._queued_kind(front) is not QueueKind.NORMAL:
             return False
 
-        candidate_count = self._front_normal_run_length(
+        candidate_count = self._front_same_requester_run_length(
+            key,
             gate,
-            coalesce_normal_events=True,
+            self._front_normal_run_length(
+                gate,
+                coalesce_normal_events=True,
+            ),
         )
         if candidate_count == 0:
             return False

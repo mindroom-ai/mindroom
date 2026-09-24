@@ -558,7 +558,7 @@ def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
 
 
 def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
-    """Target-scoped active follow-up batches should preserve timeline order and senders."""
+    """Target-scoped active follow-up batches should preserve timeline order and per-message tags."""
     room = nio.MatrixRoom("!room:localhost", "@mindroom_general:localhost")
     pending_events = [
         make_pending_event(
@@ -576,21 +576,21 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
         ),
         make_pending_event(
             PreparedIngress(
-                sender="@bob:localhost",
-                event_id="$b1",
-                body="B <context> & more",
-                source={"content": {"body": "B <context> & more"}},
+                sender="@alice:localhost",
+                event_id="$a2",
+                body="A <context> & more",
+                source={"content": {"body": "A <context> & more"}},
                 server_timestamp=2,
             ),
             room,
-            requester_user_id="@bob:localhost",
+            requester_user_id="@alice:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
         make_pending_event(
             PreparedIngress(
                 sender="@alice:localhost",
-                event_id="$a2",
+                event_id="$a3",
                 body="A follow-up",
                 source={"content": {"body": "A follow-up"}},
                 server_timestamp=3,
@@ -607,20 +607,20 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
         pending_events,
     )
 
-    assert batch.handled_turn.source_event_ids == ("$a1", "$b1", "$a2")
+    assert batch.handled_turn.source_event_ids == ("$a1", "$a2", "$a3")
     assert batch.requester_user_id == "@alice:localhost"
     assert batch.handled_turn.source_event_prompts == {
         "$a1": "A first",
-        "$b1": "B <context> & more",
-        "$a2": "A follow-up",
+        "$a2": "A <context> & more",
+        "$a3": "A follow-up",
     }
     assert batch.event.body == (
         "Messages arrived while the previous response was still running. "
         "They are in chat timeline order. Respond once to the combined context:\n\n"
         "<queued_messages>\n"
         '<msg event_id="$a1" from="@alice:localhost"><![CDATA[A first]]></msg>\n'
-        '<msg event_id="$b1" from="@bob:localhost"><![CDATA[B <context> & more]]></msg>\n'
-        '<msg event_id="$a2" from="@alice:localhost"><![CDATA[A follow-up]]></msg>\n'
+        '<msg event_id="$a2" from="@alice:localhost"><![CDATA[A <context> & more]]></msg>\n'
+        '<msg event_id="$a3" from="@alice:localhost"><![CDATA[A follow-up]]></msg>\n'
         "</queued_messages>"
     )
 

@@ -179,7 +179,7 @@ Receipt ordering, batching, and response serialization use five different identi
 - Physical sender: the Matrix user ID that physically sent the event.
 - Effective requester: the trusted user ID the turn is attributed to after ingress validation; trusted-relay promotion can make it differ from the physical sender.
 - Receipt lane: the per-(room, effective requester) FIFO in `ingress_lanes.py`, keyed by `ReceiptLaneKey`, that preserves receipt order while asynchronous readiness (voice STT, media downloads) resolves.
-- Batching owner: the `CoalescingOwner` inside `CoalescingKey`, built through `requester_coalescing_key` or `active_follow_up_coalescing_key`; the gate in `coalescing.py` merges only same-owner messages into one batch, and a busy conversation reroutes admissions to an `ActiveFollowUpCoalescingOwner` key so follow-ups batch behind the active response.
+- Batching owner: the `CoalescingOwner` inside `CoalescingKey`, built through `requester_coalescing_key` or `active_follow_up_coalescing_key`; the gate in `coalescing.py` merges only same-owner messages into one batch, and a busy conversation reroutes admissions to an `ActiveFollowUpCoalescingOwner` key so follow-ups queue behind the active response and flush as one batch per consecutive effective-requester run, because a turn runs under exactly one requester's identity and `build_prepared_turn` rejects batches mixing requesters.
 - Delivery target: `MessageTarget`, the authoritative identity for where a response is sent; the response-lifecycle lock that serializes visible responses derives from it as `ResponseLifecycleKey` via `MessageTarget.lifecycle_key`.
 
 ### Prepared ingress

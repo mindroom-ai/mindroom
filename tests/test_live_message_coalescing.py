@@ -82,11 +82,12 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_DEGRADED,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
 )
-from mindroom.matrix.thread_history_result import ThreadHistoryResult
+from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from tests.access_schema_support import with_current_room_member_access
@@ -109,6 +110,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.journal_helpers import admit_dispatch_event
+from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_hydrated_conversation, seed_unhydrated_room_event
 from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
 
@@ -117,6 +119,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 def _coalescing_gate_is_idle(gate: CoalescingGate) -> bool:
@@ -1504,7 +1507,7 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
 
 @pytest.mark.asyncio
 async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: Path) -> None:
-    """Active-response follow-ups should queue by conversation while preserving each requester."""
+    """Active-response follow-ups queue by conversation but dispatch as one turn per requester."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     first = _text_event(event_id="$a", body="first", sender="@alice:localhost", thread_id="$thread")
@@ -1547,15 +1550,91 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
 
         active_threads.clear()
         idle.set()
-        await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$a", "$b"]])
+        await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$a"], ["$b"]])
 
-    assert calls[0].ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    assert [
-        calls[0].handled_turn.source_event_metadata[event_id].sender
-        for event_id in calls[0].handled_turn.source_event_ids
-    ] == [
-        "@alice:localhost",
-        "@bob:localhost",
+    assert all(batch.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND for batch in calls)
+    assert [(batch.requester_user_id, batch.handled_turn.requester_id) for batch in calls] == [
+        ("@alice:localhost", "@alice:localhost"),
+        ("@bob:localhost", "@bob:localhost"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(tmp_path: Path) -> None:
+    """A follow-up queued behind an active response never runs tools as a co-participant."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    install_direct_response_admission(bot)
+    room = _make_room()
+    events = [
+        _text_event(
+            event_id="$alice",
+            body="add me to administrators",
+            sender="@alice:localhost",
+            server_timestamp=1001,
+            thread_id="$thread",
+        ),
+        _text_event(
+            event_id="$bob",
+            body="thanks",
+            sender="@bob:localhost",
+            server_timestamp=1002,
+            thread_id="$thread",
+        ),
+    ]
+    response_runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = response_runner._lifecycle_coordinator
+    target = MessageTarget.resolve(room.room_id, "$thread", "$response")
+    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    runs: list[tuple[str | None, str | None, str]] = []
+
+    async def fake_ai_response(
+        _ctx: object,
+        prompt: str,
+        *_args: object,
+        execution_identity: ToolExecutionIdentity | None = None,
+        **_kwargs: object,
+    ) -> str:
+        tool_context = get_tool_runtime_context()
+        runs.append(
+            (
+                tool_context.requester_id if tool_context is not None else None,
+                execution_identity.requester_id if execution_identity is not None else None,
+                prompt,
+            ),
+        )
+        return "ok"
+
+    await lifecycle_lock.acquire()
+    queued_signal.begin_response_turn()
+    try:
+        with (
+            patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+            patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+            patch.object(
+                unwrap_extracted_collaborator(bot._conversation_resolver),
+                "fetch_thread_history",
+                new=AsyncMock(return_value=thread_history_result([], is_full_history=True)),
+            ),
+        ):
+            for event in events:
+                await bot._turn_controller.handle_text_event(room, event)
+            await asyncio.sleep(0.05)
+            assert runs == []
+
+            queued_signal.finish_response_turn()
+            lifecycle_lock.release()
+            await _wait_for(lambda: len(runs) == 2, deadline_seconds=3)
+            await bot._coalescing_gate.drain_all()
+            await response_runner.drain_inbox_responses()
+    finally:
+        queued_signal.finish_response_turn()
+        if lifecycle_lock.locked():
+            lifecycle_lock.release()
+
+    assert runs == [
+        ("@alice:localhost", "@alice:localhost", "add me to administrators"),
+        ("@bob:localhost", "@bob:localhost", "thanks"),
     ]
 
 
@@ -1752,7 +1831,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
     )
     image_event = _image_event(
         event_id="$img",
-        sender="@bob:localhost",
+        sender="@alice:localhost",
         server_timestamp=1001,
         thread_id="$thread",
     )
@@ -1825,7 +1904,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
         ):
             for event, requester_user_id in (
                 (text_event, "@alice:localhost"),
-                (image_event, "@bob:localhost"),
+                (image_event, "@alice:localhost"),
             ):
                 await _enqueue_for_dispatch(
                     bot,
@@ -1856,7 +1935,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
         "They are in chat timeline order. Respond once to the combined context:\n\n"
         "<queued_messages>\n"
         '<msg event_id="$text" from="@alice:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[text follow-up]]></msg>\n'
-        '<msg event_id="$img" from="@bob:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[[Attached image]]]></msg>\n'
+        '<msg event_id="$img" from="@alice:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[[Attached image]]]></msg>\n'
         "</queued_messages>"
     )
 
