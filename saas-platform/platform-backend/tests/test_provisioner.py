@@ -195,12 +195,19 @@ async def test_provision_openrouter_key_logs_superseded_hash_revoke_failure(capl
     assert "Failed to revoke superseded OpenRouter key old_hash for instance 123" in caplog.text
 
 
+def _is_existing_secret_value_lookup(args: list[str]) -> bool:
+    """Return whether kubectl args read one existing instance Secret value."""
+    return args[:3] == ["get", "secret", "mindroom-api-keys-456"] and any(
+        arg.startswith("-o=jsonpath=") for arg in args
+    )
+
+
 async def _kubectl_without_credentials_encryption_secret(args: list[str], namespace: str | None = None):
     """Return an empty response for a missing existing instance API key Secret."""
     _ = namespace
     if args[:2] == ["get", "pvc"]:
         return (0, '{"items":[]}', "")
-    if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
+    if _is_existing_secret_value_lookup(args):
         assert "--ignore-not-found" in args
         return (0, "", "")
     return (0, "Success", "")
@@ -211,7 +218,7 @@ async def _kubectl_with_credentials_encryption_secret(args: list[str], namespace
     _ = namespace
     if args[:2] == ["get", "pvc"]:
         return (0, '{"items":[]}', "")
-    if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
+    if _is_existing_secret_value_lookup(args):
         assert "--ignore-not-found" in args
         existing_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii").rstrip("=")
         return (0, base64.b64encode(existing_key.encode("utf-8")).decode("ascii"), "")
@@ -223,7 +230,7 @@ async def _kubectl_credentials_encryption_secret_lookup_fails(args: list[str], n
     _ = namespace
     if args[:2] == ["get", "pvc"]:
         return (0, '{"items":[]}', "")
-    if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
+    if _is_existing_secret_value_lookup(args):
         assert "--ignore-not-found" in args
         return (1, "", "Forbidden")
     return (0, "Success", "")
@@ -414,6 +421,47 @@ class TestProvisionerEndpoints:
         assert secret_data["anthropic_key"] == ""
         assert secret_data["google_key"] == ""
         assert secret_data["deepseek_key"] == ""
+
+    def test_provisioning_secret_holds_only_instance_scoped_credentials(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """A tenant that reads its own Secret must not obtain the platform's Supabase service-role key."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+
+        with patch(
+            "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
+        ) as apply_secret:
+            apply_secret.return_value = "hash"
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "byok"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        secret_data = _applied_instance_secret_data(apply_secret)
+        # Review any new key for tenant scoping before extending this set.
+        assert set(secret_data) == {
+            "openai_key",
+            "anthropic_key",
+            "openrouter_key",
+            "google_key",
+            "deepseek_key",
+            "sandbox_proxy_token",
+            "credentials_encryption_key",
+            "matrix_oidc_client_secret",
+            "matrix_registration_shared_secret",
+            "platform_sso_secret",
+        }
+        assert len(bytes.fromhex(secret_data["sandbox_proxy_token"])) == 32
 
     def test_hobby_provisioning_only_injects_limited_openrouter_provider_key(
         self,

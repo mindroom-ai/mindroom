@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
@@ -13,6 +12,7 @@ import httpx
 import pytest
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
+from mindroom import credentials as credentials_module
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.google import (
@@ -40,6 +40,7 @@ from mindroom.oauth.service import build_oauth_connect_instruction, build_oauth_
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
     from typing import Any
 
     from mindroom.constants import RuntimePaths
@@ -484,11 +485,11 @@ async def test_google_bootstrap_client_storage_stays_off_event_loop(
         },
     )
     client_path = manager.get_credentials_path(service)
-    original_read = Path.read_bytes
+    original_read = credentials_module._read_credentials_payload
     original_save = manager.save_credentials
     operations: set[str] = set()
 
-    def observed_read(path: Path) -> bytes:
+    def observed_read(path: Path) -> bytes | None:
         if path == client_path:
             assert threading.get_ident() != owner_thread, "Google client read blocked the event loop"
             operations.add("read")
@@ -506,7 +507,7 @@ async def test_google_bootstrap_client_storage_stays_off_event_loop(
 
     with monkeypatch.context() as storage_patch:
         if observed_operation == "read":
-            storage_patch.setattr(Path, "read_bytes", observed_read)
+            storage_patch.setattr(credentials_module, "_read_credentials_payload", observed_read)
         elif observed_operation == "manager":
             storage_patch.setattr("mindroom.oauth.google.get_runtime_credentials_manager", observed_manager)
         else:
