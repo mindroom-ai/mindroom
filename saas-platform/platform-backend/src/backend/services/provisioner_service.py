@@ -742,13 +742,16 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             ]
 
         _append_matrix_oidc_helm_args(helm_args)
+        # Apply before Helm so pods restarted by the new secret hash read the new values;
+        # Synapse reads its OIDC client secret only at startup.
+        await _apply_instance_secret(customer_id, namespace, instance_secret_data)
         code, stdout, stderr = await run_helm(helm_args)
         if code != 0:
             msg = f"Helm install failed: {stderr}"
             raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
         logger.info("Helm install output: %s", stdout)
-        # Older releases managed this Secret in Helm. Apply it after Helm so
-        # Helm's resource pruning cannot delete the externally managed Secret.
+        # Older releases managed this Secret in Helm. Apply it again after Helm
+        # because Helm's resource pruning deletes the externally managed Secret.
         await _apply_instance_secret(customer_id, namespace, instance_secret_data)
     except HTTPException:
         _mark_instance_provision_error(sb, customer_id, "deployment HTTP exception")

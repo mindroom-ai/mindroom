@@ -41,6 +41,7 @@ matrixOidc:
   enabled: "false"
   issuer: ""
   clientId: "mindroom-synapse"
+  # This instance's own client secret. The SaaS issuer accepts only the per-instance value the provisioner derives.
   clientSecret: ""
 administrators: []
 roomDefaults:

@@ -138,7 +138,9 @@ class TestProvisionerCommandValidation:
         assert secret_data["sandbox_proxy_token"]
         assert secret_data["credentials_encryption_key"]
         assert secret_data["matrix_registration_shared_secret"]
-        assert operations == ["helm", "secret"]
+        # Before Helm so restarted pods read new values; after Helm in case legacy pruning deleted it.
+        assert operations == ["secret", "helm", "secret"]
+        assert captured_secret_manifests[0] == captured_secret_manifests[1]
 
     def test_instance_secrets_are_stable_and_instance_scoped(self):
         """Provisioner-derived instance secrets should be stable without being shared across tenants."""

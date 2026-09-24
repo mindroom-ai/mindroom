@@ -333,8 +333,11 @@ After Helm completes, the platform backend applies `mindroom-api-keys-{instance_
 Tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
 Tenant workloads are untrusted, so the instance Secret holds only instance-scoped credentials and never the platform's Supabase service-role key.
 The sandbox proxy token is random per instance.
-The Synapse OIDC client secret is derived per instance from `matrixOidc.clientSecret`, which stays in the control plane; the issuer accepts it only for authorization codes issued to that instance.
+The Synapse OIDC client secret is derived per instance from the platform chart's `matrixOidc.clientSecret`, which stays in the control plane; the issuer accepts it only for authorization codes issued to that instance.
 Each provision removes Secret keys the provisioner no longer writes, because `kubectl apply` keeps keys dropped from `stringData`.
+Upgrading from releases that copied platform credentials into instance Secrets requires rotating the Supabase service-role key, the platform chart's `matrixOidc.clientSecret`, and any platform provider keys copied by `cluster/scripts/update-api-keys.sh`, then re-provisioning every instance with `POST /system/provision` and its `instance_id`.
+Until an instance is re-provisioned, its Synapse presents the old shared OIDC client secret and Matrix SSO login fails.
+Standalone chart installs that set the retired `supabaseServiceKey` value keep that key in the chart-created Secret until it is deleted manually.
 
 ## Ingress
 
