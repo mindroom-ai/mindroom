@@ -16,7 +16,11 @@ from agno.tools.sleep import SleepTools
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
-from mindroom.approval_execution import _collect_agent_continuation, _settle_agent_continuation
+from mindroom.approval_execution import (
+    _collect_agent_continuation,
+    _continuation_turn_context,
+    _stream_continuation_turn,
+)
 from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
@@ -427,12 +431,12 @@ async def test_approval_settlement_preserves_tool_boundary(
 
     collected = await _collect_agent_continuation(events(), presentation, progress=None)
     trace: list[ToolTraceEntry] = []
-    result = await _settle_agent_continuation(
-        continuation,
+    result = await _stream_continuation_turn(
+        _continuation_turn_context(continuation, model_name="default", metadata=None),
         presentation,
+        prompt=continuation.request_body,
+        show_tool_calls=continuation.show_tool_calls,
         resumed_attempt=ResumedAttempt(CompletedAttempt(response_text=collected.terminal_content)),
-        model_name="default",
-        metadata=None,
         config=config,
         runtime_paths=paths,
         execution_identity=identity,
@@ -498,12 +502,12 @@ async def test_approval_settlement_uses_typed_status(
         on_completed(CompletedAttempt(status=status))
 
     monkeypatch.setattr("mindroom.approval_execution.stream_agent_response", stream)
-    settlement = _settle_agent_continuation(
-        continuation,
+    settlement = _stream_continuation_turn(
+        _continuation_turn_context(continuation, model_name="default", metadata=None),
         CollectedStreamPresentation(show_tool_calls=False),
+        prompt=continuation.request_body,
+        show_tool_calls=continuation.show_tool_calls,
         resumed_attempt=ResumedAttempt(CompletedAttempt()),
-        model_name="default",
-        metadata=None,
         config=config,
         runtime_paths=paths,
         execution_identity=identity,
@@ -725,12 +729,12 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
     async def progress(chunk: StructuredStreamChunk) -> None:
         published.append(chunk.content)
 
-    result = await _settle_agent_continuation(
-        continuation,
+    result = await _stream_continuation_turn(
+        _continuation_turn_context(continuation, model_name="default", metadata=None),
         CollectedStreamPresentation(show_tool_calls=True, response_text="Checked."),
+        prompt=continuation.request_body,
+        show_tool_calls=continuation.show_tool_calls,
         resumed_attempt=ResumedAttempt(CompletedAttempt()),
-        model_name="default",
-        metadata=None,
         config=config,
         runtime_paths=paths,
         execution_identity=identity,
