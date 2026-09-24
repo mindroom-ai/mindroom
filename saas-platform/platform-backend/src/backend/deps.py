@@ -148,7 +148,7 @@ async def verify_user(authorization: str = Header(None), request: Request = None
     """Verify regular user via Supabase JWT.
 
     With the current schema, `account.id == auth.user.id`.
-    Ensures the `accounts` row exists, creating it if necessary.
+    The signup trigger creates every `accounts` row, so a missing row is rejected, never recreated.
     """
     # Get client IP for monitoring
     client_ip = client_ip_from_request(request) if request is not None else "unknown"
@@ -189,46 +189,20 @@ async def verify_user(authorization: str = Header(None), request: Request = None
         # Record successful auth
         auth_monitor.record_success(client_ip, str(account_id))
 
-        # Ensure account exists
-        try:
-            result = sb.table("accounts").select("*").eq("id", account_id).single().execute()
-            if not result.data:
-                msg = "No data"
-                raise ValueError(msg)  # noqa: TRY301
-        except Exception:
-            logger.info(f"Account not found for user {account_id}, creating...")
-            try:
-                now_iso = now.isoformat()
-                create_result = (
-                    sb.table("accounts")
-                    .insert(
-                        {
-                            "id": account_id,
-                            "email": user.user.email,
-                            "full_name": user.user.user_metadata.get("full_name", "")
-                            if user.user.user_metadata
-                            else "",
-                            "created_at": now_iso,
-                            "updated_at": now_iso,
-                        }
-                    )
-                    .execute()
-                )
-                result = create_result
-            except Exception:
-                logger.exception("Failed to create account")
-                # Try to fetch again in case it was a race condition
-                result = sb.table("accounts").select("*").eq("id", account_id).single().execute()
-                if not result.data:
-                    msg = "Account creation failed. Please contact support."
-                    raise HTTPException(status_code=404, detail=msg) from None
+        # Recreating a deleted row would silently reset its tier, admin flag, and Stripe link to defaults.
+        result = sb.table("accounts").select("*").eq("id", account_id).limit(1).execute()
+        if not result.data:
+            logger.error("No account row for authenticated user %s; refusing to recreate it", account_id)
+            record_auth_event(actor="user", outcome="missing_account")
+            msg = "Account not found. Please contact support."
+            raise HTTPException(status_code=403, detail=msg)  # noqa: TRY301
 
         # Prepare response data
         user_data = {
             "user_id": user.user.id,
             "email": user.user.email,
             "account_id": account_id,
-            "account": result.data,
+            "account": result.data[0],
         }
 
         _store_auth_cache(token, user_data, now)

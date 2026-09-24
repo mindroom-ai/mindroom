@@ -8,7 +8,7 @@ import jwt
 import pytest
 from fastapi import HTTPException
 
-from backend.metrics import get_admin_metric, reset_security_metrics
+from backend.metrics import get_admin_metric, get_auth_metric, reset_security_metrics
 
 
 def _jwt_with_exp(expires_at: datetime) -> str:
@@ -55,8 +55,8 @@ class TestDeps:
         mock_auth_client.auth.get_user.return_value = mock_user
 
         # Setup mock account
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "user_123", "email": "test@example.com"}
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(
+            data=[{"id": "user_123", "email": "test@example.com"}]
         )
 
         # Test
@@ -83,43 +83,32 @@ class TestDeps:
         assert exc_info.value.detail == "Invalid token"
 
     @pytest.mark.asyncio
-    async def test_verify_user_creates_account(
+    async def test_verify_user_rejects_missing_account_without_recreating_it(
         self, mock_supabase: MagicMock, mock_auth_client: MagicMock, mock_time: Mock
     ):
-        """Test user verification creates account if not exists."""
+        """A deleted admin or paid account must not come back as a default free account on next login."""
         from backend.deps import _auth_cache, verify_user
 
         _auth_cache.clear()
+        reset_security_metrics()
         token = _jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
 
-        # Setup mock user
         mock_user = Mock()
-        mock_user.user.id = "new_user_123"
-        mock_user.user.email = "new@example.com"
-        mock_user.user.user_metadata = {"full_name": "New User"}
+        mock_user.user.id = "deleted_admin_123"
+        mock_user.user.email = "admin@example.com"
+        mock_user.user.user_metadata = {"full_name": "Deleted Admin"}
         mock_auth_client.auth.get_user.return_value = mock_user
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[])
 
-        # First select returns no data (account doesn't exist)
-        mock_supabase.table().select().eq().single().execute.side_effect = [
-            Exception("Not found"),  # First check fails
-            Mock(data={"id": "new_user_123", "email": "new@example.com"}),  # After insert
-        ]
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_user(f"Bearer {token}")
 
-        # Mock insert
-        mock_supabase.table().insert().execute.return_value = Mock(data={"id": "new_user_123"})
-
-        # Test
-        result = await verify_user(f"Bearer {token}")
-
-        # Verify
-        assert result["user_id"] == "new_user_123"
-        assert result["account_id"] == "new_user_123"
-
-        # Verify insert was called
-        insert_call = mock_supabase.table().insert.call_args[0][0]
-        assert insert_call["id"] == "new_user_123"
-        assert insert_call["email"] == "new@example.com"
-        assert sha256(token.encode()).hexdigest() in _auth_cache
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "Account not found. Please contact support."
+        mock_supabase.table().insert.assert_not_called()
+        mock_supabase.table().upsert.assert_not_called()
+        assert get_auth_metric(actor="user", outcome="missing_account") == 1
+        assert sha256(token.encode()).hexdigest() not in _auth_cache
         _auth_cache.clear()
 
     @pytest.mark.asyncio
@@ -162,8 +151,8 @@ class TestDeps:
         mock_user.user.email = "test@example.com"
         mock_user.user.user_metadata = {"full_name": "Test User"}
         mock_auth_client.auth.get_user.return_value = mock_user
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "user_123", "email": "test@example.com"}
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(
+            data=[{"id": "user_123", "email": "test@example.com"}]
         )
 
         await verify_user(f"Bearer {token}")
@@ -187,8 +176,8 @@ class TestDeps:
         mock_user.user.email = "test@example.com"
         mock_user.user.user_metadata = {"full_name": "Test User"}
         mock_auth_client.auth.get_user.return_value = mock_user
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "user_123", "email": "test@example.com"}
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(
+            data=[{"id": "user_123", "email": "test@example.com"}]
         )
 
         await verify_user(f"Bearer {token}")
@@ -212,8 +201,8 @@ class TestDeps:
         mock_user.user.email = "test@example.com"
         mock_user.user.user_metadata = {"full_name": "Test User"}
         mock_auth_client.auth.get_user.return_value = mock_user
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "user_123", "email": "test@example.com"}
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(
+            data=[{"id": "user_123", "email": "test@example.com"}]
         )
 
         result = await verify_user(f"Bearer {token}")

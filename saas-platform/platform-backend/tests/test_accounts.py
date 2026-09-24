@@ -1,5 +1,6 @@
 """Comprehensive HTTP API tests for accounts endpoints."""
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -14,6 +15,13 @@ from main import app
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "supabase/migrations"
 BASELINE_MIGRATION_SQL = MIGRATIONS_DIR / "000_consolidated_complete_schema.sql"
 ACCOUNT_GRANTS_MIGRATION_SQL = MIGRATIONS_DIR / "002_restrict_account_grants.sql"
+ACCOUNT_LIFECYCLE_MIGRATION_SQL = MIGRATIONS_DIR / "003_restrict_account_lifecycle_functions.sql"
+ACCOUNT_LIFECYCLE_FUNCTIONS = {
+    "soft_delete_account": "UUID, TEXT, UUID",
+    "restore_account": "UUID",
+    "hard_delete_account": "UUID",
+}
+SERVICE_ROLE_GUARD = "IF auth.jwt()->>'role' IS DISTINCT FROM 'service_role' THEN"
 
 
 def assert_account_grants_restricted(sql: str) -> None:
@@ -35,6 +43,26 @@ def test_accounts_baseline_migration_restricts_authenticated_updates_to_profile_
 def test_accounts_incremental_migration_restricts_existing_authenticated_grants() -> None:
     """Existing databases receive the same account grant restriction."""
     assert_account_grants_restricted(ACCOUNT_GRANTS_MIGRATION_SQL.read_text(encoding="utf-8"))
+
+
+def assert_account_lifecycle_functions_restricted(sql: str) -> None:
+    for name, signature in ACCOUNT_LIFECYCLE_FUNCTIONS.items():
+        assert f"REVOKE ALL ON FUNCTION {name}({signature}) FROM PUBLIC, anon, authenticated;" in sql
+        assert f"GRANT EXECUTE ON FUNCTION {name}({signature}) TO service_role;" in sql
+        body = sql.split(f"CREATE OR REPLACE FUNCTION {name}(", 1)[1].split("$$ LANGUAGE", 1)[0]
+        assert body.split("BEGIN", 1)[1].lstrip().startswith(SERVICE_ROLE_GUARD)
+    names = "|".join(ACCOUNT_LIFECYCLE_FUNCTIONS)
+    assert not re.search(rf"GRANT [^;]* ON FUNCTION ({names})\b[^;]*\b(PUBLIC|anon|authenticated)\b", sql)
+
+
+def test_account_lifecycle_functions_baseline_migration_is_service_role_only() -> None:
+    """Fresh databases expose the RLS-bypassing account RPCs only to the service role."""
+    assert_account_lifecycle_functions_restricted(BASELINE_MIGRATION_SQL.read_text(encoding="utf-8"))
+
+
+def test_account_lifecycle_functions_incremental_migration_is_service_role_only() -> None:
+    """Existing databases revoke the default PUBLIC, anon, and authenticated EXECUTE grants."""
+    assert_account_lifecycle_functions_restricted(ACCOUNT_LIFECYCLE_MIGRATION_SQL.read_text(encoding="utf-8"))
 
 
 class TestAccountsEndpoints:

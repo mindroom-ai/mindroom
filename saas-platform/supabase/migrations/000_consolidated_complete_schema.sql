@@ -323,6 +323,9 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 -- ============================================================================
 -- SOFT DELETE FUNCTIONS (GDPR Compliance)
 -- ============================================================================
+-- These functions bypass RLS, so each one rejects every caller except the
+-- platform backend (service role) before touching data. EXECUTE is also
+-- revoked from PUBLIC, anon, and authenticated below.
 
 -- Soft delete function for accounts
 CREATE OR REPLACE FUNCTION soft_delete_account(
@@ -331,6 +334,10 @@ CREATE OR REPLACE FUNCTION soft_delete_account(
     requested_by UUID DEFAULT NULL
 ) RETURNS VOID AS $$
 BEGIN
+    IF auth.jwt()->>'role' IS DISTINCT FROM 'service_role' THEN
+        RAISE EXCEPTION 'permission denied for function soft_delete_account' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     -- Mark account as deleted
     UPDATE accounts
     SET
@@ -375,6 +382,10 @@ CREATE OR REPLACE FUNCTION restore_account(
     target_account_id UUID
 ) RETURNS VOID AS $$
 BEGIN
+    IF auth.jwt()->>'role' IS DISTINCT FROM 'service_role' THEN
+        RAISE EXCEPTION 'permission denied for function restore_account' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     -- Restore account
     UPDATE accounts
     SET
@@ -420,6 +431,10 @@ CREATE OR REPLACE FUNCTION hard_delete_account(
     target_account_id UUID
 ) RETURNS VOID AS $$
 BEGIN
+    IF auth.jwt()->>'role' IS DISTINCT FROM 'service_role' THEN
+        RAISE EXCEPTION 'permission denied for function hard_delete_account' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     -- Delete related data (cascade will handle most)
     DELETE FROM instances WHERE account_id = target_account_id;
     DELETE FROM subscriptions WHERE account_id = target_account_id;
@@ -554,9 +569,13 @@ CREATE POLICY "Admins can manage all webhook events" ON webhook_events
     FOR ALL USING (is_admin())
     WITH CHECK (is_admin());
 
-GRANT EXECUTE ON FUNCTION soft_delete_account TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION restore_account TO service_role;
-GRANT EXECUTE ON FUNCTION hard_delete_account TO service_role;
+-- CREATE FUNCTION grants EXECUTE to PUBLIC, and Supabase default privileges grant it to anon and authenticated.
+REVOKE ALL ON FUNCTION soft_delete_account(UUID, TEXT, UUID) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION restore_account(UUID) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION hard_delete_account(UUID) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION soft_delete_account(UUID, TEXT, UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION restore_account(UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION hard_delete_account(UUID) TO service_role;
 
 GRANT ALL ON TABLE accounts TO service_role;
 GRANT ALL ON TABLE subscriptions TO service_role;
