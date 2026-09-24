@@ -1496,17 +1496,31 @@ class TestCredentialsManager:
         assert manager.list_services() == []
         assert manager.load_credentials("openai") is None
 
-    def test_credentials_directory_symlink_is_never_read_through(
+    def test_linked_primary_credentials_directory_fails_loudly(
         self,
         tmp_path: Path,
     ) -> None:
-        """A credential directory replaced by a link must not expose the link target."""
+        """An operator-linked primary credential directory must not read as an empty store."""
+        real_dir = tmp_path / "elsewhere"
+        CredentialsManager(real_dir).save_credentials("openai", {"api_key": "shared-key"})
+        linked_dir = tmp_path / "credentials"
+        linked_dir.symlink_to(real_dir, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="is a symbolic link"):
+            CredentialsManager(linked_dir)
+
+    def test_credentials_directory_swapped_for_symlink_is_never_read_through(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A credential directory replaced by a link after startup must not expose the link target."""
         shared_dir = tmp_path / "credentials"
         manager = CredentialsManager(shared_dir)
         manager.save_credentials("openai", {"api_key": "shared-key"})
         linked_dir = tmp_path / "linked"
-        linked_dir.symlink_to(shared_dir, target_is_directory=True)
         linked_manager = CredentialsManager(linked_dir)
+        linked_dir.rmdir()
+        linked_dir.symlink_to(shared_dir, target_is_directory=True)
 
         assert linked_manager.list_services() == []
         assert linked_manager.load_credentials("openai") is None

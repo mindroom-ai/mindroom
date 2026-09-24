@@ -293,6 +293,21 @@ def _harden_credentials_file(directory_fd: int, path: Path) -> None:
         os.close(file_fd)
 
 
+def _reject_linked_primary_credential_directories(credential_paths: set[Path]) -> None:
+    """Fail loudly when an operator links a primary credential directory.
+
+    Every operation opens credential directories with ``O_NOFOLLOW``, so a linked
+    directory would otherwise read as an empty store and hide every saved credential.
+    """
+    for path in sorted(credential_paths):
+        if path.is_symlink():
+            msg = (
+                f"Credential directory '{path}' is a symbolic link; "
+                "point the storage path at the real directory instead"
+            )
+            raise ValueError(msg)
+
+
 def _validate_worker_credential_directories(worker_root: Path, credential_paths: tuple[Path, ...]) -> None:
     """Fail closed before the primary touches one worker's credential directories.
 
@@ -419,6 +434,7 @@ class CredentialsManager:
 
         credential_paths = {self.base_path, self.shared_base_path}
         if self.current_worker_key is None and self.base_path.name == "credentials":
+            _reject_linked_primary_credential_directories(credential_paths)
             credential_paths.update(_existing_worker_credential_paths(self.storage_root))
         for credential_path in credential_paths:
             _ensure_private_directory(credential_path, harden_existing=True)
