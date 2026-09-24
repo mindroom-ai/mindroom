@@ -22,6 +22,30 @@
 {{- end -}}
 {{- end }}
 
+{{- /*
+Tenant-scoped dedicated-worker name prefix.
+Worker resource names are derived from the worker key, so every tenant in the shared
+`mindroom-instances` namespace must start from its own prefix: it keeps two tenants from
+generating the same worker name, and it is what the worker-manager admission policy scopes
+create and update requests to.
+A hyphen in the customer would make one tenant's prefix a prefix of another tenant's names
+(`mindroom-worker-a-` also starts the names of customer `a-b`), so dedicated workers require a
+customer without separators.
+Normalization mirrors `_digest_and_safe_prefix` in `mindroom.tool_system.worker_routing`.
+*/ -}}
+{{- define "mindroom.workerNamePrefix" -}}
+{{- $customer := toString .customer -}}
+{{- if not (regexMatch "^[a-z0-9]+$" $customer) -}}
+{{- fail "workerBackend=kubernetes requires a customer of lowercase letters and digits so worker names stay tenant-scoped" -}}
+{{- end -}}
+{{- $prefix := printf "%s-%s" (.kubernetesWorkerNamePrefix | default "mindroom-worker") $customer -}}
+{{- $normalized := trimAll "-" (regexReplaceAll "[^a-z0-9-]+" (lower $prefix) "-") -}}
+{{- if or (eq $normalized "") (gt (len $normalized) 52) -}}
+{{- fail "kubernetesWorkerNamePrefix combined with customer must normalize to 1-52 characters of [a-z0-9-]" -}}
+{{- end -}}
+{{- $normalized -}}
+{{- end }}
+
 {{- define "mindroom.workerBackendEnv" -}}
 {{- $workerBackend := .workerBackend -}}
 {{- $instanceNamespace := .instanceNamespace -}}
@@ -82,7 +106,7 @@
 - name: MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS
   value: {{ $values.kubernetesWorkerReadyTimeoutSeconds | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_NAME_PREFIX
-  value: {{ $values.kubernetesWorkerNamePrefix | quote }}
+  value: {{ include "mindroom.workerNamePrefix" $values | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS
   value: {{ $values.kubernetesWorkerEnableServiceLinks | quote }}
 {{- with $values.kubernetesWorkerRuntimeClassName }}

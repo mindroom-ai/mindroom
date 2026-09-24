@@ -1,0 +1,155 @@
+{{- if eq (.Values.workerBackend | default "static_runner") "kubernetes" }}
+{{- $customer := .Values.customer | toString -}}
+{{- $policyName := printf "mindroom-worker-manager-%s" $customer -}}
+{{- $username := printf "system:serviceaccount:mindroom-instances:mindroom-worker-manager-%s" $customer -}}
+{{- $workerNamePrefix := printf "%s-" (include "mindroom.workerNamePrefix" .Values) -}}
+{{- $workerServiceAccountName := .Values.kubernetesWorkerServiceAccountName | default "default" -}}
+{{- $authSecretName := printf "mindroom-worker-auth-%s" $customer -}}
+{{- $storagePvcName := printf "mindroom-storage-%s" $customer -}}
+{{- $configMapName := printf "mindroom-config-%s" $customer -}}
+{{- /*
+Dedicated workers get dynamic names, so the worker-manager Role cannot use `resourceNames` and
+is necessarily namespace-wide. Every tenant shares `mindroom-instances`, so RBAC alone would let
+one tenant's runtime create, patch or delete another tenant's workloads and mount another
+tenant's Secrets and PVCs. This policy is the boundary that keeps each worker manager inside its
+own tenant: it runs only for this tenant's ServiceAccount and denies anything that is not one of
+this tenant's own worker resources. Requires Kubernetes 1.30+ for admissionregistration.k8s.io/v1.
+*/ -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $policyName }}
+  labels:
+    app: mindroom
+    customer: {{ $customer | quote }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE", "DELETE"]
+      resources: ["pods", "services", "endpoints", "secrets", "configmaps", "persistentvolumeclaims", "serviceaccounts"]
+    - apiGroups: ["apps"]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE", "DELETE"]
+      resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    - apiGroups: ["discovery.k8s.io"]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE", "DELETE"]
+      resources: ["endpointslices"]
+  matchConditions:
+  - name: tenant-worker-manager
+    expression: >-
+      request.userInfo.username == {{ $username | toJson }}
+  variables:
+  - name: target
+    expression: >-
+      object == null ? oldObject : object
+  - name: labels
+    expression: >-
+      has(variables.target.metadata.labels) ? variables.target.metadata.labels : {}
+  - name: podTemplate
+    expression: >-
+      has(variables.target.spec) && has(variables.target.spec.template) ? variables.target.spec.template : null
+  - name: podTemplateLabels
+    expression: >-
+      variables.podTemplate != null && has(variables.podTemplate.metadata)
+      && has(variables.podTemplate.metadata.labels) ? variables.podTemplate.metadata.labels : {}
+  - name: podSpec
+    expression: >-
+      variables.podTemplate != null && has(variables.podTemplate.spec) ? variables.podTemplate.spec
+      : (has(variables.target.spec) && has(variables.target.spec.containers) ? variables.target.spec : null)
+  - name: containers
+    expression: >-
+      variables.podSpec == null ? []
+      : ((has(variables.podSpec.containers) ? variables.podSpec.containers : [])
+      + (has(variables.podSpec.initContainers) ? variables.podSpec.initContainers : [])
+      + (has(variables.podSpec.ephemeralContainers) ? variables.podSpec.ephemeralContainers : []))
+  - name: volumes
+    expression: >-
+      variables.podSpec != null && has(variables.podSpec.volumes) ? variables.podSpec.volumes : []
+  - name: inspectsSpec
+    expression: >-
+      request.operation != "DELETE" && variables.podSpec != null
+  validations:
+  # Deleting is authorized by the tenant label alone so workers created before this policy
+  # existed stay removable; creating and updating additionally require this tenant's own name.
+  - expression: >-
+      "customer" in variables.labels && variables.labels["customer"] == {{ $customer | toJson }}
+    message: The MindRoom worker manager may only manage resources labelled with its own customer.
+    reason: Forbidden
+  - expression: >-
+      request.operation == "DELETE"
+      || variables.target.metadata.name.startsWith({{ $workerNamePrefix | toJson }})
+      || variables.target.metadata.name == {{ $authSecretName | toJson }}
+    message: The MindRoom worker manager may only create or update its own tenant worker resources.
+    reason: Forbidden
+  - expression: >-
+      request.operation == "DELETE" || variables.podTemplate == null
+      || ("customer" in variables.podTemplateLabels
+      && variables.podTemplateLabels["customer"] == {{ $customer | toJson }})
+    message: MindRoom worker pod templates must carry their own customer label.
+    reason: Forbidden
+  - expression: >-
+      !variables.inspectsSpec
+      || ((!has(variables.podSpec.serviceAccountName)
+      || variables.podSpec.serviceAccountName == {{ $workerServiceAccountName | toJson }})
+      && (!has(variables.podSpec.serviceAccount)
+      || variables.podSpec.serviceAccount == {{ $workerServiceAccountName | toJson }})
+      && has(variables.podSpec.automountServiceAccountToken)
+      && !variables.podSpec.automountServiceAccountToken)
+    message: MindRoom worker pods must use the configured worker ServiceAccount without an API token.
+    reason: Forbidden
+  - expression: >-
+      !variables.inspectsSpec || variables.volumes.all(volume,
+      (has(volume.persistentVolumeClaim)
+      && volume.persistentVolumeClaim.claimName == {{ $storagePvcName | toJson }})
+      || (has(volume.configMap) && volume.configMap.name == {{ $configMapName | toJson }})
+      || (has(volume.secret) && volume.secret.secretName == {{ $authSecretName | toJson }})
+      || has(volume.emptyDir))
+    message: MindRoom worker pods may only mount their own tenant storage, config and worker-auth volumes.
+    reason: Forbidden
+  - expression: >-
+      !variables.inspectsSpec || variables.containers.all(container,
+      (!has(container.env) || container.env.all(entry, !has(entry.valueFrom)
+      || ((!has(entry.valueFrom.secretKeyRef)
+      || entry.valueFrom.secretKeyRef.name == {{ $authSecretName | toJson }})
+      && (!has(entry.valueFrom.configMapKeyRef)
+      || entry.valueFrom.configMapKeyRef.name == {{ $configMapName | toJson }}))))
+      && (!has(container.envFrom) || container.envFrom.all(source,
+      (!has(source.secretRef) || source.secretRef.name == {{ $authSecretName | toJson }})
+      && (!has(source.configMapRef) || source.configMapRef.name == {{ $configMapName | toJson }}))))
+    message: MindRoom worker containers may only read their own tenant Secret and ConfigMap.
+    reason: Forbidden
+  - expression: >-
+      !variables.inspectsSpec
+      || ((!has(variables.podSpec.hostNetwork) || !variables.podSpec.hostNetwork)
+      && (!has(variables.podSpec.hostPID) || !variables.podSpec.hostPID)
+      && (!has(variables.podSpec.hostIPC) || !variables.podSpec.hostIPC)
+      && variables.containers.all(container, !has(container.securityContext)
+      || ((!has(container.securityContext.privileged) || !container.securityContext.privileged)
+      && (!has(container.securityContext.capabilities)
+      || !has(container.securityContext.capabilities.add)
+      || size(container.securityContext.capabilities.add) == 0))))
+    message: MindRoom worker pods may not use host namespaces, privileged containers or added capabilities.
+    reason: Forbidden
+  - expression: >-
+      request.operation == "DELETE" || request.resource.resource != "services"
+      || (has(variables.target.spec) && has(variables.target.spec.selector)
+      && "customer" in variables.target.spec.selector
+      && variables.target.spec.selector["customer"] == {{ $customer | toJson }})
+    message: MindRoom worker Services must select their own tenant pods.
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $policyName }}
+  labels:
+    app: mindroom
+    customer: {{ $customer | quote }}
+spec:
+  policyName: {{ $policyName }}
+  validationActions: ["Deny"]
+{{- end }}

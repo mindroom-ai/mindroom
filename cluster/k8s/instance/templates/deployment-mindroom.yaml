@@ -68,6 +68,9 @@ spec:
       {{- end }}
       {{- if eq $workerBackend "kubernetes" }}
       serviceAccountName: {{ $workerManagerServiceAccountName }}
+      {{- else }}
+      # Only the dedicated-worker backend talks to the Kubernetes API from this pod.
+      automountServiceAccountToken: false
       {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:

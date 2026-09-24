@@ -23254,6 +23254,7 @@ The runtime chart stores derived worker tokens and optional credential-encryptio
 If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
 The hosted instance chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in a pre-created tenant auth Secret.
 The hosted instance worker-manager Role does not grant broad Secret API access in the shared `mindroom-instances` namespace.
+Its Deployment and Service verbs are namespace-wide because worker names are derived from the worker key at runtime, so a per-tenant `ValidatingAdmissionPolicy` confines each tenant's worker manager to its own resources.
 
 > [!WARNING]
 > **Filesystem isolation depends on `worker_scope`.**
@@ -23352,7 +23353,15 @@ When `workerBackend: kubernetes` is enabled, the chart creates:
 - In the runtime chart's default same-namespace mode, a chart-created worker-auth Secret plus narrow `get` and `patch` access to only that Secret.
 - In the runtime chart's explicit separate worker namespace mode, Secret CRUD for per-worker auth Secrets in that worker namespace.
 - In the hosted instance chart, a pre-created tenant worker-auth Secret plus narrow `get` and `patch` access to only that Secret.
+- In the hosted instance chart, a per-tenant `ValidatingAdmissionPolicy` and binding that deny every request from that tenant's worker manager which is not one of its own worker resources.
 - NetworkPolicy rules that allow the primary runtime to reach the internal worker port while denying worker-to-worker runner ingress.
+
+The hosted instance chart shares one `mindroom-instances` namespace across tenants, so the worker manager's namespace-wide Deployment and Service verbs are confined by admission instead of by RBAC.
+The policy runs only for `system:serviceaccount:mindroom-instances:mindroom-worker-manager-{customer}` and requires that the object carry that tenant's `customer` label, that created and updated names start with `{kubernetesWorkerNamePrefix}-{customer}-`, that pod templates carry that tenant's `customer` label, run as the configured worker ServiceAccount with `automountServiceAccountToken: false`, and reference only `mindroom-storage-{customer}`, `mindroom-config-{customer}` and `mindroom-worker-auth-{customer}`.
+Host namespaces, privileged containers and added capabilities are denied as well.
+This needs a Kubernetes 1.30+ API server for `admissionregistration.k8s.io/v1`; on older clusters the release fails to install rather than granting the unconfined Role.
+Dedicated-worker names are tenant-scoped for the same reason, so worker Deployments and Services created by an earlier release keep their old names; deleting them stays allowed because the policy authorizes deletes by the tenant's `customer` label.
+Tenant-scoped names also require `customer` to be lowercase letters and digits, because a hyphen would let one tenant's prefix match another tenant's worker names; the chart fails to render otherwise.
 
 ### Operations
 

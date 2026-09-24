@@ -25,6 +25,8 @@ spec:
         mindroom.ai/synapse-config-hash: {{ $synapseConfigHash | quote }}
         mindroom.ai/instance-secret-hash: {{ $instanceSecretHash | quote }}
     spec:
+      # Synapse never calls the Kubernetes API.
+      automountServiceAccountToken: false
       containers:
       - name: synapse
         image: {{ .Values.synapse_image | default "matrixdotorg/synapse:latest" }}

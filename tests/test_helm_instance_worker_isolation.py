@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from mindroom.config.main import Config
+from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key
 
 
 def _render_chart(
@@ -635,6 +636,92 @@ def test_instance_chart_worker_manager_can_only_patch_own_worker_auth_secret() -
             "verbs": ["get", "patch"],
         },
     ]
+
+
+def test_instance_chart_confines_worker_manager_to_its_own_tenant_resources() -> None:
+    """Namespace-wide worker verbs in a shared namespace must be scoped by admission."""
+    docs = _render_instance_chart()
+    policy = _resource(docs, "ValidatingAdmissionPolicy", "mindroom-worker-manager-demo")
+    binding = _resource(docs, "ValidatingAdmissionPolicyBinding", "mindroom-worker-manager-demo")
+    expressions = " ".join(validation["expression"] for validation in policy["spec"]["validations"])
+
+    assert policy["spec"]["failurePolicy"] == "Fail"
+    assert [condition["expression"] for condition in policy["spec"]["matchConditions"]] == [
+        'request.userInfo.username == "system:serviceaccount:mindroom-instances:mindroom-worker-manager-demo"',
+    ]
+    assert binding["spec"] == {
+        "policyName": "mindroom-worker-manager-demo",
+        "validationActions": ["Deny"],
+    }
+    assert 'variables.labels["customer"] == "demo"' in expressions
+    assert 'variables.target.metadata.name.startsWith("mindroom-worker-demo-")' in expressions
+    assert 'variables.podTemplateLabels["customer"] == "demo"' in expressions
+    assert 'variables.podSpec.serviceAccountName == "default"' in expressions
+    assert "&& !variables.podSpec.automountServiceAccountToken" in expressions
+    assert 'volume.persistentVolumeClaim.claimName == "mindroom-storage-demo"' in expressions
+    assert 'volume.configMap.name == "mindroom-config-demo"' in expressions
+    assert 'entry.valueFrom.secretKeyRef.name == "mindroom-worker-auth-demo"' in expressions
+    assert 'source.secretRef.name == "mindroom-worker-auth-demo"' in expressions
+    assert 'variables.target.spec.selector["customer"] == "demo"' in expressions
+
+
+def test_instance_chart_names_dedicated_workers_per_tenant() -> None:
+    """Generated worker names must be unique per tenant and match the admission policy prefix."""
+    docs = _render_instance_chart()
+    env = _env_by_name(_container(_resource(docs, "Deployment", "mindroom-demo"), "mindroom"))
+    policy = _resource(docs, "ValidatingAdmissionPolicy", "mindroom-worker-manager-demo")
+    expressions = " ".join(validation["expression"] for validation in policy["spec"]["validations"])
+    worker_id = descriptive_worker_id_for_key(
+        "v1:default:user_agent:@alice:demo.mindroom.chat:code",
+        prefix=env["MINDROOM_KUBERNETES_WORKER_NAME_PREFIX"]["value"],
+    )
+
+    assert env["MINDROOM_KUBERNETES_WORKER_NAME_PREFIX"]["value"] == "mindroom-worker-demo"
+    assert worker_id.startswith("mindroom-worker-demo-")
+    assert f'startsWith("{worker_id[: len("mindroom-worker-demo-")]}")' in expressions
+
+
+def test_instance_chart_rejects_worker_name_prefixes_that_cannot_scope_one_tenant() -> None:
+    """A prefix the runtime would truncate would render worker names the policy denies."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/instance"),
+        "workerBackend=kubernetes",
+        "storageAccessMode=ReadWriteMany",
+        f"kubernetesWorkerNamePrefix={'w' * 60}",
+    )
+
+    assert completed.returncode != 0
+    assert "kubernetesWorkerNamePrefix" in completed.stderr
+
+
+def test_instance_chart_rejects_dedicated_workers_for_ambiguous_customer_names() -> None:
+    """A hyphenated customer would share its worker name prefix with another tenant."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/instance"),
+        "workerBackend=kubernetes",
+        "storageAccessMode=ReadWriteMany",
+        "customer=acme-corp",
+    )
+    sidecar = _run_helm_template(Path("cluster/k8s/instance"), "customer=acme-corp")
+
+    assert completed.returncode != 0
+    assert "requires a customer of lowercase letters and digits" in completed.stderr
+    sidecar.check_returncode()
+
+
+def test_instance_chart_mounts_api_tokens_only_where_the_api_is_used() -> None:
+    """Only the dedicated-worker control plane needs a Kubernetes API token in its pod."""
+    worker_docs = _render_instance_chart()
+    sidecar_docs = _render_chart(Path("cluster/k8s/instance"))
+    worker_pod = _resource(worker_docs, "Deployment", "mindroom-demo")["spec"]["template"]["spec"]
+    sidecar_pod = _resource(sidecar_docs, "Deployment", "mindroom-demo")["spec"]["template"]["spec"]
+    synapse_pod = _resource(sidecar_docs, "Deployment", "synapse-demo")["spec"]["template"]["spec"]
+
+    assert worker_pod["serviceAccountName"] == "mindroom-worker-manager-demo"
+    assert "automountServiceAccountToken" not in worker_pod
+    assert sidecar_pod["automountServiceAccountToken"] is False
+    assert "serviceAccountName" not in sidecar_pod
+    assert synapse_pod["automountServiceAccountToken"] is False
 
 
 def test_instance_chart_uses_tenant_worker_auth_secret() -> None:

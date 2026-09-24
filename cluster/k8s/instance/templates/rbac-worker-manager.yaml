@@ -1,5 +1,11 @@
 {{- if eq (.Values.workerBackend | default "static_runner") "kubernetes" }}
 {{- $workerManagerServiceAccountName := printf "mindroom-worker-manager-%s" .Values.customer -}}
+{{- /*
+Worker Deployments and Services are named from the worker key at runtime, so `resourceNames`
+cannot scope these verbs and this Role is namespace-wide in a namespace every tenant shares.
+`admissionpolicy-worker-manager.yaml` is what confines this ServiceAccount to its own tenant's
+worker resources; the Role and that policy must stay in step.
+*/ -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
