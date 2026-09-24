@@ -27,6 +27,8 @@ _ROOM_ADMIN_POWER_LEVEL = 100
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 _DEFAULT_USER_POWER_LEVEL = 0
 _POWER_USER_POWER_LEVEL = 50
+# Room v12 (MSC4289) gives creators unbounded power and keeps them out of power_levels.users.
+_FIRST_PRIVILEGED_CREATOR_ROOM_VERSION = 12
 
 _MANAGED_ROOM_EVENT_POWER_LEVELS = {
     THREAD_TAGS_EVENT_TYPE: 0,
@@ -302,6 +304,67 @@ def _room_power_level_for_user(power_levels_content: dict[str, Any], user_id: st
             return user_level
     users_default = power_levels_content.get("users_default")
     return users_default if isinstance(users_default, int) else _DEFAULT_USER_POWER_LEVEL
+
+
+def room_control_problem(  # noqa: PLR0911 - each uncontrolled Matrix state is a separate fail-closed exit
+    snapshot: RoomStateSnapshot,
+    owner_user_id: str,
+    room_alias: str,
+    admin_user_ids: Iterable[str],
+) -> str | None:
+    """Return why one account does not own and control a room it manages, or None when it does.
+
+    Any homeserver user can publish a room under a predictable alias, so the
+    owner must have created it under that alias, be joined, and hold admin
+    power that no one outside the configured admins matches. From room v12,
+    creators outrank every power level, so only co-creators can match the owner.
+    """
+    if snapshot.creator != owner_user_id:
+        return f"created by {snapshot.creator}, not {owner_user_id}"
+    if snapshot.events.get(("m.room.canonical_alias", ""), {}).get("alias") != room_alias:
+        return f"canonical alias is not {room_alias}"
+    if snapshot.events.get(("m.room.member", owner_user_id), {}).get("membership") != "join":
+        return f"{owner_user_id} is not joined"
+    power_levels = snapshot.events.get((_POWER_LEVELS_EVENT_TYPE, ""))
+    if power_levels is None:
+        return "power levels are missing"
+    allowed_user_ids = {owner_user_id, *admin_user_ids}
+    create_content = snapshot.events.get(("m.room.create", ""), {})
+    room_version = create_content.get("room_version", "1")
+    if (
+        isinstance(room_version, str)
+        and room_version.isdigit()
+        and int(room_version) >= _FIRST_PRIVILEGED_CREATOR_ROOM_VERSION
+    ):
+        additional_creators = create_content.get("additional_creators")
+        co_creators = sorted(
+            user_id
+            for user_id in (additional_creators if isinstance(additional_creators, list) else ())
+            if isinstance(user_id, str) and user_id not in allowed_user_ids
+        )
+        if co_creators:
+            return f"users outside the configured admins co-created the room: {', '.join(co_creators)}"
+        return None
+    state_default = power_levels.get("state_default")
+    required_power = max(
+        _ROOM_ADMIN_POWER_LEVEL,
+        state_default if isinstance(state_default, int) else _DEFAULT_STATE_EVENT_POWER_LEVEL,
+    )
+    owner_power = _room_power_level_for_user(power_levels, owner_user_id)
+    if owner_power < required_power:
+        return f"{owner_user_id} has power {owner_power}, below {required_power}"
+    users = power_levels.get("users")
+    rivals = sorted(
+        user_id
+        for user_id in (users if isinstance(users, dict) else {})
+        if user_id not in allowed_user_ids and _room_power_level_for_user(power_levels, user_id) >= owner_power
+    )
+    if rivals:
+        return f"users outside the configured admins match {owner_user_id}'s power: {', '.join(rivals)}"
+    users_default = power_levels.get("users_default")
+    if isinstance(users_default, int) and users_default >= owner_power:
+        return f"every user matches {owner_user_id}'s power"
+    return None
 
 
 async def room_admin_power_user(
@@ -766,5 +829,6 @@ __all__ = [
     "join_room",
     "leave_room",
     "room_admin_power_user",
+    "room_control_problem",
     "room_encryption_enabled",
 ]

@@ -21,6 +21,7 @@ from mindroom.matrix.client_session import olm_store_dir, olm_store_exists
 from mindroom.matrix.rooms import _managed_room_should_be_encrypted
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.managed_room_helpers import router_owned_room_events
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -179,11 +180,16 @@ class TestManagedRoomEncryptionReconcile:
         )
         mock_client = AsyncMock()
         mock_client.homeserver = "https://example.com"
+        mock_client.user_id = "@router:example.com"
         mock_client.rooms = {"!lobby:example.com": object()}
         mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
             room_alias="#lobby:example.com",
             room_id="!lobby:example.com",
             servers=["example.com"],
+        )
+        mock_client.room_get_state.return_value = nio.RoomGetStateResponse(
+            router_owned_room_events(mock_client.user_id, "#lobby:example.com"),
+            "!lobby:example.com",
         )
 
         monkeypatch.setattr(matrix_state, "load_rooms", dict)
@@ -206,7 +212,6 @@ class TestManagedRoomEncryptionReconcile:
         )
 
         assert room_id == "!lobby:example.com"
-        mock_client.user_id = "@router:example.com"
         mock_client.room_get_state.return_value = nio.RoomGetStateResponse(
             [
                 {"type": "m.room.member", "state_key": mock_client.user_id, "content": {"membership": "join"}},

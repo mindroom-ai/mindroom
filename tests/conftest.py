@@ -2923,6 +2923,14 @@ def _reset_approval_manager_runtime() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_rejected_managed_rooms() -> Generator[None, None, None]:
+    """Keep the process-global managed-room rejection report isolated per test."""
+    matrix_rooms_module._rejected_managed_rooms.clear()
+    yield
+    matrix_rooms_module._rejected_managed_rooms.clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_voice_echo_barriers() -> Generator[None, None, None]:
     """Keep cross-bot voice echo ordering state, and its loop bindings, per test."""
     _reset_visible_voice_echo_barriers()

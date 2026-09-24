@@ -16,7 +16,7 @@ from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_name
 from mindroom.matrix.media import MatrixMediaUpstreamError, fetch_matrix_thumbnail, matrix_profile_avatar_uri
-from mindroom.matrix.rooms import filter_non_dm_rooms
+from mindroom.matrix.rooms import filter_non_dm_rooms, rejected_managed_rooms
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.users import create_agent_http_client
 
@@ -61,6 +61,8 @@ class AllAgentsRoomsResponse(BaseModel):
     """Response containing all configured Matrix entities' room information."""
 
     agents: list[AgentRoomsResponse]
+    # Managed room aliases the runtime refused to adopt or manage, mapped to the reason.
+    rejected_managed_rooms: dict[str, str] = Field(default_factory=dict)
 
 
 def _get_configured_matrix_entities(config_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -260,7 +262,7 @@ async def get_all_agents_rooms(request: Request) -> AllAgentsRoomsResponse:
     ]
     agents_rooms = await asyncio.gather(*tasks)
 
-    return AllAgentsRoomsResponse(agents=agents_rooms)
+    return AllAgentsRoomsResponse(agents=agents_rooms, rejected_managed_rooms=rejected_managed_rooms())
 
 
 @router.get("/agents/{agent_id}/rooms")

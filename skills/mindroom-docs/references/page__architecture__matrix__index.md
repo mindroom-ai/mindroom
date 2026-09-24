@@ -50,6 +50,13 @@ Agents can join existing rooms, create new rooms with AI-generated topics, respo
 
 Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_rooms_exist()` (public). DM rooms can be detected with `async is_dm_room(client, room_id) -> bool`.
 
+Any homeserver account can publish a managed alias such as `#lobby:<server>` before MindRoom does, so a resolved alias alone never makes a room managed.
+MindRoom adopts a resolved room only when the router created it under that alias, is joined, and no user outside the room's configured `admins` matches the router's power.
+In room version 12 and later, creators outrank every power level, so only unconfigured co-creators disqualify the room.
+Every room reconciliation pass on startup or config reload also requires power levels, encryption, join rule, and directory visibility to be enforced.
+A room that fails either check is removed from `matrix_state.yaml`, so its key stays unresolved: no agent joins it, no one is invited into it, and its members gain no room-based access.
+The router logs `managed_room_rejected` at error level and the dashboard's External Rooms page lists the refused alias with its reason.
+
 ## Threading (MSC3440)
 
 MindRoom emits thread replies following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md), using `m.relates_to` with `rel_type: m.thread`.
@@ -244,6 +251,7 @@ matrix_space:
 ```
 
 When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
+An existing Space passes the same ownership check as managed rooms before MindRoom records it, links rooms into it, or invites anyone to it, and MindRoom never joins a Space it finds by alias.
 The Space name is reconciled on each startup to match the configured value.
 Startup and config updates write child links without automatically granting human users root Space admin power.
 Concrete users from effective managed-room `invite_users` policies are invited to the root Space without receiving Space admin power.

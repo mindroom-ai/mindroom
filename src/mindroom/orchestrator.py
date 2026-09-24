@@ -2035,8 +2035,8 @@ class _MultiAgentOrchestrator:
             await self._setup_rooms_and_memberships(bots_to_setup)
         elif plan.matrix_space_changed or plan.room_metadata_changed:
             room_ids = await self._ensure_rooms_exist()
-            if plan.room_metadata_changed:
-                await self._reconcile_managed_rooms(room_ids)
+            # Policy enforcement gates managed status, so it follows every room-existence pass.
+            await self._reconcile_managed_rooms(room_ids)
             await self._ensure_root_space(room_ids)
 
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
