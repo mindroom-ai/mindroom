@@ -324,6 +324,86 @@ def test_load_attachment_rejects_records_outside_retained_media(tmp_path: Path) 
     assert resolve_attachments(tmp_path, ["att_unmanaged"]) == []
 
 
+def _write_legacy_attachment_record(storage_path: Path, attachment_id: str, source: Path, payload: bytes) -> Path:
+    """Write a record the way releases through v2026.9.272 registered local files in place."""
+    record_path = storage_path / "attachments" / f"{attachment_id}.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record = AttachmentRecord(
+        attachment_id=attachment_id,
+        local_path=source.resolve(),
+        kind="file",
+        mime_type="text/plain",
+        room_id="!room:localhost",
+        size_bytes=len(payload),
+        content_sha256=hashlib.sha256(payload).hexdigest(),
+        created_at=datetime.now(UTC).isoformat(),
+    )
+    record_path.write_text(json.dumps(record.to_payload(), sort_keys=True), encoding="utf-8")
+    return record_path
+
+
+def test_load_attachment_adopts_verified_legacy_record(tmp_path: Path) -> None:
+    """A pre-upgrade record naming a workspace file loads through a retained copy that later swaps cannot change."""
+    storage = tmp_path / "storage"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "notes.txt"
+    source.write_bytes(b"notes")
+    record_path = _write_legacy_attachment_record(storage, "att_legacy", source, b"notes")
+
+    record = load_attachment(storage, "att_legacy")
+
+    assert record is not None
+    retained_path = storage.resolve() / "incoming_media" / "att_legacy.txt"
+    assert record.local_path == retained_path
+    assert record.filename == "notes.txt"
+    assert record.room_id == "!room:localhost"
+    assert retained_path.read_bytes() == b"notes"
+    assert json.loads(record_path.read_text(encoding="utf-8"))["local_path"] == str(retained_path)
+
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"SECRET_API_KEY")
+    source.unlink()
+    source.symlink_to(secret)
+    reloaded = load_attachment(storage, "att_legacy")
+    assert reloaded is not None
+    assert reloaded.local_path.read_bytes() == b"notes"
+
+
+@pytest.mark.parametrize("change", ["leaf_link", "parent_link", "content", "digest"])
+def test_load_attachment_rejects_legacy_record_that_cannot_be_verified(tmp_path: Path, change: str) -> None:
+    """Adoption never follows a planted link or retains bytes other than the ones originally registered."""
+    storage = tmp_path / "storage"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "notes.txt"
+    source.write_bytes(b"notes")
+    record_path = _write_legacy_attachment_record(storage, "att_legacy", source, b"notes")
+    # The planted targets hold the recorded bytes, so only the no-follow walk can reject them.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "notes.txt").write_bytes(b"notes")
+    if change == "leaf_link":
+        source.unlink()
+        source.symlink_to(outside / "notes.txt")
+    elif change == "parent_link":
+        source.unlink()
+        workspace.rmdir()
+        workspace.symlink_to(outside)
+    elif change == "content":
+        source.write_bytes(b"SECRET_API_KEY")
+    else:
+        payload = json.loads(record_path.read_text(encoding="utf-8"))
+        del payload["content_sha256"]
+        record_path.write_text(json.dumps(payload), encoding="utf-8")
+    original_record = record_path.read_text(encoding="utf-8")
+
+    assert load_attachment(storage, "att_legacy") is None
+    assert resolve_attachments(storage, ["att_legacy"]) == []
+    assert list((storage / "incoming_media").glob("*")) == []
+    assert record_path.read_text(encoding="utf-8") == original_record
+
+
 def test_attachment_records_to_media_includes_images(tmp_path: Path) -> None:
     """Image attachments should resolve into model image media."""
     image_path = tmp_path / "photo.png"

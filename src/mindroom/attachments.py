@@ -23,6 +23,7 @@ from .atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from .attachment_ids import normalize_attachment_id
 from .background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from .constants import ATTACHMENT_IDS_KEY
+from .legacy_attachments import legacy_attachment_source, open_legacy_attachment_source
 from .logging_config import get_logger
 from .matrix.media import (
     AudioMessageEvent,
@@ -605,8 +606,17 @@ async def wait_for_attachment_cleanup_tasks() -> bool:
     return await wait_for_background_tasks(owner=_ATTACHMENT_CLEANUP_TASK_OWNER)
 
 
-def _retain_media_copy(source_fd: int, media_fd: int, media_name: str) -> tuple[int, str]:
-    """Hash an open regular file and publish it as managed media unless it already is that file."""
+def _retain_media_copy(
+    source_fd: int,
+    media_fd: int,
+    media_name: str,
+    *,
+    expected_sha256: str | None = None,
+) -> tuple[int, str]:
+    """Hash an open regular file and publish it as managed media unless it already is that file.
+
+    With ``expected_sha256``, a copy whose bytes differ is discarded before publication.
+    """
     try:
         already_retained = os.path.samestat(
             os.fstat(source_fd),
@@ -628,7 +638,36 @@ def _retain_media_copy(source_fd: int, media_fd: int, media_name: str) -> tuple[
             hasher.update(chunk)
             if output is not None:
                 output.write(chunk)
+        if expected_sha256 is not None and hasher.hexdigest() != expected_sha256:
+            message = "Attachment file no longer matches its recorded content."
+            raise ValueError(message)
     return size_bytes, hasher.hexdigest()
+
+
+def _retained_media_name(attachment_id: str, mime_type: str | None) -> str:
+    return f"{attachment_id}{_extension_from_mime_type(mime_type)}"
+
+
+def _prepare_retained_media_dir(storage_path: Path) -> Path:
+    media_dir = _incoming_media_dir(storage_path)
+    media_dir.mkdir(parents=True, exist_ok=True)
+    return media_dir.resolve()
+
+
+def _persist_attachment_record(storage_path: Path, attachment_id: str, payload: dict[str, Any]) -> bool:
+    """Atomically publish one attachment metadata record."""
+    record_path = _attachment_record_path(storage_path, attachment_id)
+    tmp_path = record_path.with_suffix(f".{uuid4().hex[:8]}.tmp")
+    try:
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(record_path)
+    except OSError:
+        logger.exception("Failed to persist attachment metadata", attachment_id=attachment_id)
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        return False
+    return True
 
 
 def register_local_attachment(
@@ -660,11 +699,9 @@ def register_local_attachment(
         return None
 
     source_directory = local_path.parent if source_root is None else source_root
-    media_name = f"{normalized_attachment_id}{_extension_from_mime_type(mime_type)}"
+    media_name = _retained_media_name(normalized_attachment_id, mime_type)
     try:
-        media_dir = _incoming_media_dir(storage_path)
-        media_dir.mkdir(parents=True, exist_ok=True)
-        media_dir = media_dir.resolve()
+        media_dir = _prepare_retained_media_dir(storage_path)
         with (
             open_regular_file_within_root(source_directory, local_path.relative_to(source_directory)) as source_fd,
             open_directory_within_root(media_dir) as media_fd,
@@ -691,16 +728,7 @@ def register_local_attachment(
         created_at=datetime.now(UTC).isoformat(),
     )
 
-    record_path = _attachment_record_path(storage_path, normalized_attachment_id)
-    tmp_path = record_path.with_suffix(f".{uuid4().hex[:8]}.tmp")
-    try:
-        record_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path.write_text(json.dumps(record.to_payload(), sort_keys=True), encoding="utf-8")
-        tmp_path.replace(record_path)
-    except OSError:
-        logger.exception("Failed to persist attachment metadata", attachment_id=normalized_attachment_id)
-        with contextlib.suppress(OSError):
-            tmp_path.unlink(missing_ok=True)
+    if not _persist_attachment_record(storage_path, normalized_attachment_id, record.to_payload()):
         return None
 
     if cleanup_loop is None:
@@ -933,6 +961,46 @@ async def register_audio_attachment(
     )
 
 
+def _adopt_legacy_attachment(
+    storage_path: Path,
+    attachment_id: str,
+    raw_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Retain a verified copy of a legacy record's in-place file and point the record at it."""
+    source = legacy_attachment_source(raw_payload)
+    if source is None:
+        logger.warning("Legacy attachment record has no verifiable source", attachment_id=attachment_id)
+        return None
+    source_path, content_sha256 = source
+    mime_type = raw_payload.get("mime_type")
+    media_name = _retained_media_name(attachment_id, mime_type if isinstance(mime_type, str) else None)
+    try:
+        media_dir = _prepare_retained_media_dir(storage_path)
+        with (
+            open_legacy_attachment_source(source_path) as source_fd,
+            open_directory_within_root(media_dir) as media_fd,
+        ):
+            _retain_media_copy(source_fd, media_fd, media_name, expected_sha256=content_sha256)
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Legacy attachment cannot be adopted into retained media",
+            attachment_id=attachment_id,
+            path=str(source_path),
+            error=str(exc),
+        )
+        return None
+    filename = raw_payload.get("filename")
+    adopted_payload = {
+        **raw_payload,
+        "local_path": str(media_dir / media_name),
+        "filename": filename if isinstance(filename, str) and filename else source_path.name,
+    }
+    if not _persist_attachment_record(storage_path, attachment_id, adopted_payload):
+        return None
+    logger.info("Adopted legacy attachment into retained media", attachment_id=attachment_id)
+    return adopted_payload
+
+
 def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord | None:  # noqa: PLR0911
     """Load attachment metadata by ID."""
     normalized_attachment_id = normalize_attachment_id(attachment_id)
@@ -957,8 +1025,11 @@ def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord 
         return None
     # Only primary-owned retained media is readable; a path elsewhere may be replaceable by sandboxed code.
     if Path(local_path).parent != _incoming_media_dir(storage_path.resolve()):
-        logger.warning("Attachment metadata references unmanaged media", attachment_id=normalized_attachment_id)
-        return None
+        adopted_payload = _adopt_legacy_attachment(storage_path, normalized_attachment_id, raw_payload)
+        if adopted_payload is None:
+            return None
+        raw_payload = adopted_payload
+        local_path = adopted_payload["local_path"]
 
     filename = raw_payload.get("filename")
     mime_type = raw_payload.get("mime_type")
