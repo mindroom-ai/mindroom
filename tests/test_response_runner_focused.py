@@ -3185,8 +3185,13 @@ async def test_ready_approval_replay_rechecks_current_authorization(
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("owner", ["general", "helpers"], ids=["ad_hoc", "configured"])
-async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Path, owner: str) -> None:
-    """A ready team continuation must not resume after one member loses access."""
+@pytest.mark.parametrize("worker_removed", [False, True], ids=["denied", "removed"])
+async def test_ready_team_approval_rechecks_every_persisted_member(
+    tmp_path: Path,
+    owner: str,
+    worker_removed: bool,
+) -> None:
+    """A ready team continuation must fail closed after one member loses access or leaves config."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     await _admit_approval_source(runner.deps.approval_store)
@@ -3217,12 +3222,13 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
     runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(
         users=[continuation.requester_id],
     )
-    runner.deps.runtime.config.agents["worker"] = runner.deps.runtime.config.agents["general"].model_copy(
-        update={
-            "display_name": "Worker",
-            "access": ResponderAccessConfig(users=[]),
-        },
-    )
+    if not worker_removed:
+        runner.deps.runtime.config.agents["worker"] = runner.deps.runtime.config.agents["general"].model_copy(
+            update={
+                "display_name": "Worker",
+                "access": ResponderAccessConfig(users=[]),
+            },
+        )
     failing = replace(
         continuation,
         state="failing",
@@ -3230,7 +3236,11 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
     )
 
     with (
-        patch.object(runner._approval_responses, "request_failure", new=AsyncMock(return_value=failing)),
+        patch.object(
+            runner._approval_responses,
+            "request_failure",
+            new=AsyncMock(return_value=failing),
+        ) as request_failure,
         patch.object(runner._approval_responses, "settle_failure", new=AsyncMock(return_value=True)),
         patch.object(
             runner,
@@ -3246,6 +3256,7 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
         )
 
     assert event_id == "$waiting"
+    request_failure.assert_awaited_once()
     execute.assert_not_awaited()
 
 

@@ -2649,10 +2649,16 @@ class ResponseRunner:
             recovered, event_id = await self._recover_nonready_approval(owned, target=target)
             if recovered:
                 return event_id
-            if not is_sender_allowed_for_entity_replies_in_room(
+            config = self.deps.runtime.config
+            entity_names = _reply_authorization_entity_names(owned.entity_name, owned.team_member_names)
+            # A persisted member removed from config can no longer be authorized, so its continuation fails closed.
+            if any(
+                name not in config.agents and name not in config.teams and name != ROUTER_AGENT_NAME
+                for name in entity_names
+            ) or not is_sender_allowed_for_entity_replies_in_room(
                 owned.requester_id,
-                _reply_authorization_entity_names(owned.entity_name, owned.team_member_names),
-                self.deps.runtime.config,
+                entity_names,
+                config,
                 owned.room_id,
                 self.deps.runtime_paths,
                 self.deps.runtime.agent_reply_memberships,
