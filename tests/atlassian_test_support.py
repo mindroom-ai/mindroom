@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
@@ -169,13 +170,12 @@ class FakeGateway:
         return [request for request in self.requests if not request.url.path.startswith("/oauth/")]
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> FakeGateway:
-        """Route every Atlassian client request through this fake."""
-        real_client = httpx.AsyncClient
-
-        def client_factory() -> httpx.AsyncClient:
-            return real_client(transport=httpx.MockTransport(self.handle), follow_redirects=False)
-
-        monkeypatch.setattr(atlassian_client, "_new_http_client", client_factory)
+        """Route every Atlassian client request through this fake, keeping the production client settings."""
+        monkeypatch.setattr(
+            atlassian_client,
+            "_new_http_client",
+            partial(atlassian_client._new_http_client, transport=httpx.MockTransport(self.handle)),
+        )
         return self
 
 

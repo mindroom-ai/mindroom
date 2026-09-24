@@ -108,9 +108,9 @@ class _AtlassianDownload:
     content_disposition: str | None
 
 
-def _new_http_client() -> httpx.AsyncClient:
+def _new_http_client(transport: httpx.AsyncBaseTransport | None = None) -> httpx.AsyncClient:
     """Build one short-lived client; redirects are never followed implicitly."""
-    return httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS, follow_redirects=False)
+    return httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS, follow_redirects=False, transport=transport)
 
 
 def _bearer_headers(access_token: str) -> dict[str, str]:
@@ -412,7 +412,8 @@ async def download(
                 headers = dict(_DOWNLOAD_HEADERS)
                 if from_gateway:
                     headers["Authorization"] = f"Bearer {access_token}"
-                async with client.stream("GET", url, headers=headers) as response:
+                # Each hop is checked before it is followed, whatever the client default is.
+                async with client.stream("GET", url, headers=headers, follow_redirects=False) as response:
                     if response.is_redirect:
                         url = _redirect_target(url, response.headers.get("location"), gateway_prefix)
                         continue

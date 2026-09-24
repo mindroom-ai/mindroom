@@ -306,6 +306,27 @@ async def test_unsupported_redirects_are_rejected_without_following_them(
 
 
 @pytest.mark.asyncio
+async def test_download_checks_each_hop_even_when_the_client_would_follow_redirects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each download request disables redirect following itself, so a client default cannot skip the checks."""
+    tool, gateway, context, _paths = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        atlassian_client,
+        "_new_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(gateway.handle), follow_redirects=True),
+    )
+    gateway.route("GET", gateway_url("confluence", DOWNLOAD_PATH), _redirect("https://evil.example.com/file"))
+    gateway.route("GET", "https://evil.example.com/file", _file())
+
+    result = await _download(tool, context)
+
+    assert result["code"] == "redirect_rejected"
+    assert [request.url.host for request in _download_requests(gateway)] == ["api.atlassian.com"]
+
+
+@pytest.mark.asyncio
 async def test_malformed_redirect_fails_without_echoing_the_location(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

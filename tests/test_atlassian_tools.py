@@ -12,6 +12,7 @@ import pytest
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
 from mindroom.credentials import CredentialsManager
+from mindroom.custom_tools import atlassian_client
 from mindroom.custom_tools.atlassian import AtlassianTools
 from mindroom.oauth.atlassian import atlassian_function_names, atlassian_oauth_provider
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync, resolve_oauth_credential_context
@@ -742,6 +743,30 @@ async def test_api_errors_keep_messages_but_drop_bodies_urls_and_tokens(
     assert "internal-body-marker" not in serialized
     assert "sig=abc" not in serialized
     assert TOKEN not in serialized
+
+
+@pytest.mark.asyncio
+async def test_http_client_bounds_each_operation_and_never_follows_redirects() -> None:
+    """The production client times out each operation and leaves every redirect to the caller."""
+    async with atlassian_client._new_http_client() as client:
+        assert client.timeout == httpx.Timeout(20.0)
+        assert client.follow_redirects is False
+
+
+@pytest.mark.asyncio
+async def test_api_redirects_are_reported_instead_of_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An API redirect is an error, so the bearer and request never travel to its location."""
+    tool, gateway = _connected(tmp_path, monkeypatch)
+    gateway.route(
+        "GET",
+        gateway_url("jira", "/rest/api/3/issue/PROJ-1"),
+        lambda _request: httpx.Response(302, headers={"location": "https://evil.example.com/steal"}),
+    )
+
+    result = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
+
+    assert (result["code"], result["status_code"]) == ("atlassian_error", 302)
+    assert [request.url.host for request in gateway.product_requests()] == ["api.atlassian.com"]
 
 
 @pytest.mark.asyncio
