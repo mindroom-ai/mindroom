@@ -518,7 +518,7 @@ The runner sources this script with `bash` after applying the workspace home con
 - For agent-routed worker requests, the hook lives at the resolved agent workspace root as `.mindroom/worker-env.sh`.
 - For shared and unscoped agents that means `agents/<agent>/workspace/.mindroom/worker-env.sh`.
 - For private agents that means `private_instances/<scope>/<agent>/workspace/.mindroom/worker-env.sh`.
-- For `worker_scope: user`, the hook follows the per-request workspace, so one shared user runtime can pick up different hooks as it works in different agent workspaces.
+- For `worker_scope: user`, the hook follows the per-request workspace, so one shared user runtime can pick up different hooks as it works in different private agent workspaces.
 - Requester-isolated runtimes (`user`, `user_agent`, and background scripts) only source a hook when the workspace is inside that requester's `private_instances/<scope>/` namespace or the worker's own scratch workspace.
   A hook in a non-private agent's `agents/<agent>/workspace` is ignored in these runtimes because every requester's runtime for that agent can write it, and sourcing it would run another requester's code with this requester's proxy identity and leased credentials.
 - For unkeyed static-sidecar proxy calls (no `worker_key`), the hook is discovered from `tool_init_overrides["base_dir"]` only when that value is an absolute path; relative strings are ignored on this path because there is no canonical workspace root to resolve them against.

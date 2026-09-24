@@ -6180,6 +6180,9 @@ def test_workspace_env_hook_ownership_for_requester_isolated_runtimes(tmp_path: 
 
     assert not allowed(shared_workspace, user_key, prepared_worker=prepared)
     assert not allowed(shared_workspace, user_agent_key)
+    linked_private_root = private_instance_scope_root_path(storage_root, user_agent_key)
+    linked_private_root.symlink_to(shared_workspace.parent)
+    assert not allowed(linked_private_root / "workspace", user_agent_key)
     assert not allowed(linked_workspace, user_key)
     assert not allowed(other_private_workspace, user_key)
     assert not allowed(shared_workspace, None, worker_scope="user")

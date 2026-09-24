@@ -354,8 +354,13 @@ def subprocess_worker_command(
     *,
     python_executable: str | None = None,
 ) -> list[str]:
-    """Build the sandbox subprocess worker command line."""
-    return [python_executable or sys.executable, "-m", "mindroom.api.sandbox_runner", subprocess_worker_arg]
+    """Build the sandbox subprocess worker command line.
+
+    `-P` keeps the request cwd (an agent workspace other requesters may write)
+    from shadowing installed modules, and `-s` ignores user site-packages under
+    the workspace HOME; the worker appends its cwd to `sys.path` itself.
+    """
+    return [python_executable or sys.executable, "-P", "-s", "-m", "mindroom.api.sandbox_runner", subprocess_worker_arg]
 
 
 class WorkspaceEnvHookError(RuntimeError):

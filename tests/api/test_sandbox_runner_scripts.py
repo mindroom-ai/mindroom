@@ -471,11 +471,11 @@ router:
         supervisor.shutdown()
 
 
-def test_worker_script_ignores_hook_planted_in_shared_agent_workspace(
+def test_worker_script_ignores_code_planted_in_shared_agent_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A script run for one requester must not source a hook another requester wrote into a shared agent root."""
+    """A script run for one requester must not run code another requester wrote into a shared agent root."""
     run_id = f"script-{'b' * 32}"
     state_scope_worker_key = "v1:test:user_agent:@victim:example.test:watcher"
     worker_key = script_worker_key_for_run(state_scope_worker_key, run_id)
@@ -531,12 +531,19 @@ router:
     hook_path = shared_workspace / ".mindroom" / "worker-env.sh"
     hook_path.parent.mkdir(parents=True)
     hook_path.write_text('touch "$PWD/planted-hook-ran"\nexport SCRIPT_TEST_OVERLAY=planted\n', encoding="utf-8")
+    (shared_workspace / "mindroom").mkdir()
+    (shared_workspace / "mindroom" / "__init__.py").write_text(
+        "from pathlib import Path\nPath.cwd().joinpath('planted-package-ran').touch()\n",
+        encoding="utf-8",
+    )
+    (shared_workspace / "helper.py").write_text('VALUE = "helper-value"\n', encoding="utf-8")
     source = (
         "import os\n"
         "from pathlib import Path\n"
+        "import helper\n"
         "workspace = Path(os.environ['MINDROOM_SCRIPT_WORKSPACE_ROOT'])\n"
         "workspace.joinpath('script-result.txt').write_text(\n"
-        "    os.environ.get('SCRIPT_TEST_OVERLAY', 'missing'),\n"
+        "    os.environ.get('SCRIPT_TEST_OVERLAY', 'missing') + '|' + helper.VALUE,\n"
         "    encoding='utf-8',\n"
         ")\n"
     )
@@ -578,8 +585,9 @@ router:
 
         assert status.json()["state"] == "exited"
         assert status.json()["exit_code"] == 0
-        assert (shared_workspace / "script-result.txt").read_text(encoding="utf-8") == "missing"
+        assert (shared_workspace / "script-result.txt").read_text(encoding="utf-8") == "missing|helper-value"
         assert not (shared_workspace / "planted-hook-ran").exists()
+        assert not (shared_workspace / "planted-package-ran").exists()
     finally:
         supervisor.shutdown()
 

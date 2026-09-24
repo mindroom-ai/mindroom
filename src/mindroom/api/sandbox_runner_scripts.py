@@ -446,7 +446,8 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
     result = await run_command_via_supervisor(
         socket_path,
         namespace=_script_namespace(payload.worker_key, payload.run_id),
-        argv=[python_executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        # `-P -s`: the workspace cwd and HOME must not shadow the shim or inject site code.
+        argv=[python_executable, "-P", "-s", "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
         env=environment,
         cwd=str(workspace),
         tail=200,

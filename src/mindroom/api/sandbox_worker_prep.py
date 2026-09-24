@@ -381,11 +381,13 @@ def workspace_env_hook_allowed(
         return True
     if worker_key is None:
         return False
-    owned_roots = [private_instance_scope_root_path(sandbox_exec.runner_storage_root(runtime_paths), worker_key)]
+    private_root = private_instance_scope_root_path(sandbox_exec.runner_storage_root(runtime_paths), worker_key)
+    # The private root authorizes its configured location, not a linked replacement.
+    owned_roots = [private_root] if private_root.resolve() == private_root else []
     if prepared is not None:
-        owned_roots.append(prepared.paths.workspace)
+        owned_roots.append(prepared.paths.workspace.resolve())
     resolved_workspace = workspace.expanduser().resolve()
-    return any(resolved_workspace.is_relative_to(root.expanduser().resolve()) for root in owned_roots)
+    return any(resolved_workspace.is_relative_to(root) for root in owned_roots)
 
 
 def record_worker_failure(
