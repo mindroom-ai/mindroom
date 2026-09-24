@@ -5058,7 +5058,14 @@ def test_cli_workers_have_private_control_auth_and_only_canonical_state(
     assert handles[0].auth_token != handles[1].auth_token
     assert all(handle.auth_token != _TEST_AUTH_TOKEN for handle in handles)
     calls = client.containers.run_calls
-    assert calls[0]["volumes"][1:] == calls[1]["volumes"][1:]
+    # Each process owns its worker root and that root's read-only credential mirror;
+    # every canonical state mount after those two is shared.
+    for call, handle in zip(calls, handles, strict=True):
+        worker_root = handle.debug_metadata["state_root"]
+        assert call["volumes"][1] == (
+            f"{worker_root}/.shared_credentials:{backend.config.storage_mount_path}/.shared_credentials:ro"
+        )
+    assert calls[0]["volumes"][2:] == calls[1]["volumes"][2:]
     for call, handle in zip(calls, handles, strict=True):
         assert _TEST_AUTH_TOKEN not in json.dumps(call)
         for secret in ("seeded-primary-admin", "seeded-provider-key", _TEST_AUTH_TOKEN):
