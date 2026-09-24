@@ -254,6 +254,11 @@ spec:
             {{- $_ := set $credentialPolicy $tool (list $tool) }}
             {{- end }}
             {{- end }}
+            {{- range .Values.env.extra }}
+            {{- if eq (default "" .name) "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON" }}
+            {{- $credentialPolicy = dict }}
+            {{- end }}
+            {{- end }}
             {{- if $credentialPolicy }}
             - name: MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON
               value: {{ $credentialPolicy | toJson | quote }}

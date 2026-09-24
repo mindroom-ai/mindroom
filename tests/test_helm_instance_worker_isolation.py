@@ -3008,16 +3008,14 @@ def test_runtime_chart_static_runner_sees_only_scratch_storage_and_read_only_con
     [
         ((), []),
         (("config.source=file", "config.path=/etc/mindroom/config.yaml"), []),
+        (("config.source=file", "config.path=/app/agent_data2/active/config.yaml"), []),
         (
-            ("config.source=file", "config.path=/app/agent_data/config.yaml"),
-            [
-                {
-                    "name": "storage",
-                    "mountPath": "/app/agent_data/config.yaml",
-                    "subPath": "config.yaml",
-                    "readOnly": True,
-                },
-            ],
+            (
+                "config.source=file",
+                "storage.mountPath=/app/agent_data/",
+                "config.path=/app/x/../agent_data/active/c.yaml",
+            ),
+            [{"name": "storage", "mountPath": "/app/agent_data/active", "subPath": "active", "readOnly": True}],
         ),
         (
             ("config.source=file", "config.path=/app/agent_data/content-bundles/team/prod/agent-config.yaml"),
@@ -3075,6 +3073,48 @@ def test_runtime_chart_leases_saved_settings_for_static_runner_proxy_tools(
     policy = env.get("MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON")
 
     assert (json.loads(policy["value"]) if policy else None) == expected_policy
+
+
+def test_runtime_chart_operator_credential_policy_replaces_derived_policy() -> None:
+    """An explicit env.extra policy wins without rendering a duplicate env entry."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "workers.sandbox.proxyToken.value=test-token",
+        "env.extra[0].name=MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON",
+        "env.extra[0].value=operator-policy",
+        release_name="mindroom-runtime",
+    )
+    container = _container(_resource(docs, "Deployment", "mindroom-runtime"), "mindroom")
+
+    assert [env for env in container["env"] if env["name"] == "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON"] == [
+        {"name": "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON", "value": "operator-policy"},
+    ]
+
+
+def test_runtime_chart_static_runner_rejects_config_directly_in_storage_root() -> None:
+    """A single-file subPath would let kubelet create a directory where the primary expects its config."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "config.source=file",
+        "config.path=/app/agent_data/config.yaml",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "requires config.path in a directory below storage.mountPath" in completed.stderr
+
+
+def test_instance_chart_static_runner_scratch_size_limit_can_be_disabled() -> None:
+    """An empty size limit still renders valid emptyDir volume sources."""
+    docs = _render_chart(Path("cluster/k8s/instance"), "sandboxRunnerScratchSizeLimit=")
+    volumes = _resource(docs, "Deployment", "mindroom-demo")["spec"]["template"]["spec"]["volumes"]
+
+    assert [volume for volume in volumes if volume["name"].startswith("sandbox-")] == [
+        {"name": "sandbox-workspace", "emptyDir": {}},
+        {"name": "sandbox-storage", "emptyDir": {}},
+    ]
 
 
 def test_runtime_chart_static_runner_scratch_size_limit_can_be_disabled() -> None:

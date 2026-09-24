@@ -38,6 +38,10 @@
 {{- fail "matrix.registrationToken cannot be set when matrix.managedAccountAuth=appservice" -}}
 {{- end -}}
 {{- $configSource := include "mindroom-runtime.configSource" . -}}
+{{- $fileConfigStorageSubpath := include "mindroom-runtime.fileConfigStorageSubpath" . -}}
+{{- if and (eq .Values.workers.backend "static_runner") $fileConfigStorageSubpath (eq (printf "%s/%s" (trimSuffix "/" (clean .Values.storage.mountPath)) $fileConfigStorageSubpath) (clean .Values.config.path)) -}}
+{{- fail "workers.backend=static_runner with config.source=file requires config.path in a directory below storage.mountPath; the sidecar mounts that directory read-only" -}}
+{{- end -}}
 {{- if not (kindIs "string" .Values.config.bootstrapBundleRevision) -}}
 {{- fail "config.bootstrapBundleRevision must be a string" -}}
 {{- end -}}
