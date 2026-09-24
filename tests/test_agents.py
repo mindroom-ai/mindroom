@@ -529,6 +529,8 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
         worker_scope=worker_scope,
+        file_access="workspace",
+        unrestricted_tool_names=("shell",),
     )
 
     assert f"Worker reuse: {expected_reuse}." in rendered
@@ -545,6 +547,8 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
+        file_access="workspace",
+        unrestricted_tool_names=("shell",),
     )
 
     assert "Worker backend: `static_runner`." in rendered
@@ -566,10 +570,47 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
+        file_access="workspace",
+        unrestricted_tool_names=("shell",),
     )
 
     assert "After the configured idle timeout, the container stops" in rendered
     assert "persisted files and caches remain until an operator deletes that worker state." in rendered
+
+
+@pytest.mark.parametrize(
+    ("file_access", "expected"),
+    [
+        ("workspace", "- File access for path tools: `workspace` (agent workspace and attachments only)."),
+        ("unrestricted", "- File access for path tools: `unrestricted` (any path the tool's process can reach)."),
+    ],
+)
+def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_access: str, expected: str) -> None:
+    """The model should learn which files its path tools may use and which tools are never confined."""
+    for worker_routed in ((), ("shell",)):
+        rendered = _render_tool_execution_environment(
+            runtime_paths=_runtime_paths(tmp_path),
+            local_tool_names=("gmail", "python"),
+            worker_routed_tool_names=worker_routed,
+            worker_scope=None,
+            file_access=file_access,
+            unrestricted_tool_names=("python", "shell"),
+        )
+        assert expected in rendered
+        assert "- Always unrestricted (they run arbitrary programs): `python`, `shell`." in rendered
+
+
+def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(tmp_path: Path) -> None:
+    """No code-execution tools means no always-unrestricted line."""
+    rendered = _render_tool_execution_environment(
+        runtime_paths=_runtime_paths(tmp_path),
+        local_tool_names=("gmail",),
+        worker_routed_tool_names=(),
+        worker_scope=None,
+        file_access="workspace",
+        unrestricted_tool_names=(),
+    )
+    assert "Always unrestricted" not in rendered
 
 
 @patch("mindroom.agents.get_tool_by_name", side_effect=ImportError("dependency missing"))

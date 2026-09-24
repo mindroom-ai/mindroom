@@ -1488,6 +1488,49 @@ async def test_initialize_and_reload_warn_about_foreign_homeserver_authorities(
 
 
 @pytest.mark.asyncio
+async def test_initialize_and_reload_warn_about_unrestricted_file_access_next_to_worker_code_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Startup and every applied reload must flag path tools that can bypass a worker-isolated shell."""
+    warning = (
+        "Agent routes code tools to a worker but has file_access 'unrestricted'; "
+        "its primary-process path tools can read runtime secrets"
+    )
+
+    def write_config(agent_name: str) -> None:
+        config_data = {
+            "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
+            "router": {"model": "default"},
+            "agents": {
+                agent_name: {
+                    "display_name": agent_name.title(),
+                    "model": "default",
+                    "rooms": ["lobby"],
+                    "tools": ["shell"],
+                    "worker_tools": ["shell"],
+                    "file_access": "unrestricted",
+                },
+            },
+        }
+        (tmp_path / "config.yaml").write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
+
+    _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
+    write_config("coder")
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    with capture_logs() as startup_logs:
+        await orchestrator.initialize()
+
+    write_config("builder")
+    with capture_logs() as reload_logs:
+        updated = await orchestrator.config_reload._update_config()
+
+    assert updated is True
+    assert [log["agent"] for log in startup_logs if log["event"] == warning] == ["coder"]
+    assert [log["agent"] for log in reload_logs if log["event"] == warning] == ["builder"]
+
+
+@pytest.mark.asyncio
 async def test_update_config_serializes_live_plugin_reload_against_staged_plugin_commit(
     tmp_path: Path,
 ) -> None:
