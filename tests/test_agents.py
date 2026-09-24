@@ -530,8 +530,8 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         worker_routed_tool_names=("shell",),
         worker_scope=worker_scope,
         file_access="workspace",
-        unrestricted_tool_names=("shell",),
-        primary_only_unrestricted_tool_names=(),
+        unconfined_tool_names=("shell",),
+        primary_only_unconfined_tool_names=(),
     )
 
     assert f"Worker reuse: {expected_reuse}." in rendered
@@ -549,8 +549,8 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
         file_access="workspace",
-        unrestricted_tool_names=("shell",),
-        primary_only_unrestricted_tool_names=(),
+        unconfined_tool_names=("shell",),
+        primary_only_unconfined_tool_names=(),
     )
 
     assert "Worker backend: `static_runner`." in rendered
@@ -573,8 +573,8 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
         file_access="workspace",
-        unrestricted_tool_names=("shell",),
-        primary_only_unrestricted_tool_names=(),
+        unconfined_tool_names=("shell",),
+        primary_only_unconfined_tool_names=(),
     )
 
     assert "After the configured idle timeout, the container stops" in rendered
@@ -597,8 +597,8 @@ def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_acc
             worker_routed_tool_names=worker_routed,
             worker_scope=None,
             file_access=file_access,
-            unrestricted_tool_names=("python", "shell"),
-            primary_only_unrestricted_tool_names=("duckdb",),
+            unconfined_tool_names=("python", "shell"),
+            primary_only_unconfined_tool_names=("duckdb",),
         )
         assert expected in rendered
         assert "- Not confined by file_access (only a worker isolates them): `python`, `shell`." in rendered
@@ -616,8 +616,8 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         worker_routed_tool_names=(),
         worker_scope=None,
         file_access="workspace",
-        unrestricted_tool_names=(),
-        primary_only_unrestricted_tool_names=(),
+        unconfined_tool_names=(),
+        primary_only_unconfined_tool_names=(),
     )
     assert "Not confined by file_access" not in rendered
 

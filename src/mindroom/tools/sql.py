@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="sql",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     requires_primary_runtime=True,
     display_name="SQL Tools",
     description="Database query and management tools for SQL databases",

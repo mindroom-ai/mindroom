@@ -285,8 +285,8 @@ def _validate_authored_file_access(
     remaining = dict(overrides)
     value = remaining.pop("file_access")
     path = _override_path(tool_name, "file_access", config_path_prefix=config_path_prefix)
-    if metadata.file_access is ToolFileAccess.UNRESTRICTED:
-        if value == "unrestricted":
+    if metadata.file_access is ToolFileAccess.UNCONFINED:
+        if value == "unconfined":
             return remaining
         isolation = (
             "It cannot run in a worker, so enable it only for agents trusted with the primary runtime."
@@ -294,7 +294,7 @@ def _validate_authored_file_access(
             else "Isolate it with worker_tools instead."
         )
         msg = (
-            f"{path}: {tool_name} is not confined by file_access, so its file access is always 'unrestricted'. "
+            f"{path}: {tool_name} is not confined by file_access, so its file access is always 'unconfined'. "
             f"{isolation}"
         )
         raise ToolConfigOverrideError(msg)

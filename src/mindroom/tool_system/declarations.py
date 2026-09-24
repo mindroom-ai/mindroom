@@ -97,7 +97,7 @@ class ToolFileAccess(str, Enum):
 
     NONE = "none"  # takes no local file paths
     AGENT = "agent"  # follows the agent's file_access setting
-    UNRESTRICTED = "unrestricted"  # not confined by file_access; only a worker isolates its local file access
+    UNCONFINED = "unconfined"  # not confined by file_access; only a worker isolates its local file access
 
 
 class ToolManagedInitArg(str, Enum):

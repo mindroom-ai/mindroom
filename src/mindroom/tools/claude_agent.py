@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     display_name="Claude Agent SDK",
     description="Run persistent Claude coding sessions with tool-use and subagents",
     category=ToolCategory.DEVELOPMENT,
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     executes_code=True,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,

@@ -894,8 +894,8 @@ def _render_tool_execution_environment(
     worker_routed_tool_names: tuple[str, ...],
     worker_scope: WorkerScope | None,
     file_access: FileAccess,
-    unrestricted_tool_names: tuple[str, ...],
-    primary_only_unrestricted_tool_names: tuple[str, ...],
+    unconfined_tool_names: tuple[str, ...],
+    primary_only_unconfined_tool_names: tuple[str, ...],
 ) -> str:
     """Describe effective per-tool execution routing and file access to the model."""
 
@@ -910,14 +910,14 @@ def _render_tool_execution_environment(
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
-    if unrestricted_tool_names:
+    if unconfined_tool_names:
         file_access_lines.append(
-            f"- Not confined by file_access (only a worker isolates them): {tool_list(unrestricted_tool_names)}.",
+            f"- Not confined by file_access (only a worker isolates them): {tool_list(unconfined_tool_names)}.",
         )
-    if primary_only_unrestricted_tool_names:
+    if primary_only_unconfined_tool_names:
         file_access_lines.append(
             "- Not confined by file_access and unable to run in a worker (trusted primary runtime only): "
-            f"{tool_list(primary_only_unrestricted_tool_names)}.",
+            f"{tool_list(primary_only_unconfined_tool_names)}.",
         )
 
     if not worker_routed_tool_names:
@@ -965,14 +965,14 @@ def _render_tool_execution_environment(
     return "\n".join(lines)
 
 
-def _unrestricted_tool_names(tool_names: tuple[str, ...], *, requires_primary_runtime: bool) -> tuple[str, ...]:
+def _unconfined_tool_names(tool_names: tuple[str, ...], *, requires_primary_runtime: bool) -> tuple[str, ...]:
     """Return sorted tools not confined by file_access, split by whether a worker can isolate them."""
     return tuple(
         sorted(
             name
             for name in tool_names
             if name in TOOL_METADATA
-            and TOOL_METADATA[name].file_access is ToolFileAccess.UNRESTRICTED
+            and TOOL_METADATA[name].file_access is ToolFileAccess.UNCONFINED
             and TOOL_METADATA[name].requires_primary_runtime is requires_primary_runtime
         ),
     )
@@ -1646,11 +1646,11 @@ def _build_agent_role_context(
             worker_routed_tool_names=worker_routed_tool_names,
             worker_scope=agent_runtime.execution.execution_scope,
             file_access=config.resolve_entity(agent_name).file_access,
-            unrestricted_tool_names=_unrestricted_tool_names(
+            unconfined_tool_names=_unconfined_tool_names(
                 (*local_tool_names, *worker_routed_tool_names),
                 requires_primary_runtime=False,
             ),
-            primary_only_unrestricted_tool_names=_unrestricted_tool_names(
+            primary_only_unconfined_tool_names=_unconfined_tool_names(
                 (*local_tool_names, *worker_routed_tool_names),
                 requires_primary_runtime=True,
             ),

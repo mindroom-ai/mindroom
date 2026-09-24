@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     display_name="Docker",
     description="Container, image, volume, and network management",
     category=ToolCategory.DEVELOPMENT,
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     executes_code=True,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,

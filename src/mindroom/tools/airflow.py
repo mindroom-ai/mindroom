@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="airflow",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="Airflow",
     description="Apache Airflow DAG file management for workflow orchestration",
     category=ToolCategory.DEVELOPMENT,

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="e2b",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     requires_primary_runtime=True,
     display_name="E2B Code Execution",
     description="Code execution sandbox environment with Python, file operations, and web server capabilities",

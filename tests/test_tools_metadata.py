@@ -1347,10 +1347,10 @@ def test_resolved_tool_state_cache_evicts_on_config_gc(
         metadata_module.clear_resolved_tool_state_cache()
 
 
-def test_code_execution_tools_declare_unrestricted_file_access() -> None:
+def test_code_execution_tools_declare_unconfined_file_access() -> None:
     """Tools that run arbitrary programs cannot be confined in-process."""
     for name in ("shell", "python", "docker", "script", "claude_agent"):
-        assert TOOL_METADATA[name].file_access is ToolFileAccess.UNRESTRICTED, name
+        assert TOOL_METADATA[name].file_access is ToolFileAccess.UNCONFINED, name
         assert TOOL_METADATA[name].executes_code, name
 
 
@@ -1376,11 +1376,11 @@ _UNCONFINED_LOCAL_FILE_TOOLS = (
 )
 
 
-def test_tools_reaching_local_files_outside_file_access_are_declared_unrestricted() -> None:
+def test_tools_reaching_local_files_outside_file_access_are_declared_unconfined() -> None:
     """Tools whose queries, paths, or URLs reach local files without file_access confinement must say so."""
     for name in _UNCONFINED_LOCAL_FILE_TOOLS:
         metadata = TOOL_METADATA[name]
-        assert metadata.file_access is ToolFileAccess.UNRESTRICTED, name
+        assert metadata.file_access is ToolFileAccess.UNCONFINED, name
         assert not metadata.executes_code, name
 
 
@@ -1483,15 +1483,15 @@ def test_get_tool_by_name_passes_agent_file_access(tmp_path: Path) -> None:
         TOOL_METADATA.pop(tool_name, None)
 
 
-def test_file_access_on_code_tool_accepts_only_unrestricted() -> None:
-    """Code tools accept an explicit no-op unrestricted file_access and nothing else."""
+def test_file_access_on_code_tool_accepts_only_unconfined() -> None:
+    """Code tools accept an explicit no-op unconfined file_access and nothing else."""
     validated = validate_authored_tool_entry_overrides(
         "shell",
-        {"file_access": "unrestricted"},
+        {"file_access": "unconfined"},
         config_path_prefix="agents.a.tools",
     )
     assert "file_access" not in validated
-    for value in ("workspace", True, None):
+    for value in ("workspace", "unrestricted", True, None):
         with pytest.raises(ToolConfigOverrideError, match="worker_tools"):
             validate_authored_tool_entry_overrides(
                 "shell",
@@ -1504,7 +1504,7 @@ def test_file_access_on_primary_only_unconfined_tool_does_not_suggest_worker_rou
     """Tools that cannot run in a worker must not be told to isolate themselves with worker_tools."""
     validate_authored_tool_entry_overrides(
         "duckdb",
-        {"file_access": "unrestricted"},
+        {"file_access": "unconfined"},
         config_path_prefix="agents.a.tools",
     )
     with pytest.raises(ToolConfigOverrideError, match="trusted with the primary runtime") as exc_info:
@@ -1522,7 +1522,7 @@ def test_file_access_on_other_tools_points_to_agent_setting() -> None:
         with pytest.raises(ToolConfigOverrideError, match=r"agents\.<name>\.file_access|defaults\.file_access"):
             validate_authored_tool_entry_overrides(
                 tool_name,
-                {"file_access": "unrestricted"},
+                {"file_access": "unconfined"},
                 config_path_prefix="agents.a.tools",
             )
 
@@ -1544,15 +1544,15 @@ def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
 def test_file_access_rules_survive_the_validation_snapshot() -> None:
     """Worker validation snapshots keep each tool's file-access class."""
     snapshot = {
-        "runner": ToolValidationInfo(name="runner", file_access=ToolFileAccess.UNRESTRICTED),
+        "runner": ToolValidationInfo(name="runner", file_access=ToolFileAccess.UNCONFINED),
         "reader": ToolValidationInfo(name="reader", file_access=ToolFileAccess.AGENT),
     }
     restored = deserialize_tool_validation_snapshot(serialize_tool_validation_snapshot(snapshot))
-    assert restored["runner"].file_access is ToolFileAccess.UNRESTRICTED
+    assert restored["runner"].file_access is ToolFileAccess.UNCONFINED
     assert restored["reader"].file_access is ToolFileAccess.AGENT
-    validate_authored_tool_entry_overrides("runner", {"file_access": "unrestricted"}, tool_metadata=restored)
+    validate_authored_tool_entry_overrides("runner", {"file_access": "unconfined"}, tool_metadata=restored)
     with pytest.raises(ToolConfigOverrideError, match=r"defaults\.file_access"):
-        validate_authored_tool_entry_overrides("reader", {"file_access": "unrestricted"}, tool_metadata=restored)
+        validate_authored_tool_entry_overrides("reader", {"file_access": "unconfined"}, tool_metadata=restored)
 
 
 def test_deserialize_tool_validation_snapshot_rejects_unknown_file_access() -> None:
@@ -1584,6 +1584,7 @@ def test_config_load_rejects_workspace_file_access_on_shell(tmp_path: Path) -> N
             runtime_paths,
         )
 
-    validate("unrestricted")
-    with pytest.raises(ConfigRuntimeValidationError, match="worker_tools"):
-        validate("workspace")
+    validate("unconfined")
+    for value in ("workspace", "unrestricted"):
+        with pytest.raises(ConfigRuntimeValidationError, match="worker_tools"):
+            validate(value)

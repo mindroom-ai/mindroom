@@ -29,7 +29,7 @@ def warn_about_config_risks(config: Config, runtime_paths: RuntimePaths) -> None
 def _primary_tool_is_unconfined(tool_name: str, file_access: str) -> bool:
     """Return whether a primary-process tool can reach files beyond the agent workspace."""
     metadata = TOOL_METADATA[tool_name]
-    if metadata.file_access is ToolFileAccess.UNRESTRICTED:
+    if metadata.file_access is ToolFileAccess.UNCONFINED:
         return True
     return metadata.file_access is ToolFileAccess.AGENT and file_access == "unrestricted"
 

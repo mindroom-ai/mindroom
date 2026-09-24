@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="slack",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     requires_primary_runtime=True,
     display_name="Slack",
     description="Send messages and manage channels",

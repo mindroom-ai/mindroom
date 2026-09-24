@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="visualization",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="Visualization",
     description="Create bar charts, line charts, pie charts, scatter plots, and histograms using matplotlib",
     category=ToolCategory.DEVELOPMENT,

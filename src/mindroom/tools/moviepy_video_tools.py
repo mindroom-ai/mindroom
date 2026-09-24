@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="moviepy_video_tools",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="MoviePy Video Tools",
     description="Process videos, extract audio, generate SRT caption files, and embed rich word-highlighted captions",
     category=ToolCategory.DEVELOPMENT,  # Derived from docs URL (/others/)

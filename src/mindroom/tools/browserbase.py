@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="browserbase",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     requires_primary_runtime=True,
     display_name="Browserbase",
     description="Browser automation and web scraping using headless browsers",

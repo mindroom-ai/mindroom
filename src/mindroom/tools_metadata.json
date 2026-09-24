@@ -594,7 +594,7 @@
       "display_name": "Slack",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/slack",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "download_file",
         "get_channel_history",
@@ -1454,7 +1454,7 @@
       "display_name": "Airflow",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/airflow",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "read_dag_file",
         "save_dag_file"
@@ -2217,7 +2217,7 @@
       "display_name": "Claude Agent SDK",
       "docs_url": "https://platform.claude.com/docs/en/agent-sdk/python",
       "executes_code": true,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "claude_end_session",
         "claude_interrupt",
@@ -2812,7 +2812,7 @@
       "display_name": "Docker",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/docker",
       "executes_code": true,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "build_image",
         "connect_container_to_network",
@@ -2925,7 +2925,7 @@
       "display_name": "E2B Code Execution",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/e2b",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "download_chart_data",
         "download_file_from_sandbox",
@@ -4401,7 +4401,7 @@
       "display_name": "Groq",
       "docs_url": "https://docs.agno.com/tools/toolkits/models/groq",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "generate_speech",
         "transcribe_audio",
@@ -4931,7 +4931,7 @@
       "display_name": "MoviePy Video Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/moviepy",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "create_caption_clips",
         "create_srt",
@@ -5257,7 +5257,7 @@
       "display_name": "OpenAI",
       "docs_url": "https://docs.agno.com/tools/toolkits/models/openai",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "generate_image",
         "generate_speech",
@@ -5518,7 +5518,7 @@
       "display_name": "PostgreSQL",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/postgres",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "describe_table",
         "export_table_to_path",
@@ -5586,7 +5586,7 @@
       "display_name": "Python Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/python",
       "executes_code": true,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "list_files",
         "pip_install_package",
@@ -5910,7 +5910,7 @@
       "display_name": "Amazon Redshift",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/redshift",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "describe_table",
         "export_table_to_path",
@@ -6071,7 +6071,7 @@
       "display_name": "Background Scripts",
       "docs_url": null,
       "executes_code": true,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "start_script",
         "get_script_resource_profiles",
@@ -6211,7 +6211,7 @@
       "display_name": "Shell Commands",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/shell",
       "executes_code": true,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "check_shell_command",
         "kill_shell_command",
@@ -6444,7 +6444,7 @@
       "display_name": "Visualization",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/visualization",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "create_bar_chart",
         "create_histogram",
@@ -6497,7 +6497,7 @@
       "display_name": "Web Browser Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/web-browser",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "open_page"
       ],
@@ -7637,7 +7637,7 @@
       "display_name": "Composio",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/composio",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [],
       "helper_text": null,
       "icon": "FaConnectdevelop",
@@ -8034,7 +8034,7 @@
       "display_name": "CSV Toolkit",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/csv",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "get_columns",
         "list_csv_files",
@@ -8187,7 +8187,7 @@
       "display_name": "DuckDB",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/duckdb",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "create_fts_index",
         "create_table_from_path",
@@ -9007,7 +9007,7 @@
       "display_name": "Pandas",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/pandas",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "create_pandas_dataframe",
         "run_dataframe_operation"
@@ -9246,7 +9246,7 @@
       "display_name": "SQL Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/sql",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "describe_table",
         "list_tables",
@@ -9747,7 +9747,7 @@
       "display_name": "AgentQL",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/agentql",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "custom_scrape_website",
         "scrape_website"
@@ -10547,7 +10547,7 @@
       "display_name": "Browserbase",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/browserbase",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "aclose_session",
         "aget_page_content",
@@ -11858,7 +11858,7 @@
       "display_name": "Newspaper",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/newspaper4k",
       "executes_code": false,
-      "file_access": "unrestricted",
+      "file_access": "unconfined",
       "function_names": [
         "get_article_data",
         "read_article"

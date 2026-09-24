@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="redshift",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="Amazon Redshift",
     description="Query Amazon Redshift data warehouse - list tables, run SQL, and export results",
     category=ToolCategory.DEVELOPMENT,

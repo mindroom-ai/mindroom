@@ -53,7 +53,7 @@ def _install_agentql_playwright_stealth_compat(playwright_stealth: ModuleType) -
 
 @register_tool_with_metadata(
     name="agentql",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="AgentQL",
     description="AI-powered web scraping and data extraction from websites",
     category=ToolCategory.RESEARCH,

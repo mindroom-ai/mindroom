@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="composio",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="Composio",
     description="Access 1000+ integrations including Gmail, Salesforce, GitHub, and more",
     category=ToolCategory.INTEGRATIONS,

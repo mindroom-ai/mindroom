@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="web_browser_tools",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="Web Browser Tools",
     description="Open URLs in web browser tabs or windows",
     category=ToolCategory.DEVELOPMENT,  # From docs URL: /tools/toolkits/others/

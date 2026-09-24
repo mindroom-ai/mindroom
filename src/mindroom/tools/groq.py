@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="groq",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     worker_inert_agent_functions=("generate_speech",),
     display_name="Groq",
     description="Fast AI inference for audio transcription, translation, and text-to-speech",

@@ -42,7 +42,7 @@ Every tool declares how its own file access relates to this setting.
 | Tool class | Tools | Behavior |
 |---|---|---|
 | Path tools | `file`, `coding`, `attachments`, `matrix_message`, `gmail`, `google_drive`, `browser` uploads | Follow the agent's `file_access` |
-| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `e2b`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `agentql`, `newspaper`, `slack`, `web_browser_tools`) | Always `unrestricted`, meaning not confined by `file_access`; authored config may only state `file_access: unrestricted` |
+| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `e2b`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `agentql`, `newspaper`, `slack`, `web_browser_tools`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else | Take no local file paths |
 
 MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.

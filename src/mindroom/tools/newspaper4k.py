@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="newspaper",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="Newspaper",
     description="Read and extract content from news articles using advanced web scraping",
     category=ToolCategory.RESEARCH,

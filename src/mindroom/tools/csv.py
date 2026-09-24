@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="csv",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="CSV Toolkit",
     description="CSV file analysis and querying with SQL support",
     category=ToolCategory.PRODUCTIVITY,

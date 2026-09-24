@@ -406,7 +406,7 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 `ToolFileAccess` values:
 - `NONE`: the tool takes no local file paths.
 - `AGENT`: the tool resolves every model-supplied path through `mindroom.file_access.resolve_agent_file` and follows the agent's `file_access` setting; add it to `tests/test_file_access_contract.py` when contributing it to MindRoom.
-- `UNRESTRICTED`: the tool reaches local files in a way `file_access` does not confine, such as running programs, queries, or model-chosen paths.
+- `UNCONFINED`: the tool reaches local files in a way `file_access` does not confine, such as running programs, queries, or model-chosen paths.
 
 See [Security Posture](architecture/security-posture.md#file-access) for how each class is treated.
 
@@ -586,7 +586,7 @@ class FilesystemMCPTools(MCPTools):
 @register_tool_with_metadata(
     name="mcp_filesystem",
     # The filesystem server reads local paths that file_access cannot confine.
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="MCP Filesystem",
     description="Tools from an MCP filesystem server",
     category=ToolCategory.DEVELOPMENT,

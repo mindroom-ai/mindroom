@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="postgres",
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     display_name="PostgreSQL",
     description="Query PostgreSQL databases - list tables, describe schemas, run SQL queries, and export data",
     category=ToolCategory.DEVELOPMENT,

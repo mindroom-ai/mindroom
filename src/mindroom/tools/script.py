@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     display_name="Background Scripts",
     description="Run Python scripts in the background, monitor them, or cancel them",
     category=ToolCategory.DEVELOPMENT,
-    file_access=ToolFileAccess.UNRESTRICTED,
+    file_access=ToolFileAccess.UNCONFINED,
     executes_code=True,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
