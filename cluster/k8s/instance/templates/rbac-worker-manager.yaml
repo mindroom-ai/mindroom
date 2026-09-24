@@ -3,8 +3,10 @@
 {{- /*
 Worker Deployments and Services are named from the worker key at runtime, so `resourceNames`
 cannot scope these verbs and this Role is namespace-wide in a namespace every tenant shares.
-`admissionpolicy-worker-manager.yaml` is what confines this ServiceAccount to its own tenant's
-worker resources; the Role and that policy must stay in step.
+`admissionpolicy-worker-manager.yaml` is what confines this ServiceAccount's writes to its own
+tenant's worker resources; the Role and that policy must stay in step. Admission cannot limit
+reads, so the get/list grants below still expose other tenants' pod and Deployment metadata
+(never Secret values).
 */ -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

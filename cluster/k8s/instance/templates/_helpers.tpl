@@ -31,7 +31,9 @@ create and update requests to.
 A hyphen in the customer would make one tenant's prefix a prefix of another tenant's names
 (`mindroom-worker-a-` also starts the names of customer `a-b`), so dedicated workers require a
 customer without separators.
-Normalization mirrors `_digest_and_safe_prefix` in `mindroom.tool_system.worker_routing`.
+Normalization mirrors `_digest_and_safe_prefix` in `mindroom.tool_system.worker_routing`, and the
+38-character limit is the longest prefix `worker_id_for_key` keeps beside its 24-character digest
+in a 63-character name; a longer prefix would be truncated at runtime and could collide.
 */ -}}
 {{- define "mindroom.workerNamePrefix" -}}
 {{- $customer := toString .customer -}}
@@ -40,8 +42,8 @@ Normalization mirrors `_digest_and_safe_prefix` in `mindroom.tool_system.worker_
 {{- end -}}
 {{- $prefix := printf "%s-%s" (.kubernetesWorkerNamePrefix | default "mindroom-worker") $customer -}}
 {{- $normalized := trimAll "-" (regexReplaceAll "[^a-z0-9-]+" (lower $prefix) "-") -}}
-{{- if or (eq $normalized "") (gt (len $normalized) 52) -}}
-{{- fail "kubernetesWorkerNamePrefix combined with customer must normalize to 1-52 characters of [a-z0-9-]" -}}
+{{- if or (eq $normalized "") (gt (len $normalized) 38) -}}
+{{- fail "kubernetesWorkerNamePrefix combined with customer must normalize to 1-38 characters of [a-z0-9-]" -}}
 {{- end -}}
 {{- $normalized -}}
 {{- end }}

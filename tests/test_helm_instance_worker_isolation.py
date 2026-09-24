@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import yaml
+from cel_expr_python import cel
 
 from mindroom.config.main import Config
-from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key
+from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.tool_system.worker_routing import worker_dir_name, worker_id_for_key
+from mindroom.workers.backends.kubernetes_config import KubernetesWorkerBackendConfig
+from mindroom.workers.backends.kubernetes_resources import KubernetesResourceManager
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _render_chart(
@@ -638,60 +647,461 @@ def test_instance_chart_worker_manager_can_only_patch_own_worker_auth_secret() -
     ]
 
 
-def test_instance_chart_confines_worker_manager_to_its_own_tenant_resources() -> None:
-    """Namespace-wide worker verbs in a shared namespace must be scoped by admission."""
-    docs = _render_instance_chart()
-    policy = _resource(docs, "ValidatingAdmissionPolicy", "mindroom-worker-manager-demo")
-    binding = _resource(docs, "ValidatingAdmissionPolicyBinding", "mindroom-worker-manager-demo")
-    expressions = " ".join(validation["expression"] for validation in policy["spec"]["validations"])
-
-    assert policy["spec"]["failurePolicy"] == "Fail"
-    assert [condition["expression"] for condition in policy["spec"]["matchConditions"]] == [
-        'request.userInfo.username == "system:serviceaccount:mindroom-instances:mindroom-worker-manager-demo"',
-    ]
-    assert binding["spec"] == {
-        "policyName": "mindroom-worker-manager-demo",
-        "validationActions": ["Deny"],
-    }
-    assert 'variables.labels["customer"] == "demo"' in expressions
-    assert 'variables.target.metadata.name.startsWith("mindroom-worker-demo-")' in expressions
-    assert 'variables.podTemplateLabels["customer"] == "demo"' in expressions
-    assert 'variables.podSpec.serviceAccountName == "default"' in expressions
-    assert "&& !variables.podSpec.automountServiceAccountToken" in expressions
-    assert 'volume.persistentVolumeClaim.claimName == "mindroom-storage-demo"' in expressions
-    assert 'volume.configMap.name == "mindroom-config-demo"' in expressions
-    assert 'entry.valueFrom.secretKeyRef.name == "mindroom-worker-auth-demo"' in expressions
-    assert 'source.secretRef.name == "mindroom-worker-auth-demo"' in expressions
-    assert 'variables.target.spec.selector["customer"] == "demo"' in expressions
+_WORKER_KEY = "v1:default:user_agent:@alice:demo.mindroom.chat:code"
 
 
-def test_instance_chart_names_dedicated_workers_per_tenant() -> None:
-    """Generated worker names must be unique per tenant and match the admission policy prefix."""
-    docs = _render_instance_chart()
-    env = _env_by_name(_container(_resource(docs, "Deployment", "mindroom-demo"), "mindroom"))
-    policy = _resource(docs, "ValidatingAdmissionPolicy", "mindroom-worker-manager-demo")
-    expressions = " ".join(validation["expression"] for validation in policy["spec"]["validations"])
-    worker_id = descriptive_worker_id_for_key(
-        "v1:default:user_agent:@alice:demo.mindroom.chat:code",
-        prefix=env["MINDROOM_KUBERNETES_WORKER_NAME_PREFIX"]["value"],
-    )
+class _ApiStatusError(Exception):
+    """Kubernetes client error carrying an HTTP status."""
 
-    assert env["MINDROOM_KUBERNETES_WORKER_NAME_PREFIX"]["value"] == "mindroom-worker-demo"
-    assert worker_id.startswith("mindroom-worker-demo-")
-    assert f'startsWith("{worker_id[: len("mindroom-worker-demo-")]}")' in expressions
+    def __init__(self, status: int) -> None:
+        super().__init__(status)
+        self.status = status
 
 
-def test_instance_chart_rejects_worker_name_prefixes_that_cannot_scope_one_tenant() -> None:
-    """A prefix the runtime would truncate would render worker names the policy denies."""
-    completed = _run_helm_template(
+def _render_dedicated_worker_chart(customer: str = "demo", *settings: str) -> list[dict[str, Any]]:
+    return _render_chart(
         Path("cluster/k8s/instance"),
         "workerBackend=kubernetes",
         "storageAccessMode=ReadWriteMany",
-        f"kubernetesWorkerNamePrefix={'w' * 60}",
+        f"customer={customer}",
+        *settings,
     )
 
-    assert completed.returncode != 0
-    assert "kubernetesWorkerNamePrefix" in completed.stderr
+
+def _backend_worker_resources(
+    docs: list[dict[str, Any]],
+    customer: str,
+    tmp_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the worker Deployment and Service the chart-configured backend would create."""
+    owner_name = f"mindroom-{customer}"
+    container = _container(_resource(docs, "Deployment", owner_name), "mindroom")
+    env = {entry["name"]: entry["value"] for entry in container["env"] if "value" in entry}
+    config_path = tmp_path / "config" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env=env | {"MINDROOM_WORKER_BACKEND": "kubernetes"},
+    )
+    manager = KubernetesResourceManager(
+        runtime_paths=runtime_paths,
+        config=KubernetesWorkerBackendConfig.from_runtime(runtime_paths),
+        auth_token="test-token",  # noqa: S106
+        storage_root=tmp_path,
+        tool_validation_snapshot={},
+        config_snapshot={},
+        worker_grantable_credentials=frozenset(),
+    )
+    created: dict[str, dict[str, Any]] = {}
+
+    def read_deployment(name: str, _namespace: str) -> SimpleNamespace:
+        if name != owner_name:
+            raise _ApiStatusError(404)
+        return SimpleNamespace(metadata=SimpleNamespace(uid="owner-uid", annotations={}))
+
+    def missing(_name: str, _namespace: str) -> None:
+        raise _ApiStatusError(404)
+
+    def unexpected_patch(name: str, _namespace: str, _body: dict[str, object]) -> None:
+        msg = f"{name} does not exist yet, so the backend must create it"
+        raise AssertionError(msg)
+
+    fake_clients = cast("Any", manager)
+    fake_clients.apps_api = SimpleNamespace(
+        read_namespaced_deployment=read_deployment,
+        create_namespaced_deployment=lambda _namespace, body: created.setdefault("deployment", body),
+        patch_namespaced_deployment=unexpected_patch,
+    )
+    fake_clients.core_api = SimpleNamespace(
+        read_namespaced_service=missing,
+        create_namespaced_service=lambda _namespace, body: created.setdefault("service", body),
+        patch_namespaced_service=unexpected_patch,
+    )
+    fake_clients.api_exception_cls = _ApiStatusError
+    worker_id = worker_id_for_key(_WORKER_KEY, prefix=manager.config.name_prefix)
+    manager.apply_deployment(
+        worker_key=_WORKER_KEY,
+        worker_id=worker_id,
+        state_subpath=f"workers/{worker_dir_name(_WORKER_KEY)}",
+        annotations={},
+        replicas=1,
+        private_agent_names=frozenset(),
+    )
+    manager.apply_service(worker_id)
+    return created["deployment"], created["service"]
+
+
+def _admit(
+    docs: list[dict[str, Any]],
+    *,
+    operation: str,
+    resource: str,
+    obj: dict[str, Any] | None = None,
+    old: dict[str, Any] | None = None,
+    group: str = "",
+    customer: str = "demo",
+    username: str | None = None,
+) -> str | None:
+    """Evaluate the rendered worker-manager policy the way the API server does.
+
+    Returns the message of the first failing validation, or None when the request is admitted.
+    """
+    policy = _resource(docs, "ValidatingAdmissionPolicy", f"mindroom-worker-manager-{customer}")["spec"]
+    env = cel.NewEnv(variables=dict.fromkeys(("object", "oldObject", "request", "variables"), cel.Type.DYN))
+    variables: dict[str, Any] = {}
+    data = {
+        "object": obj,
+        "oldObject": old,
+        "request": {
+            "operation": operation,
+            "resource": {"group": group, "version": "v1", "resource": resource},
+            "userInfo": {
+                "username": username or f"system:serviceaccount:mindroom-instances:mindroom-worker-manager-{customer}",
+            },
+        },
+        "variables": variables,
+    }
+    if not all(env.compile(match["expression"]).eval(data=data).value() is True for match in policy["matchConditions"]):
+        return None
+    for variable in policy["variables"]:
+        variables[variable["name"]] = env.compile(variable["expression"]).eval(data=data).plain_value()
+    for validation in policy["validations"]:
+        if env.compile(validation["expression"]).eval(data=data).value() is not True:
+            return validation["message"]
+    return None
+
+
+def _pod_spec(deployment: dict[str, Any]) -> dict[str, Any]:
+    return deployment["spec"]["template"]["spec"]
+
+
+def _main_container(deployment: dict[str, Any]) -> dict[str, Any]:
+    return _pod_spec(deployment)["containers"][0]
+
+
+def _victim_workload(name: str, app: str) -> dict[str, Any]:
+    labels = {"app": app, "customer": "victim"}
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": name, "namespace": "mindroom-instances", "labels": labels},
+        "spec": {"selector": {"matchLabels": labels}, "template": {"metadata": {"labels": labels}, "spec": {}}},
+    }
+
+
+def test_instance_chart_binds_worker_manager_policy_to_every_writable_resource() -> None:
+    """The policy must deny rather than skip anything the worker manager could write."""
+    docs = _render_dedicated_worker_chart()
+    policy = _resource(docs, "ValidatingAdmissionPolicy", "mindroom-worker-manager-demo")
+    binding = _resource(docs, "ValidatingAdmissionPolicyBinding", "mindroom-worker-manager-demo")
+    matched = {
+        (group, resource)
+        for rule in policy["spec"]["matchConstraints"]["resourceRules"]
+        if set(rule["operations"]) == {"CREATE", "UPDATE", "DELETE"}
+        for group in rule["apiGroups"]
+        for resource in rule["resources"]
+    }
+
+    assert policy["spec"]["failurePolicy"] == "Fail"
+    assert binding["spec"] == {"policyName": "mindroom-worker-manager-demo", "validationActions": ["Deny"]}
+    assert {
+        ("apps", "deployments"),
+        ("", "services"),
+        ("", "secrets"),
+        ("", "pods"),
+        ("", "endpoints"),
+        ("discovery.k8s.io", "endpointslices"),
+    } <= matched
+
+
+@pytest.mark.parametrize(
+    ("customer", "settings"),
+    [
+        ("demo", ()),
+        (
+            "42",
+            (
+                "controlPlaneNodeName=node-1",
+                "kubernetesWorkerRuntimeClassName=gvisor",
+                "kubernetesWorkerNamePrefix=custom-worker",
+            ),
+        ),
+        ("a" * 22, ()),
+    ],
+    ids=["defaults", "pinned-node-runtime-class-custom-prefix", "longest-customer"],
+)
+def test_instance_chart_admits_the_backend_worker_lifecycle(
+    customer: str,
+    settings: tuple[str, ...],
+    tmp_path: Path,
+) -> None:
+    """Everything the chart-configured backend sends for its own workers must be admitted."""
+    docs = _render_dedicated_worker_chart(customer, *settings)
+    deployment, service = _backend_worker_resources(docs, customer, tmp_path)
+    prefix = _env_by_name(_container(_resource(docs, "Deployment", f"mindroom-{customer}"), "mindroom"))[
+        "MINDROOM_KUBERNETES_WORKER_NAME_PREFIX"
+    ]["value"]
+    scaled_down = copy.deepcopy(deployment)
+    scaled_down["spec"]["replicas"] = 0
+    scaled_down["metadata"]["annotations"]["mindroom.ai/last-used-at"] = "10.0"
+    auth_secret = copy.deepcopy(_resource(docs, "Secret", f"mindroom-worker-auth-{customer}"))
+    auth_secret["data"] = {deployment["metadata"]["name"]: "dG9rZW4="}
+
+    def admit(operation: str, resource: str, **objects: dict[str, Any]) -> str | None:
+        return _admit(
+            docs,
+            operation=operation,
+            resource=resource,
+            group="apps" if resource == "deployments" else "",
+            customer=customer,
+            **objects,
+        )
+
+    assert deployment["metadata"]["name"].startswith(f"{prefix}-")
+    assert admit("CREATE", "deployments", obj=deployment) is None
+    assert admit("UPDATE", "deployments", obj=scaled_down, old=deployment) is None
+    assert admit("DELETE", "deployments", old=deployment) is None
+    assert admit("CREATE", "services", obj=service) is None
+    assert admit("DELETE", "services", old=service) is None
+    assert admit("UPDATE", "secrets", obj=auth_secret) is None
+
+
+@pytest.mark.parametrize(
+    ("edit", "denial"),
+    [
+        (
+            lambda d: _pod_spec(d)["volumes"].append({"name": "x", "secret": {"secretName": "mindroom-api-keys-v"}}),
+            "may only mount",
+        ),
+        (
+            lambda d: _pod_spec(d)["volumes"].append(
+                {"name": "x", "persistentVolumeClaim": {"claimName": "synapse-storage-v"}},
+            ),
+            "may only mount",
+        ),
+        (lambda d: _pod_spec(d)["volumes"].append({"name": "x", "hostPath": {"path": "/"}}), "may only mount"),
+        (
+            lambda d: _main_container(d)["env"].append(
+                {"name": "X", "valueFrom": {"secretKeyRef": {"name": "mindroom-api-keys-v", "key": "anthropic_key"}}},
+            ),
+            "may only read their own",
+        ),
+        (
+            lambda d: _pod_spec(d).update(
+                {"initContainers": [{"name": "x", "envFrom": [{"secretRef": {"name": "mindroom-api-keys-v"}}]}]},
+            ),
+            "may only read their own",
+        ),
+        (
+            lambda d: d["spec"]["template"]["metadata"]["labels"].update({"app": "synapse", "customer": "v"}),
+            "pod templates must carry",
+        ),
+        (
+            lambda d: _pod_spec(d).update({"serviceAccountName": "mindroom-worker-manager-v"}),
+            "configured worker ServiceAccount",
+        ),
+        (lambda d: _pod_spec(d).update({"automountServiceAccountToken": True}), "configured worker ServiceAccount"),
+        (lambda d: _pod_spec(d).update({"hostNetwork": True}), "run as non-root"),
+        (lambda d: _pod_spec(d)["securityContext"].pop("runAsNonRoot"), "run as non-root"),
+        (
+            lambda d: _pod_spec(d)["securityContext"].update({"seccompProfile": {"type": "Unconfined"}}),
+            "run as non-root",
+        ),
+        (
+            lambda d: d["spec"]["template"]["metadata"]["annotations"].update(
+                {"container.apparmor.security.beta.kubernetes.io/sandbox-runner": "unconfined"},
+            ),
+            "run as non-root",
+        ),
+        (lambda d: _main_container(d).pop("securityContext"), "drop all capabilities"),
+        (lambda d: _main_container(d)["securityContext"].pop("capabilities"), "drop all capabilities"),
+        (
+            lambda d: _main_container(d)["securityContext"]["capabilities"].update({"drop": ["NET_ADMIN"]}),
+            "drop all capabilities",
+        ),
+        (
+            lambda d: _main_container(d)["securityContext"]["capabilities"].update({"add": ["NET_RAW"]}),
+            "drop all capabilities",
+        ),
+        (
+            lambda d: _main_container(d)["securityContext"].update({"allowPrivilegeEscalation": True}),
+            "drop all capabilities",
+        ),
+        (lambda d: _main_container(d)["securityContext"].update({"privileged": True}), "drop all capabilities"),
+        (
+            lambda d: _main_container(d)["securityContext"].update({"seLinuxOptions": {"type": "spc_t"}}),
+            "drop all capabilities",
+        ),
+        (lambda d: _main_container(d)["ports"][0].update({"hostPort": 8008}), "drop all capabilities"),
+        (lambda d: _pod_spec(d).update({"nodeName": "victim-node"}), "may not choose their node"),
+        (lambda d: _pod_spec(d).update({"priorityClassName": "system-node-critical"}), "may not choose their node"),
+        (lambda d: _pod_spec(d).update({"tolerations": [{"operator": "Exists"}]}), "may not choose their node"),
+        (lambda d: _pod_spec(d).update({"imagePullSecrets": [{"name": "ghcr-pull"}]}), "may not choose their node"),
+        (lambda d: _pod_spec(d).update({"runtimeClassName": "runc"}), "may not choose their node"),
+        (lambda d: d["metadata"]["ownerReferences"][0].update({"name": "mindroom-v"}), "owned by their own tenant"),
+        (lambda d: d["metadata"]["ownerReferences"][0].update({"blockOwnerDeletion": True}), "owned by their own"),
+        (lambda d: d["metadata"].update({"name": "mindroom-v"}), "create or update its own tenant"),
+        (lambda d: d["metadata"]["labels"].pop("customer"), "labelled with its own customer"),
+    ],
+    ids=[
+        "mount-other-api-keys",
+        "mount-other-synapse-storage",
+        "mount-host-path",
+        "env-other-secret",
+        "init-container-envfrom-other-secret",
+        "impersonate-other-synapse-pods",
+        "run-as-other-worker-manager",
+        "mount-api-token",
+        "host-network",
+        "run-as-root",
+        "unconfined-seccomp",
+        "unconfined-apparmor-annotation",
+        "no-container-security-context",
+        "default-capabilities",
+        "keep-net-raw",
+        "add-net-raw",
+        "privilege-escalation",
+        "privileged",
+        "selinux-spc",
+        "host-port",
+        "pin-node",
+        "preempting-priority",
+        "tolerate-all-taints",
+        "borrow-pull-secret",
+        "other-runtime-class",
+        "owned-by-other-tenant",
+        "block-owner-deletion",
+        "squat-primary-name",
+        "unlabelled",
+    ],
+)
+def test_instance_chart_denies_unsafe_worker_deployments(
+    edit: Callable[[dict[str, Any]], object],
+    denial: str,
+    tmp_path: Path,
+) -> None:
+    """A worker Deployment may not reach another tenant's data, traffic, node or identity."""
+    docs = _render_dedicated_worker_chart()
+    deployment, _service = _backend_worker_resources(docs, "demo", tmp_path)
+    edit(deployment)
+
+    message = _admit(docs, operation="CREATE", resource="deployments", group="apps", obj=deployment)
+
+    assert message is not None
+    assert denial in message
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"selector": {"app": "synapse", "customer": "victim"}},
+        {"externalIPs": ["10.43.0.10"]},
+        {"type": "LoadBalancer"},
+        {"type": "NodePort"},
+    ],
+    ids=["select-other-tenant", "external-ips", "load-balancer", "node-port"],
+)
+def test_instance_chart_denies_worker_services_that_capture_other_traffic(
+    spec: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    """Worker Services stay internal and only ever select this tenant's pods."""
+    docs = _render_dedicated_worker_chart()
+    _deployment, service = _backend_worker_resources(docs, "demo", tmp_path)
+    service["spec"].update(spec)
+
+    message = _admit(docs, operation="CREATE", resource="services", obj=service)
+
+    assert message is not None
+    assert "ClusterIP Services" in message
+
+
+def test_instance_chart_denies_writes_to_other_tenants_resources() -> None:
+    """Another tenant's workloads, Secrets and endpoints are out of reach for every write verb."""
+    docs = _render_dedicated_worker_chart()
+    victim_runtime = _victim_workload("mindroom-victim", "mindroom")
+    relabelled_runtime = copy.deepcopy(victim_runtime)
+    relabelled_runtime["metadata"]["labels"]["customer"] = "demo"
+    victim_auth_secret = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "mindroom-worker-auth-victim", "labels": {"customer": "victim"}},
+    }
+    endpoint_slice = {
+        "apiVersion": "discovery.k8s.io/v1",
+        "kind": "EndpointSlice",
+        "metadata": {
+            "name": "mindroom-worker-demo-x",
+            "labels": {"customer": "demo", "kubernetes.io/service-name": "synapse-victim"},
+        },
+        "addressType": "IPv4",
+        "endpoints": [{"addresses": ["10.42.0.9"]}],
+    }
+
+    assert "labelled with its own customer" in (
+        _admit(docs, operation="UPDATE", resource="deployments", group="apps", obj=victim_runtime) or ""
+    )
+    assert "create or update its own tenant" in (
+        _admit(docs, operation="UPDATE", resource="deployments", group="apps", obj=relabelled_runtime) or ""
+    )
+    assert "labelled with its own customer" in (
+        _admit(
+            docs,
+            operation="DELETE",
+            resource="deployments",
+            group="apps",
+            old=_victim_workload("synapse-victim", "synapse"),
+        )
+        or ""
+    )
+    assert "labelled with its own customer" in (
+        _admit(docs, operation="UPDATE", resource="secrets", obj=victim_auth_secret) or ""
+    )
+    assert "only manage worker Deployments" in (
+        _admit(docs, operation="CREATE", resource="endpointslices", group="discovery.k8s.io", obj=endpoint_slice) or ""
+    )
+
+
+def test_instance_chart_worker_manager_policy_ignores_other_identities() -> None:
+    """Controllers creating pods from admitted templates are not subject to the tenant policy."""
+    docs = _render_dedicated_worker_chart()
+
+    assert (
+        _admit(
+            docs,
+            operation="DELETE",
+            resource="deployments",
+            group="apps",
+            old=_victim_workload("synapse-victim", "synapse"),
+            username="system:serviceaccount:kube-system:deployment-controller",
+        )
+        is None
+    )
+
+
+def test_instance_chart_rejects_worker_name_prefixes_the_runtime_would_truncate() -> None:
+    """`worker_id_for_key` keeps at most 38 prefix characters, so longer prefixes could collide."""
+    longest = _run_helm_template(
+        Path("cluster/k8s/instance"),
+        "workerBackend=kubernetes",
+        "storageAccessMode=ReadWriteMany",
+        f"customer={'a' * 22}",
+    )
+    too_long = _run_helm_template(
+        Path("cluster/k8s/instance"),
+        "workerBackend=kubernetes",
+        "storageAccessMode=ReadWriteMany",
+        f"customer={'a' * 23}",
+    )
+
+    longest.check_returncode()
+    assert too_long.returncode != 0
+    assert "must normalize to 1-38 characters" in too_long.stderr
 
 
 def test_instance_chart_rejects_dedicated_workers_for_ambiguous_customer_names() -> None:
