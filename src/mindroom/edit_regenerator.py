@@ -182,6 +182,10 @@ class EditRegenerator:
             return None
         if turn_record.requester_id_for_source(original_event_id) != requester_user_id:
             return None
+        # Regeneration replays every source under the editor's identity, so a
+        # record mixing senders would run their messages as the editor.
+        if not turn_record.replay_sources_all_from_requester(requester_user_id):
+            return None
         context = await self._edit_regeneration_context(
             context,
             room,

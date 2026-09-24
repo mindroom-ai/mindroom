@@ -17,6 +17,7 @@ from mindroom.coalescing_batch import (
     PendingEvent,
     PreparedTurn,
     build_prepared_turn,
+    is_active_follow_up_coalescing_key,
     requester_coalescing_key,
 )
 from mindroom.commands.parsing import command_parser
@@ -2139,10 +2140,17 @@ class TurnController:
             return
         coalescing_key = turn.ingress.coalescing_key
         assert coalescing_key is not None
-        _consume_queued_notice_reservations_from_metadata(
-            turn.dispatch_metadata,
-            target_key=self._queued_notice_target_key(turn.room, turn.event, coalescing_key),
-        )
+        target_key = self._queued_notice_target_key(turn.room, turn.event, coalescing_key)
+        _consume_queued_notice_reservations_from_metadata(turn.dispatch_metadata, target_key=target_key)
+        if is_active_follow_up_coalescing_key(coalescing_key):
+            # Follow-ups held back by a requester split waited on the response
+            # that just finished; left pending, they would cut this turn short
+            # and hand its unfinished work to the next requester's turn.
+            for pending_event in self.deps.coalescing_gate.queued_pending_events(coalescing_key):
+                _consume_queued_notice_reservations_from_metadata(
+                    pending_event.dispatch_metadata,
+                    target_key=target_key,
+                )
         timing_scope = event_timing_scope(turn.event.event_id)
         dispatch_timing = get_dispatch_pipeline_timing(turn.event.source)
         if dispatch_timing is not None:
