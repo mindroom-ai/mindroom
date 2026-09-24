@@ -313,7 +313,7 @@ def _resolve_attachment_file_path(
             ),
             None,
         )
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         return None, str(exc)
 
 

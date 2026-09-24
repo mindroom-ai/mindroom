@@ -1030,14 +1030,29 @@ async def test_attachments_tool_register_attachment_rejects_paths_outside_worksp
     tool = AttachmentTools(tool_output_workspace_root=workspace)
     ctx = _tool_context(tmp_path)
 
-    with tool_runtime_context(ctx):
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.register_local_attachment") as mocked_register,
+    ):
         payload = json.loads(await tool.register_attachment(requested_path))
-        current_context = get_tool_runtime_context()
-        assert current_context is not None
 
     assert payload["status"] == "error"
     assert "must stay within the workspace root" in payload["message"]
-    assert list_tool_runtime_attachment_ids(current_context) == []
+    mocked_register.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_reports_os_errors(tmp_path: Path) -> None:
+    """An OS-level path error must become an error payload, not an exception."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    ctx = _tool_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.register_attachment("a" * 300))
+
+    assert payload["status"] == "error"
 
 
 @pytest.mark.asyncio
@@ -1075,6 +1090,7 @@ async def test_matrix_message_attachments_reject_paths_outside_workspace(
 
     with (
         tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.register_local_attachment") as mocked_register,
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
         result = json.loads(
@@ -1085,6 +1101,7 @@ async def test_matrix_message_attachments_reject_paths_outside_workspace(
 
     assert result["status"] == "error"
     assert "must stay within the workspace root" in result["message"]
+    mocked_register.assert_not_called()
     mocked.assert_not_awaited()
 
 
