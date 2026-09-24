@@ -320,6 +320,20 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
+-- Function to check whether the caller may act on any account.
+-- TRUE for the platform backend (service role), platform admins, and direct database
+-- sessions used by migrations and operational tooling, which carry no PostgREST claims.
+CREATE OR REPLACE FUNCTION has_platform_privileges()
+RETURNS BOOLEAN AS $$
+DECLARE
+    jwt_claims JSONB := NULLIF(current_setting('request.jwt.claims', TRUE), '')::JSONB;
+BEGIN
+    RETURN jwt_claims IS NULL
+        OR jwt_claims->>'role' = 'service_role'
+        OR is_admin();
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
 -- ============================================================================
 -- SOFT DELETE FUNCTIONS (GDPR Compliance)
 -- ============================================================================
@@ -331,6 +345,13 @@ CREATE OR REPLACE FUNCTION soft_delete_account(
     requested_by UUID DEFAULT NULL
 ) RETURNS VOID AS $$
 BEGIN
+    -- These statements bypass RLS, so refuse callers that neither own the target account
+    -- nor hold platform privileges, even if EXECUTE is ever granted more widely again.
+    IF auth.uid() IS DISTINCT FROM target_account_id AND NOT has_platform_privileges() THEN
+        RAISE EXCEPTION 'soft_delete_account requires account ownership or platform privileges'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     -- Mark account as deleted
     UPDATE accounts
     SET
@@ -375,6 +396,11 @@ CREATE OR REPLACE FUNCTION restore_account(
     target_account_id UUID
 ) RETURNS VOID AS $$
 BEGIN
+    -- These statements bypass RLS, so restore stays a platform operation.
+    IF NOT has_platform_privileges() THEN
+        RAISE EXCEPTION 'restore_account requires platform privileges' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     -- Restore account
     UPDATE accounts
     SET
@@ -420,6 +446,11 @@ CREATE OR REPLACE FUNCTION hard_delete_account(
     target_account_id UUID
 ) RETURNS VOID AS $$
 BEGIN
+    -- These statements bypass RLS and are irreversible, so keep them platform-only.
+    IF NOT has_platform_privileges() THEN
+        RAISE EXCEPTION 'hard_delete_account requires platform privileges' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     -- Delete related data (cascade will handle most)
     DELETE FROM instances WHERE account_id = target_account_id;
     DELETE FROM subscriptions WHERE account_id = target_account_id;
@@ -554,7 +585,14 @@ CREATE POLICY "Admins can manage all webhook events" ON webhook_events
     FOR ALL USING (is_admin())
     WITH CHECK (is_admin());
 
-GRANT EXECUTE ON FUNCTION soft_delete_account TO authenticated, service_role;
+-- Account lifecycle functions are SECURITY DEFINER and bypass RLS, so only the platform
+-- backend may call them. PostgreSQL grants EXECUTE on new functions to PUBLIC, which would
+-- otherwise expose them to anon and authenticated through PostgREST, so revoke that first.
+REVOKE EXECUTE ON FUNCTION has_platform_privileges FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION soft_delete_account FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION restore_account FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION hard_delete_account FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION soft_delete_account TO service_role;
 GRANT EXECUTE ON FUNCTION restore_account TO service_role;
 GRANT EXECUTE ON FUNCTION hard_delete_account TO service_role;
 

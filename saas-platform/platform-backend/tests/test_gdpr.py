@@ -1,5 +1,7 @@
 """Test GDPR endpoints functionality."""
 
+from pathlib import Path
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,6 +9,50 @@ from fastapi.testclient import TestClient
 
 from main import app
 from backend.deps import verify_user
+
+
+MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "supabase/migrations"
+BASELINE_MIGRATION_SQL = MIGRATIONS_DIR / "000_consolidated_complete_schema.sql"
+LIFECYCLE_RPC_MIGRATION_SQL = MIGRATIONS_DIR / "003_restrict_account_lifecycle_rpcs.sql"
+ACCOUNT_LIFECYCLE_RPCS = ("soft_delete_account", "restore_account", "hard_delete_account")
+LIFECYCLE_MIGRATIONS = pytest.mark.parametrize(
+    "migration",
+    [BASELINE_MIGRATION_SQL, LIFECYCLE_RPC_MIGRATION_SQL],
+    ids=["baseline", "incremental"],
+)
+
+
+@LIFECYCLE_MIGRATIONS
+def test_account_lifecycle_rpcs_are_executable_by_service_role_only(migration: Path) -> None:
+    """Only the service-role backend may call the RLS-bypassing account lifecycle RPCs."""
+    sql = migration.read_text(encoding="utf-8")
+
+    assert "GRANT EXECUTE ON FUNCTION soft_delete_account TO authenticated, service_role;" not in sql
+    for rpc in ACCOUNT_LIFECYCLE_RPCS:
+        # PostgreSQL grants EXECUTE to PUBLIC on every new function, so without this revoke
+        # PostgREST exposes /rest/v1/rpc/<name> to anon and authenticated.
+        assert re.search(rf"REVOKE EXECUTE ON FUNCTION {rpc} FROM [^;]*PUBLIC", sql)
+        assert f"GRANT EXECUTE ON FUNCTION {rpc} TO service_role;" in sql
+        assert not re.search(rf"GRANT EXECUTE ON FUNCTION {rpc} TO [^;]*\b(anon|authenticated)\b", sql)
+
+
+@LIFECYCLE_MIGRATIONS
+def test_account_lifecycle_rpcs_reject_unprivileged_callers(migration: Path) -> None:
+    """Each function refuses unauthorized callers itself, so a widened grant cannot bypass RLS."""
+    sql = migration.read_text(encoding="utf-8")
+
+    # The caller is privileged only as the service role, a platform admin, or a direct
+    # database session (migrations and operational tooling carry no PostgREST claims).
+    assert "CREATE OR REPLACE FUNCTION has_platform_privileges()" in sql
+    assert (
+        "    RETURN jwt_claims IS NULL\n        OR jwt_claims->>'role' = 'service_role'\n        OR is_admin();"
+    ) in sql
+    assert re.search(r"REVOKE EXECUTE ON FUNCTION has_platform_privileges FROM [^;]*PUBLIC", sql)
+
+    # Soft delete additionally allows the owner of the targeted account.
+    assert "IF auth.uid() IS DISTINCT FROM target_account_id AND NOT has_platform_privileges() THEN" in sql
+    assert sql.count("IF NOT has_platform_privileges() THEN") == 2
+    assert sql.count("USING ERRCODE = 'insufficient_privilege'") == 3
 
 
 @pytest.fixture
