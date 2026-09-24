@@ -386,6 +386,7 @@ Dangerous state event types like `m.room.power_levels` and `m.room.encryption` a
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
 A dangerous write also requires the human requester, or one of their configured bridge aliases, to be joined to the target room with room admin power (power level 100), so the model's flag alone never authorizes it.
 Hard-blocked state event types like `m.room.create` remain blocked.
+The `com.mindroom.*` and `io.mindroom.*` namespaces are reserved for runtime metadata: `content` may not set keys in them at any depth, and `send_event` and `put_state` may not write event types in them.
 `search` is read-only, scopes results to one room via `room_id`, uses the top-level `limit` parameter, and rejects `filter.limit`.
 When `event_context={"include_profile": true}` is requested, returned context preserves `profile_info` for matching senders.
 

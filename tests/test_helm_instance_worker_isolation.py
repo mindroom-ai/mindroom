@@ -639,6 +639,21 @@ def test_instance_chart_worker_manager_can_only_patch_own_worker_auth_secret() -
     ]
 
 
+def test_instance_chart_mounts_api_tokens_only_where_the_api_is_used() -> None:
+    """Only the dedicated-worker control plane needs a Kubernetes API token in its pod."""
+    worker_docs = _render_instance_chart()
+    sidecar_docs = _render_chart(Path("cluster/k8s/instance"))
+    worker_pod = _resource(worker_docs, "Deployment", "mindroom-demo")["spec"]["template"]["spec"]
+    sidecar_pod = _resource(sidecar_docs, "Deployment", "mindroom-demo")["spec"]["template"]["spec"]
+    synapse_pod = _resource(sidecar_docs, "Deployment", "synapse-demo")["spec"]["template"]["spec"]
+
+    assert worker_pod["serviceAccountName"] == "mindroom-worker-manager-demo"
+    assert "automountServiceAccountToken" not in worker_pod
+    assert sidecar_pod["automountServiceAccountToken"] is False
+    assert "serviceAccountName" not in sidecar_pod
+    assert synapse_pod["automountServiceAccountToken"] is False
+
+
 def test_instance_chart_uses_tenant_worker_auth_secret() -> None:
     """Shared-namespace instances should reference a pre-created tenant token Secret."""
     docs = _render_instance_chart()
