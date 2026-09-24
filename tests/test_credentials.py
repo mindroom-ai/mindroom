@@ -1435,6 +1435,19 @@ class TestCredentialsManager:
 
         assert len(list(Path("/dev/fd").iterdir())) == open_descriptors
 
+    def test_oversized_payload_is_refused_before_it_is_written(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """A save the store could never read back must fail and leave the stored payload intact."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("github", {"token": "kept"})
+
+        with pytest.raises(ValueError, match="exceeds"):
+            manager.save_credentials("github", {"token": "x" * (2 * 1024 * 1024)})
+
+        assert manager.load_credentials("github") == {"token": "kept"}
+
     def test_oversized_payload_is_not_read_into_memory(
         self,
         temp_credentials_dir: Path,

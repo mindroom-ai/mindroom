@@ -357,6 +357,10 @@ def _existing_worker_credential_paths(storage_root: Path) -> tuple[Path, ...]:
 
 
 def _atomic_write_private_file(path: Path, payload: bytes) -> None:
+    if len(payload) > _MAX_CREDENTIALS_PAYLOAD_BYTES:
+        # Refuse what the store could never read back, rather than publishing a dead entry.
+        msg = f"Credential payload exceeds {_MAX_CREDENTIALS_PAYLOAD_BYTES} bytes"
+        raise ValueError(msg)
     _ensure_private_directory(path.parent)
     tmp_name = f".{path.name}.{secrets.token_hex(8)}.tmp"
     with open_directory_within_root(path.parent) as directory_fd:
