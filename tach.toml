@@ -5057,7 +5057,8 @@ expose = [
     "join_room",
     "leave_room",
     "room_admin_power_user",
-    "room_control_problem",
+    "room_admin_problem",
+    "room_alias_problem",
     "room_encryption_enabled",
     "room_ownership_problem",
 ]

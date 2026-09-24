@@ -319,20 +319,14 @@ def _creators_outrank_power_levels(snapshot: RoomStateSnapshot) -> bool:
 def room_ownership_problem(  # noqa: PLR0911 - each unowned Matrix state is a separate fail-closed exit
     snapshot: RoomStateSnapshot,
     owner_user_id: str,
-    room_alias: str,
 ) -> str | None:
-    """Return why one account does not own a room published under an alias, or None when it does.
+    """Return why one account does not own and administer a room, or None when it does.
 
-    Any homeserver user can publish a room under a predictable alias, so the
-    owner must have created the room, still publish it under that alias, be
-    joined, and hold admin power over its state.
+    Only the server-stamped creator, the owner's membership, and integer power
+    levels granting it admin power prove ownership; room content cannot.
     """
     if snapshot.creator != owner_user_id:
         return f"created by {snapshot.creator}, not {owner_user_id}"
-    canonical_alias = snapshot.events.get(("m.room.canonical_alias", ""), {})
-    alt_aliases = canonical_alias.get("alt_aliases")
-    if canonical_alias.get("alias") != room_alias and not (isinstance(alt_aliases, list) and room_alias in alt_aliases):
-        return f"the room does not publish {room_alias}"
     if snapshot.events.get(("m.room.member", owner_user_id), {}).get("membership") != "join":
         return f"{owner_user_id} is not joined"
     power_levels = snapshot.events.get((_POWER_LEVELS_EVENT_TYPE, ""))
@@ -354,20 +348,27 @@ def room_ownership_problem(  # noqa: PLR0911 - each unowned Matrix state is a se
     return None
 
 
-def room_control_problem(
+def room_alias_problem(snapshot: RoomStateSnapshot, room_alias: str) -> str | None:
+    """Return why a room does not publish one alias as its canonical or alternative alias, or None when it does."""
+    canonical_alias = snapshot.events.get(("m.room.canonical_alias", ""), {})
+    alt_aliases = canonical_alias.get("alt_aliases")
+    if canonical_alias.get("alias") == room_alias or (isinstance(alt_aliases, list) and room_alias in alt_aliases):
+        return None
+    return f"the room does not publish {room_alias}"
+
+
+def room_admin_problem(
     snapshot: RoomStateSnapshot,
     owner_user_id: str,
-    room_alias: str,
     admin_user_ids: Iterable[str],
 ) -> str | None:
-    """Return why one account does not own and solely control a room, or None when it does.
+    """Return which users outside the configured admins hold admin power in an owned room, or None.
 
-    Beyond ownership, no one outside the configured admins may hold admin
-    power or, from room v12, share the owner's creator rights.
+    From room v12 creators outrank power levels, so co-creators count as admins.
     """
-    if problem := room_ownership_problem(snapshot, owner_user_id, room_alias):
-        return problem
     power_levels = snapshot.events[(_POWER_LEVELS_EVENT_TYPE, "")]
+    if power_levels.get("users_default", _DEFAULT_USER_POWER_LEVEL) >= _ROOM_ADMIN_POWER_LEVEL:
+        return "every user holds admin power"
     admins = {
         user_id
         for user_id in power_levels.get("users", {})
@@ -380,8 +381,6 @@ def room_control_problem(
     rivals = sorted(admins - {owner_user_id, *admin_user_ids})
     if rivals:
         return f"users outside the configured admins hold admin power: {', '.join(rivals)}"
-    if power_levels.get("users_default", _DEFAULT_USER_POWER_LEVEL) >= _ROOM_ADMIN_POWER_LEVEL:
-        return "every user holds admin power"
     return None
 
 
@@ -847,7 +846,8 @@ __all__ = [
     "join_room",
     "leave_room",
     "room_admin_power_user",
-    "room_control_problem",
+    "room_admin_problem",
+    "room_alias_problem",
     "room_encryption_enabled",
     "room_ownership_problem",
 ]

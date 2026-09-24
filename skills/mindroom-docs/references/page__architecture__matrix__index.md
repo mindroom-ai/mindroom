@@ -51,10 +51,13 @@ Agents can join existing rooms, create new rooms with AI-generated topics, respo
 Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_rooms_exist()` (public). DM rooms can be detected with `async is_dm_room(client, room_id) -> bool`.
 
 Any homeserver account can publish a managed alias such as `#lobby:<server>` before MindRoom does, so a resolved alias alone never makes a room managed.
-MindRoom adopts a resolved room only when the router created it, the room still publishes that alias as its canonical or alternative alias, the router is joined with admin power, and no user outside the room's configured `admins` holds admin power (100).
-In room version 12 and later, creators outrank every power level, so unconfigured co-creators also disqualify the room.
-Every room reconciliation pass on startup or config reload also requires power levels, encryption, join rule, and directory visibility to be enforced.
-A room that fails either check is removed from `matrix_state.yaml`, so its key stays unresolved: agents leave or never join it, no one is invited into it, and its members gain no room-based access.
+MindRoom keeps a resolved room only when the router created it and is joined with admin power; in room version 12 and later the creator outranks every power level.
+A room not yet recorded for its key must also still publish the alias as its canonical or alternative alias, and no user outside the room's configured `admins` may hold admin power (100) or, from room version 12, be a co-creator.
+For the recorded room, that alias or admin drift is logged as `managed_room_policy_drift` instead, because the router still owns the room.
+A recorded room the router verified keeps its record through a transient state-read failure, and records written before this check are re-verified on their next readable pass.
+Every room reconciliation pass on startup or config reload also requires the room to be at least as protected as configured: encrypted when required, and no more open in join rule or directory listing than its policy.
+Failing to open a room further or to adjust its power levels only leaves it stricter, so that is logged without refusing the room.
+A refused room is removed from `matrix_state.yaml`, so its key stays unresolved: agents leave or never join it, no one is invited into it, and its members lose room-based access at once.
 The router stays in a refused room unless its state shows another account created it, so fixing the cause restores the room on the next pass without a re-invite.
 The router logs `managed_room_rejected` at error level and the dashboard's External Rooms page lists the refused alias with its reason.
 

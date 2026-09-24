@@ -29,7 +29,8 @@ from mindroom.matrix.client_room_admin import (
     get_joined_rooms,
     join_room,
     leave_room,
-    room_control_problem,
+    room_admin_problem,
+    room_alias_problem,
     room_ownership_problem,
 )
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_state
@@ -48,10 +49,12 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.state import MatrixRoom
 
 logger = get_logger(__name__)
 _ROOT_SPACE_TOPIC = "Your MindRoom AI workspace"
 _ROOT_SPACE_AVATAR_KEY = "root_space"
+_JOIN_RULE_OPENNESS = {"invite": 0, "knock": 1, "public": 2}
 
 
 @dataclass(frozen=True)
@@ -65,13 +68,16 @@ class _RoomRejection:
 
 # Managed aliases the latest room pass refused; shown on the dashboard.
 _rejected_managed_rooms: dict[str, _RoomRejection] = {}
-# Rooms this process verified as router-controlled, whose later unreadable state is transient.
-_verified_managed_room_ids: set[str] = set()
 
 
 def rejected_managed_rooms() -> dict[str, str]:
     """Return managed room aliases the latest room pass refused to manage, with the reason for each."""
     return {alias: f"{rejection.room_id}: {rejection.problem}" for alias, rejection in _rejected_managed_rooms.items()}
+
+
+def refused_managed_room_ids() -> set[str]:
+    """Return rooms the latest room pass refused to manage, which must receive no invitations."""
+    return {rejection.room_id for rejection in _rejected_managed_rooms.values()}
 
 
 def router_retained_room_ids() -> set[str]:
@@ -92,15 +98,47 @@ def _reject_managed_room(room_alias: str, room_id: str, problem: str, *, router_
         ),
     )
     _rejected_managed_rooms[room_alias] = _RoomRejection(room_id, problem, router_stays)
-    _verified_managed_room_ids.discard(room_id)
 
 
-async def _state_read_failure_is_transient(client: nio.AsyncClient, room_id: str) -> bool:
-    """Return whether an unreadable room is one this process verified and the router may still be in."""
-    if room_id not in _verified_managed_room_ids:
-        return False
-    joined_room_ids = await get_joined_rooms(client)
-    return joined_room_ids is None or room_id in joined_room_ids
+async def _verify_resolved_room(
+    client: nio.AsyncClient,
+    room_key: str,
+    room_id: str,
+    room_alias: str,
+    admin_user_ids: Sequence[str],
+    record: MatrixRoom | None,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether the router controls the room a managed alias resolved to, refusing it otherwise.
+
+    Any homeserver user can publish a predictable managed alias first, so a room
+    not yet recorded for this key must also publish the alias and have no admins
+    outside the configured ones. For the recorded room that drift is only
+    reported, and a verified record survives a transient state-read failure.
+    """
+    recorded = record is not None and record.room_id == room_id
+    verified = record is not None and record.room_id == room_id and record.router_verified
+    snapshot = await read_room_state(client, room_id)
+    if snapshot is None:
+        joined_room_ids = await get_joined_rooms(client) if verified else []
+        if joined_room_ids is None or room_id in joined_room_ids:
+            logger.warning("managed_room_state_unreadable", room_key=room_key, room_id=room_id)
+            return False
+        problem = "room state is unreadable by the router"
+    else:
+        problem = room_ownership_problem(snapshot, client.user_id)
+        drift = room_alias_problem(snapshot, room_alias) or room_admin_problem(snapshot, client.user_id, admin_user_ids)
+        if problem is None and drift is not None and recorded:
+            logger.error("managed_room_policy_drift", room_key=room_key, room_id=room_id, problem=drift)
+        elif problem is None:
+            problem = drift
+    if problem is None:
+        return True
+    # The router stays in a room it may have created, so fixing the cause restores the room.
+    router_stays = snapshot is None or snapshot.creator == client.user_id
+    _reject_managed_room(room_alias, room_id, problem, router_stays=router_stays)
+    _remove_room(room_key, runtime_paths=runtime_paths)
+    return False
 
 
 def _managed_alias(client: nio.AsyncClient, alias_localpart: str, runtime_paths: RuntimePaths) -> str:
@@ -153,7 +191,10 @@ async def _configure_managed_room_access(
     context: str,
     snapshot: RoomStateSnapshot | None = None,
 ) -> bool:
-    """Apply configured room joinability/discoverability policy for one managed room."""
+    """Apply configured room joinability/discoverability policy for one managed room.
+
+    Returns whether the room is no more open than configured; failing to open it further is only logged.
+    """
     target_join_rule = room_policy.join_policy
     target_directory_visibility = "public" if room_policy.listed else "private"
 
@@ -192,7 +233,12 @@ async def _configure_managed_room_access(
             "room_list_publication_rules restricting directory visibility changes."
         ),
     )
-    return False
+    current_join_rule = snapshot.events.get(("m.room.join_rules", ""), {}).get("join_rule") if snapshot else None
+    current_openness = _JOIN_RULE_OPENNESS.get(current_join_rule) if isinstance(current_join_rule, str) else None
+    join_rule_safe = join_rule_ok or (
+        current_openness is not None and current_openness <= _JOIN_RULE_OPENNESS[target_join_rule]
+    )
+    return join_rule_safe and (visibility_ok or target_directory_visibility == "public")
 
 
 def _managed_room_should_be_encrypted(room_policy: EffectiveRoomPolicy) -> bool:
@@ -260,13 +306,16 @@ async def _reconcile_joined_existing_room(
 ) -> bool:
     """Reconcile name, topic, power levels, encryption, and access policy for one joined managed room.
 
-    Returns whether power levels, encryption, and access policy are enforced; name and topic are cosmetic.
+    Returns whether the room is at least as protected as configured: encrypted when
+    required and no more open than its access policy. Name, topic, and power levels
+    are not gating, since a failed power-level write only leaves event levels and
+    admin grants stricter than configured.
     """
     topic_room_name = explicit_room_name or _room_key_to_name(room_key)
     if explicit_room_name is not None:
         await ensure_room_name(client, room_id, explicit_room_name, snapshot=snapshot)
     await ensure_room_has_topic(client, room_id, room_key, topic_room_name, config, runtime_paths, snapshot=snapshot)
-    power_levels_ok = await ensure_managed_room_power_levels(client, room_id, admin_user_ids, snapshot=snapshot)
+    await ensure_managed_room_power_levels(client, room_id, admin_user_ids, snapshot=snapshot)
     encryption_ok = not _managed_room_should_be_encrypted(room_policy) or await ensure_room_encryption_enabled(
         client,
         room_id,
@@ -280,7 +329,7 @@ async def _reconcile_joined_existing_room(
         context="existing_room_reconciliation",
         snapshot=snapshot,
     )
-    return power_levels_ok and encryption_ok and access_ok
+    return encryption_ok and access_ok
 
 
 async def _ensure_room_exists(
@@ -321,27 +370,20 @@ async def _ensure_room_exists(
         room_id = str(response.room_id)
         logger.debug("managed_room_alias_resolved", room_key=room_key, room_alias=full_alias, room_id=room_id)
 
-        # Any homeserver user can publish this predictable alias first, so the
-        # alias proves nothing until room state shows the router controls the room.
-        snapshot = await read_room_state(client, room_id)
-        if snapshot is None and await _state_read_failure_is_transient(client, room_id):
-            logger.warning("managed_room_state_unreadable", room_key=room_key, room_id=room_id)
+        record = existing_rooms.get(room_key)
+        if not await _verify_resolved_room(
+            client,
+            room_key,
+            room_id,
+            full_alias,
+            admin_user_ids,
+            record,
+            runtime_paths,
+        ):
             return None
-        problem = (
-            "room state is unreadable by the router"
-            if snapshot is None
-            else room_control_problem(snapshot, client.user_id, full_alias, admin_user_ids)
-        )
-        if problem is not None:
-            # The router stays in a room it may have created, so fixing the cause restores the room.
-            router_stays = snapshot is None or snapshot.creator == client.user_id
-            _reject_managed_room(full_alias, room_id, problem, router_stays=router_stays)
-            _remove_room(room_key, runtime_paths=runtime_paths)
-            return None
-        _verified_managed_room_ids.add(room_id)
 
         # Update our state if needed
-        if room_key not in existing_rooms or existing_rooms[room_key].room_id != room_id:
+        if record is None or record.room_id != room_id or not record.router_verified:
             if room_name is None:
                 room_name = _room_key_to_name(room_key)
             _add_room(room_key, room_id, full_alias, room_name, runtime_paths)
@@ -376,7 +418,6 @@ async def _ensure_room_exists(
     if created_room_id:
         # Save room info
         _add_room(room_key, created_room_id, full_alias, room_name, runtime_paths)
-        _verified_managed_room_ids.add(created_room_id)
         logger.info("managed_room_created", room_key=room_key, room_id=created_room_id, room_alias=full_alias)
 
         await _configure_managed_room_access(
@@ -470,8 +511,8 @@ async def reconcile_managed_rooms(
 ) -> dict[str, RoomStateSnapshot]:
     """Apply managed policy after joining, retaining fresh state for invitations.
 
-    A room whose policy cannot be enforced is forgotten, so nothing routes to,
-    authorizes from, or invites into it until a later pass enforces its policy.
+    A room left less protected than configured is forgotten, so nothing routes
+    to, authorizes from, or invites into it until a later pass enforces its policy.
     """
     snapshots: dict[str, RoomStateSnapshot] = {}
     pending = iter(room_ids.items())
@@ -479,27 +520,20 @@ async def reconcile_managed_rooms(
 
     async def reconcile_rooms() -> None:
         for room_key, room_id in pending:
+            problem: str | None = None
             try:
                 async with locks.setdefault(room_id, asyncio.Lock()):
                     snapshot = await read_room_state(client, room_id)
                     if snapshot is None:
-                        continue
-                    room_alias = _managed_alias(
-                        client,
-                        managed_room_alias_localpart(room_key, runtime_paths=runtime_paths),
-                        runtime_paths,
-                    )
-                    membership = snapshot.events.get(("m.room.member", client.user_id), {})
-                    if membership.get("membership") != "join":
-                        _reject_managed_room(room_alias, room_id, "router is not joined, so policy cannot be enforced")
-                        _remove_room(room_key, runtime_paths=runtime_paths)
                         continue
                     policy = resolve_room_policy(config, room_key)
                     room_config = config.rooms.get(room_key)
                     name = (
                         (room_config.display_name or _room_key_to_name(room_key)) if room_config is not None else None
                     )
-                    enforced = await _reconcile_joined_existing_room(
+                    if snapshot.events.get(("m.room.member", client.user_id), {}).get("membership") != "join":
+                        problem = "router is not joined, so policy cannot be enforced"
+                    elif not await _reconcile_joined_existing_room(
                         client,
                         room_key,
                         room_id,
@@ -509,14 +543,18 @@ async def reconcile_managed_rooms(
                         room_policy=policy,
                         admin_user_ids=_room_admin_user_ids(policy),
                         snapshot=snapshot,
-                    )
-                    if not enforced:
-                        _reject_managed_room(room_alias, room_id, "power levels, encryption, or access policy failed")
-                        _remove_room(room_key, runtime_paths=runtime_paths)
-                        continue
-                    snapshots[room_id] = snapshot
+                    ):
+                        problem = "encryption or access policy left the room less protected than configured"
+                    else:
+                        snapshots[room_id] = snapshot
             except Exception:
                 logger.exception("Failed managed room policy; continuing with remaining rooms", room_id=room_id)
+                # Enforcement stopped part-way, so the room is not known to be protected as configured.
+                problem = "policy enforcement raised an error"
+            if problem is not None:
+                alias_localpart = managed_room_alias_localpart(room_key, runtime_paths=runtime_paths)
+                _reject_managed_room(_managed_alias(client, alias_localpart, runtime_paths), room_id, problem)
+                _remove_room(room_key, runtime_paths=runtime_paths)
 
     async with asyncio.TaskGroup() as workers:
         for _ in range(min(4, len(room_ids))):
@@ -573,9 +611,9 @@ async def _owned_root_space_snapshot(
         _reject_managed_room(space_alias, root_space_id, "room state is unreadable by the router")
         return None
     state = MatrixState.load(runtime_paths=runtime_paths)
-    # The Space grants no room access, and only the router could have granted admin power in a Space it
-    # created, so ownership suffices here; earlier releases made room invitees Space admins.
-    problem = room_ownership_problem(snapshot, client.user_id, space_alias)
+    # The Space grants no room access and earlier releases made room invitees its admins,
+    # so other Space admins are not refused.
+    problem = room_ownership_problem(snapshot, client.user_id) or room_alias_problem(snapshot, space_alias)
     if problem is not None:
         _reject_managed_room(space_alias, root_space_id, problem, router_stays=snapshot.creator == client.user_id)
         if state.space_room_id == root_space_id:

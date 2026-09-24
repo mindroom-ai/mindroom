@@ -59,6 +59,7 @@ from mindroom.matrix.rooms import (
     ensure_root_space,
     ensure_user_in_rooms,
     reconcile_managed_rooms,
+    refused_managed_room_ids,
 )
 from mindroom.matrix.stale_stream_cleanup import (
     recover_stale_streaming_messages,
@@ -2259,7 +2260,9 @@ class _MultiAgentOrchestrator:
         assert router_bot.client is not None
 
         config = self._require_config()
+        recorded_room_ids = self._recorded_room_ids()
         room_ids = await ensure_all_rooms_exist(router_bot.client, config, self.runtime_paths)
+        self._fence_forgotten_room_grants(recorded_room_ids)
         logger.info("ensured_room_existence", room_count=len(room_ids))
         return room_ids
 
@@ -2268,7 +2271,20 @@ class _MultiAgentOrchestrator:
         router = self._router_bot()
         if router is None or router.client is None:
             return {}
-        return await reconcile_managed_rooms(router.client, self._require_config(), self.runtime_paths, room_ids)
+        recorded_room_ids = self._recorded_room_ids()
+        snapshots = await reconcile_managed_rooms(router.client, self._require_config(), self.runtime_paths, room_ids)
+        self._fence_forgotten_room_grants(recorded_room_ids)
+        return snapshots
+
+    def _recorded_room_ids(self) -> dict[str, str]:
+        """Return the managed room each persisted room key currently names."""
+        return {room_key: room.room_id for room_key, room in load_rooms(runtime_paths=self.runtime_paths).items()}
+
+    def _fence_forgotten_room_grants(self, recorded_room_ids: dict[str, str]) -> None:
+        """Revoke room-backed grants until the pass's closing refresh when it forgot or replaced a managed room."""
+        current_room_ids = self._recorded_room_ids()
+        if any(current_room_ids.get(room_key) != room_id for room_key, room_id in recorded_room_ids.items()):
+            self.invalidate_agent_reply_memberships(reason="managed_room_forgotten")
 
     async def _ensure_root_space(self, room_ids: dict[str, str] | None = None) -> None:
         """Ensure the optional root Matrix Space exists and link the current managed rooms."""
@@ -2398,7 +2414,10 @@ class _MultiAgentOrchestrator:
             else None
         )
 
+        refused_room_ids = refused_managed_room_ids()
         for room_id in joined_rooms:
+            if room_id in refused_room_ids:
+                continue
             configured_bots = configured_bot_user_ids_for_room(config, room_id, self.runtime_paths)
             managed = bool(configured_bots) or is_configured_room(config, room_id, self.runtime_paths)
             if not managed and internal_user_id is None:

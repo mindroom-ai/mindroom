@@ -2924,12 +2924,10 @@ def _reset_approval_manager_runtime() -> Generator[None, None, None]:
 
 @pytest.fixture(autouse=True)
 def _reset_rejected_managed_rooms() -> Generator[None, None, None]:
-    """Keep the process-global managed-room rejections and verifications isolated per test."""
+    """Keep the process-global managed-room rejection report isolated per test."""
     matrix_rooms_module._rejected_managed_rooms.clear()
-    matrix_rooms_module._verified_managed_room_ids.clear()
     yield
     matrix_rooms_module._rejected_managed_rooms.clear()
-    matrix_rooms_module._verified_managed_room_ids.clear()
 
 
 @pytest.fixture(autouse=True)

@@ -14,7 +14,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import is_configured_room
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix import state as matrix_state
-from mindroom.matrix.client_room_admin import room_control_problem
+from mindroom.matrix.client_room_admin import room_admin_problem, room_alias_problem, room_ownership_problem
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_state
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -89,11 +89,20 @@ async def _snapshot(events: list[dict[str, object]]) -> RoomStateSnapshot:
     return snapshot
 
 
+def _lobby_refusal(snapshot: RoomStateSnapshot, admin_user_ids: list[str]) -> str | None:
+    """Return the first problem an unrecorded lobby room would be refused for."""
+    return (
+        room_ownership_problem(snapshot, _ROUTER)
+        or room_alias_problem(snapshot, _LOBBY_ALIAS)
+        or room_admin_problem(snapshot, _ROUTER, admin_user_ids)
+    )
+
+
 @pytest.mark.asyncio
 async def test_router_owned_room_with_configured_admins_is_controlled() -> None:
     """Configured admins may share the router's power without making the room foreign."""
     events = router_owned_room_events(_ROUTER, _LOBBY_ALIAS, users={"@admin:localhost": 100, "@agent:localhost": 50})
-    assert room_control_problem(await _snapshot(events), _ROUTER, _LOBBY_ALIAS, ["@admin:localhost"]) is None
+    assert _lobby_refusal(await _snapshot(events), ["@admin:localhost"]) is None
 
 
 @pytest.mark.asyncio
@@ -168,7 +177,7 @@ async def test_router_owned_room_with_configured_admins_is_controlled() -> None:
 async def test_room_the_router_does_not_control_is_reported(override: dict[str, object], expected: str) -> None:
     """Creator, published alias, membership, integer power levels, and unmatched admin power are each required."""
     events = [*router_owned_room_events(_ROUTER, _LOBBY_ALIAS), override]
-    problem = room_control_problem(await _snapshot(events), _ROUTER, _LOBBY_ALIAS, ["@admin:localhost"])
+    problem = _lobby_refusal(await _snapshot(events), ["@admin:localhost"])
     assert problem is not None
     assert expected in problem
 
@@ -185,7 +194,7 @@ async def test_room_still_publishing_the_alias_as_an_alternative_is_owned() -> N
             "content": {"alias": "#friendly:localhost", "alt_aliases": [_LOBBY_ALIAS]},
         },
     ]
-    assert room_control_problem(await _snapshot(events), _ROUTER, _LOBBY_ALIAS, []) is None
+    assert _lobby_refusal(await _snapshot(events), []) is None
 
 
 def _v12_room_events(additional_creators: list[str], users: dict[str, int] | None = None) -> list[dict[str, object]]:
@@ -210,7 +219,7 @@ def _v12_room_events(additional_creators: list[str], users: dict[str, int] | Non
 @pytest.mark.asyncio
 async def test_room_v12_creator_controls_room_without_a_power_level_entry() -> None:
     """Room v12 creators outrank every listed power level, so the router needs no power-level entry."""
-    problem = room_control_problem(await _snapshot(_v12_room_events([])), _ROUTER, _LOBBY_ALIAS, ["@admin:localhost"])
+    problem = _lobby_refusal(await _snapshot(_v12_room_events([])), ["@admin:localhost"])
     assert problem is None
 
 
@@ -218,7 +227,7 @@ async def test_room_v12_creator_controls_room_without_a_power_level_entry() -> N
 async def test_room_v12_unconfigured_admin_is_reported() -> None:
     """Admin power outside the configured admins disqualifies a room in every room version."""
     events = _v12_room_events([], users={"@removed-admin:localhost": 100})
-    problem = room_control_problem(await _snapshot(events), _ROUTER, _LOBBY_ALIAS, [])
+    problem = _lobby_refusal(await _snapshot(events), [])
     assert problem == "users outside the configured admins hold admin power: @removed-admin:localhost"
 
 
@@ -226,7 +235,7 @@ async def test_room_v12_unconfigured_admin_is_reported() -> None:
 async def test_room_v12_unconfigured_co_creator_is_reported() -> None:
     """A room v12 co-creator shares the router's unbounded power."""
     events = _v12_room_events([_SQUATTER, "@admin:localhost"])
-    problem = room_control_problem(await _snapshot(events), _ROUTER, _LOBBY_ALIAS, ["@admin:localhost"])
+    problem = _lobby_refusal(await _snapshot(events), ["@admin:localhost"])
     assert problem == f"users outside the configured admins hold admin power: {_SQUATTER}"
 
 
@@ -236,7 +245,7 @@ async def test_room_without_power_levels_is_not_controlled() -> None:
     events = [
         event for event in router_owned_room_events(_ROUTER, _LOBBY_ALIAS) if event["type"] != "m.room.power_levels"
     ]
-    assert room_control_problem(await _snapshot(events), _ROUTER, _LOBBY_ALIAS, []) == "power levels are missing"
+    assert _lobby_refusal(await _snapshot(events), []) == "power levels are missing"
 
 
 @pytest.mark.asyncio
@@ -273,14 +282,36 @@ async def test_alias_published_by_another_account_is_never_adopted(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_router_keeps_its_own_refused_room(tmp_path: Path) -> None:
-    """A refused room the router created stays joined, so fixing its admins restores it without a re-invite."""
+    """An unrecorded router room with unconfigured admins is refused, but the router stays for a later fix."""
     config = membership_config(tmp_path, agent_rooms=["lobby"])
-    _record_lobby(config, _GENUINE_ROOM)
     events = router_owned_room_events(_ROUTER, _LOBBY_ALIAS, users={"@removed-admin:localhost": 100})
 
     assert await _ensure_lobby(_router_client(_GENUINE_ROOM, events), config) is None
     assert matrix_state.load_rooms(runtime_paths=runtime_paths_for(config)) == {}
     assert matrix_rooms.router_retained_room_ids() == {_GENUINE_ROOM}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "drift",
+    [
+        {
+            "type": "m.room.power_levels",
+            "state_key": "",
+            "content": {"users": {_ROUTER: 100, "@removed:localhost": 100}},
+        },
+        {"type": "m.room.canonical_alias", "state_key": "", "content": {"alias": "#renamed:localhost"}},
+    ],
+)
+async def test_recorded_room_drift_is_reported_not_refused(tmp_path: Path, drift: dict[str, object]) -> None:
+    """A removed admin or a renamed alias in the recorded room is reported, since the router still owns it."""
+    config = membership_config(tmp_path, agent_rooms=["lobby"])
+    _record_lobby(config, _GENUINE_ROOM)
+    events = [*router_owned_room_events(_ROUTER, _LOBBY_ALIAS), drift]
+
+    assert await _ensure_lobby(_router_client(_GENUINE_ROOM, events), config) == _GENUINE_ROOM
+    assert matrix_state.get_room_id("lobby", runtime_paths_for(config)) == _GENUINE_ROOM
+    assert matrix_rooms.rejected_managed_rooms() == {}
 
 
 @pytest.mark.asyncio
@@ -319,17 +350,39 @@ async def test_unreadable_verified_room_keeps_its_record(tmp_path: Path, joined_
     assert matrix_rooms.rejected_managed_rooms() == {}
 
 
+def _record_legacy_lobby(config: Config, room_id: str) -> None:
+    """Write a lobby record the way releases before ownership checks did, without router_verified."""
+    state_file = matrix_state.constants.matrix_state_file(runtime_paths=runtime_paths_for(config))
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(
+        f"rooms:\n  lobby:\n    room_id: '{room_id}'\n    alias: '{_LOBBY_ALIAS}'\n    name: Lobby\n",
+        encoding="utf-8",
+    )
+
+
 @pytest.mark.asyncio
-async def test_unreadable_joined_room_this_process_never_verified_is_forgotten(tmp_path: Path) -> None:
+async def test_unreadable_room_recorded_before_ownership_checks_is_forgotten(tmp_path: Path) -> None:
     """A record adopted before ownership checks existed is not trusted just because its state is unreadable."""
     config = membership_config(tmp_path, agent_rooms=["lobby"])
-    _record_lobby(config, _SQUATTED_ROOM)
+    _record_legacy_lobby(config, _SQUATTED_ROOM)
+    assert matrix_state.load_rooms(runtime_paths=runtime_paths_for(config))["lobby"].router_verified is False
     client = _router_client(_SQUATTED_ROOM, None)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse([_SQUATTED_ROOM])
 
     assert await _ensure_lobby(client, config) is None
     assert matrix_state.load_rooms(runtime_paths=runtime_paths_for(config)) == {}
     assert "unreadable" in matrix_rooms.rejected_managed_rooms()[_LOBBY_ALIAS]
+
+
+@pytest.mark.asyncio
+async def test_legacy_record_of_the_routers_room_becomes_verified(tmp_path: Path) -> None:
+    """Re-verifying a record written before ownership checks persists the verification."""
+    config = membership_config(tmp_path, agent_rooms=["lobby"])
+    _record_legacy_lobby(config, _GENUINE_ROOM)
+    client = _router_client(_GENUINE_ROOM, router_owned_room_events(_ROUTER, _LOBBY_ALIAS))
+
+    assert await _ensure_lobby(client, config) == _GENUINE_ROOM
+    assert matrix_state.load_rooms(runtime_paths=runtime_paths_for(config))["lobby"].router_verified is True
 
 
 @pytest.mark.asyncio
@@ -344,13 +397,15 @@ async def test_router_owned_alias_is_adopted(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failing", ["power_levels", "encryption", "access"])
-async def test_policy_reconciliation_reports_each_unenforced_component(
+@pytest.mark.parametrize(("failing", "protected"), [("power_levels", True), ("encryption", False), ("access", False)])
+async def test_policy_reconciliation_gates_on_protection_not_power_levels(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     failing: str,
+    *,
+    protected: bool,
 ) -> None:
-    """Power levels, encryption, and access policy each gate the reconciliation result."""
+    """Encryption and access gate reconciliation; a failed power-level write only leaves the room stricter."""
     config = membership_config(tmp_path, agent_rooms=["lobby"], room_defaults={"encrypted": True})
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
     for name, component in (
@@ -370,7 +425,68 @@ async def test_policy_reconciliation_reports_each_unenforced_component(
         room_policy=resolve_room_policy(config, "lobby"),
     )
 
-    assert enforced is False
+    assert enforced is protected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("current_join_rule", "listed", "join_rule_ok", "visibility_ok", "protected"),
+    [
+        ("public", False, False, True, False),
+        ("invite", False, True, False, False),
+        ("invite", True, True, False, True),
+        (None, False, False, True, False),
+    ],
+)
+async def test_failed_access_write_gates_only_when_the_room_stays_more_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    current_join_rule: str | None,
+    *,
+    listed: bool,
+    join_rule_ok: bool,
+    visibility_ok: bool,
+    protected: bool,
+) -> None:
+    """Failing to publish or open a room leaves it stricter; failing to close or unpublish it does not."""
+    config = membership_config(tmp_path, agent_rooms=["lobby"], room_defaults={"listed": listed})
+    monkeypatch.setattr(matrix_rooms, "ensure_room_join_rule", AsyncMock(return_value=join_rule_ok))
+    monkeypatch.setattr(matrix_rooms, "ensure_room_directory_visibility", AsyncMock(return_value=visibility_ok))
+    events = {} if current_join_rule is None else {("m.room.join_rules", ""): {"join_rule": current_join_rule}}
+
+    result = await matrix_rooms._configure_managed_room_access(
+        client=AsyncMock(),
+        room_key="lobby",
+        room_id=_GENUINE_ROOM,
+        room_policy=resolve_room_policy(config, "lobby"),
+        context="test",
+        snapshot=RoomStateSnapshot(_GENUINE_ROOM, events),
+    )
+
+    assert result is protected
+
+
+@pytest.mark.asyncio
+async def test_policy_enforcement_error_forgets_the_room(tmp_path: Path) -> None:
+    """An exception part-way through enforcement leaves protection unknown, so the room is refused."""
+    config = membership_config(tmp_path, agent_rooms=["lobby"])
+    _record_lobby(config, _GENUINE_ROOM)
+    client = _router_client(
+        _GENUINE_ROOM,
+        [{"type": "m.room.member", "state_key": _ROUTER, "content": {"membership": "join"}}],
+    )
+
+    with patch.object(matrix_rooms, "_reconcile_joined_existing_room", side_effect=TimeoutError):
+        snapshots = await matrix_rooms.reconcile_managed_rooms(
+            client,
+            config,
+            runtime_paths_for(config),
+            {"lobby": _GENUINE_ROOM},
+        )
+
+    assert snapshots == {}
+    assert matrix_state.load_rooms(runtime_paths=runtime_paths_for(config)) == {}
+    assert "raised" in matrix_rooms.rejected_managed_rooms()[_LOBBY_ALIAS]
 
 
 async def _reconcile_with_lobby_policy(config: Config, *, lobby_enforced: bool) -> dict[str, RoomStateSnapshot]:
@@ -414,7 +530,7 @@ async def test_room_whose_policy_cannot_be_enforced_is_no_longer_managed(tmp_pat
     assert set(snapshots) == {"!dev:localhost"}
     assert not is_configured_room(config, _GENUINE_ROOM, runtime_paths)
     assert is_configured_room(config, "!dev:localhost", runtime_paths)
-    assert "policy failed" in matrix_rooms.rejected_managed_rooms()[_LOBBY_ALIAS]
+    assert "less protected" in matrix_rooms.rejected_managed_rooms()[_LOBBY_ALIAS]
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = config
@@ -542,3 +658,65 @@ async def test_internal_user_joins_only_configured_room_records(tmp_path: Path) 
         await orchestrator._setup_rooms_and_memberships([])
 
     assert ensure_user.await_args.args[1] == {"lobby": _GENUINE_ROOM}
+
+
+@pytest.mark.asyncio
+async def test_refused_room_the_router_stays_in_gets_no_invitations(tmp_path: Path) -> None:
+    """Not even the internal user is invited into a refused room the router remains joined to."""
+    config = bind_runtime_paths(
+        Config(
+            agents={"talent": {"display_name": "Talent", "rooms": ["lobby"]}},
+            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+    router_bot = MagicMock()
+    router_bot.client = AsyncMock()
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+    matrix_rooms._reject_managed_room(_LOBBY_ALIAS, _GENUINE_ROOM, "rival admin", router_stays=True)
+    invite = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "mindroom.orchestrator.get_joined_rooms",
+            new=AsyncMock(return_value=[_GENUINE_ROOM, "!adhoc:localhost"]),
+        ),
+        patch("mindroom.orchestrator.get_room_members", new=AsyncMock(return_value={_ROUTER})),
+        patch("mindroom.orchestrator.invite_to_room", invite),
+    ):
+        await orchestrator._ensure_room_invitations()
+
+    assert {call.args[1] for call in invite.await_args_list} == {"!adhoc:localhost"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("forgets_record", "expected_invalidations"), [(True, 1), (False, 0)])
+async def test_forgetting_a_managed_room_revokes_room_grants_at_once(
+    tmp_path: Path,
+    *,
+    forgets_record: bool,
+    expected_invalidations: int,
+) -> None:
+    """Members of a forgotten room lose reply grants before the pass's closing refresh."""
+    config = membership_config(tmp_path, agent_rooms=["lobby"])
+    _record_lobby(config, _GENUINE_ROOM)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+    router_bot = MagicMock()
+    router_bot.client = AsyncMock()
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+
+    async def ensure_rooms(*_args: object) -> dict[str, str]:
+        if forgets_record:
+            matrix_rooms._remove_room("lobby", runtime_paths_for(config))
+        return {}
+
+    with (
+        patch("mindroom.orchestrator.ensure_all_rooms_exist", new=AsyncMock(side_effect=ensure_rooms)),
+        patch.object(orchestrator, "invalidate_agent_reply_memberships") as invalidate,
+    ):
+        await orchestrator._ensure_rooms_exist()
+
+    assert invalidate.call_count == expected_invalidations
