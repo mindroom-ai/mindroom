@@ -944,7 +944,7 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
         ) as mock_rooms,
         patch.object(orchestrator, "_reconcile_managed_rooms", new=AsyncMock(return_value={})) as mock_reconcile,
         patch.object(orchestrator, "_ensure_root_space", new=AsyncMock()) as mock_root_space,
-        patch.object(orchestrator, "refresh_agent_reply_memberships", new=AsyncMock()) as mock_refresh,
+        patch.object(orchestrator, "refresh_agent_reply_memberships", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
     ):
         updated = await orchestrator.config_reload._update_config()
@@ -956,4 +956,3 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
     mock_rooms.assert_awaited_once_with()
     mock_reconcile.assert_awaited_once_with({"lobby": "!room1:localhost"})
     mock_root_space.assert_awaited_once_with({"lobby": "!room1:localhost"})
-    mock_refresh.assert_awaited_once_with()

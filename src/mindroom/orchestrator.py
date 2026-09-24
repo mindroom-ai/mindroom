@@ -2039,8 +2039,9 @@ class _MultiAgentOrchestrator:
             # Policy enforcement gates managed status, so it follows every room-existence pass.
             await self._reconcile_managed_rooms(room_ids)
             await self._ensure_root_space(room_ids)
-            # A forgotten room must stop granting its members access to agents.
-            await self.refresh_agent_reply_memberships()
+            # Forgetting a managed room revoked room grants, which only an authoritative refresh restores.
+            if self.agent_reply_memberships.needs_refresh(self._require_config()):
+                await self.refresh_agent_reply_memberships()
 
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
         """Prepare or validate managed Matrix accounts before publishing a reloaded config."""

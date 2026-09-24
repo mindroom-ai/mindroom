@@ -579,6 +579,73 @@ class TestDynamicConfigUpdate:
         assert membership_client.joined_members.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_matrix_space_change_revokes_grants_of_a_forgotten_room(
+        self,
+        orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
+    ) -> None:
+        """A space-only reload that refuses the lobby must stop granting its members agent access."""
+        agent = {
+            "display_name": "GeneralAgent",
+            "role": "General assistant",
+            "model": "default",
+            "rooms": ["lobby"],
+            "access": {"members_of_rooms": ["lobby"]},
+        }
+        initial_config = Config(
+            agents={"general": agent},
+            models={"default": {"provider": "test", "id": "test-model"}},
+            matrix_space={"enabled": False},
+        )
+        updated_config = Config(
+            agents={"general": agent},
+            models={"default": {"provider": "test", "id": "test-model"}},
+            matrix_space={"enabled": True},
+        )
+        orchestrator = orchestrator_factory()
+        orchestrator.config = initial_config
+        room_id = "!lobby:example.com"
+        state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
+        state.add_room("lobby", room_id, "#lobby:example.com", "Lobby")
+        state.save(runtime_paths=orchestrator.runtime_paths)
+        membership_client = AsyncMock(spec=nio.AsyncClient)
+        membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+        membership_client.joined_members.return_value = nio.JoinedMembersResponse(
+            members=[nio.RoomMember("@alice:example.com", None, None)],
+            room_id=room_id,
+        )
+        await orchestrator.agent_reply_memberships.refresh(
+            initial_config,
+            orchestrator.runtime_paths,
+            membership_client,
+        )
+        router_bot = _mock_agent_bot(initial_config)
+        router_bot.client = membership_client
+        orchestrator.agent_bots = {"general": _mock_agent_bot(initial_config), ROUTER_AGENT_NAME: router_bot}
+
+        async def refuse_lobby(*_args: object) -> dict[str, str]:
+            state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
+            del state.rooms["lobby"]
+            state.save(runtime_paths=orchestrator.runtime_paths)
+            return {}
+
+        with (
+            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+            patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
+            patch("mindroom.orchestrator.ensure_all_rooms_exist", new=AsyncMock(side_effect=refuse_lobby)),
+            patch.object(orchestrator, "_ensure_root_space", new=AsyncMock()),
+            patch.object(orchestrator, "_finalize_config_reload", new=AsyncMock()),
+        ):
+            updated = await orchestrator.config_reload._update_config()
+
+        assert updated is True
+        assert not orchestrator.agent_reply_memberships.is_allowed(
+            "@alice:example.com",
+            ["lobby"],
+            updated_config,
+            orchestrator.runtime_paths,
+        )
+
+    @pytest.mark.asyncio
     async def test_room_only_update_keeps_ready_reply_memberships_without_router_replacement(
         self,
         orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
