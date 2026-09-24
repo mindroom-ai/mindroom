@@ -621,20 +621,25 @@ def _runtime_authored_task_state(
     """
     writer_ids = prepared_entity_user_ids(config, runtime_paths)
     task_state: dict[str, typing.Any] = {}
+    ignored_senders: set[str] = set()
+    ignored_count = 0
     for event in state_response.events:
         state_key = event.get("state_key")
         if event.get("type") != _SCHEDULED_TASK_EVENT_TYPE or not isinstance(state_key, str):
             continue
         sender = event.get("sender")
-        if not isinstance(sender, str) or sender not in writer_ids:
-            logger.warning(
-                "scheduled_task_state_ignored_unmanaged_sender",
-                room_id=room_id,
-                task_id=state_key,
-                sender=sender,
-            )
-            continue
-        task_state[state_key] = event.get("content")
+        if isinstance(sender, str) and sender in writer_ids:
+            task_state[state_key] = event.get("content")
+        else:
+            ignored_senders.add(str(sender))
+            ignored_count += 1
+    if ignored_count:
+        logger.warning(
+            "scheduled_task_state_ignored_unmanaged_sender",
+            room_id=room_id,
+            ignored_count=ignored_count,
+            senders=sorted(ignored_senders),
+        )
     return task_state
 
 
@@ -830,7 +835,13 @@ async def _reconcile_runnable_task_retrying(  # noqa: C901
             if current_config is None:
                 msg = "Scheduled task configuration is unavailable"
                 raise _ScheduledTaskStateReadError(msg)  # noqa: TRY301
-            task = await _get_pending_task_record(client, room_id, task_id, current_config, runtime_paths)
+            task = await _get_pending_task_record(
+                client=client,
+                room_id=room_id,
+                task_id=task_id,
+                config=current_config,
+                runtime_paths=runtime_paths,
+            )
             if task is None:
                 return None
             if departed_task != task:
@@ -847,7 +858,13 @@ async def _reconcile_runnable_task_retrying(  # noqa: C901
                 departed_task = task
 
             async with _schedule_edit_lock(client, room_id, task_id):
-                current_task = await _get_pending_task_record(client, room_id, task_id, current_config, runtime_paths)
+                current_task = await _get_pending_task_record(
+                    client=client,
+                    room_id=room_id,
+                    task_id=task_id,
+                    config=current_config,
+                    runtime_paths=runtime_paths,
+                )
                 if current_task is None:
                     return None
                 if current_task != departed_task:
