@@ -5,6 +5,7 @@ import io
 import json
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +16,9 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from mindroom.api import sandbox_runner
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import FileAccess
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.media_transport import decode_media_result
 
@@ -95,6 +98,39 @@ def test_view_file_endpoint_rejects_paths_outside_prepared_workspace(
     assert json.loads(result.content)["view_status"] == "error"
 
 
+@pytest.mark.parametrize("file_access", ["workspace", "unrestricted"])
+def test_view_file_endpoint_follows_routing_agent_file_access(
+    view_file_client: tuple[TestClient, Path],
+    tmp_path: Path,
+    file_access: FileAccess,
+) -> None:
+    """The worker applies the routing agent's configured file_access to paths outside its workspace."""
+    client, _workspace = view_file_client
+    client.app.state.sandbox_runner_context = replace(
+        client.app.state.sandbox_runner_context,
+        config=Config(agents={"writer": AgentConfig(display_name="Writer", file_access=file_access)}, models={}),
+    )
+    outside = tmp_path / "outside.png"
+    data = _png_bytes()
+    outside.write_bytes(data)
+
+    response = client.post(
+        "/api/sandbox-runner/view-file",
+        headers=HEADERS,
+        json={"path": str(outside), "routing_agent_name": "writer"},
+    )
+
+    assert response.status_code == 200
+    result = decode_media_result(response.json()["result"])
+    if file_access == "workspace":
+        assert not result.images
+        assert json.loads(result.content)["view_status"] == "error"
+        return
+    assert result.images
+    assert result.images[0].content == data
+    assert json.loads(result.content)["path"] == str(outside.resolve())
+
+
 def test_view_file_endpoint_rejects_missing_workspace(
     view_file_client: tuple[TestClient, Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -123,12 +159,13 @@ async def test_view_file_endpoint_keeps_event_loop_responsive_during_decode(
     client, _workspace = view_file_client
     release = threading.Event()
 
-    def blocking_view(_path: str, *, workspace: Path) -> ToolResult:
+    def blocking_view(_path: str, *, workspace: Path, file_access: FileAccess) -> ToolResult:
         assert workspace.name == "workspace"
+        assert file_access == "workspace"
         release.wait(timeout=1)
         return ToolResult(content="decoded")
 
-    monkeypatch.setattr(sandbox_runner, "view_image_path", blocking_view)
+    monkeypatch.setattr(sandbox_runner, "view_agent_image", blocking_view)
     request = type("Request", (), {"app": client.app})()
     started_at = time.monotonic()
     task = asyncio.create_task(

@@ -134,6 +134,23 @@ async def test_plain_shell_output_still_honors_tail(shell_toolkit: Toolkit) -> N
 
 
 @pytest.mark.asyncio
+async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: Toolkit, tmp_path: Path) -> None:
+    """Redirected nonterminal CLI output must use the same complete failure formatting."""
+    result = await FunctionCall(
+        function=shell_toolkit.async_functions["run_shell_command"],
+        arguments={
+            "args": 'printf \'{"status":"queued","call_id":"call-1"}\'; exit 3',
+            "mindroom_output_path": "receipt.txt",
+        },
+    ).aexecute()
+
+    assert result.status == "success"
+    assert (tmp_path / "receipt.txt").read_text().split("\n", 1)[-1] == (
+        'Error: {"status":"queued","call_id":"call-1"}'
+    )
+
+
+@pytest.mark.asyncio
 async def test_background_shell_publishes_original_destination(shell_toolkit: Toolkit, tmp_path: Path) -> None:
     """The original output request survives the shell's native timeout and toolkit polling."""
     result = await FunctionCall(
@@ -295,7 +312,8 @@ async def test_spool_failure_settles_background_handle(tmp_path: Path, monkeypat
     result = await run_command(
         registry,
         namespace="disk-failure",
-        argv=["bash", "-c", "printf data"],
+        # Outlive spawn so timeout=0 always backgrounds; a command that already exited returns in the foreground.
+        argv=["bash", "-c", "printf data; sleep 0.5"],
         env={"PATH": os.environ["PATH"]},
         cwd=str(tmp_path),
         tail=100,

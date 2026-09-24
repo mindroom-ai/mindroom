@@ -1114,8 +1114,10 @@ class AgentBot:
         return self._response_runner.has_active_response_for_target(target)
 
     def retry_approval_sources(self, room_id: str, source_event_ids: tuple[str, ...]) -> None:
-        """Release continuation-owned sources to the normal journal worker."""
-        self._journal_dispatcher.retry_turn_sources(room_id, source_event_ids)
+        """Wake response-local CLI waits, then release unowned sources to the journal."""
+        journal_sources = self._response_runner.wake_cli_approval_sources(source_event_ids)
+        if journal_sources:
+            self._journal_dispatcher.retry_turn_sources(room_id, journal_sources)
 
     async def _emit_reaction_received_hooks(
         self,

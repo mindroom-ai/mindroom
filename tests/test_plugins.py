@@ -64,7 +64,7 @@ def _write_broken_tool_plugin(plugin_root: Path, tool_name: str = "broken_plugin
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class BrokenTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -73,6 +73,7 @@ def _write_broken_tool_plugin(plugin_root: Path, tool_name: str = "broken_plugin
         "@register_tool_with_metadata(\n"
         f"    name={tool_name!r},\n"
         "    display_name='Broken Plugin Tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    description='Tool declared by a plugin that fails after registration',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
         ")\n"
@@ -93,7 +94,7 @@ def _write_pre_registration_broken_tool_plugin(plugin_root: Path, tool_name: str
     (plugin_root / "tools.py").write_text(
         "from definitely_missing_plugin_dependency import broken\n"
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class BrokenTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -102,6 +103,7 @@ def _write_pre_registration_broken_tool_plugin(plugin_root: Path, tool_name: str
         "@register_tool_with_metadata(\n"
         f"    name={tool_name!r},\n"
         "    display_name='Broken Plugin Tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    description='Tool declared by a plugin that fails before registration',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
         ")\n"
@@ -120,7 +122,7 @@ def _write_constant_named_broken_tool_plugin(plugin_root: Path, tool_name: str =
     (plugin_root / "tools.py").write_text(
         "from definitely_missing_plugin_dependency import broken\n"
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         f"TOOL_NAME = {tool_name!r}\n"
         "\n"
@@ -130,6 +132,7 @@ def _write_constant_named_broken_tool_plugin(plugin_root: Path, tool_name: str =
         "\n"
         "@register_tool_with_metadata(\n"
         "    name=TOOL_NAME,\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Constant Named Tool',\n"
         "    description='Tool registered under a module-level constant name',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -149,7 +152,7 @@ def _write_dynamic_named_broken_tool_plugin(plugin_root: Path, tool_name: str = 
     (plugin_root / "tools.py").write_text(
         "from definitely_missing_plugin_dependency import broken\n"
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class BrokenTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -158,6 +161,7 @@ def _write_dynamic_named_broken_tool_plugin(plugin_root: Path, tool_name: str = 
         "@register_tool_with_metadata(\n"
         f"    name='_'.join({tool_name.split('_')!r}),\n"
         "    display_name='Dynamic Named Tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    description='Tool whose registered name cannot be recovered statically',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
         ")\n"
@@ -175,7 +179,7 @@ def _write_mid_registration_broken_tool_plugin(plugin_root: Path) -> None:
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class BrokenTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -183,6 +187,7 @@ def _write_mid_registration_broken_tool_plugin(plugin_root: Path) -> None:
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='registered_before_failure',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Registered Before Failure',\n"
         "    description='Tool declared before failure',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -194,6 +199,7 @@ def _write_mid_registration_broken_tool_plugin(plugin_root: Path) -> None:
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='declared_after_failure',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Declared After Failure',\n"
         "    description='Tool declared after failure',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -212,7 +218,7 @@ def _write_working_tool_plugin(plugin_root: Path, *, plugin_name: str, tool_name
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class WorkingTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -221,6 +227,7 @@ def _write_working_tool_plugin(plugin_root: Path, *, plugin_name: str, tool_name
         "@register_tool_with_metadata(\n"
         f"    name={tool_name!r},\n"
         "    display_name='Working Plugin Tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    description='Tool declared by a working plugin',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
         ")\n"
@@ -321,7 +328,7 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -329,6 +336,7 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='demo_plugin',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Demo Plugin',\n"
         "    description='Demo plugin tool',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -384,7 +392,7 @@ def test_resolved_tool_metadata_for_runtime_does_not_mutate_live_registry(tmp_pa
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -392,6 +400,7 @@ def test_resolved_tool_metadata_for_runtime_does_not_mutate_live_registry(tmp_pa
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='demo_plugin',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Demo Plugin',\n"
         "    description='Demo plugin tool',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -450,7 +459,7 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -458,6 +467,7 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='demo_pkg_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Demo Package Plugin',\n"
         "    description='Demo package plugin tool',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -981,7 +991,7 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -989,6 +999,7 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='leaked_plugin_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Leaked Plugin Tool',\n"
         "    description='Should not leak from failed validation',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -1056,7 +1067,7 @@ def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1064,6 +1075,7 @@ def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='validated_plugin_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Validated Plugin Tool',\n"
         "    description='Should stay out of the live registry during validation',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -1171,7 +1183,7 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
     )
     (plugin_root / "helpers.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class HelperTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1179,6 +1191,7 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='helper_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Helper Tool',\n"
         "    description='Defined in an imported helper module',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -1247,7 +1260,7 @@ def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: P
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1255,6 +1268,7 @@ def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: P
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='removed_plugin_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Removed Plugin Tool',\n"
         "    description='Should disappear when the plugin is removed',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -1324,7 +1338,7 @@ def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Pat
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1332,6 +1346,7 @@ def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Pat
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='toggled_plugin_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Toggled Plugin Tool',\n"
         "    description='Should return when the plugin is re-enabled',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -1433,7 +1448,7 @@ def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tm
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1441,6 +1456,7 @@ def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tm
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='old_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Old Tool',\n"
         "    description='Old plugin tool',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -1466,7 +1482,7 @@ def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tm
 
         tools_path.write_text(
             "from agno.tools import Toolkit\n"
-            "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+            "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
             "\n"
             "class DemoTool(Toolkit):\n"
             "    def __init__(self) -> None:\n"
@@ -1474,6 +1490,7 @@ def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tm
             "\n"
             "@register_tool_with_metadata(\n"
             "    name='new_tool',\n"
+            "    file_access=ToolFileAccess.NONE,\n"
             "    display_name='New Tool',\n"
             "    description='New plugin tool',\n"
             "    category=ToolCategory.DEVELOPMENT,\n"
@@ -1511,7 +1528,7 @@ def test_load_plugins_rejects_built_in_tool_name_collisions(tmp_path: Path) -> N
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1519,6 +1536,7 @@ def test_load_plugins_rejects_built_in_tool_name_collisions(tmp_path: Path) -> N
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='calculator',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Calculator Override',\n"
         "    description='Should fail',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -1552,7 +1570,7 @@ def test_load_plugins_rejects_plugin_tool_name_collisions(tmp_path: Path) -> Non
     for root, display_name in ((first_root, "First Tool"), (second_root, "Second Tool")):
         (root / "tools.py").write_text(
             "from agno.tools import Toolkit\n"
-            "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+            "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
             "\n"
             "class DemoTool(Toolkit):\n"
             "    def __init__(self) -> None:\n"
@@ -1560,6 +1578,7 @@ def test_load_plugins_rejects_plugin_tool_name_collisions(tmp_path: Path) -> Non
             "\n"
             "@register_tool_with_metadata(\n"
             "    name='shared_tool',\n"
+            "    file_access=ToolFileAccess.NONE,\n"
             f"    display_name='{display_name}',\n"
             "    description='Should conflict',\n"
             "    category=ToolCategory.DEVELOPMENT,\n"
@@ -1589,7 +1608,7 @@ def test_load_plugins_rejects_duplicate_tool_names_within_one_plugin(tmp_path: P
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class FirstTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1601,6 +1620,7 @@ def test_load_plugins_rejects_duplicate_tool_names_within_one_plugin(tmp_path: P
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='dup_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='First Duplicate',\n"
         "    description='Should fail',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -1610,6 +1630,7 @@ def test_load_plugins_rejects_duplicate_tool_names_within_one_plugin(tmp_path: P
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='dup_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Second Duplicate',\n"
         "    description='Should also fail',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -1640,7 +1661,7 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1648,6 +1669,7 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='renamed_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Renamed Tool',\n"
         "    description='Should survive manifest rename',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -1728,7 +1750,7 @@ def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
     )
     (good_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1736,6 +1758,7 @@ def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='good_plugin_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Good Plugin Tool',\n"
         "    description='Should not leak after failure',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -2525,7 +2548,7 @@ def test_load_plugins_skips_later_broken_plugin_and_keeps_earlier_tools(
     )
     (good_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -2533,6 +2556,7 @@ def test_load_plugins_skips_later_broken_plugin_and_keeps_earlier_tools(
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='good_plugin_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Good Plugin Tool',\n"
         "    description='Should stay loaded after a later failure',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -3228,7 +3252,7 @@ def test_failed_strict_tool_plugin_reload_preserves_previous_live_registry(tmp_p
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class ReloadTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -3236,6 +3260,7 @@ def test_failed_strict_tool_plugin_reload_preserves_previous_live_registry(tmp_p
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='reload_plugin_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Reload Plugin Tool',\n"
         "    description='Tool that starts healthy then breaks on reload',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"

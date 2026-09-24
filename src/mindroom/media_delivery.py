@@ -15,13 +15,16 @@ from uuid import uuid4
 
 from agno.media import Image
 
-from mindroom.path_confinement import open_regular_file_within_root, resolve_path_within_root
+from mindroom.file_access import resolve_agent_file
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.tools.function import ToolResult
     from PIL.Image import Image as PillowImage
+
+    from mindroom.config.models import FileAccess
+    from mindroom.file_access import AuthorizedFile
 
 VIEWED_IMAGE_ID_PREFIX = "mindroom_viewed_"
 MAX_SOURCE_BYTES = 20 * 1024 * 1024
@@ -121,34 +124,34 @@ def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:  # 
     )
 
 
-def _read_workspace_image(root: Path, relative: Path) -> bytes:
-    """Read through directory descriptors so path swaps cannot escape the workspace."""
-    with (
-        open_regular_file_within_root(root, relative) as descriptor,
-        os.fdopen(descriptor, "rb", closefd=False) as file,
-    ):
-        if os.fstat(descriptor).st_size > MAX_SOURCE_BYTES:
+def _read_authorized_image(authorized: AuthorizedFile) -> bytes:
+    """Read through directory descriptors so path swaps cannot escape the authorizing root."""
+    with authorized.open() as file:
+        if os.fstat(file.fileno()).st_size > MAX_SOURCE_BYTES:
             message = f"Image exceeds the {MAX_SOURCE_BYTES}-byte source limit."
             raise ValueError(message)
         return file.read(MAX_SOURCE_BYTES + 1)
 
 
-def view_image_path(path: str, *, workspace: Path) -> ToolResult:
-    """Read one regular image confined to an already-authorized workspace."""
+def view_agent_image(path: str, *, workspace: Path | None, file_access: FileAccess) -> ToolResult:
+    """Read one regular image under the agent's file access, resolving relative paths from the workspace."""
     metadata: dict[str, object] = {"path": path}
     if not isinstance(path, str) or not path.strip():
         return media_error("path must be a non-empty string.", metadata=metadata)
+    if file_access == "workspace" and workspace is None:
+        return media_error("An authorized workspace is required for path viewing.", metadata=metadata)
     try:
-        root = workspace.resolve(strict=True)
-        resolved = resolve_path_within_root(root, path, symlinks="internal", strict=True)
-        relative = resolved.relative_to(root)
-        if not relative.parts:
-            return media_error("Image path must name a regular file.", metadata=metadata)
-        metadata["path"] = relative.as_posix()
-        data = _read_workspace_image(root, relative)
+        authorized = resolve_agent_file(
+            path,
+            workspace_root=workspace,
+            file_access=file_access,
+            field_name="Image path",
+        )
+        metadata["path"] = authorized.relative.as_posix() if file_access == "workspace" else authorized.display_path
+        data = _read_authorized_image(authorized)
     except ValueError as exc:
         return media_error(str(exc), metadata=metadata)
-    except (OSError, RuntimeError):
+    except OSError:
         return media_error(
             "Image file is missing, inaccessible, or outside the authorized workspace.",
             metadata=metadata,
