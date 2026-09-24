@@ -112,6 +112,7 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_next_allowed_at
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
@@ -2846,6 +2847,14 @@ def _reset_model_media_capabilities() -> Generator[None, None, None]:
     reset_model_media_capability_cache()
 
 
+@pytest.fixture(autouse=True)
+def _reset_oversized_nonterminal_streaming_edit_rate_limit() -> Generator[None, None, None]:
+    """Keep the process-global oversized streaming-edit cadence isolated per test, even when one fails."""
+    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
+    yield
+    _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
+
+
 _LEDGER_LOADING_TEST_MODULES = frozenset(
     {
         "test_handled_turns.py",
@@ -2939,6 +2948,9 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
     def allow_sender(*_args: object, **_kwargs: object) -> bool:
         return True
 
+    async def allow_target_room(*_args: object, **_kwargs: object) -> bool:
+        return True
+
     # Don't bypass authorization for tests that are specifically testing it
     if "test_authorization" in request.node.parent.name:
         yield
@@ -2965,6 +2977,18 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
                     patch(
                         "mindroom.custom_tools.attachment_helpers.is_sender_allowed_for_responder",
                         new=allow_sender,
+                    ),
+                )
+                stack.enter_context(
+                    patch(
+                        "mindroom.custom_tools.attachment_helpers.requester_joined_target_room",
+                        new=allow_target_room,
+                    ),
+                )
+                stack.enter_context(
+                    patch(
+                        "mindroom.custom_tools.matrix_message_idempotency.requester_joined_target_room",
+                        new=allow_target_room,
                     ),
                 )
                 stack.enter_context(

@@ -141,14 +141,19 @@ async def test_agent_discovery_in_another_room(context: ToolRuntimeContext, auth
     MatrixRoomTools._recent_actions.clear()
     other = nio.MatrixRoom("!other:localhost", "@actual_general:localhost")
     other.add_member("@actual_code:localhost", "Code", None)
+    other.add_member("@alice:localhost", "Alice", None)
     other.members_synced = True
+    # Cross-room access also requires the requester's own membership, which is
+    # always read from the homeserver rather than the cached room projection.
+    cast("AsyncMock", context.client.joined_members).return_value = nio.JoinedMembersResponse(
+        members=[
+            nio.RoomMember(user_id="@actual_code:localhost", display_name="Code", avatar_url=None),
+            nio.RoomMember(user_id="@alice:localhost", display_name="Alice", avatar_url=None),
+        ],
+        room_id=other.room_id,
+    )
     if cached:
         context.client.rooms[other.room_id] = other
-    else:
-        cast("AsyncMock", context.client.joined_members).return_value = nio.JoinedMembersResponse(
-            members=[nio.RoomMember(user_id="@actual_code:localhost", display_name="Code", avatar_url=None)],
-            room_id=other.room_id,
-        )
     if not authorized:
         current = context.config.model_copy(deep=True)
         access = current.agents["general"].access
@@ -165,7 +170,34 @@ async def test_agent_discovery_in_another_room(context: ToolRuntimeContext, auth
     else:
         assert payload["status"] == "error"
         assert "Not authorized" in payload["message"]
-    assert cast("AsyncMock", context.client.joined_members).await_count == int(authorized and not cached)
+    assert cast("AsyncMock", context.client.joined_members).await_count == (
+        0 if not authorized else 1 + int(not cached)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [True, False])
+async def test_agent_discovery_denies_room_the_requester_has_not_joined(
+    context: ToolRuntimeContext,
+    cached: bool,
+) -> None:
+    """A user grant must not expose the agents of rooms the requester is not part of."""
+    MatrixRoomTools._recent_actions.clear()
+    other = nio.MatrixRoom("!other:localhost", "@actual_general:localhost")
+    other.add_member("@actual_code:localhost", "Code", None)
+    other.members_synced = True
+    cast("AsyncMock", context.client.joined_members).return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(user_id="@actual_code:localhost", display_name="Code", avatar_url=None)],
+        room_id=other.room_id,
+    )
+    if cached:
+        context.client.rooms[other.room_id] = other
+
+    with tool_runtime_context(context):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="agents", room_id=other.room_id))
+
+    assert payload["status"] == "error"
+    assert "Not authorized" in payload["message"]
 
 
 @pytest.mark.asyncio

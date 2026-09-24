@@ -11,7 +11,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
-from starlette.requests import Request
 
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
@@ -187,21 +186,29 @@ def test_mapped_model_visibility_and_direct_access(api: _ApiHarness) -> None:
     assert response.status_code == 403
 
 
-def test_team_access_requires_every_member(api: _ApiHarness) -> None:
-    """A permitted team cannot be used to reach a forbidden member."""
+def test_team_access_grants_its_members(api: _ApiHarness) -> None:
+    """A team's own access decides team requests, even for members the caller cannot address directly."""
     api.config.teams["mixed"] = TeamConfig(
         display_name="Mixed",
         role="Test team",
         agents=["specialist", "forbidden"],
         access=ResponderAccessConfig(users=["@alice:example.org"]),
     )
+    api.config.teams["closed"] = TeamConfig(
+        display_name="Closed",
+        role="Test team",
+        agents=["specialist"],
+        access=ResponderAccessConfig(users=["@bob:example.org"]),
+    )
     headers = {"Authorization": "Bearer alice-key"}
     response = api.client.get("/v1/models", headers=headers)
-    assert "team/mixed" not in {model["id"] for model in response.json()["data"]}
+    model_ids = {model["id"] for model in response.json()["data"]}
+    assert "team/mixed" in model_ids
+    assert "team/closed" not in model_ids
     response = api.client.post(
         "/v1/chat/completions",
         headers=headers,
-        json={"model": "team/mixed", "messages": [{"role": "user", "content": "help"}]},
+        json={"model": "team/closed", "messages": [{"role": "user", "content": "help"}]},
     )
     assert response.status_code == 403
 
@@ -359,8 +366,7 @@ def test_invalid_mapping_is_generic_configuration_error(tmp_path: Path, mapping:
         config_path=tmp_path / "config.yaml",
         process_env={"OPENAI_COMPAT_API_KEYS": "key", "OPENAI_COMPAT_API_KEY_REQUESTERS": mapping},
     )
-    request = Request({"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []})
-    response = openai_compat._authenticate_request(request, "Bearer key", runtime_paths)
+    response = openai_compat._authenticate_request("Bearer key", runtime_paths)
     assert isinstance(response, JSONResponse)
     assert response.status_code == 503
     assert json.loads(response.body)["error"]["message"] == "Invalid API requester configuration"

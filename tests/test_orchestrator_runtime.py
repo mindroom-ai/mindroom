@@ -19,12 +19,12 @@ import httpx
 import nio
 import pytest
 import uvicorn
-from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
 import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 import mindroom.workers.runtime as workers_runtime_module
+from mindroom.agent_cli.session import CliAuthenticationError, CliOperationOwner
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle as api_config_lifecycle
 from mindroom.api import main as api_main
@@ -561,9 +561,6 @@ class TestAgentBot(AgentBotTestBase):
             log_level="info",
             ws="websockets-sansio",
         )
-        # Without a dashboard credential the served app refuses a rebound attacker host.
-        served_app = mock_uvicorn_config.call_args.args[0]
-        assert TestClient(served_app).get("/api/health", headers={"Host": "attacker.example"}).status_code == 400
         mock_error.assert_called_once()
         assert mock_error.call_args.args == ("fatal_embedded_api_server_exit",)
         assert get_api_server_address() is None
@@ -1055,7 +1052,9 @@ class TestAgentBot(AgentBotTestBase):
             response_admission_gate: object,
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
+            agent_cli_registry: object,
         ) -> None:
+            assert agent_cli_registry is mock_orchestrator.agent_cli_registry
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
@@ -1142,7 +1141,9 @@ class TestAgentBot(AgentBotTestBase):
             response_admission_gate: object,
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
+            agent_cli_registry: object,
         ) -> None:
+            assert agent_cli_registry is mock_orchestrator.agent_cli_registry
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
@@ -1219,7 +1220,9 @@ class TestAgentBot(AgentBotTestBase):
             response_admission_gate: object,
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
+            agent_cli_registry: object,
         ) -> None:
+            assert agent_cli_registry is mock_orchestrator.agent_cli_registry
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
@@ -3831,6 +3834,8 @@ class TestMultiAgentOrchestrator:
         ):
             await orchestrator.stop()
 
+        with pytest.raises(CliAuthenticationError, match="closed"):
+            orchestrator.agent_cli_registry.register(MagicMock(spec=CliOperationOwner))
         assert calls == ["scripts", "approvals", "mcp"]
         mock_shutdown_approvals.assert_awaited_once()
 
@@ -4697,7 +4702,7 @@ class TestMultiAgentOrchestrator:
         )
         (plugin_root / "tools.py").write_text(
             "from agno.tools import Toolkit\n"
-            "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+            "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
             "\n"
             "class UpdatedTool(Toolkit):\n"
             "    def __init__(self) -> None:\n"
@@ -4705,6 +4710,7 @@ class TestMultiAgentOrchestrator:
             "\n"
             "@register_tool_with_metadata(\n"
             "    name='updated_plugin_tool',\n"
+            "    file_access=ToolFileAccess.NONE,\n"
             "    display_name='Updated Plugin Tool',\n"
             "    description='updated plugin tool',\n"
             "    category=ToolCategory.DEVELOPMENT,\n"

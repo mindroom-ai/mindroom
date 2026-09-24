@@ -26,6 +26,20 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 _GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS = 5.0
+# A knowledge checkout may sit inside an agent-writable workspace, and Git reads
+# the checkout's own ``.git/config``. Command-line ``-c`` values take precedence
+# over repository config and reach any Git child, so these stop a listing from
+# running programs the checkout names (``core.fsmonitor`` fires on ``ls-files``).
+# ``safe.bareRepository=explicit`` stops Git adopting a bare-repository layout
+# that an agent built at the root without any ``.git`` path component.
+_READ_ONLY_GIT_CONFIG_OVERRIDES = (
+    "core.fsmonitor=false",
+    "core.hooksPath=/dev/null",
+    "credential.helper=",
+    "safe.bareRepository=explicit",
+)
+# Operator-controlled config locations, kept so settings such as ``safe.directory`` still apply.
+_GIT_CONFIG_LOCATION_ENV = ("HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
 _GLOB_CHARS = frozenset("*?[")
 _TEXT_LIKE_EXTENSIONS = {
     ".md",
@@ -293,6 +307,39 @@ def knowledge_files_from_relative_paths(
     return files
 
 
+def _read_only_git_env() -> dict[str, str]:
+    """Return a minimal Git environment that carries none of the caller's secrets.
+
+    Relative ``PATH`` entries are dropped because they would resolve inside the
+    checkout, and so would an empty ``PATH``, which falls back to ``os.defpath``. An empty ``GIT_ALLOW_PROTOCOL`` refuses every transport, overriding
+    any ``protocol.*`` config in the checkout, so an index read that would lazily
+    fetch missing objects cannot reach a remote helper; newer Git also honours
+    ``GIT_NO_LAZY_FETCH`` and skips that fetch outright.
+    """
+    path_entries = os.environ.get("PATH", os.defpath).split(os.pathsep)
+    env = {
+        "PATH": os.pathsep.join(entry for entry in path_entries if Path(entry).is_absolute()) or os.defpath,
+        "GIT_ALLOW_PROTOCOL": "",
+        "GIT_NO_LAZY_FETCH": "1",
+    }
+    env.update({name: value for name in _GIT_CONFIG_LOCATION_ENV if (value := os.environ.get(name))})
+    return env
+
+
+def _run_read_only_git(root: Path, args: list[str], *, timeout: float | None) -> subprocess.CompletedProcess[str]:
+    """Run one read-only Git command in root without trusting root's config or the caller's environment."""
+    overrides = [arg for override in _READ_ONLY_GIT_CONFIG_OVERRIDES for arg in ("-c", override)]
+    return subprocess.run(
+        ["git", *overrides, *args],
+        cwd=str(root),
+        env=_read_only_git_env(),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
 def git_checkout_present(root: Path, *, timeout_seconds: float | None = None) -> bool:
     """Return whether root itself is a Git worktree checkout."""
     if not root.is_dir():
@@ -303,11 +350,9 @@ def git_checkout_present(root: Path, *, timeout_seconds: float | None = None) ->
     else:
         effective_timeout = effective_timeout_seconds
     try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree", "--show-toplevel"],
-            check=False,
-            capture_output=True,
-            text=True,
+        result = _run_read_only_git(
+            root,
+            ["rev-parse", "--is-inside-work-tree", "--show-toplevel"],
             timeout=effective_timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -338,14 +383,7 @@ def git_tracked_relative_paths_from_checkout(
         git_config.sync_timeout_seconds if timeout_seconds is None else timeout_seconds,
     )
     try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z"],
-            cwd=str(knowledge_root),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=effective_timeout_seconds,
-        )
+        result = _run_read_only_git(knowledge_root, ["ls-files", "-z"], timeout=effective_timeout_seconds)
     except subprocess.TimeoutExpired as exc:
         msg = f"Git command timed out after {effective_timeout_seconds:g}s: git ls-files -z"
         raise RuntimeError(msg) from exc

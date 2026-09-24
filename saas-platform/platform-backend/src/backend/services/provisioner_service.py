@@ -14,7 +14,7 @@ import json
 import os
 import secrets
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any
@@ -52,9 +52,7 @@ from backend.config import (
     OPENROUTER_PROVISIONING_API_KEY,
     PLATFORM_DOMAIN,
     PROVISIONER_API_KEY,
-    SANDBOX_PROXY_TOKEN,
     SUPABASE_ANON_KEY,
-    SUPABASE_SERVICE_KEY,
     SUPABASE_URL,
     logger,
 )
@@ -176,13 +174,18 @@ def _instance_matrix_registration_shared_secret(instance_id: str) -> str:
     return _stable_instance_secret("matrix-registration", instance_id)
 
 
+def instance_platform_sso_secret(instance_id: str) -> str:
+    """Derive the per-instance key that signs dashboard login tickets for one tenant runtime."""
+    return _stable_instance_secret("platform-sso", instance_id)
+
+
 def _stable_instance_secret(purpose: str, instance_id: str) -> str:
     """Derive one stable per-instance secret from the platform root secret.
 
     WARNING: when INSTANCE_CREDENTIALS_ENCRYPTION_SECRET is unset, PROVISIONER_API_KEY doubles
     as the HMAC root secret. Rotating PROVISIONER_API_KEY without first setting
     INSTANCE_CREDENTIALS_ENCRYPTION_SECRET silently invalidates every derived per-instance
-    secret (credential encryption keys, Matrix registration shared secrets) for existing tenants.
+    secret (credential encryption keys, Matrix registration shared secrets, dashboard SSO keys) for existing tenants.
     """
     root_secret = (INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY).strip()
     if not root_secret:
@@ -214,8 +217,12 @@ def _owner_matrix_user_id_from_email(email: str, *, instance_id: str, base_domai
 
 
 def _owner_matrix_user_id_for_account(sb: Any, *, account_id: Any, instance_id: str, base_domain: str) -> str | None:
-    """Return the MXID that should be authorized for the tenant owner."""
-    if not account_id:
+    """Return the MXID that should be authorized for the tenant owner.
+
+    Only platform OIDC binds the derived localpart to the authenticated account holder.
+    Without it the platform cannot prove who holds that MXID, so nothing is pre-authorized.
+    """
+    if not account_id or not _env_flag_enabled(INSTANCE_MATRIX_OIDC_ENABLED):
         return None
     try:
         normalized_account_id = str(UUID(str(account_id)))
@@ -234,10 +241,11 @@ def _owner_matrix_user_id_for_account(sb: Any, *, account_id: Any, instance_id: 
 
 def _append_matrix_oidc_helm_args(helm_args: list[str]) -> None:
     """Forward hosted Matrix OIDC settings to the instance chart."""
-    if INSTANCE_MATRIX_OIDC_ENABLED:
-        helm_args += ["--set", f"matrixOidc.enabled={INSTANCE_MATRIX_OIDC_ENABLED}"]
     if _env_flag_enabled(INSTANCE_MATRIX_OIDC_ENABLED):
+        # The chart only enables OIDC for the literal "true", which must agree with the owner authorization gate.
         helm_args += [
+            "--set",
+            "matrixOidc.enabled=true",
             "--set",
             "roomDefaults.joinPolicy=public",
             "--set",
@@ -296,7 +304,33 @@ async def _apply_instance_secret(instance_id: str, namespace: str, secret_data: 
     if code != 0:
         msg = f"Failed to apply instance Secret {secret_name}: {err or out}"
         raise RuntimeError(msg)
+    await _remove_stale_instance_secret_keys(secret_name, namespace, secret_data.keys())
     return _instance_secret_hash(secret_data)
+
+
+async def _remove_stale_instance_secret_keys(secret_name: str, namespace: str, current_keys: Iterable[str]) -> None:
+    """Delete Secret keys the provisioner no longer writes.
+
+    `kubectl apply` leaves keys dropped from `stringData` in the live Secret, so a retired
+    credential would otherwise stay mounted in tenant pods.
+    """
+    code, out, err = await run_kubectl(
+        ["get", "secret", secret_name, "-o=go-template={{range $key, $value := .data}}{{$key}} {{end}}"],
+        namespace=namespace,
+    )
+    if code != 0:
+        msg = f"Failed to inspect instance Secret {secret_name}: {err or out}"
+        raise RuntimeError(msg)
+    stale_keys = sorted(set(out.split()) - set(current_keys))
+    if not stale_keys:
+        return
+    patch = json.dumps({"data": dict.fromkeys(stale_keys)})
+    code, out, err = await run_kubectl(
+        ["patch", "secret", secret_name, "--type=merge", "-p", patch], namespace=namespace
+    )
+    if code != 0:
+        msg = f"Failed to remove stale keys from instance Secret {secret_name}: {err or out}"
+        raise RuntimeError(msg)
 
 
 async def _existing_instance_secret_value(instance_id: str, namespace: str, key: str) -> str | None:
@@ -568,7 +602,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         logger.warning("Failed to update URLs for instance %s", customer_id)
 
     # Keep this non-empty so shell/file/python proxying doesn't fail at runtime.
-    sandbox_proxy_token = SANDBOX_PROXY_TOKEN or secrets.token_hex(32)
+    # Always per instance: a shared token would let one tenant authenticate to every tenant's runner.
+    sandbox_proxy_token = secrets.token_hex(32)
     # Existing instances may have plaintext credential files; preserve their current encryption state.
     credentials_encryption_key = await _provision_credentials_encryption_key(
         customer_id=customer_id, existing_instance_id=existing_instance_id, data=data, namespace=namespace
@@ -588,17 +623,18 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             namespace=namespace,
         )
         # User BYOK credentials live in tenant storage; hosted budgets use only a scoped OpenRouter key.
+        # Tenant workloads are untrusted, so every value here must be scoped to this instance.
         instance_secret_data = {
             "openai_key": "",
             "anthropic_key": "",
             "openrouter_key": openrouter_key,
             "google_key": "",
             "deepseek_key": "",
-            "supabase_service_key": SUPABASE_SERVICE_KEY or "",
             "sandbox_proxy_token": sandbox_proxy_token,
             "credentials_encryption_key": credentials_encryption_key,
             "matrix_oidc_client_secret": INSTANCE_MATRIX_OIDC_CLIENT_SECRET or "",
             "matrix_registration_shared_secret": _instance_matrix_registration_shared_secret(customer_id),
+            "platform_sso_secret": instance_platform_sso_secret(customer_id),
         }
         instance_secret_hash = _instance_secret_hash(instance_secret_data)
         # Use upgrade --install to handle both new and re-provisioning cases
@@ -616,6 +652,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             f"customer={customer_id}",
             "--set",
             f"baseDomain={base_domain}",
+            "--set",
+            f"platformDomain={PLATFORM_DOMAIN}",
             "--set",
             f"accountId={account_id}",
             "--set",
@@ -699,13 +737,16 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             ]
 
         _append_matrix_oidc_helm_args(helm_args)
+        # Apply before Helm so pods restarted by the new secret hash read the new values;
+        # Synapse reads its OIDC client secret only at startup.
+        await _apply_instance_secret(customer_id, namespace, instance_secret_data)
         code, stdout, stderr = await run_helm(helm_args)
         if code != 0:
             msg = f"Helm install failed: {stderr}"
             raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
         logger.info("Helm install output: %s", stdout)
-        # Older releases managed this Secret in Helm. Apply it after Helm so
-        # Helm's resource pruning cannot delete the externally managed Secret.
+        # Older releases managed this Secret in Helm. Apply it again after Helm
+        # because Helm's resource pruning deletes the externally managed Secret.
         await _apply_instance_secret(customer_id, namespace, instance_secret_data)
     except HTTPException:
         _mark_instance_provision_error(sb, customer_id, "deployment HTTP exception")

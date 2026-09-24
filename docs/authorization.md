@@ -130,6 +130,7 @@ An explicit `members_of_rooms: []` disables inferred room grants.
 
 MindRoom resolves aliases before administrator and static-user matching.
 Internal MindRoom identities bypass responder restrictions because they are system participants.
+A team's `access` authorizes requests to the team as a whole: a requester the team admits reaches every member agent through that team, even members whose own `access` would not admit them directly.
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
 The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
@@ -158,7 +159,6 @@ Dashboard configuration access follows deployment authentication.
 Standalone deployments check `MINDROOM_API_KEY` when configured; Supabase deployments validate the user's token and enforce the instance account ID when configured.
 Without an API key, standalone dashboard and configuration API access is unauthenticated.
 Set `MINDROOM_API_KEY` before exposing a standalone instance outside a trusted local environment.
-Unauthenticated access binds `127.0.0.1` by default, answers only local host names, address literals, and the hosts of `MINDROOM_PUBLIC_URL` or `MINDROOM_DASHBOARD_ALLOWED_HOSTS`, and refuses browser changes from other sites.
 These operator authentication checks are independent of the Matrix `administrators` list.
 
 With trusted upstream auth and no `MINDROOM_CONNECTIONS_AGENT`, every gateway-authenticated user can read and change dashboard configuration, regardless of `administrators`.

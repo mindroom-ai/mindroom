@@ -194,6 +194,11 @@ extract_metadata_only("https://matrix.org/blog/")
 #### Notes
 
 - `trafilatura` is the strongest no-key option when you want more than a plain page read.
+- Server-side `trafilatura` downloads accept only HTTP(S) URLs whose resolved targets are public Internet addresses.
+- Private, loopback, link-local, multicast, reserved, and metadata-style targets are rejected with an error result before any connection is made.
+- Redirects, `robots.txt`, meta-refresh targets, and links discovered while crawling are validated the same way.
+- `crawl_website()` stops with that error when the crawler reaches a blocked target, while `extract_content=True` reports each blocked page individually.
+- Pages are downloaded uncompressed, and a server that answers with a compressed body is treated as a failed download.
 - `crawl_website()` depends on Trafilatura spider support in the runtime, so verify the crawler function exists if crawling matters to your workflow.
 - For news-article specific extraction with titles, authors, and summaries, `newspaper` can be a better fit.
 
@@ -689,6 +694,11 @@ Agno's normal agent-session persistence can retain model-visible screenshot pixe
 Playwright MCP briefly writes its requested screenshot into the local browser workspace, and MindRoom reads and removes that exact scratch file before returning the tool result.
 Safari and other unsupported browsers can still be operated through the separate accessibility-first `desktop` tool.
 For the host target, `output_dir` defaults to `<storage>/browser` for screenshots, PDFs, and other artifacts.
+Which files `upload` may read follows the agent's [`file_access`](../architecture/security-posture.md#file-access) setting.
+With the default `workspace`, host `upload` accepts files in that artifact directory, files in the agent's workspace (absolute or workspace-relative paths), and `att_*` IDs of attachments available in the current conversation; use `./` for a workspace file whose name starts with `att_`.
+Everything else under the runtime storage root, including credentials, encryption keys, Matrix state, sessions, and other agents' workspaces, is rejected, so `output_dir` must not point at runtime state.
+On a routed worker, `workspace` mode reads only files inside the worker workspace.
+With `unrestricted`, `upload` accepts any existing file its process can read, which on a routed worker is the worker container.
 The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
 

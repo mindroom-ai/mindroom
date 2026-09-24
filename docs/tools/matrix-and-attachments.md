@@ -68,7 +68,8 @@ matrix_message(action="react", event_id="$event123", message="✅")
 See [Matrix Message Full Semantics](matrix-message.md) for the complete argument schema, conversation selection, attachments, and collapsible sections.
 Use `matrix_room(action="threads")` for thread discovery and `matrix_room(action="room-info")` for current targeting metadata.
 `attachments` accepts up to five ordered context-scoped `att_*` IDs or file paths.
-Relative paths resolve from the agent workspace and must stay inside it.
+With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With [`file_access`](../architecture/security-posture.md#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
 When sending to a recipient, all files arrive before the task text starts its response.
 For durable text-only retries, supply `idempotency_key`; the same requester, agent, room, and key reuse the first prepared payload and receipt for eight days after completion.
 Send results include the conversation `thread_id` and delivered event IDs, including partial delivery details on failure.
@@ -91,7 +92,7 @@ Pass each returned `name` as `recipient` in [matrix_message](matrix-message.md#a
 `state` returns one exact state event when `event_type` is supplied, using an empty `state_key` by default.
 Without `event_type`, `state` returns a room-state summary with at most 100 non-member event previews and elides `m.room.member` events.
 `room_id` defaults to the active Matrix room.
-An alternate room is allowed only when the requester is authorized there under the configured room-access policy.
+An alternate room is allowed only when the requester has access to the agent under the configured room-access policy and is currently joined to that room.
 The tool requires an active Matrix `ToolRuntimeContext` and rate-limits each `(agent_name, requester_id, room_id)` combination to 20 actions per 30 seconds.
 
 ### Configuration
@@ -378,12 +379,14 @@ reset_thread_model()
 ### What It Does
 
 `matrix_api` supports `send_event`, `get_state`, `put_state`, `redact`, `get_event`, and `search`.
-It defaults `room_id` to the active room, but it also supports authorized cross-room access when the requester is allowed to act there.
+It defaults `room_id` to the active room, but it also supports cross-room access when the requester has access to the agent and is currently joined to that other room.
 It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations.
 `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs.
 Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
+A dangerous write also requires the human requester, or one of their configured bridge aliases, to be joined to the target room with room admin power (power level 100), so the model's flag alone never authorizes it.
 Hard-blocked state event types like `m.room.create` remain blocked.
+The `com.mindroom.*` and `io.mindroom.*` namespaces are reserved for runtime metadata: `content` may not set keys in them at any depth, and `send_event` and `put_state` may not write event types in them.
 `search` is read-only, scopes results to one room via `room_id`, uses the top-level `limit` parameter, and rejects `filter.limit`.
 When `event_context={"include_profile": true}` is requested, returned context preserves `profile_info` for matching senders.
 
@@ -460,7 +463,10 @@ Use `mindroom_output_path` before handing attachments to worker-routed workspace
 In shell tools, the agent workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in worker-routed shell and python tools it is also `~` and `$HOME`, so a saved path like `incoming/file.txt` can also be read as `~/incoming/file.txt`.
 The path must be relative to the workspace and must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, start with `~`, or contain `$` or `%` characters.
 `register_attachment()` turns a local file path into a new context-scoped `att_*` ID and appends that ID to the current runtime context so later tool calls in the same run can reuse it.
-Relative `register_attachment()` paths resolve from the agent workspace when one is available, and they must stay inside that workspace.
+`register_attachment()` paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access) setting: with the default `workspace`, they resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
+Absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace, so `~/incoming/file.txt` is rejected here.
+Without a configured agent workspace, `workspace` mode refuses path-based registration and only existing `att_*` IDs can be attached; `unrestricted` mode still accepts absolute paths.
+Registration copies the file's current bytes into managed attachment storage without following symbolic links, so later edits or replacement of the source file do not change the attachment.
 Attachment records include kind, filename, MIME type, room ID, thread ID, sender, creation time, and an `available` flag that reports whether the local file still exists.
 This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`.
 

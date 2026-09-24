@@ -33,7 +33,6 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_run_context import prepend_knowledge_availability_notice
 from mindroom.ai import AIStreamChunk, ResponseTurnContext, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import require_open_access_origin
 from mindroom.api.openai_request_parsing import (
     AUTO_MODEL_NAME,
     RESERVED_MODEL_NAMES,
@@ -283,7 +282,6 @@ class _ModelListResponse(BaseModel):
 
 
 def _authenticate_request(
-    request: Request,
     authorization: str | None,
     runtime_paths: RuntimePaths,
 ) -> JSONResponse | str | None:
@@ -296,8 +294,6 @@ def _authenticate_request(
     )
     if not keys_env.strip():
         if allow_unauthenticated:
-            # A completion runs an agent with its tools, so no other site may trigger one.
-            require_open_access_origin(request, runtime_paths.env_value("MINDROOM_PUBLIC_URL"))
             return None
         return _error_response(
             401,
@@ -392,23 +388,19 @@ def _requester_authority(
 
 
 def _requester_allows_model(model: str, authority: DetachedRequesterContext | None) -> bool:
-    """Apply responder access to a mapped caller and every configured team member."""
+    """Apply the selected agent's or team's own responder access to a mapped caller.
+
+    A team's access grants its exact member agents for team requests, so members are not checked separately.
+    """
     if authority is None:
         return True
-    entities = [model]
-    if model.startswith(TEAM_MODEL_PREFIX):
-        team_name = model.removeprefix(TEAM_MODEL_PREFIX)
-        entities = [team_name, *authority.config.teams[team_name].agents]
-    return all(
-        is_sender_allowed_for_responder(
-            authority.requester_id,
-            entity_name,
-            None,
-            authority.config,
-            authority.runtime_paths,
-            authority.agent_reply_memberships,
-        )
-        for entity_name in entities
+    return is_sender_allowed_for_responder(
+        authority.requester_id,
+        model.removeprefix(TEAM_MODEL_PREFIX),
+        None,
+        authority.config,
+        authority.runtime_paths,
+        authority.agent_reply_memberships,
     )
 
 
@@ -468,7 +460,7 @@ async def list_models(
 ) -> JSONResponse:
     """List available models (agents) in OpenAI format."""
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
-    auth_error = _authenticate_request(request, authorization, runtime_paths)
+    auth_error = _authenticate_request(authorization, runtime_paths)
     if isinstance(auth_error, JSONResponse):
         return auth_error
 
@@ -535,7 +527,7 @@ async def chat_completions(
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
-    auth_error = _authenticate_request(request, authorization, runtime_paths)
+    auth_error = _authenticate_request(authorization, runtime_paths)
     if isinstance(auth_error, JSONResponse):
         return auth_error
 

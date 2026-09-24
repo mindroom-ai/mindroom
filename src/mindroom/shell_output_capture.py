@@ -40,6 +40,15 @@ class ShellOutputDestination:
         return cls(workspace_root=workspace_root, path=path, max_bytes=max_bytes)
 
 
+def format_shell_completion(stdout: str, stderr: str, *, return_code: int) -> str:
+    """Format completed output without discarding either failure stream."""
+    if return_code == 0:
+        return stdout
+    if stdout and stderr:
+        return f"Error: {stdout}\nStderr:\n{stderr}"
+    return f"Error: {stdout or stderr}"
+
+
 class CapturedShellStream:
     """Spool decoded text up to the redirect cap without retaining it in memory."""
 
@@ -94,8 +103,10 @@ class ShellOutputCapture:
             prepare_tool_output_file,
         )
 
-        selected = self.stdout if return_code == 0 else self.stderr
-        error = selected.error
+        selected = self.stdout if return_code == 0 else None
+        error = selected.error if selected is not None else self.stdout.error or self.stderr.error
+        if return_code and self.stdout.byte_count + self.stderr.byte_count > self.destination.max_bytes:
+            error = f"Redirected shell output exceeds the {self.destination.max_bytes} byte limit."
         if (
             self.incomplete
             or not self.stdout.reached_eof
@@ -106,6 +117,7 @@ class ShellOutputCapture:
             error = "Shell command or output capture was interrupted; no complete output file was saved."
         if error is not None:
             return json.dumps({"mindroom_tool_output": {"status": "error", "error": error}})
+        assert return_code is not None
         try:
             request = prepare_tool_output_file(
                 ToolOutputFilePolicy(
@@ -117,9 +129,11 @@ class ShellOutputCapture:
             )
             if isinstance(request, dict):
                 return json.dumps(request)
-            output = selected.read()
-            if return_code != 0:
-                output = f"Error: {output}"
+            output = (
+                selected.read()
+                if selected is not None
+                else format_shell_completion(self.stdout.read(), self.stderr.read(), return_code=return_code)
+            )
             if self.cwd is not None:
                 output = f"[cwd: {self.cwd}]\n{output}"
             return json.dumps(finalize_tool_output_file(request, output))

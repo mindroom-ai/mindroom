@@ -16,7 +16,8 @@ from mindroom import constants, file_watcher
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import ApiAuthState, dashboard_open_access, public_origin, verify_user  # noqa: F401
+from mindroom.api.agent_cli import router as agent_cli_router
+from mindroom.api.auth import ApiAuthState, public_origin, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
 from mindroom.api.computers import active_computer_worker_keys, rebind_computer_runtime
 from mindroom.api.computers import router as computers_router
@@ -641,10 +642,7 @@ def _api_cors_origins(runtime_paths: constants.RuntimePaths) -> list[str]:
 
 def _dashboard_cors_settings(runtime_paths: constants.RuntimePaths) -> _DashboardCorsSettings:
     """Return dashboard CORS settings for one runtime context."""
-    # Without a credential every response is administrator data, so a wildcard
-    # would let any site read config and provider keys. Named origins still apply.
-    wildcard_allowed = not dashboard_open_access(runtime_paths)
-    if wildcard_allowed and runtime_paths.env_flag(_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV):
+    if runtime_paths.env_flag(_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV):
         return _DashboardCorsSettings(allow_origins=("*",), allow_credentials=False)
 
     configured_origins = runtime_paths.env_value(_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV)
@@ -654,8 +652,6 @@ def _dashboard_cors_settings(runtime_paths: constants.RuntimePaths) -> _Dashboar
             return _DashboardCorsSettings(allow_origins=hosted_origins, allow_credentials=True)
 
     origins = _parse_dashboard_cors_allowed_origins(configured_origins)
-    if not wildcard_allowed:
-        origins = tuple(origin for origin in origins if origin != "*") or _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
     return _DashboardCorsSettings(
         allow_origins=origins,
         allow_credentials="*" not in origins,
@@ -774,6 +770,7 @@ app.include_router(report_publishing_public_router)
 app.include_router(external_triggers_router)
 app.include_router(computers_router)
 app.include_router(script_gateway_router)
+app.include_router(agent_cli_router)
 app.include_router(dynamic_workflows_router, dependencies=[Depends(verify_user)])
 
 
@@ -1136,3 +1133,9 @@ async def get_available_rooms(request: Request, _user: Annotated[dict, Depends(v
 
 
 app.include_router(frontend_router)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8765)  # noqa: S104

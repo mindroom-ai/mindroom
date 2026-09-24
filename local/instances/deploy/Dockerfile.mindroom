@@ -114,6 +114,5 @@ USER 1000:1000
 EXPOSE 8765
 # Run through an init process so orphaned subprocesses do not accumulate as zombies.
 ENTRYPOINT ["tini", "--"]
-# Run the app from the prebuilt virtualenv to avoid rebuilding at runtime; bind all
-# container interfaces so the published port reaches the API.
-CMD ["/app/.venv/bin/mindroom", "run", "--api-host", "0.0.0.0"]
+# Run the app from the prebuilt virtualenv to avoid rebuilding at runtime
+CMD ["/app/.venv/bin/mindroom", "run"]

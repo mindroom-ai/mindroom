@@ -238,7 +238,7 @@ class MatrixVoiceMessageTools(Toolkit):
             message="Failed to send companion message to Matrix.",
         )
 
-    def _preflight(
+    async def _preflight(
         self,
         context: ToolRuntimeContext,
         *,
@@ -259,7 +259,7 @@ class MatrixVoiceMessageTools(Toolkit):
         response_format = self._response_format_for_target(base_url)
 
         resolved_room_id = resolve_optional_room_id(context, room_id)
-        if not room_access_allowed(context, resolved_room_id):
+        if not await room_access_allowed(context, resolved_room_id):
             return None, self._payload(
                 "error",
                 room_id=resolved_room_id,
@@ -356,7 +356,7 @@ class MatrixVoiceMessageTools(Toolkit):
         if validation_error is not None:
             return self._payload("error", message=validation_error)
 
-        preflight, preflight_error = self._preflight(context, text=text, room_id=room_id)
+        preflight, preflight_error = await self._preflight(context, text=text, room_id=room_id)
         if preflight_error is not None or preflight is None:
             return preflight_error or self._context_error()
 

@@ -472,10 +472,9 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 |----------|-------------|---------|
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
 | `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling; it does **not** change the API server bind port, which uses `mindroom run --api-port`. | `8765` |
-| `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access for local host names only) | _(none)_ |
-| `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra host names an open-access dashboard answers, beyond local names, address literals, and the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_SCRIPT_GATEWAY_URL`, and `MINDROOM_URL` | _(none)_ |
+| `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
-| `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses; ignored without dashboard authentication | _(unset)_ |
+| `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
@@ -574,6 +573,7 @@ agents:
     markdown: true                 # Optional: Override default (inherits from defaults section)
     worker_tools: [shell, file]    # Optional: Override default (inherits from defaults section)
     worker_scope: user_agent       # Optional: Reuse one proxied runtime per requester+agent
+    file_access: workspace         # Optional: workspace or unrestricted (inherits from defaults section)
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0, file, or none)
@@ -630,6 +630,7 @@ teams:
     num_history_runs: 8            # Optional: Team-scoped replay policy
     num_history_messages: null     # Optional: Mutually exclusive with num_history_runs
     max_tool_calls_from_history: 6 # Optional: Limit replayed tool call messages
+    max_tool_calls_per_turn: 200   # Optional: Coordinator tool calls per team turn, delegations included; members keep their own budgets (default: defaults.max_tool_calls_per_turn)
     compaction:                    # Optional: Team-scoped required-compaction overrides
       # Soft thresholds do not compact by themselves while history still fits.
       enabled: true
@@ -657,6 +658,7 @@ defaults:
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files
+  max_tool_calls_per_turn: 1000    # Default: 1000 (tool calls one agent or team turn may execute; later calls return a tool error, and the turn ends with its text so far after this many plus two model requests)
   tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
   show_stop_button: true           # Default: true (global only, cannot be overridden per-agent)
   auto_resume_after_restart: true # Default: true (resume eligible interrupted threads after startup or replacement)
@@ -678,6 +680,7 @@ defaults:
   show_tool_calls: true            # Default: true (show tool details inline; hidden mode still allows generic worker warmup copy)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
+  file_access: workspace           # Default: workspace (path tools stay in the agent workspace; unrestricted allows any path)
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
   thread_summary_model: null       # Default: null (uses the default model)

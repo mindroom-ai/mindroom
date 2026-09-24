@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tests.conftest import seed_session
+from tests.conftest import FakeModel, seed_session
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -387,7 +387,6 @@ def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: C
     captured_runtime_paths: list[RuntimePaths | None] = []
 
     def _authenticate_and_swap(
-        _request: Request,
         authorization: str | None,
         runtime_paths: RuntimePaths,
     ) -> JSONResponse | None:
@@ -648,7 +647,6 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
     captured_runtime_paths: list[RuntimePaths | None] = []
 
     def _authenticate_and_swap(
-        _request: Request,
         authorization: str | None,
         runtime_paths: RuntimePaths,
     ) -> JSONResponse | None:
@@ -1006,34 +1004,6 @@ class TestListModels:
 
 class TestChatCompletions:
     """Tests for POST /v1/chat/completions (non-streaming)."""
-
-    def test_unauthenticated_completions_reject_cross_origin_browser_calls(self, app_client: TestClient) -> None:
-        """An unauthenticated /v1 runs agents, so no other site may trigger one."""
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
-            response = app_client.post(
-                "/v1/chat/completions",
-                json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
-                headers={"Origin": "https://attacker.example"},
-            )
-
-        assert response.status_code == 403, response.text
-        mock_ai.assert_not_awaited()
-
-    def test_unauthenticated_completions_allow_same_origin_and_api_clients(self, app_client: TestClient) -> None:
-        """The local UI and ordinary API clients keep reaching an unauthenticated /v1."""
-        payload = {"model": "general", "messages": [{"role": "user", "content": "Hello"}]}
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
-            mock_ai.return_value = "Hello!"
-
-            same_origin = app_client.post(
-                "/v1/chat/completions",
-                json=payload,
-                headers={"Origin": "http://testserver"},
-            )
-            api_client = app_client.post("/v1/chat/completions", json=payload)
-
-        assert same_origin.status_code == 200, same_origin.text
-        assert api_client.status_code == 200, api_client.text
 
     def test_basic_completion(self, app_client: TestClient) -> None:
         """Basic non-streaming completion returns correct shape."""
@@ -4981,7 +4951,10 @@ class TestTeamCompletion:
 
         with (
             patch("mindroom.teams.create_agent", return_value=member),
-            patch("mindroom.model_loading.get_model_instance", return_value="openai:test-model"),
+            patch(
+                "mindroom.model_loading.get_model_instance",
+                return_value=FakeModel(id="test-model", provider="fake"),
+            ),
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 

@@ -29,6 +29,7 @@ from mindroom.config.mid_turn import MidTurnConfig  # noqa: TC001
 from mindroom.config.models import (
     AgentLearningMode,
     CompactionOverrideConfig,
+    FileAccess,
     ToolConfigEntry,
     validate_unique_tool_entries,
 )
@@ -227,6 +228,10 @@ class AgentConfig(BaseModel):
     )
     skills: list[str] = Field(default_factory=list, description="List of skill names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
+    minimal_instructions: list[str] = Field(
+        default_factory=list,
+        description="Always-present minimal mode instructions",
+    )
     rooms: list[str] = Field(
         default_factory=list,
         description="List of room IDs or names to auto-join",
@@ -330,6 +335,11 @@ class AgentConfig(BaseModel):
         ge=0,
         description="Max tool call messages replayed from history (per-agent override)",
     )
+    max_tool_calls_per_turn: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum tool calls one turn may execute (per-agent override)",
+    )
     show_tool_calls: bool | None = Field(
         default=None,
         description="Whether to show tool call details inline in responses (per-agent override)",
@@ -341,6 +351,10 @@ class AgentConfig(BaseModel):
     worker_scope: WorkerScope | None = Field(
         default=None,
         description="Worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
+    )
+    file_access: FileAccess | None = Field(
+        default=None,
+        description="Per-agent override of defaults.file_access (None = inherit the default)",
     )
     allow_self_config: bool | None = Field(
         default=None,
@@ -488,6 +502,11 @@ class TeamConfig(BaseModel):
         default=None,
         ge=0,
         description="Max tool call messages replayed from team history",
+    )
+    max_tool_calls_per_turn: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum tool calls the team coordinator may execute in one turn, delegations included (per-team override)",
     )
 
     @field_validator("agents")

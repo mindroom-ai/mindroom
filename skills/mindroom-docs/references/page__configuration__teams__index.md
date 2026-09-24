@@ -69,6 +69,7 @@ teams:
     num_history_runs: 8
     num_history_messages: null
     max_tool_calls_from_history: 6
+    max_tool_calls_per_turn: 200
 
     # Team-scoped required-compaction overrides (optional)
     # Soft thresholds do not compact by themselves while history still fits.
@@ -94,6 +95,7 @@ teams:
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
 | `num_history_messages` | No | `defaults.num_history_messages` | Max messages from team-scoped history replayed into the next run |
 | `max_tool_calls_from_history` | No | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history |
+| `max_tool_calls_per_turn` | No | `defaults.max_tool_calls_per_turn` | Tool calls the team coordinator may execute in one turn, delegations to members included; each member keeps its own `max_tool_calls_per_turn`, and the same end-of-budget behavior as for [agents](https://docs.mindroom.chat/configuration/agents/) applies |
 | `compaction` | No | `defaults.compaction` | Team-scoped required-compaction overrides |
 
 Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.

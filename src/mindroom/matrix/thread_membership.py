@@ -36,6 +36,8 @@ Invariants enforced here (every resolver in the repo must go through this module
    callers can fail closed (mutation callers invalidate room-wide; dispatch callers coalesce on the
    candidate root and retry).
    Lookup failures and missing related events during the walk are likewise INDETERMINATE, never ROOM_LEVEL.
+   A related event the homeserver will not serve, or one that is not a message, carries
+   ``RelatedEventUnavailableError``, which no retry changes.
 
 5. Child proof and relation ancestry accept only ``m.room.message`` and ``m.room.encrypted`` events.
    Child proof also excludes the candidate root itself and edits of the root: an ``m.replace`` of a
@@ -169,6 +171,17 @@ class ThreadMembershipLookupError(RuntimeError):
     """Raised when related-event lookup cannot determine thread membership from available data."""
 
 
+class RelatedEventUnavailableError(ThreadMembershipLookupError):
+    """Raised when a related event can never place an event in a conversation.
+
+    The homeserver will not serve it -- it does not exist, is not in this
+    room, or is hidden from this account, for example history from before it
+    joined -- or it is not a message and so belongs to no conversation. Asking
+    again gets the same answer, so a caller that cannot proceed without the
+    event has to end its work rather than retry it.
+    """
+
+
 class ThreadRoomScanRootNotFoundError(RuntimeError):
     """Raised when a room scan finishes without ever seeing the requested root event."""
 
@@ -200,7 +213,7 @@ def _conversation_relation_thread_membership_access(
         event_info = await access.fetch_event_info(room_id, event_id)
         if event_info is not None and not event_type_supports_thread_relations(event_info.event_type):
             msg = f"Related event {event_id} cannot carry conversation thread membership"
-            raise ThreadMembershipLookupError(msg)
+            raise RelatedEventUnavailableError(msg)
         return event_info
 
     async def lookup_thread_id(room_id: str, event_id: str) -> str | None:
@@ -210,7 +223,7 @@ def _conversation_relation_thread_membership_access(
         event_info = await fetch_event_info(room_id, event_id)
         if event_info is None:
             msg = f"Indexed event {event_id} is unavailable for conversation thread validation"
-            raise ThreadMembershipLookupError(msg)
+            raise RelatedEventUnavailableError(msg)
         return thread_id
 
     return ThreadMembershipAccess(
@@ -293,7 +306,7 @@ async def resolve_related_event_thread_membership(
         if related_event_info is None:
             # Missing related events are still possible thread roots; demote later without losing the candidate.
             resolution = ThreadResolution._indeterminate(
-                ThreadMembershipLookupError(f"Related event {current_event_id} is unavailable"),
+                RelatedEventUnavailableError(f"Related event {current_event_id} is unavailable"),
                 candidate_thread_root_id=current_event_id,
             )
             break

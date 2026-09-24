@@ -49,7 +49,7 @@ def test_mindroom_runtime_images_run_under_tini() -> None:
 
         assert "tini" in _apt_install_packages(text)
         assert 'ENTRYPOINT ["tini", "--"]' in text
-        assert 'CMD ["/app/.venv/bin/mindroom", "run", "--api-host", "0.0.0.0"]' in text
+        assert 'CMD ["/app/.venv/bin/mindroom", "run"]' in text
 
 
 def test_mindroom_runtime_images_opt_into_dashboard_asset_build() -> None:

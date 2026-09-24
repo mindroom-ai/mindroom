@@ -36,7 +36,7 @@ Run it with:
 ```bash
 docker run -d \
   --name mindroom \
-  -p 127.0.0.1:8765:8765 \
+  -p 8765:8765 \
   -v ./config.yaml:/app/config.yaml:ro \
   -v ./mindroom_data:/app/mindroom_data \
   --env-file .env \
@@ -55,7 +55,7 @@ services:
     container_name: mindroom
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8765:8765"
+      - "8765:8765"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./mindroom_data:/app/mindroom_data
@@ -97,8 +97,7 @@ Key environment variables (set in `.env` or pass directly):
 | `MINDROOM_API_KEY` | API key for dashboard auth (standalone) | - (open access) |
 
 To change the API server port or bind address, pass `--api-port` or `--api-host` to the `mindroom run` command.
-For example, add `command: ["mindroom", "run", "--api-host", "0.0.0.0", "--api-port", "9000"]` to the Docker Compose service.
-The image binds `0.0.0.0` inside the container, so publish the port on the host loopback as above unless `MINDROOM_API_KEY` is set.
+For example, add `command: ["mindroom", "run", "--api-port", "9000"]` to the Docker Compose service.
 
 Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).
 
