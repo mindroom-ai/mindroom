@@ -728,7 +728,8 @@ class AtlassianToolkit(Toolkit):
             page = _page_id(page_id)
         except AtlassianError as exc:
             return self._error(exc)
-        params = {"cql": f"id = {page} AND type = page", "limit": 1, "expand": "body.storage,version,space"}
+        # Any content type is matched, so an ID that is not a page is reported as such instead of as missing.
+        params = {"cql": f"id = {page}", "limit": 1, "expand": "body.storage,version,space"}
 
         async def get_page(access_token: str, site: AtlassianSite) -> dict[str, object]:
             path = "/wiki/rest/api/content/search"
@@ -737,9 +738,20 @@ class AtlassianToolkit(Toolkit):
             if not isinstance(results, list) or not results:
                 raise AtlassianError(
                     code="page_not_found",
-                    message="The page does not exist or the connected account cannot view it.",
+                    message="The page was not found. It may not exist, may not be a page, may not be viewable by "
+                    "the connected account, or may not be indexed by search yet if it was created moments ago.",
                 )
             item = _mapping(results[0])
+            content_type = item.get("type")
+            if content_type != "page":
+                described = (
+                    "a blog post" if content_type == "blogpost" else f"Confluence content of type {content_type}"
+                )
+                raise AtlassianError(
+                    code="not_a_page",
+                    message=f"This ID belongs to {described}, not a page, and confluence_get_page reads pages only.",
+                    content_type=content_type if isinstance(content_type, str) else None,
+                )
             space = _mapping(item.get("space"))
             links = _mapping(item.get("_links"))
             return {

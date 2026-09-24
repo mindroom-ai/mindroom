@@ -278,7 +278,10 @@ The stored file name is always generated from the attachment ID.
 - A larger attachment returns `attachment_too_large`, whose message names the limit and the `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` setting that raises it.
 - Raising that setting also raises the inline limit for `get_attachment(..., mindroom_output_path=...)`, and MindRoom's fixed 64 MiB limit for [registered files](https://docs.mindroom.chat/attachments/) still applies.
 - A download must finish within 120 seconds, including every redirect.
-- Page reads and attachment listings use Confluence search, so a page created moments ago can take a short time to appear, and archived or draft pages are not returned.
+- Page reads and attachment listings go through Confluence search, so they see only content that search has indexed.
+- A page or attachment created moments ago can take a short time to appear, so `confluence_get_page` returns `page_not_found` and `confluence_list_attachments` omits the new attachment until the index catches up.
+- Archived and draft pages are not returned.
+- `confluence_get_page` reads pages only, and the ID of a blog post or other content returns `not_a_page` with its `content_type`.
 - Only Atlassian Cloud is supported; Jira and Confluence Data Center use the existing `jira` and `confluence` tools.
 - The tool does not upload attachments, delete content, or manage spaces and projects.
 - `confluence_update_page` replaces the whole body and needs the page's current version number plus one from `confluence_get_page`.

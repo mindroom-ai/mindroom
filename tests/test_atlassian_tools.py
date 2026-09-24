@@ -535,6 +535,7 @@ async def test_confluence_get_page_reads_storage_body_through_cql(
             "results": [
                 {
                     "id": "123",
+                    "type": "page",
                     "title": "Runbook",
                     "space": {"key": "OPS", "name": "Operations"},
                     "version": {"number": 7},
@@ -549,7 +550,7 @@ async def test_confluence_get_page_reads_storage_body_through_cql(
     result = json.loads(await tool.confluence_get_page(page_id="123"))
 
     params = gateway.product_requests()[0].url.params
-    assert params["cql"] == "id = 123 AND type = page"
+    assert params["cql"] == "id = 123"
     assert params["expand"] == "body.storage,version,space"
     assert result["page"] == {
         "id": "123",
@@ -1015,13 +1016,41 @@ async def test_one_site_listed_per_product_counts_as_one_site(tmp_path: Path, mo
 
 @pytest.mark.asyncio
 async def test_missing_page_is_reported_without_guessing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A page that search cannot see is reported as not found or not viewable."""
+    """A page that search cannot see may be missing, hidden, or not indexed yet, and the result says so."""
     tool, gateway = _connected(tmp_path, monkeypatch)
     gateway.route("GET", gateway_url("confluence", "/wiki/rest/api/content/search"), {"results": []})
 
     result = json.loads(await tool.confluence_get_page(page_id="404"))
 
     assert result["code"] == "page_not_found"
+    assert "not be indexed by search yet" in result["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content_type", "described"),
+    [("blogpost", "a blog post"), ("comment", "Confluence content of type comment")],
+)
+async def test_content_that_is_not_a_page_is_named(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content_type: str,
+    described: str,
+) -> None:
+    """A search result ID for a blog post or other content reports its type instead of a missing page."""
+    tool, gateway = _connected(tmp_path, monkeypatch)
+    gateway.route(
+        "GET",
+        gateway_url("confluence", "/wiki/rest/api/content/search"),
+        {"results": [{"id": "321", "type": content_type, "title": "News", "body": {"storage": {"value": "<p>x</p>"}}}]},
+    )
+
+    result = json.loads(await tool.confluence_get_page(page_id="321"))
+
+    assert result["code"] == "not_a_page"
+    assert result["content_type"] == content_type
+    assert described in result["message"]
+    assert "body_storage" not in result
 
 
 @pytest.mark.asyncio
