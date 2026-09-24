@@ -141,6 +141,7 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 - `file` is the compatibility-friendly general file toolkit, but `coding` is a better default for code-editing agents.
 - `delete_file()` is disabled by default, so destructive access is opt-in.
+- `save_file()`, `replace_file_chunk()`, and `delete_file()` refuse any path with a `.git` component because git runs commands named in repository metadata.
 - `search_files()` matches filesystem globs; use `search_content()` to search inside text files.
 
 ## [`shell`]
@@ -309,6 +310,8 @@ ls("src/mindroom")
 
 - Prefer `coding` over `file` for code-editing agents because it gives better read pagination, better search, and safer text replacement behavior.
 - Recursive `grep()` and `find_files()` filter hidden and gitignored paths automatically, but explicit file targets are not filtered.
+- Gitignore filtering skips the git index and system or global git config and never runs commands from repository config, so tracked files that match an ignore pattern are filtered too.
+- `write_file()` and `edit_file()` refuse any path with a `.git` component because git runs commands named in repository metadata.
 - `edit_file()` refuses ambiguous edits, so widen the surrounding context in `old_text` when a match is not unique.
 
 ## [`docker`]

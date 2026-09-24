@@ -387,7 +387,7 @@ class TestGrep:
         def counting_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[object]:
             nonlocal run_calls
             cmd = args[0] if args else kwargs.get("args")
-            if isinstance(cmd, list) and cmd[:2] == ["git", "check-ignore"]:
+            if isinstance(cmd, list) and cmd[0] == "git" and "check-ignore" in cmd:
                 run_calls += 1
             return original_run(*args, **kwargs)
 
@@ -905,7 +905,7 @@ class TestFindFiles:
         def counting_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[object]:
             nonlocal run_calls
             cmd = args[0] if args else kwargs.get("args")
-            if isinstance(cmd, list) and cmd[:2] == ["git", "check-ignore"]:
+            if isinstance(cmd, list) and cmd[0] == "git" and "check-ignore" in cmd:
                 run_calls += 1
             return original_run(*args, **kwargs)
 
@@ -1031,6 +1031,156 @@ class TestPathTraversal:
         """Tilde paths are not expanded and treated as literal relative paths."""
         result = tools.read_file("~/../../etc/passwd")
         assert "Error" in result
+
+
+def _plant_git_dir(git_dir: Path, config: str) -> None:
+    """Create the minimal repository layout git discovers, with the given config."""
+    (git_dir / "objects" / "info").mkdir(parents=True)
+    (git_dir / "refs" / "heads").mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+    (git_dir / "config").write_text(config)
+
+
+class TestGitMetadataSafety:
+    """Gitignore filtering must not run repository-configured commands, and writes must not touch .git."""
+
+    @pytest.mark.parametrize("layout", ["git_init", "planted_dir", "gitlink_file"])
+    @pytest.mark.parametrize("operation", ["find_files", "grep_fallback"])
+    def test_gitignore_filter_does_not_run_fsmonitor(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        layout: str,
+        operation: str,
+    ) -> None:
+        """A core.fsmonitor command in workspace repository config must never execute."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        marker = tmp_path / "marker"
+        fsmonitor = f"touch '{marker}'"
+        if layout == "git_init":
+            subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+            subprocess.run(["git", "config", "core.fsmonitor", fsmonitor], cwd=workspace, check=True)
+        else:
+            config = f'[core]\n\trepositoryformatversion = 0\n\tfsmonitor = "{fsmonitor}"\n'
+            if layout == "planted_dir":
+                _plant_git_dir(workspace / ".git", config)
+            else:
+                _plant_git_dir(workspace / "notgit", config)
+                (workspace / ".git").write_text("gitdir: notgit\n")
+        (workspace / ".gitignore").write_text("ignored.txt\n")
+        (workspace / "visible.txt").write_text("needle\n")
+        (workspace / "ignored.txt").write_text("needle\n")
+
+        tools = CodingTools(base_dir=str(workspace))
+        if operation == "find_files":
+            result = tools.find_files("*.txt")
+        else:
+            monkeypatch.setattr("mindroom.custom_tools.coding._run_ripgrep", lambda *_args, **_kwargs: None)
+            result = tools.grep("needle")
+
+        assert not marker.exists()
+        assert "visible.txt" in result
+        assert "ignored.txt" not in result
+
+    def test_gitignore_filter_ignores_inherited_git_environment(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Inherited GIT_DIR and global config must not redirect or configure the check-ignore call."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+        (workspace / ".gitignore").write_text("ignored.txt\n")
+        (workspace / "visible.txt").write_text("x")
+        (workspace / "ignored.txt").write_text("x")
+        global_excludes = tmp_path / "global.ignore"
+        global_excludes.write_text("visible.txt\n")
+        global_config = tmp_path / "global.gitconfig"
+        global_config.write_text(f"[core]\n\texcludesFile = {global_excludes}\n")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+        monkeypatch.setenv("GIT_DIR", str(tmp_path / "missing"))
+
+        result = CodingTools(base_dir=str(workspace)).find_files("*.txt")
+
+        assert result == "visible.txt"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            ".git/config",
+            ".git/hooks/pre-commit",
+            ".git/objects/info/.keep",
+            ".git",
+            "sub/.git",
+            "sub/.git/config",
+            ".GIT/config",
+            ".git/../evil.txt",
+        ],
+    )
+    def test_write_file_rejects_git_metadata(self, tools: CodingTools, tmp_base: Path, path: str) -> None:
+        """write_file must refuse any target with a .git component and create nothing."""
+        before = sorted(p.relative_to(tmp_base) for p in tmp_base.rglob("*"))
+
+        result = tools.write_file(path, "[core]\n")
+
+        assert result.startswith("Error writing file:")
+        assert ".git" in result
+        assert sorted(p.relative_to(tmp_base) for p in tmp_base.rglob("*")) == before
+
+    def test_edit_file_rejects_existing_git_config(self, tmp_path: Path) -> None:
+        """edit_file must leave an existing checkout's .git/config unchanged."""
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        config = tmp_path / ".git" / "config"
+        original = config.read_text()
+        tools = CodingTools(base_dir=str(tmp_path))
+
+        result = tools.edit_file(".git/config", "[core]", "[core]\n\tfsmonitor = true")
+
+        assert result.startswith("Error editing file:")
+        assert config.read_text() == original
+
+    def test_write_and_edit_reject_symlink_into_git_dir(self, tmp_path: Path) -> None:
+        """A symlink alias for .git must not bypass the metadata write policy."""
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        config = tmp_path / ".git" / "config"
+        original = config.read_text()
+        try:
+            (tmp_path / "meta").symlink_to(tmp_path / ".git", target_is_directory=True)
+        except (NotImplementedError, OSError):
+            pytest.skip("Symlinks not supported on this platform")
+        tools = CodingTools(base_dir=str(tmp_path))
+
+        assert tools.write_file("meta/config", "x").startswith("Error writing file:")
+        assert tools.edit_file("meta/config", "[core]", "[core]\n").startswith("Error editing file:")
+        assert config.read_text() == original
+
+    def test_write_and_edit_outside_git_metadata_still_work(self, tools: CodingTools, tmp_base: Path) -> None:
+        """Ordinary workspace writes, including .gitignore and .github, are unaffected."""
+        assert "Wrote" in tools.write_file(".gitignore", "build/\n")
+        assert "Wrote" in tools.write_file(".github/workflows/ci.yml", "on: push\n")
+        assert "Wrote" in tools.write_file("src/git/config.py", "x = 1\n")
+        assert "Applied edit" in tools.edit_file("src/git/config.py", "x = 1", "x = 2")
+        assert (tmp_base / "src" / "git" / "config.py").read_text() == "x = 2\n"
+
+    def test_file_tool_rejects_git_metadata_mutations(self, tmp_path: Path) -> None:
+        """The generic file tool applies the same read-only policy to .git metadata."""
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        config = tmp_path / ".git" / "config"
+        original = config.read_text()
+        tools = file_tools()(base_dir=tmp_path, enable_delete_file=True)
+
+        assert "read-only" in tools.save_file("[core]\n", ".git/config")
+        assert "read-only" in tools.save_file("#!/bin/sh\n", ".git/hooks/pre-commit")
+        assert "read-only" in tools.save_file("gitdir: x\n", "sub/.git")
+        assert "read-only" in tools.replace_file_chunk(".git/config", 0, 0, "[core]")
+        assert "read-only" in tools.delete_file(".git/config")
+        assert config.read_text() == original
+        assert not (tmp_path / ".git" / "hooks" / "pre-commit").exists()
+        assert not (tmp_path / "sub").exists()
+        assert tools.save_file("ok\n", "notes.txt") == "notes.txt"
+        assert (tmp_path / "notes.txt").read_text() == "ok\n"
 
 
 class TestPathSafetyHelpers:

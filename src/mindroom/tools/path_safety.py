@@ -20,6 +20,22 @@ def blocked_file_action_message(action: str, requested_path: str, base_dir: Path
     return f"Error {action}: path '{requested_path}' is outside base_dir '{base_dir}'. {_BASE_DIR_ESCAPE_HINT}"
 
 
+def git_metadata_write_message(action: str, requested_path: str) -> str:
+    """Explain why a write into git repository metadata was blocked."""
+    return f"Error {action}: path '{requested_path}' is inside git repository metadata (.git), which is read-only."
+
+
+def is_git_metadata_path(requested_path: str, resolved: Path) -> bool:
+    """Check whether a write target names or passes through a ``.git`` entry.
+
+    Git runs commands named in repository config, so file tools must not
+    create or modify ``.git`` metadata. Both the requested and resolved
+    spellings are checked so symlinks cannot hide the component, and the
+    comparison ignores case for case-insensitive filesystems.
+    """
+    return any(part.casefold() == ".git" for part in (*Path(requested_path).parts, *resolved.parts))
+
+
 def format_path_for_output(path: str | Path, base_dir: Path) -> str:
     """Prefer base-dir-relative output, falling back to absolute paths outside the base dir."""
     try:

@@ -15,6 +15,7 @@ from __future__ import annotations
 import bisect
 import difflib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -26,6 +27,8 @@ from agno.tools import Toolkit
 
 from mindroom.tools.path_safety import (
     format_path_for_output,
+    git_metadata_write_message,
+    is_git_metadata_path,
     is_within_base_dir,
     resolve_base_dir_path,
     split_search_pattern,
@@ -362,11 +365,30 @@ def _gitignored_paths(paths: list[Path], base_dir: Path) -> set[Path]:
         path_map.setdefault(token, []).append(candidate)
 
     payload = "\0".join(path_map.keys()) + "\0"
+    # The workspace, including any .git metadata in it, is agent-writable, so git
+    # must not run commands named by repository config (core.fsmonitor runs on
+    # index reads). Skip the index, override command-valued settings, drop system
+    # and global config, and pass only PATH through from the environment.
     try:
         result = subprocess.run(
-            ["git", "check-ignore", "--stdin", "-z"],
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                f"core.hooksPath={os.devnull}",
+                "check-ignore",
+                "--no-index",
+                "--stdin",
+                "-z",
+            ],
             check=False,
             cwd=str(base_dir),
+            env={
+                "PATH": os.environ.get("PATH", os.defpath),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+            },
             input=payload.encode("utf-8"),
             capture_output=True,
             timeout=5,
@@ -566,7 +588,7 @@ class CodingTools(Toolkit):
             return result
         return _format_read_output(result[1], offset, limit)
 
-    def edit_file(self, path: str, old_text: str, new_text: str) -> str:
+    def edit_file(self, path: str, old_text: str, new_text: str) -> str:  # noqa: PLR0911 - flat guard clauses
         """Replace a specific text occurrence in a file. Uses fuzzy matching to handle whitespace/Unicode differences.
 
         The old_text must match exactly one location in the file. If it matches
@@ -588,6 +610,8 @@ class CodingTools(Toolkit):
         if isinstance(result, str):
             return result
         resolved, content = result
+        if is_git_metadata_path(path, resolved):
+            return git_metadata_write_message("editing file", path)
 
         matches = _find_all_matches(content, old_text)
         if len(matches) == 0:
@@ -623,6 +647,8 @@ class CodingTools(Toolkit):
             resolved = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
+        if is_git_metadata_path(path, resolved):
+            return git_metadata_write_message("writing file", path)
 
         try:
             resolved.parent.mkdir(parents=True, exist_ok=True)
