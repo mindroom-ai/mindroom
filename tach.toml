@@ -618,6 +618,11 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.legacy_attachments"
+depends_on = ["mindroom.path_confinement"]
+visibility = ["mindroom.attachments"]
+
+[[modules]]
 path = "mindroom.legacy_delivery_payloads"
 depends_on = ["mindroom.constants"]
 visibility = [
@@ -1437,6 +1442,7 @@ visibility = ["mindroom.api.sandbox_runner"]
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.file_access",
     "mindroom.path_confinement",
     "mindroom.media_delivery",
     "mindroom.tool_system.worker_media",
@@ -1607,10 +1613,12 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.attachments"
 depends_on = [
+    "mindroom.file_access",
     "mindroom.media_delivery",
     "mindroom.tool_system.media_attachments",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.media",
+    "mindroom.path_confinement",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.sandbox_proxy",
@@ -3952,6 +3960,7 @@ expose = ["has_meaningful_stream_output"]
 path = "mindroom.tool_system.metadata"
 depends_on = [
     "mindroom.constants",
+    "mindroom.file_access",
     "mindroom.mcp.registry",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.dependencies",
@@ -3960,6 +3969,7 @@ depends_on = [
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
+    "mindroom.tool_system.legacy_tool_overrides",
 ]
 
 [[modules]]
@@ -4166,7 +4176,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.media_delivery"
-depends_on = ["mindroom.path_confinement"]
+depends_on = ["mindroom.file_access", "mindroom.path_confinement"]
 visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.custom_tools.attachments",
@@ -5222,6 +5232,7 @@ expose = [
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
     "ToolExecutionTarget",
+    "ToolFileAccess",
     "ToolManagedInitArg",
     "ToolMetadata",
     "ToolStatus",
@@ -5230,6 +5241,14 @@ expose = [
     "tool_schema_source",
 ]
 from = ["mindroom.tool_system.declarations"]
+
+[[interfaces]]
+expose = [
+    "AuthorizedFile",
+    "agent_file_access",
+    "resolve_agent_file",
+]
+from = ["mindroom.file_access"]
 
 [[interfaces]]
 expose = [
@@ -5277,6 +5296,7 @@ expose = [
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
     "ToolConfigOverrideError",
+    "ToolFileAccess",
     "ToolInitOverrideError",
     "ToolManagedInitArg",
     "ToolMetadata",
@@ -6737,6 +6757,10 @@ path = "mindroom.path_confinement"
 depends_on = []
 
 [[modules]]
+path = "mindroom.file_access"
+depends_on = ["mindroom.path_confinement"]
+
+[[modules]]
 path = "mindroom.config.mid_turn"
 depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 
@@ -6771,3 +6795,7 @@ visibility = ["mindroom.tools.moviepy_video_tools"]
 [[interfaces]]
 from = ["mindroom.custom_tools.agno_compat_moviepy"]
 expose = ["MindRoomMoviePyVideoTools"]
+
+[[modules]]
+path = "mindroom.tool_system.legacy_tool_overrides"
+depends_on = []

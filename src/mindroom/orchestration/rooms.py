@@ -59,3 +59,27 @@ def get_root_space_user_ids_to_invite(config: Config, runtime_paths: RuntimePath
         user_ids,
         warning_message="Skipping non-concrete membership root-space invite user IDs",
     )
+
+
+def warn_about_foreign_homeserver_authorities(config: Config, runtime_paths: RuntimePaths) -> None:
+    """Warn when administrators or managed-room invitees and admins live on another homeserver."""
+    server_name = config.get_domain(runtime_paths)
+    room_policies = [
+        resolve_room_policy(config, room_key)
+        for room_key in config.get_all_configured_rooms()
+        if not room_key.startswith(("!", "#"))
+    ]
+    user_ids = [
+        *config.administrators,
+        *(user_id for policy in room_policies for user_id in (*policy.invite_users, *policy.admins)),
+    ]
+    concrete_user_ids, _ = split_concrete_matrix_user_ids(user_ids)
+    foreign_user_ids = sorted(
+        user_id for user_id in concrete_user_ids if user_id.split(":", 1)[1].lower() != server_name.lower()
+    )
+    if foreign_user_ids:
+        logger.warning(
+            "Administrators, room invitees, or room admins are on another homeserver; remove them unless you trust them",
+            server_name=server_name,
+            user_ids=foreign_user_ids,
+        )

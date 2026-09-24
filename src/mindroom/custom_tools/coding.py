@@ -21,15 +21,21 @@ import subprocess
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
+from mindroom.path_confinement import is_git_metadata_path
 from mindroom.tools.path_safety import (
+    blocked_git_metadata_message,
     format_path_for_output,
     is_within_base_dir,
     resolve_base_dir_path,
     split_search_pattern,
 )
+
+if TYPE_CHECKING:
+    from mindroom.config.models import FileAccess
 
 _MAX_LINES = 2000
 _MAX_BYTES = 50 * 1024  # 50KB
@@ -504,12 +510,20 @@ def _find_files_in(
     return result
 
 
-def _resolve_and_read(base_dir: Path, path: str, restrict_to_base_dir: bool = True) -> tuple[Path, str] | str:
+def _resolve_and_read(
+    base_dir: Path,
+    path: str,
+    restrict_to_base_dir: bool = True,
+    *,
+    writable: bool = False,
+) -> tuple[Path, str] | str:
     """Resolve path and read file content. Returns (resolved, content) or error string."""
     try:
         resolved = resolve_base_dir_path(base_dir, path, restrict_to_base_dir)
     except ValueError as e:
         return f"Error: {e}"
+    if writable and is_git_metadata_path(resolved):
+        return blocked_git_metadata_message("writing file", path)
 
     if not resolved.exists():
         return f"Error: File not found: {path}"
@@ -529,9 +543,13 @@ class CodingTools(Toolkit):
     smart truncation, fuzzy matching, and actionable pagination hints.
     """
 
-    def __init__(self, base_dir: str | None = None, restrict_to_base_dir: bool = True) -> None:
+    def __init__(
+        self,
+        base_dir: str | None = None,
+        file_access: FileAccess = "workspace",
+    ) -> None:
         self.base_dir = Path(base_dir).resolve() if base_dir else Path.cwd().resolve()
-        self.restrict_to_base_dir = restrict_to_base_dir
+        self.restrict_to_base_dir = file_access == "workspace"
         super().__init__(
             name="coding",
             tools=[
@@ -584,7 +602,7 @@ class CodingTools(Toolkit):
         if not old_text:
             return "Error: old_text must be non-empty."
 
-        result = _resolve_and_read(self.base_dir, path, self.restrict_to_base_dir)
+        result = _resolve_and_read(self.base_dir, path, self.restrict_to_base_dir, writable=True)
         if isinstance(result, str):
             return result
         resolved, content = result
@@ -623,6 +641,8 @@ class CodingTools(Toolkit):
             resolved = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
+        if is_git_metadata_path(resolved):
+            return blocked_git_metadata_message("writing file", path)
 
         try:
             resolved.parent.mkdir(parents=True, exist_ok=True)

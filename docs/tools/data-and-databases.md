@@ -449,8 +449,8 @@ MindRoom exposes `google_drive_list_files()`, `google_drive_search_files()`, `go
 `google_drive_search_files()` searches Drive metadata.
 `google_drive_read_file()` reads Google Workspace files and non-Google files up to the configured `max_read_size`.
 `google_drive_download_file()` downloads a Drive file, exporting Google Workspace files to their best native format, for example a complete Google Sheets workbook as `.xlsx`.
-`google_drive_upload_file()` uploads a local file and resolves relative paths from the agent workspace.
-`google_drive_update_file(file_id, local_path, mime_type=None)` replaces an existing binary file's contents from a file inside the agent workspace.
+`google_drive_upload_file()` uploads a local file, resolves relative paths from the agent workspace, and follows the agent's [`file_access`](../architecture/security-posture.md#file-access) setting for which local files it may read.
+`google_drive_update_file(file_id, local_path, mime_type=None)` replaces an existing binary file's contents from a local file under the same `file_access` rule.
 Native Google Workspace files require their respective Workspace APIs for content updates.
 `google_drive_create_folder()` creates a folder under the Drive root or an optional parent.
 `google_drive_move_file()` moves a file to a new parent and can rename it in the same request.

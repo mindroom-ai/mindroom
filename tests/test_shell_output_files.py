@@ -295,7 +295,8 @@ async def test_spool_failure_settles_background_handle(tmp_path: Path, monkeypat
     result = await run_command(
         registry,
         namespace="disk-failure",
-        argv=["bash", "-c", "printf data"],
+        # Outlive spawn so timeout=0 always backgrounds; a command that already exited returns in the foreground.
+        argv=["bash", "-c", "printf data; sleep 0.5"],
         env={"PATH": os.environ["PATH"]},
         cwd=str(tmp_path),
         tail=100,

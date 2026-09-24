@@ -368,7 +368,6 @@ def test_validate_supabase_token_catches_supabase_auth_errors(monkeypatch: pytes
     auth_state = auth.ApiAuthState(
         runtime_paths=_runtime_paths(tmp_path),
         settings=auth._ApiAuthSettings(
-            platform_login_url="https://platform.example.com/login",
             supabase_url="https://supabase.example.com",
             supabase_anon_key="anon-key",
             account_id=None,
@@ -2581,7 +2580,6 @@ def test_spotify_connect_uses_pending_oauth_state(
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
         settings=auth._ApiAuthSettings(
-            platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
             account_id=None,
@@ -2632,7 +2630,6 @@ def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: 
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
         settings=auth._ApiAuthSettings(
-            platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
             account_id=None,
@@ -2706,7 +2703,6 @@ def test_spotify_callback_preserves_runtime_validation_error(
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
         settings=auth._ApiAuthSettings(
-            platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
             account_id=None,
@@ -3749,6 +3745,12 @@ def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(
     assert location.path == "/login"
     assert parse_qs(location.query) == {"next": ["/"]}
 
+    response = api_key_client.get("/%09/evil.com", follow_redirects=False)
+    assert response.status_code == 307
+    location = urlparse(response.headers["location"])
+    assert location.path == "/login"
+    assert parse_qs(location.query) == {"next": ["/"]}
+
 
 def test_frontend_login_page_renders_for_api_key_auth(api_key_client: TestClient) -> None:
     """Standalone API-key auth should expose a simple login form."""
@@ -3774,6 +3776,16 @@ def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
     assert "&amp;execution_scope" not in response.text
 
 
+def test_frontend_login_page_drops_tab_bearing_next_path(api_key_client: TestClient) -> None:
+    """Browsers strip ASCII tabs before parsing, so a tab-bearing target must not survive."""
+    response = api_key_client.get("/login?next=/%09/evil.com")
+
+    assert response.status_code == 200
+    next_path_line = next(line for line in response.text.splitlines() if "const nextPath =" in line)
+    assert next_path_line.strip() == 'const nextPath = "/";'
+    assert 'target.origin === window.location.origin ? target.href : "/"' in response.text
+
+
 @pytest.mark.parametrize(
     ("next_path", "expected"),
     [
@@ -3794,6 +3806,14 @@ def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
         ("/%255Cexample.com", "/"),
         ("/%252Fexample.com", "/"),
         ("/agents/%5Cprofile", "/agents/%5Cprofile"),
+        ("/\t/evil.com", "/"),
+        ("/\n/evil.com", "/"),
+        ("/\r/evil.com", "/"),
+        ("/%09/evil.com", "/"),
+        ("/%0a/evil.com", "/"),
+        ("/%0d/evil.com", "/"),
+        ("/%2509/evil.com", "/"),
+        ("/agents\t", "/"),
     ],
 )
 def test_sanitize_next_path_blocks_protocol_relative_variants(
@@ -3812,7 +3832,6 @@ def test_frontend_login_propagates_trusted_upstream_auth_misconfiguration(
     main._app_context(api_key_client.app).auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
         settings=auth._ApiAuthSettings(
-            platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
             account_id=None,
@@ -4244,7 +4263,6 @@ def api_key_client(temp_config_file: Path) -> TestClient:
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
         settings=auth._ApiAuthSettings(
-            platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
             account_id=None,
@@ -5325,15 +5343,20 @@ def test_api_key_keeps_oauth_callbacks_open(
     assert "OAuth state is invalid or expired" in response.json()["detail"]
 
 
+_PLATFORM_SSO_SECRET = "instance-platform-sso-secret-for-tests-0001"  # noqa: S105
+_OTHER_INSTANCE_SSO_SECRET = "another-instance-platform-sso-secret-0002"  # noqa: S105
+
+
 def _set_platform_auth(
     *,
     valid_tokens: set[str],
-    platform_login_url: str = "https://platform.example.com/login",
+    platform_sso_url: str = "https://platform.example.com/instance-sso/authorize",
     public_url: str | None = None,
     account_id: str | None = None,
     user_id: str = "user-123",
+    platform_sso_secret: str | None = _PLATFORM_SSO_SECRET,
 ) -> None:
-    """Configure the API module for platform-managed cookie auth tests."""
+    """Configure the API module for platform-managed login tests."""
 
     class _FakeUser:
         id = user_id
@@ -5355,27 +5378,221 @@ def _set_platform_auth(
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
         settings=auth._ApiAuthSettings(
-            platform_login_url=platform_login_url,
             supabase_url="https://supabase.example.com",
             supabase_anon_key="anon-key",
             account_id=account_id,
             mindroom_api_key=None,
             public_url=public_url,
+            platform_sso_url=platform_sso_url,
+            platform_sso_secret=platform_sso_secret,
         ),
         supabase_auth=_FakeClient(),
     )
 
 
-def test_supabase_cookie_auth_allows_access(
+def _platform_sso_token(
+    token_type: str,
+    *,
+    audience: str = "http://testserver",
+    subject: str = "user-123",
+    secret: str = _PLATFORM_SSO_SECRET,
+    lifetime_seconds: int = 60,
+) -> str:
+    """Sign a platform login ticket or session the way the platform and runtime do."""
+    now = int(time.time())
+    return jwt.encode(
+        {
+            "typ": token_type,
+            "aud": audience,
+            "sub": subject,
+            "email": "user@example.com",
+            "iat": now,
+            "exp": now + lifetime_seconds,
+            "jti": uuid4().hex,
+        },
+        secret,
+        algorithm="HS256",
+    )
+
+
+def _platform_ticket(**kwargs: Any) -> str:  # noqa: ANN401
+    return _platform_sso_token(auth._PLATFORM_SSO_TICKET_TYPE, **kwargs)
+
+
+def _platform_session(**kwargs: Any) -> str:  # noqa: ANN401
+    return _platform_sso_token(auth._PLATFORM_SESSION_TYPE, **kwargs)
+
+
+def _use_platform_session(test_client: TestClient, session_token: str) -> None:
+    test_client.cookies.clear()
+    test_client.cookies.set(auth._PLATFORM_SESSION_COOKIE_NAME, session_token)
+
+
+def test_platform_sso_ticket_exchange_sets_host_only_session(test_client: TestClient) -> None:
+    """A valid ticket becomes a host-only session cookie that authenticates dashboard calls."""
+    _set_platform_auth(valid_tokens=set(), account_id="user-123")
+
+    response = test_client.get(
+        "/api/auth/platform-sso",
+        params={"ticket": _platform_ticket(), "next": "/agents?tab=1"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/agents?tab=1"
+    set_cookie = response.headers["set-cookie"]
+    assert set_cookie.startswith(f"{auth._PLATFORM_SESSION_COOKIE_NAME}=")
+    set_cookie_lower = set_cookie.lower()
+    assert "domain=" not in set_cookie_lower
+    assert "path=/" in set_cookie_lower
+    assert "secure" in set_cookie_lower
+    assert "httponly" in set_cookie_lower
+    assert "samesite=lax" in set_cookie_lower
+
+    session_token = set_cookie.split(";", 1)[0].split("=", 1)[1]
+    _use_platform_session(test_client, session_token)
+    assert test_client.post("/api/config/load", headers={"Origin": "http://testserver"}).status_code == 200
+
+
+def test_platform_sso_ticket_is_single_use(test_client: TestClient) -> None:
+    """A captured ticket cannot be exchanged a second time."""
+    _set_platform_auth(valid_tokens=set())
+    ticket = _platform_ticket()
+
+    first = test_client.get("/api/auth/platform-sso", params={"ticket": ticket}, follow_redirects=False)
+    second = test_client.get("/api/auth/platform-sso", params={"ticket": ticket}, follow_redirects=False)
+
+    assert first.status_code == 307
+    assert second.status_code == 401
+
+
+def test_platform_sso_prunes_expired_ticket_ids_and_keeps_redirects_in_app(
     test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Platform requests should authenticate from the mindroom_jwt cookie."""
-    valid_cookie_token = "valid-cookie-token"  # noqa: S105
-    _set_platform_auth(valid_tokens={valid_cookie_token})
-    test_client.cookies.set("mindroom_jwt", valid_cookie_token)
+    """The replay cache drops expired IDs, and a ticket exchange never redirects off the instance."""
+    used_ticket_ids = {"expired-ticket": int(time.time()) - 3600}
+    monkeypatch.setattr(auth, "_used_platform_sso_ticket_ids", used_ticket_ids)
+    _set_platform_auth(valid_tokens=set())
+
+    response = test_client.get(
+        "/api/auth/platform-sso",
+        params={"ticket": _platform_ticket(), "next": "//evil.example.test/steal"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/"
+    assert "expired-ticket" not in used_ticket_ids
+    assert len(used_ticket_ids) == 1
+
+
+@pytest.mark.parametrize(
+    "ticket_kwargs",
+    [
+        {"secret": _OTHER_INSTANCE_SSO_SECRET},
+        {"audience": "https://other-tenant.example.test"},
+        {"lifetime_seconds": -60},
+    ],
+    ids=["other-instance-key", "other-instance-audience", "expired"],
+)
+def test_platform_sso_rejects_tickets_for_other_instances(
+    test_client: TestClient,
+    ticket_kwargs: dict[str, Any],
+) -> None:
+    """Tickets signed for another instance, naming another instance, or expired are rejected."""
+    _set_platform_auth(valid_tokens=set())
+
+    response = test_client.get(
+        "/api/auth/platform-sso",
+        params={"ticket": _platform_ticket(**ticket_kwargs)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 401
+    assert "set-cookie" not in response.headers
+
+
+def test_platform_sso_tickets_and_sessions_are_not_interchangeable(test_client: TestClient) -> None:
+    """A ticket is not a session, and a session is not a ticket."""
+    _set_platform_auth(valid_tokens=set())
+
+    _use_platform_session(test_client, _platform_ticket())
+    assert test_client.post("/api/config/load", headers={"Origin": "http://testserver"}).status_code == 401
+
+    test_client.cookies.clear()
+    response = test_client.get(
+        "/api/auth/platform-sso",
+        params={"ticket": _platform_session()},
+        follow_redirects=False,
+    )
+    assert response.status_code == 401
+
+
+def test_platform_sso_rejects_other_account_ticket(test_client: TestClient) -> None:
+    """The instance only admits its configured account."""
+    _set_platform_auth(valid_tokens=set(), account_id="account-owner")
+
+    response = test_client.get(
+        "/api/auth/platform-sso",
+        params={"ticket": _platform_ticket(subject="other-account")},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 403
+    assert "set-cookie" not in response.headers
+
+
+def test_platform_sso_is_disabled_without_instance_secret(test_client: TestClient) -> None:
+    """Without the instance SSO key the runtime neither exchanges tickets nor trusts sessions."""
+    _set_platform_auth(valid_tokens=set(), platform_sso_secret=None)
+
+    response = test_client.get(
+        "/api/auth/platform-sso",
+        params={"ticket": _platform_ticket()},
+        follow_redirects=False,
+    )
+    assert response.status_code == 404
+
+    _use_platform_session(test_client, _platform_session())
+    assert test_client.post("/api/config/load", headers={"Origin": "http://testserver"}).status_code == 401
+
+
+def test_platform_runtime_ignores_platform_api_cookie(test_client: TestClient) -> None:
+    """Tenant runtimes must not treat the platform's Supabase cookie as a dashboard credential."""
+    supabase_token = "valid-supabase-token"  # noqa: S105
+    _set_platform_auth(valid_tokens={supabase_token})
+    test_client.cookies.set("mindroom_jwt", supabase_token)
 
     response = test_client.post("/api/config/load", headers={"Origin": "http://testserver"})
-    assert response.status_code == 200
+
+    assert response.status_code == 401
+
+
+def test_platform_session_mutations_require_same_origin(test_client: TestClient) -> None:
+    """Cookie sessions remain subject to the browser mutation origin check."""
+    _set_platform_auth(valid_tokens=set())
+    _use_platform_session(test_client, _platform_session())
+
+    response = test_client.post("/api/config/load", headers={"Origin": "https://evil.example.test"})
+
+    assert response.status_code == 403
+
+
+def test_platform_auth_settings_read_sso_environment(tmp_path: Path) -> None:
+    """The runtime reads the SSO endpoint and instance key that the instance chart provides."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_PLATFORM_SSO_URL": "https://api.example.test/instance-sso/authorize",
+            "MINDROOM_PLATFORM_SSO_SECRET": _PLATFORM_SSO_SECRET,
+        },
+    )
+
+    settings = auth._build_auth_settings(runtime_paths)
+
+    assert settings.platform_sso_url == "https://api.example.test/instance-sso/authorize"
+    assert settings.platform_sso_secret == _PLATFORM_SSO_SECRET
 
 
 def test_platform_frontend_redirects_to_login_when_cookie_missing(
@@ -5383,7 +5600,7 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Platform deployments should redirect unauthenticated dashboard requests to the platform login."""
+    """Platform deployments should redirect unauthenticated dashboard requests to platform SSO."""
     frontend_dir = tmp_path / "frontend-dist"
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
@@ -5391,12 +5608,35 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens=set(),
-        platform_login_url="https://app.example.com/auth/login",
+        platform_sso_url="https://api.example.com/instance-sso/authorize",
     )
 
     response = test_client.get("/agents", follow_redirects=False)
     assert response.status_code == 307
-    assert response.headers["location"].startswith("https://app.example.com/auth/login?redirect_to=")
+    assert response.headers["location"].startswith("https://api.example.com/instance-sso/authorize?redirect_to=")
+
+
+def test_platform_frontend_skips_sso_redirect_without_instance_secret(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Without the instance key, a platform redirect would only end in an unusable ticket."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    _set_platform_auth(
+        valid_tokens=set(),
+        platform_sso_url="https://api.example.com/instance-sso/authorize",
+        platform_sso_secret=None,
+    )
+
+    response = test_client.get("/agents", follow_redirects=False)
+
+    assert response.status_code == 401
+    assert "location" not in response.headers
 
 
 def test_platform_frontend_redirect_uses_public_url_for_redirect_to(
@@ -5412,7 +5652,7 @@ def test_platform_frontend_redirect_uses_public_url_for_redirect_to(
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens=set(),
-        platform_login_url="https://app.example.com/auth/login",
+        platform_sso_url="https://api.example.com/instance-sso/authorize",
         public_url="https://tenant42.example.test",
     )
 
@@ -5462,24 +5702,24 @@ def test_platform_frontend_redirects_to_login_when_cookie_invalid(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Invalid platform cookies must redirect to login instead of serving the SPA shell."""
+    """Invalid platform sessions must redirect to login instead of serving the SPA shell."""
     frontend_dir = tmp_path / "frontend-dist"
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
-        valid_tokens={"valid-cookie-token"},
-        platform_login_url="https://app.example.com/auth/login",
+        valid_tokens=set(),
+        platform_sso_url="https://api.example.com/instance-sso/authorize",
     )
-    test_client.cookies.set("mindroom_jwt", "definitely-invalid")
+    _use_platform_session(test_client, _platform_session(secret=_OTHER_INSTANCE_SSO_SECRET))
 
     response = test_client.get(
         "/agents",
         follow_redirects=False,
     )
     assert response.status_code == 307
-    assert response.headers["location"].startswith("https://app.example.com/auth/login?redirect_to=")
+    assert response.headers["location"].startswith("https://api.example.com/instance-sso/authorize?redirect_to=")
 
 
 def test_platform_frontend_serves_dashboard_with_valid_cookie(
@@ -5487,18 +5727,17 @@ def test_platform_frontend_serves_dashboard_with_valid_cookie(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Valid platform cookies should grant access to the bundled dashboard."""
-    valid_cookie_token = "valid-cookie-token"  # noqa: S105
+    """Valid platform sessions should grant access to the bundled dashboard."""
     frontend_dir = tmp_path / "frontend-dist"
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
-        valid_tokens={valid_cookie_token},
-        platform_login_url="https://app.example.com/auth/login",
+        valid_tokens=set(),
+        platform_sso_url="https://api.example.com/instance-sso/authorize",
     )
-    test_client.cookies.set("mindroom_jwt", valid_cookie_token)
+    _use_platform_session(test_client, _platform_session())
 
     response = test_client.get("/")
     assert response.status_code == 200
@@ -5511,26 +5750,24 @@ def test_platform_frontend_redirects_when_cookie_account_mismatches(
     tmp_path: Path,
 ) -> None:
     """Platform frontend access must enforce the instance account id."""
-    valid_cookie_token = "valid-cookie-token"  # noqa: S105
     frontend_dir = tmp_path / "frontend-dist"
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
-        valid_tokens={valid_cookie_token},
-        platform_login_url="https://app.example.com/auth/login",
+        valid_tokens=set(),
+        platform_sso_url="https://api.example.com/instance-sso/authorize",
         account_id="account-owner",
-        user_id="other-account",
     )
-    test_client.cookies.set("mindroom_jwt", valid_cookie_token)
+    _use_platform_session(test_client, _platform_session(subject="other-account"))
 
     response = test_client.get(
         "/",
         follow_redirects=False,
     )
     assert response.status_code == 307
-    assert response.headers["location"].startswith("https://app.example.com/auth/login?redirect_to=")
+    assert response.headers["location"].startswith("https://api.example.com/instance-sso/authorize?redirect_to=")
 
 
 def test_health_startup_grace_expires_after_stale_threshold(

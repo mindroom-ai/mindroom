@@ -287,7 +287,7 @@ def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -295,6 +295,7 @@ def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='mcp_demo',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Plugin MCP Demo',\n"
         "    description='Should collide',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -336,7 +337,7 @@ def test_config_validation_allows_non_mcp_prefixed_plugin_tools_on_isolating_sco
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -344,6 +345,7 @@ def test_config_validation_allows_non_mcp_prefixed_plugin_tools_on_isolating_sco
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='mcp_custom_plugin',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Plugin MCP Custom',\n"
         "    description='Not an MCP server',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"

@@ -124,9 +124,13 @@ from .logging_config import get_logger, setup_logging
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import build_config_update_plan, configured_entity_names
+from .orchestration.config_warnings import warn_about_config_risks
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
 from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
-from .orchestration.rooms import get_room_user_ids_to_invite, get_root_space_user_ids_to_invite
+from .orchestration.rooms import (
+    get_room_user_ids_to_invite,
+    get_root_space_user_ids_to_invite,
+)
 from .orchestration.runtime import (
     STARTUP_RETRY_INITIAL_DELAY_SECONDS,
     STARTUP_RETRY_MAX_DELAY_SECONDS,
@@ -1380,6 +1384,7 @@ class _MultiAgentOrchestrator:
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
         self.config = config
+        warn_about_config_risks(config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
         self._activate_hook_registry(hook_registry)
@@ -1787,6 +1792,7 @@ class _MultiAgentOrchestrator:
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
         await self._prepare_entity_accounts(new_config, entity_names)
         self.config = new_config
+        warn_about_config_risks(new_config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(new_config, reason="initial_config_reload")
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(new_config)
@@ -2127,6 +2133,7 @@ class _MultiAgentOrchestrator:
                 "updating_config_authorization",
                 platform_administrator_ids=new_config.administrators,
             )
+            warn_about_config_risks(new_config, self.runtime_paths)
             self._computer_runtime.unbind()
             await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
             if changed_runtime_mcp_servers:
