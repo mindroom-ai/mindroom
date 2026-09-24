@@ -288,7 +288,6 @@ class TestBotScheduleCommands:
                 room_id="!test:server",
                 thread_id="$thread123",
                 config=mock_agent_bot.config,
-                runtime_paths=mock_agent_bot.runtime_paths,
             )
 
             send_response_mock.assert_called_once()
@@ -316,8 +315,6 @@ class TestBotScheduleCommands:
                 client=mock_agent_bot.client,
                 room_id="!test:server",
                 task_id="task123",
-                config=mock_agent_bot.config,
-                runtime_paths=mock_agent_bot.runtime_paths,
                 matrix_admin=None,
             )
 
@@ -351,8 +348,6 @@ class TestBotScheduleCommands:
             mock_cancel_all.assert_called_once_with(
                 client=mock_agent_bot.client,
                 room_id="!test:server",
-                config=mock_agent_bot.config,
-                runtime_paths=mock_agent_bot.runtime_paths,
                 matrix_admin=None,
             )
 

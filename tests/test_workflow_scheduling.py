@@ -42,7 +42,6 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import persist_entity_accounts
-from tests.scheduling_helpers import scheduled_task_state_response
 
 
 def _mid(name: str) -> MatrixID:
@@ -1095,17 +1094,15 @@ class TestIntegrationWithScheduling:
         )
 
         assert existing_task.created_at is not None
-        router_id = entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id
-        client.room_get_state.return_value = scheduled_task_state_response(
-            "!room:server",
-            {
-                "task123": {
-                    "status": "pending",
-                    "workflow": existing_task.workflow.model_dump_json(),
-                    "created_at": existing_task.created_at.isoformat(),
-                },
+        client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+            content={
+                "status": "pending",
+                "workflow": existing_task.workflow.model_dump_json(),
+                "created_at": existing_task.created_at.isoformat(),
             },
-            sender=router_id,
+            event_type="com.mindroom.scheduled.task",
+            state_key="task123",
+            room_id="!room:server",
         )
 
         task_id, message = await schedule_task(
@@ -1204,17 +1201,15 @@ class TestIntegrationWithScheduling:
         )
 
         assert existing_task.created_at is not None
-        router_id = entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id
-        client.room_get_state.return_value = scheduled_task_state_response(
-            "!room:server",
-            {
-                "task123": {
-                    "status": "pending",
-                    "workflow": existing_task.workflow.model_dump_json(),
-                    "created_at": existing_task.created_at.isoformat(),
-                },
+        client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+            content={
+                "status": "pending",
+                "workflow": existing_task.workflow.model_dump_json(),
+                "created_at": existing_task.created_at.isoformat(),
             },
-            sender=router_id,
+            event_type="com.mindroom.scheduled.task",
+            state_key="task123",
+            room_id="!room:server",
         )
 
         task_id, message = await schedule_task(

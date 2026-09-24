@@ -146,7 +146,6 @@ class SchedulerTools(Toolkit):
             room_id=context.room_id,
             thread_id=context.resolved_thread_id,
             config=context.config,
-            runtime_paths=context.runtime_paths,
         )
         _raise_for_scheduler_error(response_text)
         return response_text
@@ -169,8 +168,6 @@ class SchedulerTools(Toolkit):
             client=context.client,
             room_id=context.room_id,
             task_id=task_id,
-            config=context.config,
-            runtime_paths=context.runtime_paths,
             matrix_admin=context.matrix_admin,
         )
         _raise_for_scheduler_error(response_text)

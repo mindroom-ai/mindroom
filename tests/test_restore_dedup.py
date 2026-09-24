@@ -3,18 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
 import pytest
 
 from mindroom import scheduling
+from mindroom.constants import resolve_runtime_paths
 from mindroom.scheduling import _MISSED_TASK_MAX_AGE_SECONDS, ScheduledWorkflow, restore_scheduled_tasks
-from tests.scheduling_helpers import SCHEDULE_WRITER_ID, schedule_runtime_paths
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _conversation_reader() -> AsyncMock:
@@ -28,16 +24,13 @@ def _make_state_event(state_key: str, workflow: ScheduledWorkflow, status: str =
         "state_key": state_key,
         "content": {"workflow": workflow.model_dump_json(), "status": status},
         "event_id": f"$e{idx}",
-        "sender": SCHEDULE_WRITER_ID,
+        "sender": "@s:server",
         "origin_server_ts": idx,
     }
 
 
 @pytest.mark.asyncio
-async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(monkeypatch: pytest.MonkeyPatch) -> None:
     """Past once-tasks within the grace period should be restored; invalid cron skipped."""
     client = AsyncMock()
     config = AsyncMock()
@@ -85,7 +78,7 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(
         client,
         "!r:server",
         config,
-        schedule_runtime_paths(tmp_path),
+        resolve_runtime_paths(process_env={}),
         _conversation_reader(),
     )
     # recent past once-task is restored; invalid cron and cancelled cron are skipped
@@ -93,7 +86,7 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(
 
 
 @pytest.mark.asyncio
-async def test_restore_marks_ancient_missed_task_as_failed(tmp_path: Path) -> None:
+async def test_restore_marks_ancient_missed_task_as_failed() -> None:
     """One-time task older than the grace period should be marked as failed."""
     client = AsyncMock()
     config = AsyncMock()
@@ -121,7 +114,7 @@ async def test_restore_marks_ancient_missed_task_as_failed(tmp_path: Path) -> No
         client,
         "!r:server",
         config,
-        schedule_runtime_paths(tmp_path),
+        resolve_runtime_paths(process_env={}),
         _conversation_reader(),
     )
     assert restored == 0
@@ -137,7 +130,6 @@ async def test_restore_marks_ancient_missed_task_as_failed(tmp_path: Path) -> No
 @pytest.mark.asyncio
 async def test_restore_marks_ancient_missed_task_failed_via_admin_when_active_write_is_forbidden(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Ancient missed tasks should use the admin state fallback when active writes are rejected."""
     client = AsyncMock()
@@ -166,7 +158,7 @@ async def test_restore_marks_ancient_missed_task_failed_via_admin_when_active_wr
         client,
         "!r:server",
         config,
-        schedule_runtime_paths(tmp_path),
+        resolve_runtime_paths(process_env={}),
         _conversation_reader(),
     )
 
@@ -185,7 +177,7 @@ async def test_restore_marks_ancient_missed_task_failed_via_admin_when_active_wr
 
 
 @pytest.mark.asyncio
-async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
     """Future one-time tasks should be restored normally."""
     client = AsyncMock()
     config = AsyncMock()
@@ -212,7 +204,7 @@ async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch, 
         client,
         "!r:server",
         config,
-        schedule_runtime_paths(tmp_path),
+        resolve_runtime_paths(process_env={}),
         _conversation_reader(),
     )
     assert restored == 1
@@ -220,7 +212,7 @@ async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch, 
 
 
 @pytest.mark.asyncio
-async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.MonkeyPatch) -> None:
     """Restoration should not create duplicate asyncio tasks for the same task id."""
     client = AsyncMock()
     config = AsyncMock()
@@ -240,7 +232,7 @@ async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.
                 "state_key": "id1",
                 "content": {"workflow": workflow.model_dump_json(), "status": "pending"},
                 "event_id": "$e1",
-                "sender": SCHEDULE_WRITER_ID,
+                "sender": "@s:server",
                 "origin_server_ts": 1,
             },
         ],
@@ -258,7 +250,7 @@ async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.
         client,
         "!r:server",
         config,
-        schedule_runtime_paths(tmp_path),
+        resolve_runtime_paths(process_env={}),
         _conversation_reader(),
     )
 

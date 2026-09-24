@@ -338,16 +338,6 @@ def current_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> 
     return frozenset(sender_ids)
 
 
-def prepared_entity_user_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
-    """Return persisted Matrix IDs of current configured entities, skipping unprepared accounts."""
-    domain = runtime_matrix_domain(runtime_paths)
-    return frozenset(
-        user_id
-        for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]
-        if (user_id := managed_account_user_id(managed_account_key(entity_name), domain, runtime_paths)) is not None
-    )
-
-
 def resolve_agent_thread_mode(
     agent_config: AgentConfig,
     room_id: str | None,

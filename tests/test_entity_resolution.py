@@ -16,7 +16,6 @@ from mindroom.entity_resolution import (
     configured_bot_user_ids_for_room,
     configured_call_agent_name_for_room,
     entity_identity_registry,
-    prepared_entity_user_ids,
 )
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -268,36 +267,6 @@ def test_entity_identity_registry_requires_prepared_entity_accounts(tmp_path: Pa
 
     with pytest.raises(MissingManagedEntityAccountError, match="router"):
         entity_identity_registry(config, runtime_paths)
-
-
-def test_prepared_entity_user_ids_skip_unprepared_accounts(tmp_path: Path) -> None:
-    """Only current entities with persisted accounts count, and a missing account never raises."""
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(display_name="General", role="General agent"),
-                "writer": AgentConfig(display_name="Writer", role="Writer agent"),
-            },
-            teams={"crew": TeamConfig(display_name="Crew", role="Crew", agents=["general"])},
-        ),
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={},
-        ),
-    )
-    runtime_paths = runtime_paths_for(config)
-    state = MatrixState()
-    state.add_account(f"agent_{ROUTER_AGENT_NAME}", "mindroom_router", "pw", domain="localhost")
-    state.add_account("agent_general", "mindroom_general", "pw", domain="localhost")
-    state.add_account("agent_crew", "mindroom_crew", "pw", domain="localhost")
-    state.add_account("agent_removed", "mindroom_removed", "pw", domain="localhost")
-    state.add_account("agent_user", "mindroom_user", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
-
-    assert prepared_entity_user_ids(config, runtime_paths) == frozenset(
-        {"@mindroom_router:localhost", "@mindroom_general:localhost", "@mindroom_crew:localhost"},
-    )
 
 
 def test_entity_identity_registry_rejects_duplicate_persisted_entity_ids(tmp_path: Path) -> None:
