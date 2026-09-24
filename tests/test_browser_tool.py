@@ -932,6 +932,24 @@ async def test_browser_upload_allows_paths_inside_tool_storage(
     assert payload["paths"] == [str(allowed_file)]
 
 
+def _upload_runtime_context(runtime_paths: RuntimePaths, storage_path: Path) -> ToolRuntimeContext:
+    return make_test_tool_runtime_context(
+        agent_name="general",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
+        requester_id="@alice:example.org",
+        client=MagicMock(),
+        config=MagicMock(),
+        runtime_paths=runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        storage_path=storage_path,
+    )
+
+
 def test_browser_upload_roots_do_not_reuse_previous_context_output_dir(tmp_path: Path) -> None:
     """Reusable browser tools should not let later calls upload files from a prior context."""
     runtime_paths = resolve_primary_runtime_paths(
@@ -941,43 +959,37 @@ def test_browser_upload_roots_do_not_reuse_previous_context_output_dir(tmp_path:
     )
     tool = BrowserTools(runtime_paths)
 
-    def runtime_context(storage_path: Path) -> ToolRuntimeContext:
-        return make_test_tool_runtime_context(
-            agent_name="general",
-            target=MessageTarget.resolve(
-                room_id="!room:example.org",
-                thread_id=None,
-                reply_to_event_id=None,
-            ),
-            requester_id="@alice:example.org",
-            client=MagicMock(),
-            config=MagicMock(),
-            runtime_paths=runtime_paths,
-            relations=make_relation_lookup(),
-            conversation_reader=make_conversation_reader_mock(),
-            storage_path=storage_path,
-        )
-
     first_storage_path = tmp_path / "first-context"
     second_storage_path = tmp_path / "second-context"
     first_file = first_storage_path / "browser" / "artifact.txt"
     first_file.parent.mkdir(parents=True)
     first_file.write_text("from first context", encoding="utf-8")
 
-    with tool_runtime_context(runtime_context(first_storage_path)):
+    with tool_runtime_context(_upload_runtime_context(runtime_paths, first_storage_path)):
         assert tool._resolve_output_dir() == first_file.parent.resolve()
 
     with (
-        tool_runtime_context(runtime_context(second_storage_path)),
+        tool_runtime_context(_upload_runtime_context(runtime_paths, second_storage_path)),
         pytest.raises(ValueError, match="outside browser upload root"),
     ):
         tool._resolve_upload_path(str(first_file))
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "credentials/secret_credentials.json",
+        "encryption_keys/bot.db",
+        "attachments/att_secret.json",
+        "incoming_media/att_secret.png",
+        "matrix_state.yaml",
+    ],
+)
 async def test_browser_upload_rejects_runtime_storage_secrets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    relative_path: str,
 ) -> None:
     """Browser uploads should only read browser artifacts, not all runtime state."""
     runtime_paths = resolve_primary_runtime_paths(
@@ -985,22 +997,27 @@ async def test_browser_upload_rejects_runtime_storage_secrets(
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    secret_file = runtime_paths.storage_root / "credentials" / "secret.json"
-    secret_file.parent.mkdir(parents=True)
+    secret_file = runtime_paths.storage_root / relative_path
+    secret_file.parent.mkdir(parents=True, exist_ok=True)
     secret_file.write_text("secret", encoding="utf-8")
+    artifact = runtime_paths.storage_root / "browser" / "artifact.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("artifact", encoding="utf-8")
     tool = BrowserTools(runtime_paths)
     set_input_files = _install_upload_tab(tool, monkeypatch)
 
-    with pytest.raises(ValueError, match="outside browser upload root"):
-        await tool._upload(
-            profile_name="mindroom",
-            target_id=None,
-            paths=[str(secret_file)],
-            ref="e1",
-            input_ref=None,
-            element=None,
-            timeout_ms=None,
-        )
+    with tool_runtime_context(_upload_runtime_context(runtime_paths, runtime_paths.storage_root)):
+        assert tool._resolve_upload_path(str(artifact)) == artifact.resolve()
+        with pytest.raises(ValueError, match="outside browser upload root"):
+            await tool._upload(
+                profile_name="mindroom",
+                target_id=None,
+                paths=[str(secret_file)],
+                ref="e1",
+                input_ref=None,
+                element=None,
+                timeout_ms=None,
+            )
 
     set_input_files.assert_not_called()
 
