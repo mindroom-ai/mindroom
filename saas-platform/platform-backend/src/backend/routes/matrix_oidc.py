@@ -307,7 +307,10 @@ async def authorize(
 
     try:
         user = await verify_user(authorization=f"Bearer {token}", request=request)
-    except HTTPException:
+    except HTTPException as exc:
+        # Signing in again cannot fix a missing account or a blocked IP, so only 401 goes back to login.
+        if exc.status_code != 401:
+            raise
         return _platform_login_redirect(request)
 
     instance = _load_owned_instance(instance_id, str(user["account_id"]))

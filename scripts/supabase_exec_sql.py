@@ -64,8 +64,14 @@ def run_sql(query: str) -> None:
             "    LANGUAGE plpgsql\n"
             "    SECURITY DEFINER\n"
             "    SET search_path = public\n"
-            "    AS $$ BEGIN EXECUTE query; END; $$;\n\n"
-            "    REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC;\n"
+            "    AS $$ BEGIN\n"
+            "        IF auth.jwt()->>'role' IS DISTINCT FROM 'service_role' THEN\n"
+            "            RAISE EXCEPTION 'permission denied for function exec_sql'\n"
+            "            USING ERRCODE = 'insufficient_privilege';\n"
+            "        END IF;\n"
+            "        EXECUTE query;\n"
+            "    END; $$;\n\n"
+            "    REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC, anon, authenticated;\n"
             "    GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO service_role;\n"
         )
         raise SystemExit(msg)

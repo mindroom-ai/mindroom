@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from httpx import Response
 from main import app
 
 
@@ -70,6 +72,42 @@ def test_matrix_oidc_authorize_redirects_anonymous_users_to_platform_login(monke
     assert parse_qs(urlparse(location).query)["redirect_to"][0].startswith(
         "https://api.mindroom.chat/matrix-oidc/authorize?"
     )
+
+
+def _authorize_with_cookie(verify_user_error: HTTPException, monkeypatch) -> Response:
+    matrix_oidc = _patch_oidc(monkeypatch)
+    monkeypatch.setattr(matrix_oidc, "verify_user", AsyncMock(side_effect=verify_user_error))
+    client = TestClient(app, raise_server_exceptions=False)
+    client.cookies.set("mindroom_jwt", "platform-jwt")
+    return client.get(
+        "/matrix-oidc/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "mindroom-synapse",
+            "redirect_uri": "https://1.matrix.mindroom.chat/_synapse/client/oidc/callback",
+            "scope": "openid profile email",
+            "state": "state-123",
+        },
+        headers={"host": "api.mindroom.chat"},
+        follow_redirects=False,
+    )
+
+
+def test_matrix_oidc_authorize_redirects_expired_platform_sessions_to_login(monkeypatch) -> None:
+    response = _authorize_with_cookie(HTTPException(status_code=401, detail="Invalid token"), monkeypatch)
+
+    assert response.status_code == 307
+    assert response.headers["location"].startswith("https://app.mindroom.chat/auth/login?")
+
+
+def test_matrix_oidc_authorize_rejects_missing_accounts_without_login_loop(monkeypatch) -> None:
+    """Signing in again cannot restore a missing account, so it must not bounce back to login."""
+    detail = "Account not found. Please contact support."
+    response = _authorize_with_cookie(HTTPException(status_code=403, detail=detail), monkeypatch)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == detail
+    assert "location" not in response.headers
 
 
 def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -> None:

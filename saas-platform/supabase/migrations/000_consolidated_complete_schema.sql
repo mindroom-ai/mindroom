@@ -600,11 +600,16 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
 BEGIN
+    IF auth.jwt()->>'role' IS DISTINCT FROM 'service_role' THEN
+        RAISE EXCEPTION 'permission denied for function exec_sql' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     EXECUTE query;
 END;
 $$;
 
-REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC;
+-- Supabase default privileges grant EXECUTE to anon and authenticated, so revoking PUBLIC alone is not enough.
+REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO service_role;
 
 REVOKE INSERT, UPDATE ON TABLE accounts FROM authenticated;

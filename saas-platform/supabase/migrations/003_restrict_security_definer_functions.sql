@@ -1,4 +1,4 @@
--- Restrict the RLS-bypassing account lifecycle functions to the platform backend.
+-- Restrict the RLS-bypassing SECURITY DEFINER RPCs in the public schema to the platform backend.
 -- Fresh installs get the same definitions and grants from 000_consolidated_complete_schema.sql.
 -- Each function now rejects callers other than the service role before touching data.
 
@@ -137,3 +137,23 @@ REVOKE ALL ON FUNCTION hard_delete_account(UUID) FROM PUBLIC, anon, authenticate
 GRANT EXECUTE ON FUNCTION soft_delete_account(UUID, TEXT, UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION restore_account(UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION hard_delete_account(UUID) TO service_role;
+
+-- Helper to run privileged SQL via service role (used by tooling scripts)
+CREATE OR REPLACE FUNCTION exec_sql(query TEXT)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    IF auth.jwt()->>'role' IS DISTINCT FROM 'service_role' THEN
+        RAISE EXCEPTION 'permission denied for function exec_sql' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    EXECUTE query;
+END;
+$$;
+
+-- Supabase default privileges grant EXECUTE to anon and authenticated, so revoking PUBLIC alone is not enough.
+REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO service_role;

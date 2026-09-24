@@ -15,13 +15,18 @@ from main import app
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "supabase/migrations"
 BASELINE_MIGRATION_SQL = MIGRATIONS_DIR / "000_consolidated_complete_schema.sql"
 ACCOUNT_GRANTS_MIGRATION_SQL = MIGRATIONS_DIR / "002_restrict_account_grants.sql"
-ACCOUNT_LIFECYCLE_MIGRATION_SQL = MIGRATIONS_DIR / "003_restrict_account_lifecycle_functions.sql"
-ACCOUNT_LIFECYCLE_FUNCTIONS = {
+SECURITY_DEFINER_MIGRATION_SQL = MIGRATIONS_DIR / "003_restrict_security_definer_functions.sql"
+# SECURITY DEFINER RPCs that bypass RLS and must stay service-role only, mapped to their signatures.
+SERVICE_ROLE_FUNCTIONS = {
     "soft_delete_account": "UUID, TEXT, UUID",
     "restore_account": "UUID",
     "hard_delete_account": "UUID",
+    "exec_sql": "TEXT",
 }
+# Read-only helpers that RLS policies evaluate as the calling role.
+RLS_HELPER_FUNCTIONS = {"is_admin", "get_current_account_id"}
 SERVICE_ROLE_GUARD = "IF auth.jwt()->>'role' IS DISTINCT FROM 'service_role' THEN"
+FUNCTION_DEFINITION = re.compile(r"CREATE OR REPLACE FUNCTION (\w+)\(.*?\$\$.*?\$\$[^;]*;", re.DOTALL)
 
 
 def assert_account_grants_restricted(sql: str) -> None:
@@ -45,24 +50,30 @@ def test_accounts_incremental_migration_restricts_existing_authenticated_grants(
     assert_account_grants_restricted(ACCOUNT_GRANTS_MIGRATION_SQL.read_text(encoding="utf-8"))
 
 
-def assert_account_lifecycle_functions_restricted(sql: str) -> None:
-    for name, signature in ACCOUNT_LIFECYCLE_FUNCTIONS.items():
+def assert_security_definer_functions_restricted(sql: str) -> None:
+    definers = {
+        match.group(1): match.group(0)
+        for match in FUNCTION_DEFINITION.finditer(sql)
+        if "SECURITY DEFINER" in match.group(0) and "RETURNS TRIGGER" not in match.group(0)
+    }
+    assert definers.keys() - RLS_HELPER_FUNCTIONS == SERVICE_ROLE_FUNCTIONS.keys()
+    for name, signature in SERVICE_ROLE_FUNCTIONS.items():
         assert f"REVOKE ALL ON FUNCTION {name}({signature}) FROM PUBLIC, anon, authenticated;" in sql
         assert f"GRANT EXECUTE ON FUNCTION {name}({signature}) TO service_role;" in sql
-        body = sql.split(f"CREATE OR REPLACE FUNCTION {name}(", 1)[1].split("$$ LANGUAGE", 1)[0]
-        assert body.split("BEGIN", 1)[1].lstrip().startswith(SERVICE_ROLE_GUARD)
-    names = "|".join(ACCOUNT_LIFECYCLE_FUNCTIONS)
-    assert not re.search(rf"GRANT [^;]* ON FUNCTION ({names})\b[^;]*\b(PUBLIC|anon|authenticated)\b", sql)
+        assert definers[name].split("BEGIN", 1)[1].lstrip().startswith(SERVICE_ROLE_GUARD)
+    names = "|".join(SERVICE_ROLE_FUNCTIONS)
+    regrant = rf"GRANT [^;]*\bON (FUNCTION (public\.)?({names})\b|ALL FUNCTIONS\b)[^;]*\bTO\b[^;]*\b(PUBLIC|anon|authenticated)\b"
+    assert not re.search(regrant, sql, re.IGNORECASE)
 
 
-def test_account_lifecycle_functions_baseline_migration_is_service_role_only() -> None:
-    """Fresh databases expose the RLS-bypassing account RPCs only to the service role."""
-    assert_account_lifecycle_functions_restricted(BASELINE_MIGRATION_SQL.read_text(encoding="utf-8"))
+def test_security_definer_functions_baseline_migration_is_service_role_only() -> None:
+    """Fresh databases expose the RLS-bypassing definer RPCs only to the service role."""
+    assert_security_definer_functions_restricted(BASELINE_MIGRATION_SQL.read_text(encoding="utf-8"))
 
 
-def test_account_lifecycle_functions_incremental_migration_is_service_role_only() -> None:
+def test_security_definer_functions_incremental_migration_is_service_role_only() -> None:
     """Existing databases revoke the default PUBLIC, anon, and authenticated EXECUTE grants."""
-    assert_account_lifecycle_functions_restricted(ACCOUNT_LIFECYCLE_MIGRATION_SQL.read_text(encoding="utf-8"))
+    assert_security_definer_functions_restricted(SECURITY_DEFINER_MIGRATION_SQL.read_text(encoding="utf-8"))
 
 
 class TestAccountsEndpoints:
