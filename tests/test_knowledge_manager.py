@@ -1805,7 +1805,8 @@ def test_git_listing_runs_git_without_caller_environment(
     assert list_git_tracked_knowledge_files(config, "docs", docs_path) == [docs_path.resolve() / "doc.md"]
     assert len(envs) == 2
     for env in envs:
-        assert set(env) <= {"PATH", "HOME"}
+        assert "MINDROOM_API_KEY" not in env
+        assert env["GIT_ALLOW_PROTOCOL"] == ""
         assert all(Path(entry).is_absolute() for entry in env["PATH"].split(os.pathsep))
 
 

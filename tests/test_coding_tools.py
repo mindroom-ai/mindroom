@@ -1493,9 +1493,11 @@ class TestGitMetadataWrites:
 
     def test_coding_tools_block_git_metadata_writes(self, tmp_path: Path, git_config: Path) -> None:
         """write_file and edit_file refuse .git paths."""
+        (tmp_path / "linked").symlink_to(git_config.parent, target_is_directory=True)
         tools = CodingTools(base_dir=str(tmp_path))
 
         assert "Git metadata" in tools.write_file(self._CONFIG, "[core]\n")
+        assert "Git metadata" in tools.write_file("linked/config", "[core]\n")
         assert "Git metadata" in tools.edit_file(self._CONFIG, "bare = false", "bare = true")
 
         assert git_config.read_text() == self._ORIGINAL

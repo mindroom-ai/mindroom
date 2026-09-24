@@ -28,14 +28,15 @@ if TYPE_CHECKING:
 _GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS = 5.0
 # A knowledge checkout may sit inside an agent-writable workspace, and Git reads
 # the checkout's own ``.git/config``. Command-line ``-c`` values take precedence
-# over repository config, so these stop a listing from running any program the
-# checkout names (``core.fsmonitor`` fires on ``ls-files``) or reaching a transport.
+# over repository config and reach any Git child, so these stop a listing from
+# running programs the checkout names (``core.fsmonitor`` fires on ``ls-files``).
 _READ_ONLY_GIT_CONFIG_OVERRIDES = (
     "core.fsmonitor=false",
     "core.hooksPath=/dev/null",
     "credential.helper=",
-    "protocol.allow=never",
 )
+# Operator-controlled config locations, kept so settings such as ``safe.directory`` still apply.
+_GIT_CONFIG_LOCATION_ENV = ("HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
 _GLOB_CHARS = frozenset("*?[")
 _TEXT_LIKE_EXTENSIONS = {
     ".md",
@@ -307,13 +308,18 @@ def _read_only_git_env() -> dict[str, str]:
     """Return a minimal Git environment that carries none of the caller's secrets.
 
     Relative ``PATH`` entries are dropped because they would resolve inside the
-    checkout; ``HOME`` keeps the operator's global config, such as ``safe.directory``.
+    checkout. An empty ``GIT_ALLOW_PROTOCOL`` refuses every transport, overriding
+    any ``protocol.*`` config in the checkout, so an index read that would lazily
+    fetch missing objects cannot reach a remote helper; newer Git also honours
+    ``GIT_NO_LAZY_FETCH`` and skips that fetch outright.
     """
     path_entries = os.environ.get("PATH", os.defpath).split(os.pathsep)
-    env = {"PATH": os.pathsep.join(entry for entry in path_entries if Path(entry).is_absolute())}
-    home = os.environ.get("HOME")
-    if home:
-        env["HOME"] = home
+    env = {
+        "PATH": os.pathsep.join(entry for entry in path_entries if Path(entry).is_absolute()),
+        "GIT_ALLOW_PROTOCOL": "",
+        "GIT_NO_LAZY_FETCH": "1",
+    }
+    env.update({name: value for name in _GIT_CONFIG_LOCATION_ENV if (value := os.environ.get(name))})
     return env
 
 

@@ -659,6 +659,29 @@ def test_existing_directory_rejected_without_calling_tool(tmp_path: Path) -> Non
     assert _receipt(result.result)["status"] == "error"
 
 
+@pytest.mark.parametrize("git_path", ["knowledge/docs/.git/config", "knowledge/docs/.git", "repo/.GIT/config"])
+def test_git_metadata_output_paths_rejected_without_calling_tool(tmp_path: Path, git_path: str) -> None:
+    """Redirected output must not author Git metadata that MindRoom later runs Git against."""
+    git_config = tmp_path / "knowledge" / "docs" / ".git" / "config"
+    git_config.parent.mkdir(parents=True)
+    git_config.write_text("[core]\n", encoding="utf-8")
+    seen: list[object] = []
+    toolkit = _EchoToolkit(seen, result="should not run")
+    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+
+    result = FunctionCall(
+        function=_first_function(toolkit),
+        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: git_path},
+        call_id="call-1",
+    ).execute()
+
+    assert seen == []
+    assert _receipt(result.result)["status"] == "error"
+    assert validate_output_path_syntax(git_path) == "mindroom_output_path must not target Git metadata ('.git')."
+    assert git_config.read_text(encoding="utf-8") == "[core]\n"
+    assert not (tmp_path / "repo").exists()
+
+
 def test_intermediate_symlink_escape_rejected_without_calling_tool(tmp_path: Path) -> None:
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir()

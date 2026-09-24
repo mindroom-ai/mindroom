@@ -24,10 +24,10 @@ from pathlib import Path
 
 from agno.tools import Toolkit
 
+from mindroom.path_confinement import is_git_metadata_path
 from mindroom.tools.path_safety import (
     blocked_git_metadata_message,
     format_path_for_output,
-    is_git_metadata_path,
     is_within_base_dir,
     resolve_base_dir_path,
     split_search_pattern,

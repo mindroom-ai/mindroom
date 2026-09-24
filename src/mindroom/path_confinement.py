@@ -17,6 +17,17 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
+def is_git_metadata_path(path: Path) -> bool:
+    """Return whether a path is a ``.git`` entry or lies beneath one.
+
+    MindRoom runs Git in knowledge checkouts that may sit inside agent
+    workspaces, and Git trusts ``.git`` contents, so agent-facing writers refuse
+    these paths. That is defense in depth: shell and code-execution tools can
+    still write there, so Git itself must never trust a checkout's config.
+    """
+    return any(part.casefold() == ".git" for part in path.parts)
+
+
 def resolve_path_within_root(
     root: Path,
     path: str | Path,

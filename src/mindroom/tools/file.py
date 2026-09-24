@@ -9,6 +9,7 @@ from typing import Any, cast
 from agno.tools.file import FileTools as AgnoFileTools
 from agno.utils.log import log_debug, log_error
 
+from mindroom.path_confinement import is_git_metadata_path
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -21,7 +22,6 @@ from mindroom.tools.path_safety import (
     blocked_file_action_message,
     blocked_git_metadata_message,
     format_path_for_output,
-    is_git_metadata_path,
     is_within_base_dir,
     resolve_base_dir_path,
     split_search_pattern,
