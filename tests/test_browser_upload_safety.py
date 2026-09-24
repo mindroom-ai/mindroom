@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from typing import BinaryIO
 
     from mindroom.config.models import FileAccess
+    from mindroom.file_access import AuthorizedFile
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -143,7 +144,7 @@ async def test_upload_rejects_source_swapped_after_resolution(
     source, swap = _swap_fixture(root, part)
     resolve = tool._resolve_upload_path
 
-    def resolve_then_swap(path: str) -> tuple[Path, Path]:
+    def resolve_then_swap(path: str) -> AuthorizedFile:
         resolved = resolve(path)
         swap()
         return resolved
@@ -175,6 +176,32 @@ async def test_upload_rejects_replaced_authorized_root(
 
     with pytest.raises((OSError, ValueError)):
         await _upload(tool, [root / "upload.txt"])
+    consumer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", ["primary", "worker"])
+@pytest.mark.parametrize("requested", ["relative", "absolute"])
+async def test_upload_rejects_replaced_workspace_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    binding: str,
+    requested: str,
+) -> None:
+    """A bound workspace root swapped for a link cannot authorize its new outside destination."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool, consumer, _root = _upload_tool(tmp_path, monkeypatch, workspace_root=workspace)
+    if binding == "worker":
+        tool._worker_workspace = workspace.resolve()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "upload.txt").write_bytes(b"private bytes")
+    workspace.rmdir()
+    workspace.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises((OSError, ValueError)):
+        await _upload(tool, ["upload.txt" if requested == "relative" else workspace / "upload.txt"])
     consumer.assert_not_awaited()
 
 
@@ -406,7 +433,7 @@ async def test_primary_upload_rejects_runtime_state_and_other_agents(
 
     with (
         tool_runtime_context(_upload_context(tool, storage)),
-        pytest.raises(ValueError, match="outside browser upload root"),
+        pytest.raises(ValueError, match="inside the agent workspace"),
     ):
         await _upload(tool, [source])
     consumer.assert_not_awaited()
@@ -471,7 +498,7 @@ async def test_worker_upload_reads_only_worker_workspace(
     consumed = _capture_uploads(consumer)
 
     result = await _upload(tool, [workspace_file])
-    with pytest.raises(ValueError, match="outside browser upload root"):
+    with pytest.raises(ValueError, match="inside the agent workspace"):
         await _upload(tool, [primary_file])
     with pytest.raises(ValueError, match="must be an existing file"):
         await _upload(tool, ["att_photo"])

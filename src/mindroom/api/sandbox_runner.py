@@ -34,8 +34,9 @@ from mindroom.attachment_ids import normalize_attachment_id
 from mindroom.config.main import Config, load_config, normalized_config_data
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
-from mindroom.media_delivery import view_image_path
+from mindroom.media_delivery import view_agent_image
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
@@ -89,6 +90,7 @@ if TYPE_CHECKING:
 
     from agno.tools.toolkit import Toolkit
 
+    from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.worker_computer.protocol import BrowserSession
@@ -1736,13 +1738,18 @@ async def view_file_in_worker(
             failure_kind="worker",
         )
 
-    result = await asyncio.to_thread(_view_file_result_envelope, payload.path, workspace_root)
+    result = await asyncio.to_thread(
+        _view_file_result_envelope,
+        payload.path,
+        workspace_root,
+        agent_file_access(config, payload.routing_agent_name),
+    )
     return SandboxRunnerViewFileResponse(ok=True, result=result)
 
 
-def _view_file_result_envelope(path: str, workspace: Path) -> dict[str, object]:
+def _view_file_result_envelope(path: str, workspace: Path, file_access: FileAccess) -> dict[str, object]:
     """Read, decode, and encode one image outside the runner event loop."""
-    return encode_media_result(view_image_path(path, workspace=workspace))
+    return encode_media_result(view_agent_image(path, workspace=workspace, file_access=file_access))
 
 
 async def _execute_worker_browser(

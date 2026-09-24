@@ -880,7 +880,7 @@ async def test_browser_upload_rejects_paths_outside_upload_roots(
     tool = BrowserTools(runtime_paths)
     set_input_files = _install_upload_tab(tool, monkeypatch)
 
-    with pytest.raises(ValueError, match="outside browser upload root"):
+    with pytest.raises(ValueError, match="requires an agent workspace"):
         await tool._upload(
             profile_name="mindroom",
             target_id=None,
@@ -969,7 +969,7 @@ def test_browser_upload_roots_do_not_reuse_previous_context_output_dir(tmp_path:
 
     with (
         tool_runtime_context(runtime_context(second_storage_path)),
-        pytest.raises(ValueError, match="outside browser upload root"),
+        pytest.raises(ValueError, match="requires an agent workspace"),
     ):
         tool._resolve_upload_path(str(first_file))
 
@@ -991,7 +991,7 @@ async def test_browser_upload_rejects_runtime_storage_secrets(
     tool = BrowserTools(runtime_paths)
     set_input_files = _install_upload_tab(tool, monkeypatch)
 
-    with pytest.raises(ValueError, match="outside browser upload root"):
+    with pytest.raises(ValueError, match="requires an agent workspace"):
         await tool._upload(
             profile_name="mindroom",
             target_id=None,

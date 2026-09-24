@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from mindroom.path_confinement import open_regular_file_within_root
 
 
 def test_workspace_mode_accepts_relative_and_absolute_paths_inside_workspace(tmp_path: Path) -> None:
@@ -20,7 +18,7 @@ def test_workspace_mode_accepts_relative_and_absolute_paths_inside_workspace(tmp
     report.write_bytes(b"pdf")
     for raw in ("docs/report.pdf", str(report)):
         authorized = resolve_agent_file(raw, workspace_root=workspace, file_access="workspace", field_name="attachment")
-        assert authorized == AuthorizedFile(root=workspace.resolve(), path=report.resolve())
+        assert authorized == AuthorizedFile(root=workspace, relative=Path("docs/report.pdf"), path=report.resolve())
 
 
 def test_workspace_mode_accepts_symlinks_that_stay_inside_workspace(tmp_path: Path) -> None:
@@ -129,3 +127,27 @@ def test_both_modes_reject_unknown_home_directories_as_value_errors(tmp_path: Pa
                 file_access=mode,
                 field_name="attachment",
             )
+
+
+def test_workspace_root_replaced_by_link_is_refused_at_open(tmp_path: Path) -> None:
+    """Descriptor readers open from the caller's root spelling, so a swapped root never reaches its target."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret")
+    workspace = tmp_path / "ws"
+    workspace.symlink_to(outside, target_is_directory=True)
+    authorized = resolve_agent_file("secret.txt", workspace_root=workspace, file_access="workspace", field_name="f")
+    assert authorized.root == workspace
+    with pytest.raises(OSError, match=r"symbolic links|Not a directory"):  # noqa: SIM117
+        with open_regular_file_within_root(authorized.root, authorized.relative):
+            pass
+
+
+def test_unrestricted_mode_opens_from_the_filesystem_anchor(tmp_path: Path) -> None:
+    """Unrestricted files open through a no-follow walk from the anchor of their canonical path."""
+    target = tmp_path / "notes.txt"
+    target.write_text("n")
+    authorized = resolve_agent_file(str(target), workspace_root=None, file_access="unrestricted", field_name="f")
+    assert authorized.root == Path(target.resolve().anchor)
+    with open_regular_file_within_root(authorized.root, authorized.relative) as descriptor:
+        assert descriptor >= 0

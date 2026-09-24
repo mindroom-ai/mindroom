@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from itertools import count
 from pathlib import Path
@@ -37,7 +38,7 @@ from mindroom.desktop.client import desktop_response_router
 from mindroom.desktop.media import download_encrypted_screenshot
 from mindroom.desktop.playwright_mcp import browser_action_requires_control
 from mindroom.desktop.protocol import MAX_COMMAND_TTL_MS, DesktopCommand
-from mindroom.file_access import resolve_agent_file
+from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import PinnedMatrixDevice
 from mindroom.media_delivery import image_result
@@ -516,14 +517,14 @@ def _friendly_playwright_browser_error_message(exc: PlaywrightError) -> str | No
     )
 
 
-def _stage_browser_upload_paths(sources: list[tuple[Path, Path]], staging_dir: Path) -> list[str]:
+def _stage_browser_upload_paths(sources: list[AuthorizedFile], staging_dir: Path) -> list[str]:
     """Snapshot authorized descriptors to private paths that Playwright can reopen."""
     staged_paths: list[str] = []
-    for index, (root, path) in enumerate(sources):
+    for index, source_file in enumerate(sources):
         # Open the canonical file relative to the root that authorized it, without following links.
         # Resolving a replaced child here would grant trust to its new destination.
-        with open_regular_file_within_root(root, path.relative_to(root)) as descriptor:
-            destination = staging_dir / str(index) / path.name
+        with open_regular_file_within_root(source_file.root, source_file.relative) as descriptor:
+            destination = staging_dir / str(index) / source_file.path.name
             destination.parent.mkdir(mode=0o700)
             with os.fdopen(descriptor, "rb", closefd=False) as source, destination.open("xb") as output:
                 shutil.copyfileobj(source, output, length=1024 * 1024)
@@ -1356,7 +1357,7 @@ class BrowserTools(Toolkit):
             tab.upload_staging.append(staging)
         return {
             "action": "upload",
-            "paths": [str(path) for _root, path in sources],
+            "paths": [str(source.path) for source in sources],
             "profile": profile_name,
             "selector": selector,
             "status": "ok",
@@ -1945,48 +1946,42 @@ class BrowserTools(Toolkit):
             pass
         return output_dir
 
-    def _resolve_upload_path(self, path: str) -> tuple[Path, Path]:
-        """Resolve one upload path or ``att_*`` ID to its authorizing root and canonical file.
+    def _resolve_upload_path(self, path: str) -> AuthorizedFile:
+        """Resolve one upload path or ``att_*`` ID to its authorized file.
 
         The agent's ``file_access`` governs paths in the agent workspace, which
         is the worker workspace for a worker-bound browser. A primary-process
-        browser also reads its own artifact directory, never the rest of the
-        runtime storage root with its credentials, keys, and state.
+        browser also reads absolute paths in its own artifact directory, never
+        the rest of the runtime storage root with its credentials, keys, and state.
         """
-        worker_bound = self._worker_workspace is not None
-        if not worker_bound and path.startswith("att_"):
-            return self._resolve_upload_attachment(path)
-        workspace = self._worker_workspace if worker_bound else self._workspace_root
-        try:
-            authorized = resolve_agent_file(
+        if self._worker_workspace is not None:
+            return resolve_agent_file(
                 path,
-                workspace_root=workspace,
+                workspace_root=self._worker_workspace,
                 file_access=self._file_access,
                 field_name="upload path",
             )
-        except ValueError:
-            pass
-        else:
-            return authorized.root, authorized.path
-        requested = Path(path).expanduser()
-        resolved = (workspace / requested if workspace is not None else requested).resolve()
-        if not resolved.is_file():
-            msg = f"upload path must be an existing file: {path}"
-            raise ValueError(msg)
-        roots = [] if workspace is None else [workspace]
-        if not worker_bound:
+        if path.startswith("att_"):
+            return self._resolve_upload_attachment(path)
+        if Path(path).is_absolute():
             artifact_root = self._browser_artifact_root()
             artifact_dir = artifact_root if self._configured_output_dir is not None else artifact_root / "browser"
-            try:
-                return artifact_dir, resolve_path_within_root(artifact_dir, resolved, symlinks="internal")
-            except ValueError:
-                roots.insert(0, artifact_dir)
-        root_list = ", ".join(str(root) for root in roots)
-        msg = f"upload path '{path}' resolves to '{resolved}', outside browser upload root(s): {root_list}"
-        raise ValueError(msg)
+            with suppress(ValueError):
+                return resolve_agent_file(
+                    path,
+                    workspace_root=artifact_dir,
+                    file_access="workspace",
+                    field_name="upload path",
+                )
+        return resolve_agent_file(
+            path,
+            workspace_root=self._workspace_root,
+            file_access=self._file_access,
+            field_name="upload path",
+        )
 
     @staticmethod
-    def _resolve_upload_attachment(attachment_id: str) -> tuple[Path, Path]:
+    def _resolve_upload_attachment(attachment_id: str) -> AuthorizedFile:
         """Resolve an attachment available in this conversation to its recorded file."""
         context = get_tool_runtime_context()
         if context is None:
@@ -1996,7 +1991,8 @@ class BrowserTools(Toolkit):
         if error is not None or local_path is None:
             raise ValueError(error or f"Attachment is unavailable: {attachment_id}")
         # Records store canonical paths, so walk every component without following links.
-        return Path(local_path.anchor), local_path
+        anchor = Path(local_path.anchor)
+        return AuthorizedFile(root=anchor, relative=local_path.relative_to(anchor), path=local_path)
 
     @staticmethod
     def _remove_tab(state: _BrowserProfileState, target_id: str) -> None:

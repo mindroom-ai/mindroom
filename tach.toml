@@ -1437,6 +1437,7 @@ visibility = ["mindroom.api.sandbox_runner"]
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.file_access",
     "mindroom.path_confinement",
     "mindroom.media_delivery",
     "mindroom.tool_system.worker_media",
@@ -3953,6 +3954,7 @@ expose = ["has_meaningful_stream_output"]
 path = "mindroom.tool_system.metadata"
 depends_on = [
     "mindroom.constants",
+    "mindroom.file_access",
     "mindroom.mcp.registry",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.dependencies",
@@ -4167,7 +4169,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.media_delivery"
-depends_on = ["mindroom.path_confinement"]
+depends_on = ["mindroom.file_access", "mindroom.path_confinement"]
 visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.custom_tools.attachments",
@@ -5236,6 +5238,7 @@ from = ["mindroom.tool_system.declarations"]
 [[interfaces]]
 expose = [
     "AuthorizedFile",
+    "agent_file_access",
     "resolve_agent_file",
 ]
 from = ["mindroom.file_access"]

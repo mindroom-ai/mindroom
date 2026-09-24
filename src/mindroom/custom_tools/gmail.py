@@ -72,9 +72,8 @@ def _stage_attachments(
     Upstream Agno opens each attachment by pathname, so handing it a validated
     path would let a concurrent writer swap in a link first.
     """
-    # Open workspace files through the configured root spelling so a root replaced by a link is refused too.
-    pinned_root = workspace_root if file_access == "workspace" else None
-    if file_access == "workspace":
+    workspace_mode = file_access == "workspace"
+    if workspace_mode:
         if workspace_root is None:
             msg = "Gmail attachments require an agent workspace"
             raise ValueError(msg)
@@ -85,7 +84,7 @@ def _stage_attachments(
     if not isinstance(requested, list | tuple) or not all(isinstance(path, str) for path in requested):
         msg = "Gmail attachments must be file paths"
         raise ValueError(msg)
-    location = "in the agent workspace" if pinned_root is not None else "readable by MindRoom"
+    location = "in the agent workspace" if workspace_mode else "readable by MindRoom"
     remaining = _MAX_ATTACHMENT_BYTES
     staged_paths: list[str] = []
     for index, attachment in enumerate(requested):
@@ -97,10 +96,7 @@ def _stage_attachments(
                 field_name="Gmail attachment",
             )
             with (
-                open_regular_file_within_root(
-                    pinned_root or authorized.root,
-                    authorized.path.relative_to(authorized.root),
-                ) as descriptor,
+                open_regular_file_within_root(authorized.root, authorized.relative) as descriptor,
                 os.fdopen(descriptor, "rb", closefd=False) as source,
             ):
                 data = source.read(remaining + 1)

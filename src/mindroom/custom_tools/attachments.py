@@ -24,13 +24,7 @@ from mindroom.file_access import resolve_agent_file
 from mindroom.matrix.client_delivery import send_file_message, send_runtime_encrypted_media_message
 from mindroom.matrix.media import resolve_image_mime_type
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
-from mindroom.media_delivery import (
-    MAX_SOURCE_BYTES,
-    image_result,
-    media_error,
-    view_authorized_image,
-    view_image_path,
-)
+from mindroom.media_delivery import MAX_SOURCE_BYTES, image_result, media_error, view_agent_image
 from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.output_files import (
     ToolOutputFilePolicy,
@@ -429,20 +423,6 @@ async def send_resolved_attachments(
     return attachment_event_ids, None
 
 
-def _view_unrestricted_image(path: str, *, workspace_root: Path | None) -> ToolResult:
-    """View one image anywhere this process can read, resolving relative paths from the workspace."""
-    try:
-        authorized = resolve_agent_file(
-            path,
-            workspace_root=workspace_root,
-            file_access="unrestricted",
-            field_name="Image path",
-        )
-    except ValueError as exc:
-        return media_error(str(exc), metadata={"path": path})
-    return view_authorized_image(authorized)
-
-
 class AttachmentTools(Toolkit):
     """Toolkit for reading and sending context-scoped attachments."""
 
@@ -520,15 +500,12 @@ class AttachmentTools(Toolkit):
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 return media_error(str(exc), metadata=metadata)
             return result or media_error("Worker workspace is unavailable.", metadata=metadata)
-        if self._file_access == "unrestricted":
-            return await asyncio.to_thread(
-                _view_unrestricted_image,
-                path,
-                workspace_root=self._tool_output_workspace_root,
-            )
-        if self._tool_output_workspace_root is None:
-            return media_error("An authorized workspace is required for path viewing.", metadata=metadata)
-        return await asyncio.to_thread(view_image_path, path, workspace=self._tool_output_workspace_root)
+        return await asyncio.to_thread(
+            view_agent_image,
+            path,
+            workspace=self._tool_output_workspace_root,
+            file_access=self._file_access,
+        )
 
     def _describe_get_attachment_schema(self) -> None:
         """Attach explicit model-facing descriptions for bespoke attachment args."""

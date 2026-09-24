@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.declarations import (
     ConfigField,
@@ -646,11 +647,8 @@ def _build_managed_tool_init_kwargs(
 
 
 def _managed_file_access(runtime_config: Config | None, worker_target: ResolvedWorkerTarget | None) -> FileAccess:
-    """Resolve the constructing agent's file_access; anything unknown stays confined to the workspace."""
-    agent_name = worker_target.routing_agent_name if worker_target is not None else None
-    if runtime_config is None or agent_name is None or agent_name not in runtime_config.agents:
-        return "workspace"
-    return runtime_config.resolve_entity(agent_name).file_access
+    """Resolve the constructing agent's file_access."""
+    return agent_file_access(runtime_config, worker_target.routing_agent_name if worker_target is not None else None)
 
 
 def _resolve_tool_credentials_manager(

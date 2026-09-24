@@ -108,7 +108,7 @@ def test_path_view_uses_workspace_and_retains_file(tmp_path: Path) -> None:
     path = tmp_path / "fixture.png"
     data = image_bytes()
     path.write_bytes(data)
-    result = media_delivery.view_image_path("fixture.png", workspace=tmp_path)
+    result = media_delivery.view_agent_image("fixture.png", workspace=tmp_path, file_access="workspace")
     assert result.images
     assert result.images[0].content == data
     assert path.read_bytes() == data
@@ -130,7 +130,7 @@ def test_path_view_rejects_unavailable_or_unauthorized_files(tmp_path: Path, kin
         "missing": "missing.png",
         "directory": ".",
     }[kind]
-    result = media_delivery.view_image_path(requested, workspace=workspace)
+    result = media_delivery.view_agent_image(requested, workspace=workspace, file_access="workspace")
     assert not result.images
     assert json.loads(result.content)["view_status"] == "error"
 
@@ -179,6 +179,6 @@ def test_path_view_rejects_symlink_swap_during_open(tmp_path: Path, monkeypatch:
         return original_open(file, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", swap_open)
-    result = media_delivery.view_image_path("image.png", workspace=workspace)
+    result = media_delivery.view_agent_image("image.png", workspace=workspace, file_access="workspace")
     assert not result.images
     assert json.loads(result.content)["view_status"] == "error"
