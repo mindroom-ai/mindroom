@@ -64,10 +64,9 @@ logger = get_logger(__name__)
 # reads under a byte cap so the primary process never resolves a planted entry.
 _MAX_MEMORY_FILE_BYTES = 1 << 20
 _MAX_MEMORY_SCAN_BYTES = 16 << 20
-_MAX_MEMORY_SCAN_FILES = 2048
+_MAX_MEMORY_SCAN_ENTRIES = 4096
 _MAX_MEMORY_DIR_DEPTH = 8
 _READ_CHUNK_BYTES = 1 << 16
-_REWRITE_REFUSED_MESSAGE = "Refused to rewrite a file memory entry that is oversized or not valid UTF-8"
 
 
 @dataclass(frozen=True)
@@ -173,30 +172,40 @@ def _is_regular_file_at(directory_fd: int, name: str) -> bool:
         return False
 
 
-def _collect_markdown_relative_paths(directory_fd: int, prefix: str, depth: int) -> list[str]:
-    """List markdown files below one pinned directory, never crossing a link."""
+def _collect_daily_markdown_paths(daily_fd: int) -> list[str]:
+    """List markdown files below the pinned daily directory, never crossing a link.
+
+    Every directory is re-opened by a no-follow walk from ``daily_fd``, and one
+    entry budget bounds files and directories alike.
+    """
     found: list[str] = []
-    subdirectories: list[str] = []
-    with os.scandir(directory_fd) as entries:
-        for entry in entries:
-            if len(found) >= _MAX_MEMORY_SCAN_FILES:
-                break
-            if entry.is_dir(follow_symlinks=False):
-                subdirectories.append(entry.name)
-            elif entry.name.endswith(".md") and entry.is_file(follow_symlinks=False):
-                found.append(f"{prefix}/{entry.name}")
-    if subdirectories and depth >= _MAX_MEMORY_DIR_DEPTH:
+    pending: list[tuple[str, ...]] = [()]
+    examined = 0
+    skipped_deep = False
+    while pending and examined <= _MAX_MEMORY_SCAN_ENTRIES:
+        parts = pending.pop()
+        with (
+            suppress(OSError, ValueError),
+            open_directory_within_root(daily_fd, Path(*parts)) as directory_fd,
+            os.scandir(directory_fd) as entries,
+        ):
+            for entry in entries:
+                examined += 1
+                if examined > _MAX_MEMORY_SCAN_ENTRIES:
+                    break
+                if entry.is_dir(follow_symlinks=False):
+                    if len(parts) < _MAX_MEMORY_DIR_DEPTH:
+                        pending.append((*parts, entry.name))
+                    else:
+                        skipped_deep = True
+                elif entry.name.endswith(".md") and entry.is_file(follow_symlinks=False):
+                    found.append("/".join((FILE_MEMORY_DAILY_DIR, *parts, entry.name)))
+    if examined > _MAX_MEMORY_SCAN_ENTRIES or skipped_deep:
         logger.warning(
-            "Stopped file memory listing at its directory depth limit",
-            path=prefix,
+            "Stopped file memory listing at its entry or depth limit",
+            max_entries=_MAX_MEMORY_SCAN_ENTRIES,
             max_depth=_MAX_MEMORY_DIR_DEPTH,
         )
-        return found
-    for name in subdirectories:
-        if len(found) >= _MAX_MEMORY_SCAN_FILES:
-            break
-        with suppress(OSError, ValueError), open_directory_within_root(directory_fd, name) as child_fd:
-            found.extend(_collect_markdown_relative_paths(child_fd, f"{prefix}/{name}", depth + 1))
     return found
 
 
@@ -205,14 +214,7 @@ def _scope_markdown_relative_paths(scope_fd: int) -> list[str]:
     if _is_regular_file_at(scope_fd, FILE_MEMORY_ENTRYPOINT):
         paths.append(FILE_MEMORY_ENTRYPOINT)
     with suppress(OSError, ValueError), open_directory_within_root(scope_fd, FILE_MEMORY_DAILY_DIR) as daily_fd:
-        paths.extend(sorted(_collect_markdown_relative_paths(daily_fd, FILE_MEMORY_DAILY_DIR, 1)))
-    if len(paths) > _MAX_MEMORY_SCAN_FILES:
-        logger.warning(
-            "Stopped file memory listing at its file-count limit",
-            found_files=len(paths),
-            max_files=_MAX_MEMORY_SCAN_FILES,
-        )
-        return paths[:_MAX_MEMORY_SCAN_FILES]
+        paths.extend(sorted(_collect_daily_markdown_paths(daily_fd)))
     return paths
 
 
@@ -277,6 +279,7 @@ def _scope_memory_file(relative_path: str, payload: _CappedPayload) -> _ScopeMem
 
 def _read_scope_markdown_files_at(scope_fd: int, scope_path: Path) -> list[_ScopeMemoryFile]:
     files: list[_ScopeMemoryFile] = []
+    skipped: list[str] = []
     budget = _MAX_MEMORY_SCAN_BYTES
     for relative_path in _scope_markdown_relative_paths(scope_fd):
         if budget <= 0:
@@ -284,12 +287,8 @@ def _read_scope_markdown_files_at(scope_fd: int, scope_path: Path) -> list[_Scop
             break
         try:
             payload = _read_scope_file_at(scope_fd, relative_path, max_bytes=min(_MAX_MEMORY_FILE_BYTES, budget))
-        except (OSError, ValueError) as exc:
-            logger.warning(
-                "Skipped unreadable file memory entry",
-                path=relative_path,
-                error_type=type(exc).__name__,
-            )
+        except (OSError, ValueError):
+            skipped.append(relative_path)
             continue
         if payload is None:
             continue
@@ -301,7 +300,27 @@ def _read_scope_markdown_files_at(scope_fd: int, scope_path: Path) -> list[_Scop
                 max_bytes=_MAX_MEMORY_FILE_BYTES,
             )
         files.append(_scope_memory_file(relative_path, payload))
+    if skipped:
+        # One notice per scan, so planted entries cannot flood the log.
+        logger.warning("Skipped unreadable file memory entries", count=len(skipped), first_path=skipped[0])
     return files
+
+
+def _read_listed_memory_file(scope_path: Path, relative_path: str) -> _ScopeMemoryFile | None:
+    """Read one listed non-entrypoint memory file without reading the rest of the scope."""
+    if relative_path == FILE_MEMORY_ENTRYPOINT:
+        return None
+    try:
+        with open_directory_within_root(scope_path) as scope_fd:
+            if relative_path not in _scope_markdown_relative_paths(scope_fd):
+                return None
+            payload = _read_scope_file_at(scope_fd, relative_path, max_bytes=_MAX_MEMORY_FILE_BYTES)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        logger.warning("Skipped unreadable file memory entry", path=relative_path, error_type=type(exc).__name__)
+        return None
+    return _scope_memory_file(relative_path, payload) if payload is not None else None
 
 
 def _read_scope_markdown_files(scope_path: Path) -> list[_ScopeMemoryFile]:
@@ -320,13 +339,36 @@ def _read_scope_markdown_files(scope_path: Path) -> list[_ScopeMemoryFile]:
         return []
 
 
+def _existing_file_mode(directory_fd: int, name: str) -> int | None:
+    """Return a regular entry's permission bits so a rewrite keeps them."""
+    try:
+        file_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    return stat.S_IMODE(file_stat.st_mode) & 0o777 if stat.S_ISREG(file_stat.st_mode) else None
+
+
+def _require_rewritable(memory_file: _ScopeMemoryFile) -> None:
+    if not memory_file.rewritable:
+        msg = (
+            f"File memory entry {memory_file.relative_path} is oversized or not valid UTF-8, "
+            "so it cannot be rewritten safely; edit the file directly."
+        )
+        raise ValueError(msg)
+
+
 def _write_scope_markdown_file(scope_path: Path, relative_path: Path, payload: bytes) -> None:
     """Publish one memory file descriptor-relative, never through a planted entry."""
     with (
         open_directory_within_root(scope_path) as scope_fd,
         open_directory_within_root(scope_fd, relative_path.parent, create=True) as directory_fd,
     ):
-        atomic_write_bytes_at(directory_fd, relative_path.name, payload)
+        atomic_write_bytes_at(
+            directory_fd,
+            relative_path.name,
+            payload,
+            file_mode=_existing_file_mode(directory_fd, relative_path.name),
+        )
 
 
 def _append_scope_markdown_line(scope_path: Path, relative_path: Path, line: str, *, initial_text: bytes) -> None:
@@ -335,10 +377,11 @@ def _append_scope_markdown_line(scope_path: Path, relative_path: Path, line: str
         open_directory_within_root(scope_path) as scope_fd,
         open_directory_within_root(scope_fd, relative_path.parent, create=True) as directory_fd,
     ):
+        # A new file gets 0o666 less the umask, like an ordinary file write.
         descriptor = os.open(
             relative_path.name,
             os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-            0o600,
+            0o666,
             dir_fd=directory_fd,
         )
         try:
@@ -643,14 +686,7 @@ def _load_scope_path_memory_line(
     line_no = int(match.group("line"))
     relative_path = match.group("path")
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
-    memory_file = next(
-        (
-            candidate
-            for candidate in _read_scope_markdown_files(scope_path)
-            if candidate.relative_path == relative_path and candidate.relative_path != FILE_MEMORY_ENTRYPOINT
-        ),
-        None,
-    )
+    memory_file = _read_listed_memory_file(scope_path, relative_path)
     if memory_file is None:
         return None
 
@@ -717,9 +753,6 @@ def _replace_scope_memory_entry(
     _entries, id_to_file = _load_scope_id_entries(scope_user_id, resolution, config)
     if (memory_file := id_to_file.get(memory_id)) is None:
         return False
-    if not memory_file.rewritable:
-        logger.warning(_REWRITE_REFUSED_MESSAGE, path=memory_file.relative_path)
-        return False
 
     changed = False
     new_lines: list[str] = []
@@ -741,6 +774,7 @@ def _replace_scope_memory_entry(
     if not changed:
         return False
 
+    _require_rewritable(memory_file)
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
     _write_scope_markdown_file(scope_path, Path(memory_file.relative_path), _memory_lines_payload(new_lines))
     return True
@@ -756,9 +790,7 @@ def _replace_scope_path_memory_entry(
     path_memory_line = _load_scope_path_memory_line(scope_user_id, memory_id, resolution, config)
     if path_memory_line is None:
         return False
-    if not path_memory_line.memory_file.rewritable:
-        logger.warning(_REWRITE_REFUSED_MESSAGE, path=path_memory_line.memory_file.relative_path)
-        return False
+    _require_rewritable(path_memory_line.memory_file)
 
     lines = list(path_memory_line.lines)
 
