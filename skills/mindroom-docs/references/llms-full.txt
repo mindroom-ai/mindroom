@@ -11025,7 +11025,7 @@ Additional Atlassian sites can be added as separate, independently connected too
 | `confluence_add_comment` | Confluence | yes | Add a footer comment to a page. |
 
 Plain-text Jira descriptions and comments are converted to Atlassian Document Format, with blank lines separating paragraphs.
-`jira_transition_issue` picks an exact transition ID first, then an exact transition name, then a target status that only one transition leads to, ignoring case for names.
+`jira_transition_issue` picks an exact transition ID first, then a transition name, then a target status that only one transition leads to, and name and status matches ignore case.
 When several transitions share that name or target status, it returns `transition_ambiguous` with the candidates and changes nothing.
 Confluence bodies use the Confluence storage format, which is XHTML such as `<p>Hello</p>`.
 Every result is a JSON object with `status` set to `ok` or `error`.
@@ -11268,8 +11268,8 @@ The stored file name is always generated from the attachment ID.
 - HTTP request logs drop the signature query from media service URLs.
 - At debug level, each download hop logs only its host, its path with identifiers masked and without query or parameters, its status, and whether the bearer was sent.
 - Jira and Confluence error messages are kept for failed API requests, with URLs replaced and control characters removed.
-- A 401 from the gateway, for an API call or a download, returns a reconnect link instead of Atlassian's error text.
-- A 401 whose message reports a scope mismatch returns `scope_mismatch` with Atlassian's message and no reconnect link, because reconnecting grants the same scopes again.
+- A gateway 401 whose message reports a scope mismatch returns `scope_mismatch` with Atlassian's message and no reconnect link, because reconnecting grants the same scopes again.
+- Any other gateway 401, for an API call or a download, returns a reconnect link instead of Atlassian's error text.
 
 ## Limits
 
