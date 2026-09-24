@@ -2,7 +2,9 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+import shutil
+import tempfile
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -142,12 +144,27 @@ def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
         )
 
 
+@pytest.fixture
+def socket_dir() -> Iterator[Path]:
+    """Bind Unix sockets outside pytest's temp root, which a long TMPDIR can push past the ~107-byte limit."""
+    path = Path(tempfile.mkdtemp(prefix="mr-rfb-", dir="/tmp"))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 @pytest.mark.parametrize("termination", ["normal", "text", "bug"])
-def test_rfb_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, termination: str) -> None:  # noqa: PLR0915 - transport lifecycle through teardown
+def test_rfb_stream(  # noqa: PLR0915 - transport lifecycle through teardown
+    tmp_path: Path,
+    socket_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    termination: str,
+) -> None:
     """Watcher input is filtered on the worker even when the viewer sends raw key bytes."""
     received = bytearray()
     display = FakeDisplay()
-    display.socket_path = tmp_path / "rfb"
+    display.socket_path = socket_dir / "rfb"
     runtime = WorkerComputerRuntime(display)
 
     async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -228,11 +245,12 @@ def test_rfb_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, termination
 @pytest.mark.asyncio
 async def test_worker_stream_cancellation_drains_socket_and_exact_ownership(  # noqa: PLR0915 - real transport ownership through repeated cancellation
     tmp_path: Path,
+    socket_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Repeated cancellation during sibling drain cannot strand the Unix socket or viewer lease."""
     runtime = WorkerComputerRuntime(FakeDisplay())
-    runtime.display.socket_path = tmp_path / "cancellation-rfb"
+    runtime.display.socket_path = socket_dir / "cancellation-rfb"
     status = await runtime.ensure_started()
     closed = asyncio.Event()
 
