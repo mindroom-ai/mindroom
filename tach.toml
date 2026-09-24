@@ -602,6 +602,7 @@ path = "mindroom.matrix.relation_lookup"
 depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.event_info",
+    "mindroom.matrix.thread_membership",
 ]
 visibility = [
     "mindroom.bot",
