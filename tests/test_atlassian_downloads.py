@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 import mindroom.matrix.media as media_module
 from mindroom import attachments as attachments_module
@@ -196,6 +197,54 @@ async def test_download_registers_a_turn_scoped_context_attachment(
         "$thread",
         ALICE,
     )
+    assert "signed-secret" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_download_follows_the_observed_atlassian_redirect_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Atlassian answers with an empty JSON 302 to a signed media URL, which serves the identity-encoded file."""
+    tool, gateway, context, _paths = _setup(tmp_path, monkeypatch)
+    media_url = (
+        "https://api.media.atlassian.com/file/0b9c2f4e-8d1a-4c3b-9e7f-5a6b7c8d9e0f/binary"
+        "?token=eyJhbGciOiJIUzI1NiJ9.signed-secret.sig&client=11111111-2222-4333-8444-555555555555&dl=true"
+    )
+    gateway.route(
+        "GET",
+        gateway_url("confluence", DOWNLOAD_PATH),
+        lambda _request: httpx.Response(
+            302,
+            headers={"location": media_url, "content-type": "application/json", "content-length": "0"},
+        ),
+    )
+    gateway.route(
+        "GET",
+        media_url.split("?", maxsplit=1)[0],
+        lambda _request: httpx.Response(
+            200,
+            content=_streamed(PAYLOAD),
+            headers={
+                "content-type": "application/pdf",
+                "content-length": str(len(PAYLOAD)),
+                "content-disposition": 'attachment; filename="Report.pdf"',
+            },
+        ),
+    )
+
+    result = await _download(tool, context)
+
+    hops = _download_requests(gateway)
+    assert result["status"] == "ok"
+    assert result["attachment"]["size_bytes"] == len(PAYLOAD)
+    assert [(str(request.url), bearer(request)) for request in hops] == [
+        (gateway_url("confluence", DOWNLOAD_PATH), TOKEN),
+        (media_url, None),
+    ]
+    record = load_attachment(tmp_path / "storage", result["attachment_id"])
+    assert record is not None
+    assert record.local_path.read_bytes() == PAYLOAD
     assert "signed-secret" not in json.dumps(result)
 
 
@@ -727,18 +776,54 @@ async def test_request_logs_never_contain_signed_media_urls(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Request logs keep media URLs without the signature query that authorizes them."""
+    """Request logs keep media URLs without the signature query, and hop logs keep only a masked path shape."""
     tool, gateway, context, _paths = _setup(tmp_path, monkeypatch)
     gateway.route("GET", gateway_url("confluence", DOWNLOAD_PATH), _redirect(MEDIA_URL))
     gateway.route("GET", MEDIA_URL.split("?", maxsplit=1)[0], _file())
 
-    with caplog.at_level(logging.INFO, logger="httpx"):
+    with caplog.at_level(logging.INFO, logger="httpx"), capture_logs() as events:
         result = await _download(tool, context)
 
     logged = "\n".join(record.getMessage() for record in caplog.records if record.name == "httpx")
+    hops = [event for event in events if event["event"] == "atlassian_download_hop"]
     assert result["status"] == "ok"
     assert "api.media.atlassian.com/file/abc/binary" in logged
     assert "signed-secret" not in logged
+    assert hops == [
+        {
+            "event": "atlassian_download_hop",
+            "log_level": "debug",
+            "host": "api.atlassian.com",
+            "path_shape": "/ex/confluence/*/wiki/rest/api/content/*/child/attachment/*/download",
+            "status_code": 302,
+            "bearer_sent": True,
+        },
+        {
+            "event": "atlassian_download_hop",
+            "log_level": "debug",
+            "host": "api.media.atlassian.com",
+            "path_shape": "/file/abc/binary",
+            "status_code": 200,
+            "bearer_sent": False,
+        },
+    ]
+    assert not any(marker in repr(hops) for marker in ("signed-secret", "token=", "?", CLOUD_ID, "att456", TOKEN))
+
+
+@pytest.mark.parametrize(
+    ("url", "shape"),
+    [
+        (
+            f"https://api.atlassian.com/ex/confluence/{CLOUD_ID}/wiki/download/attachments/123/Report.pdf?version=1",
+            "/ex/confluence/*/wiki/download/attachments/*/*",
+        ),
+        ("https://api.media.atlassian.com/file/0b9c2f4e-8d1a-4c3b-9e7f-5a6b7c8d9e0f/binary?token=x", "/file/*/binary"),
+        ("https://api.media.atlassian.com/file/abc;sig=signed-secret/binary", "/file/abc"),
+    ],
+)
+def test_hop_log_path_shapes_mask_identifiers_and_drop_parameters(url: str, shape: str) -> None:
+    """Only plain-word segments survive, and nothing after a query or parameter separator is logged."""
+    assert atlassian_client._path_shape(url) == shape
 
 
 @pytest.mark.asyncio

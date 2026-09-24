@@ -263,6 +263,7 @@ The stored file name is always generated from the attachment ID.
 - Every download hop asks for `Accept-Encoding: identity`, and content-encoded responses are rejected instead of decoded.
 - Error results carry a code, a fixed message, and a status code, and never a request URL, signed download link, token, or raw response body.
 - HTTP request logs drop the signature query from media service URLs.
+- At debug level, each download hop logs only its host, its path with identifiers masked and without query or parameters, its status, and whether the bearer was sent.
 - Jira and Confluence error messages are kept for failed API requests, with URLs replaced and control characters removed.
 - A 401 from the gateway, for an API call or a download, returns a reconnect link instead of Atlassian's error text.
 - A 401 whose message reports a scope mismatch returns `scope_mismatch` with Atlassian's message and no reconnect link, because reconnecting grants the same scopes again.

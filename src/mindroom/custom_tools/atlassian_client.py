@@ -17,12 +17,15 @@ from urllib.parse import unquote, urljoin, urlsplit
 import httpx
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
+from mindroom.logging_config import get_logger
 from mindroom.oauth.atlassian import normalize_cloud_id, normalize_site_url
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
 
     from mindroom.oauth.atlassian import AtlassianProduct
+
+logger = get_logger(__name__)
 
 _GATEWAY_HOST = "api.atlassian.com"
 _GATEWAY_ORIGIN = f"https://{_GATEWAY_HOST}"
@@ -38,6 +41,8 @@ _DOWNLOAD_DEADLINE_SECONDS = 120.0
 # Any media type, but no content coding, so the byte limit counts the bytes actually received.
 _DOWNLOAD_HEADERS = {"Accept": "*/*", "Accept-Encoding": "identity"}
 _URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
+# Path segments that are plain words are logged as they are; anything else could be an identifier.
+_LOGGED_PATH_WORD_PATTERN = re.compile(r"[A-Za-z_-]{1,40}")
 # Atlassian answers a token that lacks an endpoint's scope with 401 "Unauthorized; scope does not match".
 _SCOPE_MISMATCH_PATTERN = re.compile(r"\bscope does not match\b", re.IGNORECASE)
 # A gateway 401 body only needs to be long enough to tell a missing scope from a rejected token.
@@ -388,6 +393,14 @@ def _is_gateway_url(url: str, gateway_prefix: str) -> bool:
     return True
 
 
+def _path_shape(url: str) -> str:
+    """Return a URL's path without query or parameters, with every non-word segment masked."""
+    path = urlsplit(url).path.split(";", 1)[0]
+    return "/".join(
+        segment if not segment or _LOGGED_PATH_WORD_PATTERN.fullmatch(segment) else "*" for segment in path.split("/")
+    )
+
+
 def _redirect_rejected(message: str, host: str | None = None) -> AtlassianError:
     atlassian_host = host if host and host.endswith((".atlassian.com", ".atlassian.net")) else None
     return AtlassianError(code="redirect_rejected", message=message, redirect_host=atlassian_host)
@@ -467,6 +480,14 @@ async def download(
                     headers["Authorization"] = f"Bearer {access_token}"
                 # Each hop is checked before it is followed, whatever the client default is.
                 async with client.stream("GET", url, headers=headers, follow_redirects=False) as response:
+                    # Enough to follow a live chain without logging a signed URL or an identifier.
+                    logger.debug(
+                        "atlassian_download_hop",
+                        host=urlsplit(url).hostname,
+                        path_shape=_path_shape(url),
+                        status_code=response.status_code,
+                        bearer_sent=from_gateway,
+                    )
                     if response.is_redirect:
                         url = _redirect_target(url, response.headers.get("location"), gateway_prefix)
                         continue
