@@ -20540,6 +20540,8 @@ The model sees the effective file access and the unconfined tools in its tool ex
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
 
 - The unconfined non-code tools listed above do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
+- `file` and `coding` confine paths lexically but do not open through no-follow descriptors, so when an operator routes them to the primary process while worker code shares the workspace, a link swapped into the workspace can redirect them; they run in a worker by default, where worker code already shares their trust.
+- `tests/test_file_access_contract.py` holds every path tool to the same contract, and a path tool must be added there before it can be declared.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
 
 ## Intentional behaviors
