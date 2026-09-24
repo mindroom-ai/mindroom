@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import time
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+import aiohttp
 import nio
 
 from mindroom.access_policy import EffectiveRoomPolicy, resolve_room_policy
@@ -49,6 +51,15 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _ROOT_SPACE_TOPIC = "Your MindRoom AI workspace"
 _ROOT_SPACE_AVATAR_KEY = "root_space"
+_DENIED_ROOM_STATE_ERROR_CODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
+
+
+class _AliasResolution(Enum):
+    """How to proceed when a managed alias yields no room to use."""
+
+    CREATE_WITH_ALIAS = "create_with_alias"
+    CREATE_WITHOUT_ALIAS = "create_without_alias"
+    RETRY_LATER = "retry_later"
 
 
 async def _set_room_avatar_if_available(
@@ -218,6 +229,85 @@ async def _reconcile_joined_existing_room(
     )
 
 
+def _alias_target_problem(state_events: list[dict[str, Any]], router_user_id: str, room_alias: str) -> str | None:
+    """Return why a readable room is not the router's room for one managed alias, or None when it is."""
+    state = {(event["type"], event["state_key"]): event for event in state_events}
+    create_event = state.get(("m.room.create", ""), {})
+    create_content = create_event.get("content")
+    # Room version 12 gives additional creators the same unlimited power as the creator.
+    additional_creators = create_content.get("additional_creators", []) if isinstance(create_content, dict) else []
+    if create_event.get("sender") != router_user_id or additional_creators not in ([], [router_user_id]):
+        return f"created by {create_event.get('sender')}, additional creators {additional_creators}"
+    # Any account may point an alias at any room, including one the router created for another key.
+    canonical_content = state.get(("m.room.canonical_alias", ""), {}).get("content")
+    canonical = canonical_content if isinstance(canonical_content, dict) else {}
+    alt_aliases = canonical.get("alt_aliases")
+    if canonical.get("alias") != room_alias and not (isinstance(alt_aliases, list) and room_alias in alt_aliases):
+        return f"does not publish {room_alias} as its canonical alias"
+    return None
+
+
+async def _verify_alias_target(
+    client: nio.AsyncClient,
+    room_id: str,
+    room_alias: str,
+) -> str | _AliasResolution:
+    """Return an unrecorded alias target when the router created it for this alias, or how to proceed instead."""
+    try:
+        response = await client.room_get_state(room_id)
+    except (aiohttp.ClientError, TimeoutError, ValueError):
+        logger.warning("managed_alias_target_unreadable", room_alias=room_alias, room_id=room_id, exc_info=True)
+        return _AliasResolution.RETRY_LATER
+    if isinstance(response, nio.RoomGetStateResponse) and response.room_id == room_id:
+        problem = _alias_target_problem(response.events, str(client.user_id), room_alias)
+    elif isinstance(response, nio.RoomGetStateError) and response.status_code in _DENIED_ROOM_STATE_ERROR_CODES:
+        # The router can read every room it created and is still joined to, so a denial is definitive.
+        problem = f"its state is not readable by the router ({response.status_code})"
+    else:
+        logger.warning("managed_alias_target_unreadable", room_alias=room_alias, room_id=room_id, error=str(response))
+        return _AliasResolution.RETRY_LATER
+    if problem is None:
+        return room_id
+    logger.error(
+        "managed_alias_target_refused",
+        room_alias=room_alias,
+        room_id=room_id,
+        reason=problem,
+        hint="Another account published this alias first; MindRoom creates and records a room without it instead.",
+    )
+    return _AliasResolution.CREATE_WITHOUT_ALIAS
+
+
+async def _resolve_managed_alias(
+    client: nio.AsyncClient,
+    room_alias: str,
+    recorded_room_id: str | None,
+) -> str | _AliasResolution:
+    """Return the room to use for one managed alias, or how to proceed without one.
+
+    A recorded room stays authoritative because any account on a shared
+    homeserver may publish or repoint a managed alias.
+    Only an unrecorded alias target is verified before adoption.
+    """
+    response = await client.room_resolve_alias(room_alias)
+    if isinstance(response, nio.RoomResolveAliasError) and response.status_code == "M_NOT_FOUND":
+        return _AliasResolution.CREATE_WITH_ALIAS
+    if not isinstance(response, nio.RoomResolveAliasResponse):
+        logger.warning("managed_alias_lookup_failed", room_alias=room_alias, error=str(response))
+        return recorded_room_id or _AliasResolution.RETRY_LATER
+    room_id = str(response.room_id)
+    if recorded_room_id is None:
+        return await _verify_alias_target(client, room_id, room_alias)
+    if room_id != recorded_room_id:
+        logger.warning(
+            "managed_alias_points_elsewhere",
+            room_alias=room_alias,
+            room_id=recorded_room_id,
+            alias_room_id=room_id,
+        )
+    return recorded_room_id
+
+
 async def _ensure_room_exists(
     client: nio.AsyncClient,
     room_key: str,
@@ -244,37 +334,29 @@ async def _ensure_room_exists(
         Room ID if room exists or was created, None on failure
 
     """
-    existing_rooms = matrix_state.load_rooms(runtime_paths=runtime_paths)
+    existing_room = matrix_state.load_rooms(runtime_paths=runtime_paths).get(room_key)
+    if room_name is None:
+        room_name = _room_key_to_name(room_key)
 
-    # First, try to resolve the room alias on the server
-    # This handles cases where the room exists on server but not in our state
+    # Resolving the alias recovers rooms that exist on the server but not in our state.
     server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
     alias_localpart = managed_room_alias_localpart(room_key, runtime_paths=runtime_paths)
     full_alias = f"#{alias_localpart}:{server_name}"
 
-    response = await client.room_resolve_alias(full_alias)
-    if isinstance(response, nio.RoomResolveAliasResponse):
-        room_id = str(response.room_id)
-        logger.debug("managed_room_alias_resolved", room_key=room_key, room_alias=full_alias, room_id=room_id)
+    resolution = await _resolve_managed_alias(client, full_alias, existing_room.room_id if existing_room else None)
+    if resolution is _AliasResolution.RETRY_LATER:
+        return None
+    if isinstance(resolution, str):
+        if existing_room is None:
+            _add_room(room_key, resolution, full_alias, room_name, runtime_paths)
+            logger.info("managed_room_state_updated", room_key=room_key, room_id=resolution, room_alias=full_alias)
+        return resolution
 
-        # Update our state if needed
-        if room_key not in existing_rooms or existing_rooms[room_key].room_id != room_id:
-            if room_name is None:
-                room_name = _room_key_to_name(room_key)
-            _add_room(room_key, room_id, full_alias, room_name, runtime_paths)
-            logger.info("managed_room_state_updated", room_key=room_key, room_id=room_id, room_alias=full_alias)
-
-        return room_id
-
-    # Room alias doesn't exist on server, so we can create it
-    if room_key in existing_rooms:
+    # The alias is missing or held by another account, so create the room
+    if existing_room is not None:
         # Remove stale entry from state
         logger.debug("managed_room_state_entry_removed", room_key=room_key)
         _remove_room(room_key, runtime_paths=runtime_paths)
-
-    # Create the room
-    if room_name is None:
-        room_name = _room_key_to_name(room_key)
 
     # Generate a contextual topic for the room using AI
     topic = await generate_room_topic_ai(room_key, room_name, config, runtime_paths)
@@ -283,7 +365,7 @@ async def _ensure_room_exists(
     created_room_id = await create_room(
         client=client,
         name=room_name,
-        alias=alias_localpart,
+        alias=alias_localpart if resolution is _AliasResolution.CREATE_WITH_ALIAS else None,
         topic=topic,
         power_users=power_users or [],
         admin_users=list(admin_user_ids),
@@ -291,7 +373,7 @@ async def _ensure_room_exists(
     )
 
     if created_room_id:
-        # Save room info
+        # Record the managed alias even when another account holds it, so local lookups never resolve elsewhere.
         _add_room(room_key, created_room_id, full_alias, room_name, runtime_paths)
         logger.info("managed_room_created", room_key=room_key, room_id=created_room_id, room_alias=full_alias)
 
@@ -441,9 +523,11 @@ async def _ensure_root_space_exists(
     server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
     alias_localpart = managed_space_alias_localpart(runtime_paths=runtime_paths)
     full_alias = f"#{alias_localpart}:{server_name}"
-    response = await client.room_resolve_alias(full_alias)
-    if isinstance(response, nio.RoomResolveAliasResponse):
-        space_room_id = str(response.room_id)
+    resolution = await _resolve_managed_alias(client, full_alias, state.space_room_id or None)
+    if resolution is _AliasResolution.RETRY_LATER:
+        return None
+    if isinstance(resolution, str):
+        space_room_id = resolution
         joined_space = space_room_id in client.rooms or space_room_id in joined_room_ids
         if not joined_space and await join_room(client, space_room_id) is not RoomJoinOutcome.JOINED:
             logger.warning(
@@ -460,14 +544,12 @@ async def _ensure_root_space_exists(
     space_room_id = await create_space(
         client=client,
         name=config.matrix_space.name,
-        alias=alias_localpart,
+        alias=alias_localpart if resolution is _AliasResolution.CREATE_WITH_ALIAS else None,
         topic=_ROOT_SPACE_TOPIC,
     )
-    if space_room_id is None:
-        return None
-
-    state.set_space_room_id(space_room_id)
-    state.save(runtime_paths=runtime_paths)
+    if space_room_id is not None:
+        state.set_space_room_id(space_room_id)
+        state.save(runtime_paths=runtime_paths)
     return space_room_id
 
 

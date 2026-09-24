@@ -50,6 +50,12 @@ Agents can join existing rooms, create new rooms with AI-generated topics, respo
 
 Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_rooms_exist()` (public). DM rooms can be detected with `async is_dm_room(client, room_id) -> bool`.
 
+Any account on a shared homeserver can publish a managed alias such as `#lobby:<server>` first, or point it at another room, so a resolved alias alone never makes a room managed.
+A room already recorded in `matrix_state.yaml` for its key stays in use, and an alias that now resolves elsewhere only logs `managed_alias_points_elsewhere`.
+An unrecorded key adopts its alias target only when the router created that room, with no additional room version 12 creators, and the room publishes the alias as its canonical or alternative alias.
+Otherwise the router logs `managed_alias_target_refused`, never joins that room, and creates and records a fresh room without the alias, which later passes keep using.
+If the alias lookup or the target's state read fails transiently, a recorded room stays in use and an unrecorded key is retried on the next pass.
+
 ## Threading (MSC3440)
 
 MindRoom emits thread replies following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md), using `m.relates_to` with `rel_type: m.thread`.
@@ -244,6 +250,7 @@ matrix_space:
 ```
 
 When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
+The Space alias follows the same adoption rules as managed room aliases, so a Space held by another account is replaced by a fresh Space without the alias.
 The Space name is reconciled on each startup to match the configured value.
 Startup and config updates write child links without automatically granting human users root Space admin power.
 Concrete users from effective managed-room `invite_users` policies are invited to the root Space without receiving Space admin power.
