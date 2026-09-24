@@ -1,6 +1,9 @@
 # MCP Gateway
 
-The optional MindRoom MCP gateway exposes your selected agents' assigned tools to external MCP clients at `/mcp`.
+MindRoom is a multi-agent, multi-user chat platform built on Matrix.
+People and AI agents communicate in rooms and threaded conversations.
+Each agent has a configured role and set of tools for working with services and performing tasks; agents can be personal assistants or shared specialists.
+The optional MCP gateway exposes a compatible subset of those tools to external MCP clients at `/mcp`, limited to the signed-in user's authorized and selected agents and tools.
 It reuses the [Connections portal](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#connections-portal), agent credential scopes, tool filters, and worker routing.
 Each user connects only the services they need.
 An unconnected or unavailable integration does not prevent discovery or use of another integration.
@@ -18,6 +21,21 @@ Use the returned `agent`, `toolkit`, and `function` with `get_tool` before calli
 If a service needs authorization, the response contains `error.code: connection_required` and a `connection_url` pointing to `/connections`.
 Connect that service in the browser, then retry the selected operation.
 The gateway does not require authorization to unrelated services during client login.
+
+MCP initialization supplies instructions identifying the configured personal agent from `MINDROOM_CONNECTIONS_AGENT`.
+For users with access, this agent represents their personal assistant and service connections; its identifier is configuration-specific.
+The configured name does not grant access: clients should use it only when it appears in their gateway discovery results.
+Selecting an agent through the gateway chooses its tools and credential context.
+It does not invoke the agent's model or load its system prompt, memories, or conversation history.
+Use MindRoom chat for conversations with agents.
+
+Clients should start with `search_tools` and `{}` to discover available agent/toolkit pairs, then follow the discovery flow above.
+Copy identifiers from these results, rather than guessing from display names or an agent directory such as `list_agents`.
+Directory results do not establish gateway eligibility or selection, and MCP has no current Matrix room.
+The initialization instructions include the instance's `/connections` URL for managing selections and service connections.
+On `invalid_arguments`, check the schema; on `tool_not_found`, rediscover the available identifiers.
+If a requested shared-agent tool is missing, ask the user to check the agent and tool selections in Connections, then repeat unscoped discovery.
+Do not automatically retry failed or timed-out invocations, since an action may already have taken effect.
 
 ## Enable the gateway
 
