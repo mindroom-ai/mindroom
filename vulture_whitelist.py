@@ -6,6 +6,7 @@ _.validate_commands  # Pydantic field validator (src/mindroom/config/personal_ro
 _.unique_services  # Pydantic field validator (src/mindroom/tool_system/google_workspaces.py)
 _.normalize_domains  # Pydantic field validator (src/mindroom/tool_system/google_workspaces.py)
 desktop_native_app  # Typer dispatches the native desktop helper command (src/mindroom/cli/desktop.py)
+_.fetch_response  # Trafilatura spider download binding replaced by the server-fetch guard (src/mindroom/tools/agno_compat_trafilatura.py)
 # Regenerate with:
 #   uv run vulture --make-whitelist src/mindroom --min-confidence 60 --sort-by-size | perl -pe 's/\.py:\d+/.py/g' > vulture_whitelist.py
 dashboard_credentials_supported  # unused variable (src/mindroom/agent_policy.py)
@@ -270,6 +271,7 @@ update_team  # unused function (src/mindroom/api/main.py)
 update_skill  # unused function (src/mindroom/api/skills.py)
 _.validate_private_knowledge  # unused method (src/mindroom/config/main.py)
 create_auth_session  # unused function (src/mindroom/api/auth.py)
+complete_platform_sso  # unused function (src/mindroom/api/auth.py)
 get_agent_policies  # unused function (src/mindroom/api/main.py)
 get_skill  # unused function (src/mindroom/api/skills.py)
 avatars_generate  # unused function (src/mindroom/cli/main.py)
@@ -387,6 +389,8 @@ _.revoke_token
 
 _.image_to_image  # FalTools registers this override as an image-editing tool (src/mindroom/custom_tools/fal.py)
 _.generate_media  # FalTools registers this override as a media-generation tool (src/mindroom/custom_tools/fal.py)
+_.download_file_from_sandbox  # E2BTools registers this override as a file-transfer tool (src/mindroom/custom_tools/e2b.py)
+_.download_chart_data  # E2BTools registers this override as a chart-export tool (src/mindroom/custom_tools/e2b.py)
 
 _collections_to_query  # Agno calls this hook to resolve the exact published read collection.
 
@@ -406,6 +410,14 @@ delete_session  # FastAPI Computer endpoint
 _.config_identity  # ComputerTarget dataclass equality field
 _.require_adoption_room_id  # Pydantic model validator for explicit personal-room adoption
 _.validate_additional_user_ids  # Pydantic field validator for imported room membership attestations
+
+# Agent CLI wire fields and Pydantic validators.
+_._validate_bounded_json  # Pydantic model validator
+
+_.current_protocol  # Pydantic field validator
+_.control_origins  # Pydantic field validator
+install_cli_runtime  # FastAPI worker route
+invoke_cli_shell  # FastAPI worker route
 
 _.embed_captions  # MoviePyVideoTools registers this caption-style override dynamically.
 # AgentQL and Agno invoke these owner-local overrides through inherited SDK methods.

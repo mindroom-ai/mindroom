@@ -1,5 +1,6 @@
 customer: demo
 baseDomain: mindroom.chat  # Base domain for all services
+platformDomain: ""  # Platform app/API domain when it differs from baseDomain
 storage: 10Gi  # More storage for Matrix data
 storageClassName: hcloud-volumes  # Override to local cluster storage class (for example `standard` in kind)
 storageAccessMode: ReadWriteOnce  # MindRoom storage access mode. Set ReadWriteMany for multi-node shared-worker storage.
@@ -87,11 +88,13 @@ credentials_encryption_key: ""
 # Dedicated Synapse registration shared secret when Helm creates the instance Secret.
 # With instanceSecrets.create=false, populate matrix_registration_shared_secret in the existing instance Secret instead.
 matrixRegistrationSharedSecret: ""
+# Per-instance key the platform uses to sign dashboard login tickets for this instance.
+# With instanceSecrets.create=false, the provisioner writes platform_sso_secret into the existing instance Secret.
+platformSsoSecret: ""
 
-# Supabase (shared auth)
+# Supabase (shared auth). Tenant workloads get only the public anon key, never the service-role key.
 supabaseUrl: ""
 supabaseAnonKey: ""
-supabaseServiceKey: ""
 
 trustedUpstreamAuth:
   enabled: "false"

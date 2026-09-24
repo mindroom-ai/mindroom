@@ -130,6 +130,7 @@ An explicit `members_of_rooms: []` disables inferred room grants.
 
 MindRoom resolves aliases before administrator and static-user matching.
 Internal MindRoom identities bypass responder restrictions because they are system participants.
+A team's `access` authorizes requests to the team as a whole: a requester the team admits reaches every member agent through that team, even members whose own `access` would not admit them directly.
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
 The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.

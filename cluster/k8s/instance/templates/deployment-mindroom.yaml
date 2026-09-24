@@ -13,6 +13,7 @@
 {{- $trustedUpstreamRequireJwt := has $trustedUpstreamRequireJwtValue (list "1" "true" "yes" "on") -}}
 {{- $instanceSecretName := include "mindroom.instanceSecretName" .Values -}}
 {{- $instanceSecretHash := include "mindroom.instanceSecretHash" .Values -}}
+{{- $platformDomain := .Values.platformDomain | default .Values.baseDomain -}}
 {{- $configHash := printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" (.Values.customer | toString) (.Values.baseDomain | toString) (.Values.accountId | default "" | toString) (.Values.storagePath | toString) (.Values.workerBackend | default "static_runner" | toString) (.Values.supabaseUrl | default "" | toString) (.Values.supabaseAnonKey | default "" | toString) ($trustedUpstreamAuth.enabled | default "" | toString) ($trustedUpstreamAuth.userIdHeader | default "" | toString) ($trustedUpstreamAuth.emailHeader | default "" | toString) ($trustedUpstreamAuth.matrixUserIdHeader | default "" | toString) ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "" | toString) ($trustedUpstreamAuth.requireJwt | default "" | toString) ($trustedUpstreamAuth.jwtHeader | default "" | toString) ($trustedUpstreamAuth.jwksUrl | default "" | toString) ($trustedUpstreamAuth.jwtAudience | default "" | toString) ($trustedUpstreamAuth.jwtIssuer | default "" | toString) ($trustedUpstreamAuth.jwtEmailClaim | default "email" | toString) ($trustedUpstreamAuth.jwtUserIdClaim | default "" | toString) ($trustedUpstreamAuth.jwtMatrixUserIdClaim | default "" | toString) (.Values.administrators | default (list) | toJson) (.Values.roomDefaults | default (dict) | toJson) ($trustedUpstreamAuth.emailDomain | default "" | toString) | sha256sum -}}
 {{- if and (eq $workerBackend "kubernetes") (ne $storageAccessMode "ReadWriteMany") (eq $controlPlaneNodeName "") -}}
 {{- fail "workerBackend=kubernetes with shared storage requires either storageAccessMode=ReadWriteMany or controlPlaneNodeName to keep the control plane and workers on one node" -}}
@@ -68,6 +69,9 @@ spec:
       {{- end }}
       {{- if eq $workerBackend "kubernetes" }}
       serviceAccountName: {{ $workerManagerServiceAccountName }}
+      {{- else }}
+      # Only the dedicated-worker backend talks to the Kubernetes API from this pod.
+      automountServiceAccountToken: false
       {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -156,8 +160,6 @@ spec:
           value: {{ .Values.matrixHomeserverStartupTimeoutSeconds | quote }}
         - name: SUPABASE_URL
           value: {{ .Values.supabaseUrl | quote }}
-        - name: SUPABASE_SERVICE_KEY_FILE
-          value: "/etc/secrets/supabase_service_key"
         - name: SUPABASE_ANON_KEY
           value: {{ .Values.supabaseAnonKey | quote }}
         {{- if $trustedUpstreamAuthEnabled }}
@@ -205,7 +207,17 @@ spec:
         {{- end }}
         {{- end }}
         - name: MINDROOM_PLATFORM_LOGIN_URL
-          value: "https://app.{{ .Values.baseDomain }}/auth/login"
+          value: "https://app.{{ $platformDomain }}/auth/login"
+        # Dashboard login exchanges instance-signed tickets; the platform cookie never reaches tenant hosts.
+        - name: MINDROOM_PLATFORM_SSO_URL
+          value: "https://api.{{ $platformDomain }}/instance-sso/authorize"
+        - name: MINDROOM_PLATFORM_SSO_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ $instanceSecretName }}
+              key: platform_sso_secret
+              # Instances provisioned before dashboard SSO start without browser login until re-provisioned.
+              optional: true
         - name: OPENROUTER_API_KEY_FILE
           value: "/etc/secrets/openrouter_key"
         - name: GOOGLE_API_KEY_FILE

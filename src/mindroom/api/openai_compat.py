@@ -388,23 +388,19 @@ def _requester_authority(
 
 
 def _requester_allows_model(model: str, authority: DetachedRequesterContext | None) -> bool:
-    """Apply responder access to a mapped caller and every configured team member."""
+    """Apply the selected agent's or team's own responder access to a mapped caller.
+
+    A team's access grants its exact member agents for team requests, so members are not checked separately.
+    """
     if authority is None:
         return True
-    entities = [model]
-    if model.startswith(TEAM_MODEL_PREFIX):
-        team_name = model.removeprefix(TEAM_MODEL_PREFIX)
-        entities = [team_name, *authority.config.teams[team_name].agents]
-    return all(
-        is_sender_allowed_for_responder(
-            authority.requester_id,
-            entity_name,
-            None,
-            authority.config,
-            authority.runtime_paths,
-            authority.agent_reply_memberships,
-        )
-        for entity_name in entities
+    return is_sender_allowed_for_responder(
+        authority.requester_id,
+        model.removeprefix(TEAM_MODEL_PREFIX),
+        None,
+        authority.config,
+        authority.runtime_paths,
+        authority.agent_reply_memberships,
     )
 
 

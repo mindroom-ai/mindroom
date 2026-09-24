@@ -2948,6 +2948,9 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
     def allow_sender(*_args: object, **_kwargs: object) -> bool:
         return True
 
+    async def allow_target_room(*_args: object, **_kwargs: object) -> bool:
+        return True
+
     # Don't bypass authorization for tests that are specifically testing it
     if "test_authorization" in request.node.parent.name:
         yield
@@ -2974,6 +2977,18 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
                     patch(
                         "mindroom.custom_tools.attachment_helpers.is_sender_allowed_for_responder",
                         new=allow_sender,
+                    ),
+                )
+                stack.enter_context(
+                    patch(
+                        "mindroom.custom_tools.attachment_helpers.requester_joined_target_room",
+                        new=allow_target_room,
+                    ),
+                )
+                stack.enter_context(
+                    patch(
+                        "mindroom.custom_tools.matrix_message_idempotency.requester_joined_target_room",
+                        new=allow_target_room,
                     ),
                 )
                 stack.enter_context(

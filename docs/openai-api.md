@@ -216,7 +216,7 @@ Restart MindRoom after changing these environment settings.
 Mapped identities must be concrete human Matrix user IDs, and `authorization.aliases` resolves bridge identities to their canonical requester.
 The request body's `user` field and requester headers cannot override this identity.
 
-Mapped callers only see and invoke models allowed by the existing responder access policy, including every member of a selected team.
+Mapped callers only see and invoke models allowed by the existing responder access policy; a team model is decided by the team's own `access`, which grants its member agents for that request.
 Auto-routing uses the same permitted agents.
 `run_subagent` checks both the caller agent's `delegate_to` list and the requester's access to each target, and propagates the requester into nested runs and their metadata.
 Grant access with `agents.<name>.access.users`, administrator membership, or a ready managed `members_of_rooms` membership snapshot.

@@ -63,7 +63,7 @@ class ThreadSummaryTools(Toolkit):
             )
         assert resolved_room_id is not None
 
-        if not room_access_allowed(context, resolved_room_id):
+        if not await room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",
                 action="set",

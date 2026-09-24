@@ -102,7 +102,7 @@ Callers must check `truncated` before claiming the unresolved list is complete.
 `thread_tags` also validates and normalizes predefined payload schemas for `blocked.data.blocked_by`, `waiting.data.waiting_on`, `priority.data.level`, and `due.data.deadline`.
 `thread_resolution` is an explicit opt-in capability backed by the `resolved` thread tag and does not read the removed experimental `com.mindroom.thread.resolution` event type.
 It is absent from starter configs and default tool sets, while `thread_tags` can list but cannot mutate `resolved` state.
-`matrix_api` defaults `room_id` to the active room, supports authorized cross-room targeting, never infers event IDs or state keys from thread context, and now also supports room-scoped full-text search through `action="search"`.
+`matrix_api` defaults `room_id` to the active room, supports cross-room targeting for rooms the requester is joined to, never infers event IDs or state keys from thread context, and now also supports room-scoped full-text search through `action="search"`.
 
 ## MindRoom Update Awareness
 

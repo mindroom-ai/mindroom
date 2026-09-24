@@ -29,6 +29,7 @@ from mindroom.config.mid_turn import MidTurnConfig  # noqa: TC001
 from mindroom.config.models import (
     AgentLearningMode,
     CompactionOverrideConfig,
+    FileAccess,
     ToolConfigEntry,
     validate_unique_tool_entries,
 )
@@ -227,6 +228,10 @@ class AgentConfig(BaseModel):
     )
     skills: list[str] = Field(default_factory=list, description="List of skill names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
+    minimal_instructions: list[str] = Field(
+        default_factory=list,
+        description="Always-present minimal mode instructions",
+    )
     rooms: list[str] = Field(
         default_factory=list,
         description="List of room IDs or names to auto-join",
@@ -346,6 +351,10 @@ class AgentConfig(BaseModel):
     worker_scope: WorkerScope | None = Field(
         default=None,
         description="Worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
+    )
+    file_access: FileAccess | None = Field(
+        default=None,
+        description="Per-agent override of defaults.file_access (None = inherit the default)",
     )
     allow_self_config: bool | None = Field(
         default=None,

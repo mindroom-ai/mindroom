@@ -259,7 +259,7 @@ def test_primary_runtime_defers_heavy_optional_dependencies() -> None:
 
 
 def test_worker_retirement_is_a_standard_library_leaf() -> None:
-    """The retirement boundary exposes two operations without loading another MindRoom module."""
+    """The retirement boundary exposes its descriptor-bound operations without loading another MindRoom module."""
     probe = """
 import importlib
 import json
@@ -282,7 +282,7 @@ print(json.dumps({"exports": module.__all__, "loaded": loaded}))
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {
-        "exports": ["open_worker_state_root", "remove_directory_tree_at"],
+        "exports": ["open_worker_state_root", "read_worker_identity", "remove_directory_tree_at"],
         "loaded": ["mindroom.workers.worker_retirement"],
     }
 
