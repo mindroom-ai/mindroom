@@ -228,6 +228,10 @@ class AgentConfig(BaseModel):
     )
     skills: list[str] = Field(default_factory=list, description="List of skill names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
+    minimal_instructions: list[str] = Field(
+        default_factory=list,
+        description="Always-present minimal mode instructions",
+    )
     rooms: list[str] = Field(
         default_factory=list,
         description="List of room IDs or names to auto-join",

@@ -18,7 +18,7 @@ from agno.tools.function import Function, ToolResult
 from pydantic import BaseModel
 
 from mindroom.atomic_file import atomic_write_bytes_at
-from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
 from mindroom.tool_system.agno_compat_function_schema import install_schema_postprocessor, uses_schema_postprocessor
@@ -40,7 +40,6 @@ _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
     "Use this for large output you plan to inspect later with file, coding, python, or shell tools."
 )
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
-_DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 _AUTO_SAVE_PREVIEW_BYTES = 8192
 _WRAPPED_ATTR = "__mindroom_output_file_wrapped__"
 _DEFAULT_PARAMETERS = {"type": "object", "properties": {}, "required": []}
@@ -55,7 +54,7 @@ class ToolOutputFilePolicy:
     """Resolved policy for one toolkit's model-requested output files."""
 
     workspace_root: Path
-    max_bytes: int = _DEFAULT_MAX_BYTES
+    max_bytes: int = DEFAULT_TOOL_OUTPUT_MAX_BYTES
     auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 
     @classmethod
@@ -127,7 +126,7 @@ def _output_redirect_max_bytes(runtime_paths: RuntimePaths) -> int:
     return _positive_int_runtime_setting(
         runtime_paths,
         _MAX_BYTES_ENV,
-        default=_DEFAULT_MAX_BYTES,
+        default=DEFAULT_TOOL_OUTPUT_MAX_BYTES,
         log_key="invalid_tool_output_redirect_max_bytes",
     )
 

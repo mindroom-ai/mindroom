@@ -25,6 +25,7 @@ def append_knowledge_availability_enrichment(
         *enrichment_items,
         EnrichmentItem(
             key="knowledge_availability",
+            minimal_required=True,
             text=notice,
             cache_policy="volatile",
             persist=False,

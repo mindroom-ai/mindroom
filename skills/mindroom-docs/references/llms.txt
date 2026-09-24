@@ -15,6 +15,7 @@
 - [Router](https://docs.mindroom.chat/configuration/router/)
 - [Overview](https://docs.mindroom.chat/tools/)
 - [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/)
+- [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/)
 - [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/)
 - [Data & Databases](https://docs.mindroom.chat/tools/data-and-databases/)
 - [Web Search](https://docs.mindroom.chat/tools/web-search/)

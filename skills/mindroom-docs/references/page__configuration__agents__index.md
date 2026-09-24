@@ -48,6 +48,9 @@ agents:
       - Use clear variable names
       - Add comments for complex logic
 
+    # Concise guidance included on every minimal-mode request (default: [])
+    minimal_instructions: []
+
     # Rooms to join (will be created if they don't exist)
     rooms:
       - lobby
@@ -830,3 +833,11 @@ agents:
     include_default_tools: false
     tools: [duckduckgo]
 ```
+
+## Conversation mode
+
+Standard mode is the default.
+An existing shell-enabled agent can select [minimal mode](https://docs.mindroom.chat/tools/agent-cli/) per conversation with `!mode <agent> minimal`.
+Minimal mode presents one Bash tool and discovers other tools through `mindroom-agent`.
+It keeps the same identity, workspace, memory, history, and permissions.
+The optional `minimal_instructions` list defaults to `[]` and supplies concise guidance on every minimal request; ordinary instructions remain available through CLI context discovery.

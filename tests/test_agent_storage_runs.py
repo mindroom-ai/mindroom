@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
@@ -551,6 +552,9 @@ def test_cache_diagnostics_count_history_without_retaining_closed_adapters(
 
     from mindroom import agent_storage  # noqa: PLC0415
 
+    # Scope diagnostics to this test's adapters; other tests may retain an
+    # otherwise unreachable Agno adapter cycle until the next GC collection.
+    monkeypatch.setattr(agent_storage, "_CACHE_DIAGNOSTICS", weakref.WeakKeyDictionary())
     monkeypatch.setattr(agent_storage, "_CACHE_DIAGNOSTICS_NEXT_REPORT", 0.0, raising=False)
     first = _storage(tmp_path / "first")
     second = _storage(tmp_path / "second")

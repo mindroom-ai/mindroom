@@ -51,6 +51,15 @@
           "title": "Instructions",
           "type": "array"
         },
+        "minimal_instructions": {
+          "default": [],
+          "description": "Always-present minimal mode instructions",
+          "items": {
+            "type": "string"
+          },
+          "title": "Minimal Instructions",
+          "type": "array"
+        },
         "rooms": {
           "default": [],
           "description": "List of room IDs or names to auto-join",
