@@ -408,6 +408,14 @@ _.config_identity  # ComputerTarget dataclass equality field
 _.require_adoption_room_id  # Pydantic model validator for explicit personal-room adoption
 _.validate_additional_user_ids  # Pydantic field validator for imported room membership attestations
 
+# Agent CLI wire fields and Pydantic validators.
+_._validate_bounded_json  # Pydantic model validator
+
+_.current_protocol  # Pydantic field validator
+_.control_origins  # Pydantic field validator
+install_cli_runtime  # FastAPI worker route
+invoke_cli_shell  # FastAPI worker route
+
 _.embed_captions  # MoviePyVideoTools registers this caption-style override dynamically.
 # AgentQL and Agno invoke these owner-local overrides through inherited SDK methods.
 _.scrape_website

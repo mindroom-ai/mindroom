@@ -6,12 +6,9 @@ import inspect
 import json
 from contextlib import suppress
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Never
+from typing import TYPE_CHECKING, Any
 
 from agno.tools.function import FunctionCall
-from jsonschema import Draft202012Validator
-from referencing import Registry
-from referencing.exceptions import NoSuchResource
 
 from mindroom.hooks import HookRegistry
 from mindroom.mcp_gateway.execution import run_gateway_sync
@@ -32,7 +29,6 @@ from mindroom.mcp_gateway.types import (
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_approval import tool_may_require_approval
-from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.plugins import load_plugins
@@ -42,6 +38,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
     worker_runtime_context,
 )
+from mindroom.tool_system.tool_access import function_schema, search_tool_metadata, validate_tool_arguments
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -123,39 +120,23 @@ def _function(context: AgentToolContext, toolkit: Toolkit, name: str) -> Functio
     return function
 
 
-def _schema(function: Function) -> dict[str, Any]:
-    if function.skip_entrypoint_processing or function.entrypoint is None:
-        return function.parameters
-    strict = function.strict is True
-    snapshot = cached_processed_schema(function, strict=strict)
-    if snapshot is not None:
-        return snapshot.parameters
-    prepared = function.model_copy(deep=True)
-    prepared.process_entrypoint(strict=strict)
-    return prepared.parameters
-
-
 def _schema_payload(agent: str, toolkit: str, function: Function) -> ToolSchemaResponse:
     payload: ToolSchemaResponse = {
         "agent": agent,
         "toolkit": toolkit,
         "function": function.name,
         "description": function.description or "",
-        "inputSchema": _schema(function),
+        "inputSchema": function_schema(function),
     }
     if _json_size(payload) > 32768:
         raise GatewayError(code=GatewayErrorCode.SCHEMA_TOO_LARGE)
     return payload
 
 
-def _no_remote_schema(uri: str) -> Never:
-    raise NoSuchResource(ref=uri)
-
-
 def _validate_arguments(schema: dict[str, Any], arguments: dict[str, object]) -> None:
     try:
-        Draft202012Validator(schema, registry=Registry(retrieve=_no_remote_schema)).validate(arguments)
-    except Exception as exc:
+        validate_tool_arguments(schema, arguments)
+    except ValueError as exc:
         raise GatewayError(code=GatewayErrorCode.INVALID_ARGUMENTS) from exc
 
 
@@ -202,11 +183,7 @@ async def _guard[T: GatewaySuccessResponse](
 
 
 def _search_results(items: list[SearchItem], query: str, limit: int) -> SearchResponse:
-    words = query.lower().split()
-    ranked = [
-        item for item in items if all(word in " ".join(str(value) for value in item.values()).lower() for word in words)
-    ]
-    result: SearchResponse = {"results": ranked[:limit]}
+    result: SearchResponse = {"results": search_tool_metadata(items, query, limit)}
     while result["results"] and _json_size(result) > 16384:
         result["results"].pop()
     return result

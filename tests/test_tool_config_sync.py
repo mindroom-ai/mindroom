@@ -31,6 +31,8 @@ SKIP_CONFIG_FIELD_VALIDATION = {
 # host runs this suite without it.
 OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph"})
 IGNORED_AGNO_PARAMS = {
+    # Trusted live worker binding is never authored or serialized as user configuration.
+    "shell": {"worker_binding"},
     # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
     "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
     # Mapping-only inputs have no safe authored ConfigField representation.
