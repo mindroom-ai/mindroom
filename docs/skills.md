@@ -154,3 +154,33 @@ For workspace skills created during an agent turn, assume they become available 
 1. Keep skills focused - one skill per capability
 2. Declare dependencies with `metadata.openclaw.requires`
 3. Use descriptive names like `code-review`
+
+## Automatic skill learning
+
+Skill learning is opt-in for each agent. It reviews persisted standalone-agent turns in the background and can create a Markdown skill or improve an earlier learner-owned skill:
+
+```yaml
+agents:
+  assistant:
+    display_name: Assistant
+    skill_learning:
+      enabled: true
+      model: default
+      cooldown_seconds: 300
+      max_input_chars: 24000
+      max_output_chars: 12000
+      timeout_seconds: 60
+      max_attempts: 3
+```
+
+Omit `model` to use the agent's configured model. Reviews incur additional model usage, recorded against the source conversation as `skill_learning`. No model call runs in the response delivery path. Setting `enabled: false` stops new reviews; published skills remain available until removed. Team runs are excluded. Sessions in minimal mode retain pending work without paid review until standard mode resumes.
+
+Completed turns coalesce by agent, execution identity and session until the cooldown expires. Each review captures the latest persisted trace, including tool outcomes, then keeps that snapshot fixed during inference. New completed turns arriving during a review remain pending. A successful response alone is not treated as proof that every tool succeeded. The reviewer receives bounded skill context and trace text as evidence, with no tools or permission to execute commands.
+
+Publication uses the resolved private workspace for private agents. Shared agents use their canonical `agents/<agent>/workspace/skills/` directory, including agents using mem0; this does not change their memory backend or tool permissions. Standard-mode skill discovery sees published Markdown on subsequent runs. Learning never publishes globally or shares private lessons with other requester instances.
+
+Only learner-owned files can be updated. Bundled, plugin, user-managed and manually authored workspace skill names are protected. The publisher rejects traversal, symlink paths, malformed frontmatter, oversized output and common credential-like strings. The reviewer is also instructed to omit credentials, personal facts and raw transcripts. These checks do not replace reviewing generated instructions before relying on them for sensitive work.
+
+The durable `skill_learning.db` queue stores scope metadata, source revision hashes and pending publication proposals, not raw conversation transcripts. Reviews run serially, at most four per cycle, with bounded retry attempts and exponential delay. Shutdown cancels work; pending proposals survive restart. Current configuration, private ownership and file revisions are checked again before publication. An interrupted publication is replayed by content hash; manually edited files are preserved.
+
+Each workspace retains source revision and up to five previous versions per learned skill in `.skill-learning.json`. To roll back, disable learning and restore the chosen `previous` Markdown value to `skills/<name>/SKILL.md`. The manual edit prevents subsequent automatic replacement. To remove a learned skill, disable learning and delete its skill directory. Diagnostic logs report the agent, review outcome and source revision hash.

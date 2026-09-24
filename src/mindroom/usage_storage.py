@@ -7,7 +7,13 @@ from typing import TYPE_CHECKING, Literal, cast
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-type IndependentUsageKind = Literal["compaction_summary", "memory_auto_flush", "dynamic_workflow", "live_voice"]
+type IndependentUsageKind = Literal[
+    "compaction_summary",
+    "memory_auto_flush",
+    "dynamic_workflow",
+    "live_voice",
+    "skill_learning",
+]
 type UsageKind = Literal["run"] | IndependentUsageKind
 
 TOKEN_FIELDS = (

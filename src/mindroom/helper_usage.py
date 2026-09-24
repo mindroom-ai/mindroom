@@ -69,7 +69,7 @@ async def record_helper_usage(
     *,
     owner: HelperUsageOwner,
     invocation_id: str,
-    kind: Literal["memory_auto_flush", "dynamic_workflow"],
+    kind: Literal["memory_auto_flush", "dynamic_workflow", "skill_learning"],
     requester_id: str | None,
 ) -> None:
     """Keep returned usage before output validation, without inventing request boundaries."""

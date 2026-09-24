@@ -5214,3 +5214,24 @@ async def test_dashboard_departure_uses_live_membership_owner(tmp_path: Path) ->
     with pytest.raises(RuntimeError, match="No running Matrix owner"):
         await orchestrator.leave_matrix_room("general", "!room:localhost")
     assert gate.in_flight_response_count == 0
+
+
+@pytest.mark.asyncio
+async def test_skill_learning_lifecycle_start_reload_and_stop(tmp_path: Path) -> None:
+    """The orchestrator owns one cancellable learner and disables it on reload."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    orchestrator = orchestrator_module._MultiAgentOrchestrator(runtime_paths=paths)
+    config = Config(agents={"general": AgentConfig(display_name="General")})
+    orchestrator.config = config
+    await orchestrator._sync_skill_learning_worker()
+    assert orchestrator._skill_learning_task is None
+    config.agents["general"].skill_learning.enabled = True
+    await orchestrator._sync_skill_learning_worker()
+    first = orchestrator._skill_learning_task
+    assert first is not None
+    await orchestrator._sync_skill_learning_worker()
+    assert orchestrator._skill_learning_task is first
+    config.agents["general"].skill_learning.enabled = False
+    await orchestrator._sync_skill_learning_worker()
+    assert first.done()
+    assert orchestrator._skill_learning_task is None
