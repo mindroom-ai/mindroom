@@ -249,12 +249,36 @@ async def _remove_pending_change_from_matrix(
     )
 
 
+def _bot_authored_content(
+    client: nio.AsyncClient,
+    room_id: str,
+    state_event: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return pending-config content only when this bot published the state event.
+
+    Any room member with enough power can write this state type, so only the
+    bot's own records describe a change it actually proposed.
+    """
+    content = state_event.get("content")
+    if not isinstance(content, dict) or not content:
+        return None
+    if client.user_id is None or state_event.get("sender") != client.user_id:
+        logger.warning(
+            "Ignoring pending config change not authored by this bot",
+            room_id=room_id,
+            event_id=state_event.get("state_key"),
+            sender=state_event.get("sender"),
+        )
+        return None
+    return content
+
+
 async def _resolve_pending_change(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
 ) -> _PendingConfigChange | None:
-    """Resolve one pending change from memory or its authoritative Matrix state."""
+    """Resolve one pending change from memory or its bot-authored Matrix state."""
     pending_change = _get_pending_change(event_id)
     if pending_change is not None:
         return pending_change
@@ -271,7 +295,17 @@ async def _resolve_pending_change(
         raise RuntimeError(msg)  # noqa: TRY004
     if not response.content:
         return None
-    return await _restore_pending_change(client, room_id, event_id, response.content)
+
+    # The single-state endpoint omits the sender, so read provenance from full room state.
+    state = await client.room_get_state(room_id)
+    if not isinstance(state, nio.RoomGetStateResponse):
+        msg = f"Failed to resolve pending config change from Matrix state: {state}"
+        raise RuntimeError(msg)  # noqa: TRY004
+    for state_event in state.events:
+        if state_event.get("type") == _PENDING_CONFIG_EVENT_TYPE and state_event.get("state_key") == event_id:
+            content = _bot_authored_content(client, room_id, state_event)
+            return None if content is None else await _restore_pending_change(client, room_id, event_id, content)
+    return None
 
 
 async def resolve_reaction_pending_change(
@@ -342,10 +376,10 @@ async def restore_pending_changes(client: nio.AsyncClient, room_id: str) -> int:
                 continue
 
             state_key = event.get("state_key")
-            content = event.get("content", {})
+            content = _bot_authored_content(client, room_id, event)
 
-            # Skip empty content (deleted state events)
-            if not content:
+            # Skip deleted state events and records this bot did not write
+            if content is None:
                 continue
 
             try:
