@@ -3564,12 +3564,12 @@ def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_
     assert saved_file.read_text(encoding="utf-8") == "hello"
 
 
-def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
+def test_sandbox_runner_user_scope_rejects_base_dir_of_agent_outside_user_scope(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """User-scoped workers intentionally allow base_dir anywhere under the shared agents tree."""
+    """User-scoped workers must not address agents that do not resolve to worker_scope=user."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
@@ -3593,9 +3593,9 @@ def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
             },
         )
 
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-    assert (storage_root / "agents" / "other" / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
+    assert response.status_code == 400
+    assert "allowed state roots" in response.json()["detail"]
+    assert not (storage_root / "agents" / "other").exists()
 
 
 def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
