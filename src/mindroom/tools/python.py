@@ -20,6 +20,7 @@ from mindroom.tool_system.registration import register_tool_with_metadata
 if TYPE_CHECKING:
     import logging
     from collections.abc import Callable
+    from pathlib import Path
 
     from agno.tools.python import PythonTools
 
@@ -115,9 +116,21 @@ def python_tools() -> type[PythonTools]:
     class MindRoomPythonTools(python_tools_class):
         """MindRoom wrapper around Agno's Python tool implementation."""
 
-        def __init__(self, **kwargs: object) -> None:
+        def __init__(
+            self,
+            base_dir: Path | None = None,
+            safe_globals: dict | None = None,
+            safe_locals: dict | None = None,
+            **kwargs: object,
+        ) -> None:
             # Arbitrary code execution cannot be confined in-process, so the file helpers are not either.
-            super().__init__(**kwargs, restrict_to_base_dir=False)
+            super().__init__(
+                base_dir=base_dir,
+                safe_globals=safe_globals,
+                safe_locals=safe_locals,
+                restrict_to_base_dir=False,
+                **kwargs,
+            )
 
         def pip_install_package(self, package_name: str) -> str:
             """Install a package into the current interpreter environment."""

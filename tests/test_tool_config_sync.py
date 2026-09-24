@@ -361,6 +361,7 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
         globalns=tool_class.__init__.__globals__
         | {
             "FileAccess": FileAccess,
+            "Path": Path,
             "ResolvedWorkerTarget": ResolvedWorkerTarget,
             "RuntimePaths": RuntimePaths,
         },
