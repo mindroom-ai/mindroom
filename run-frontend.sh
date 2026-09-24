@@ -15,7 +15,7 @@ bun install
 
 if [ "${1:-dev}" = "prod" ] || [ "$1" = "production" ]; then
   bun run build
-  exec bun run vite preview --host 0.0.0.0 --port 3003
+  exec bun run vite preview --port 3003
 else
-  exec bun run vite --host 0.0.0.0 --port 3003
+  exec bun run vite --port 3003
 fi

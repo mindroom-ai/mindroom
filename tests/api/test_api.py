@@ -3853,6 +3853,33 @@ def test_cookie_mutations_require_browser_origin(
 
 
 @pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({}, 200),
+        ({"Sec-Fetch-Mode": "cors"}, 200),
+        ({"Origin": "http://testserver"}, 200),
+        ({"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin"}, 200),
+        ({"Origin": "https://evil.example"}, 403),
+        ({"Origin": "null"}, 403),
+        ({"Sec-Fetch-Site": "cross-site"}, 403),
+        ({"Sec-Fetch-Site": "same-origin"}, 403),
+        ({"Origin": "http://testserver", "Sec-Fetch-Site": "cross-site"}, 403),
+    ],
+)
+def test_bearer_mutations_with_browser_metadata_require_origin(
+    api_key_client: TestClient,
+    headers: dict[str, str],
+    expected: int,
+) -> None:
+    """A bearer attached to browser traffic by an intermediary must not bypass the mutation guard."""
+    response = api_key_client.post(
+        "/api/config/load",
+        headers={"Authorization": "Bearer test-key", **headers},
+    )
+    assert response.status_code == expected, response.text
+
+
+@pytest.mark.parametrize(
     ("public_url", "origin", "expected"),
     [
         ("https://public.example.org/dashboard", "https://public.example.org", 200),

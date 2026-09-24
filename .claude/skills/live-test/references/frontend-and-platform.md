@@ -30,7 +30,7 @@ Equivalent manual path:
 ```bash
 cd frontend
 bun install
-bun run dev -- --host 0.0.0.0 --port 3003
+bun run dev -- --port 3003
 ```
 
 ## Core Frontend Screenshots
