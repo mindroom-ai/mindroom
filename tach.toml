@@ -618,6 +618,11 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.legacy_attachments"
+depends_on = ["mindroom.path_confinement"]
+visibility = ["mindroom.attachments"]
+
+[[modules]]
 path = "mindroom.legacy_delivery_payloads"
 depends_on = ["mindroom.constants"]
 visibility = [
