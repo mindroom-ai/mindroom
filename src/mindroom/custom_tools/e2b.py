@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, override
 
@@ -13,7 +14,7 @@ from agno.team.team import Team  # noqa: TC002  # resolved by Agno function sche
 from agno.tools.e2b import E2BTools
 from agno.tools.function import ToolResult
 
-from mindroom.atomic_file import atomic_write_bytes_at
+from mindroom.atomic_file import atomic_write_file_at
 from mindroom.path_confinement import (
     open_directory_within_root,
     open_regular_file_within_root,
@@ -21,10 +22,13 @@ from mindroom.path_confinement import (
 )
 
 
-def _write_within_root(root: Path, relative: Path, payload: bytes) -> None:
+def _write_within_root(root: Path, relative: Path, payload: bytes | bytearray) -> None:
     """Atomically publish bytes at a canonical path below a pinned root."""
-    with open_directory_within_root(root, relative.parent, create=True) as directory:
-        atomic_write_bytes_at(directory, relative.name, payload)
+    with (
+        open_directory_within_root(root, relative.parent, create=True) as directory,
+        atomic_write_file_at(directory, relative.name) as output,
+    ):
+        output.write(payload)
 
 
 class MindRoomE2BTools(E2BTools):
@@ -53,16 +57,14 @@ class MindRoomE2BTools(E2BTools):
             msg = "E2B local file transfers require an agent workspace"
             raise ValueError(msg)
         requested = Path(path)
-        if requested.is_absolute() or ".." in requested.parts or not requested.parts:
-            msg = f"Local path must be relative to the agent workspace without '..': {path}"
-            raise ValueError(msg)
         root = self._workspace_root.resolve()
-        try:
-            resolved = resolve_path_within_root(root, requested, symlinks="internal")
-        except ValueError:
-            msg = f"Local path must stay within the agent workspace: {path}"
-            raise ValueError(msg) from None
-        return root, resolved.relative_to(root)
+        if not requested.is_absolute() and ".." not in requested.parts:
+            with suppress(ValueError):
+                resolved = resolve_path_within_root(root, requested, symlinks="internal")
+                if resolved != root:
+                    return root, resolved.relative_to(root)
+        msg = f"Local path must name a file inside the agent workspace, relative to it and without '..': {path}"
+        raise ValueError(msg)
 
     @override
     def upload_file(self, file_path: str, sandbox_path: str | None = None) -> str:
@@ -103,7 +105,7 @@ class MindRoomE2BTools(E2BTools):
         try:
             root, relative = self._workspace_location(local_path)
             content = self.sandbox.files.read(sandbox_path, format="bytes")
-            _write_within_root(root, relative, bytes(content))
+            _write_within_root(root, relative, content)
         except Exception as e:
             return json.dumps({"status": "error", "message": f"Error downloading file: {e}"})
         return local_path
@@ -133,7 +135,7 @@ class MindRoomE2BTools(E2BTools):
         try:
             root, relative = self._workspace_location(output_path)
             _write_within_root(root, relative, base64.b64decode(png))
-        except (OSError, ValueError) as e:
+        except Exception as e:
             return ToolResult(content=f"{result.content}, but saving it failed: {e}", images=result.images)
         self.downloaded_files[result_index] = output_path
         return ToolResult(content=f"{result.content} and saved to {output_path}", images=result.images)
@@ -161,19 +163,19 @@ class MindRoomE2BTools(E2BTools):
         if self.last_execution is None:
             return ToolResult(content="No code has been executed yet")
         results = self.last_execution.results
-        if result_index >= len(results):
-            return ToolResult(
-                content=f"Result index {result_index} is out of range. Only {len(results)} results available.",
-            )
-        result = results[result_index]
-        if result.chart is None:
-            return ToolResult(content=f"Result at index {result_index} does not contain interactive chart data")
         output_path = output_path or f"chart-data-{result_index}.json"
-        chart = result.chart.to_dict()
         try:
+            if result_index >= len(results):
+                return ToolResult(
+                    content=f"Result index {result_index} is out of range. Only {len(results)} results available.",
+                )
+            result = results[result_index]
+            if result.chart is None:
+                return ToolResult(content=f"Result at index {result_index} does not contain interactive chart data")
+            chart = result.chart.to_dict()
             root, relative = self._workspace_location(output_path)
             _write_within_root(root, relative, json.dumps(chart, indent=2).encode())
-        except (OSError, ValueError) as e:
+        except Exception as e:
             return ToolResult(content=f"Error extracting chart data: {e}")
         labels = (("title", "Title"), ("x_label", "X-axis"), ("y_label", "Y-axis"))
         summary = "\n".join(

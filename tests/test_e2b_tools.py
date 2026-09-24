@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import tempfile
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, BinaryIO
@@ -109,6 +110,18 @@ def _error(result: str) -> str:
     return payload["message"]
 
 
+def _plant_escape_links(workspace: Path, outside: Path) -> None:
+    (workspace / "leak.env").symlink_to(outside / "secret.env")
+    (workspace / "linked").symlink_to(outside)
+    (workspace / "dangling.py").symlink_to(outside / "missing.py")
+    (workspace / "loop").symlink_to(workspace / "loop")
+    (workspace / "root_link").symlink_to(workspace)
+
+
+def _local_path(requested: str, outside: Path) -> str:
+    return str(outside / "secret.env") if requested == "absolute" else requested
+
+
 def test_registry_injects_workspace_into_model_entrypoints(
     make_tool: Callable[[Path | None], MindRoomE2BTools],  # noqa: ARG001  # installs the fake sandbox
     tmp_path: Path,
@@ -162,32 +175,59 @@ def test_upload_follows_links_that_stay_inside_workspace(
     assert _files(tool).stored == {"notes.md": b"notes"}
 
 
-@pytest.mark.parametrize("requested", ["absolute", "../outside/secret.env", "leak.env", "linked/secret.env"])
+@pytest.mark.parametrize(
+    "requested",
+    ["absolute", "../outside/secret.env", "leak.env", "linked/secret.env", "loop", "root_link", "/", "..", ""],
+)
 def test_upload_rejects_paths_outside_workspace(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
     workspace: Path,
     outside: Path,
     requested: str,
 ) -> None:
-    """Uploads never read absolute, parent-escaping, or outward-linked paths."""
-    (workspace / "leak.env").symlink_to(outside / "secret.env")
-    (workspace / "linked").symlink_to(outside)
+    """Uploads never read absolute, parent-escaping, outward-linked, or looping paths."""
+    _plant_escape_links(workspace, outside)
     tool = make_tool(workspace)
-    path = str(outside / "secret.env") if requested == "absolute" else requested
 
-    assert "Error uploading file" in _error(tool.upload_file(path, "/tmp/x"))  # noqa: S108
+    assert "Error uploading file" in _error(tool.upload_file(_local_path(requested, outside), "/tmp/x"))  # noqa: S108
     assert _files(tool).stored == {}
 
 
+@pytest.mark.parametrize("name", ["folder", "pipe"])
 def test_upload_rejects_non_regular_files(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
     workspace: Path,
+    name: str,
 ) -> None:
-    """Uploads only read regular files."""
+    """Uploads only read regular files and never block on a FIFO."""
     (workspace / "folder").mkdir()
+    os.mkfifo(workspace / "pipe")
     tool = make_tool(workspace)
 
-    assert "regular file" in _error(tool.upload_file("folder"))
+    assert "regular file" in _error(tool.upload_file(name))
+    assert _files(tool).stored == {}
+
+
+def test_upload_rejects_file_swapped_to_link_after_resolution(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+    outside: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file swapped for an outward link after resolution cannot redirect an upload."""
+    (workspace / "report.csv").write_bytes(b"a,b\n")
+    tool = make_tool(workspace)
+    resolve = e2b_module.resolve_path_within_root
+
+    def resolve_then_swap(root: Path, path: Path, **kwargs: object) -> Path:
+        resolved = resolve(root, path, **kwargs)
+        (workspace / "report.csv").unlink()
+        (workspace / "report.csv").symlink_to(outside / "secret.env")
+        return resolved
+
+    monkeypatch.setattr(e2b_module, "resolve_path_within_root", resolve_then_swap)
+
+    assert "Error uploading file" in _error(tool.upload_file("report.csv"))
     assert _files(tool).stored == {}
 
 
@@ -221,7 +261,17 @@ def test_download_writes_inside_workspace(
 
 @pytest.mark.parametrize(
     "requested",
-    ["absolute", "../outside/secret.env", "leak.env", "linked/plugin.py", "/", ".."],
+    [
+        "absolute",
+        "../outside/secret.env",
+        "leak.env",
+        "linked/plugin.py",
+        "dangling.py",
+        "loop",
+        "root_link",
+        "/",
+        "..",
+    ],
 )
 def test_download_rejects_paths_outside_workspace(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
@@ -229,12 +279,11 @@ def test_download_rejects_paths_outside_workspace(
     outside: Path,
     requested: str,
 ) -> None:
-    """Downloads never write absolute, parent-escaping, or outward-linked paths."""
-    (workspace / "leak.env").symlink_to(outside / "secret.env")
-    (workspace / "linked").symlink_to(outside)
+    """Downloads never write absolute, parent-escaping, outward-linked, or looping paths."""
+    _plant_escape_links(workspace, outside)
     tool = make_tool(workspace)
     _files(tool).stored["/tmp/evil.py"] = b"import os"  # noqa: S108
-    path = str(outside / "secret.env") if requested == "absolute" else requested
+    path = _local_path(requested, outside)
 
     assert "Error downloading file" in _error(tool.download_file_from_sandbox("/tmp/evil.py", path))  # noqa: S108
     assert _files(tool).reads == []
@@ -276,8 +325,10 @@ def test_png_output_path_saves_inside_workspace(
     tool.last_execution = Execution(results=[Result(png=base64.b64encode(_PNG_BYTES).decode())])
     agent = Agent()
 
+    _plant_escape_links(workspace, outside)
+
     saved = tool.download_png_result(agent, 0, "charts/plot.png")
-    rejected = tool.download_png_result(agent, 0, str(outside / "plot.png"))
+    rejected = tool.download_png_result(agent, 0, "linked/plot.png")
 
     assert saved.content.endswith("and saved to charts/plot.png")
     assert saved.images
@@ -311,16 +362,32 @@ def test_chart_data_saves_inside_workspace(
     assert not (tmp_path / "chart-data-0.json").exists()
 
 
+@pytest.mark.parametrize("requested", ["absolute", "linked/config.yaml", "dangling.py"])
 def test_chart_data_rejects_paths_outside_workspace(
     make_tool: Callable[[Path | None], MindRoomE2BTools],
     workspace: Path,
     outside: Path,
+    requested: str,
 ) -> None:
     """Chart data never writes outside the workspace."""
+    _plant_escape_links(workspace, outside)
     tool = make_tool(workspace)
     tool.last_execution = Execution(results=[Result(chart=_CHART)])
 
-    result = tool.download_chart_data(Agent(), 0, str(outside / "config.yaml"), add_as_artifact=False)
+    result = tool.download_chart_data(Agent(), 0, _local_path(requested, outside), add_as_artifact=False)
 
     assert result.content.startswith("Error extracting chart data")
-    assert not (outside / "config.yaml").exists()
+    assert (outside / "secret.env").read_text(encoding="utf-8") == "TOKEN=secret"
+    assert sorted(entry.name for entry in outside.iterdir()) == ["secret.env"]
+
+
+def test_chart_data_reports_invalid_index(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+) -> None:
+    """An out-of-range negative index is a tool error, not an escaped exception."""
+    tool = make_tool(workspace)
+    tool.last_execution = Execution(results=[Result(chart=_CHART)])
+
+    assert tool.download_chart_data(Agent(), -5).content.startswith("Error extracting chart data")
+    assert list(workspace.iterdir()) == []
