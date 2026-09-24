@@ -146,7 +146,7 @@ class SkillStore:
                     msg = "Skill changed during recovery"
                     raise ValueError(msg)
             elif action == "create":
-                if current is not None or name in self.snapshot():
+                if current is not None or name in {existing.lower() for existing in self.snapshot()}:
                     msg = "Skill already exists"
                     raise ValueError(msg)
             elif action != "update" or not previous or current_hash != digest(previous["markdown"]):
