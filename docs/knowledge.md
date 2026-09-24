@@ -318,18 +318,24 @@ If a checkout already holds a credential-bearing remote from before this check e
 
 #### Checkout layout
 
-The knowledge folder holds worktree files only; there is no `.git` inside it.
-The repository's Git directory lives at `<storage>/knowledge_git/<source key>`, which is control-plane state that no agent workspace or worker container can reach; bases that share a folder share it.
-That is deliberate: Git reads `core.fsmonitor`, `core.hooksPath`, `core.sshCommand`, credential helpers and content filters out of the repository it is pointed at, and runs them as the MindRoom process.
-A Git-backed base may live inside an agent workspace (`private.knowledge.git`, or a shared base rooted in a workspace), where the agent's file tools and its worker container can write every file, so a Git directory there would let them choose commands for the control plane to run.
-Every knowledge Git command also runs with hooks, fsmonitor, credential and askpass helpers, proxy commands and the `ext::` protocol disabled, and with a minimal environment that carries no MindRoom secrets beyond the repository credential for the command that needs it.
-Commands that run before the repository exists do so from that control-plane directory, so Git never discovers a repository an agent created around the knowledge folder.
-Agent file tools refuse to create or modify anything under a `.git`, `.hg`, `.svn` or `.bzr` directory in the workspace.
+The knowledge folder holds the checked-out files only.
+Its Git directory lives at `<storage>/knowledge_git/<folder>_<path digest>`, beside the agent and private-instance state roots that workers mount rather than inside one, and every sync and listing command names it explicitly.
+That is deliberate: Git runs programs named by the repository it operates on (`core.fsmonitor`, hooks, content filters, SSH and credential helpers), and a Git-backed base may live where agent tools and worker containers can write every file (`private.knowledge.git`, or a shared base rooted in a workspace).
+A `.git` written into the knowledge folder is therefore never read, never followed, and never indexed.
+Knowledge Git commands also run with hooks, fsmonitor, credential and askpass helpers, proxy commands and the `ext::` protocol disabled, read no system or global Git configuration, and receive a minimal environment that carries no MindRoom secrets beyond the repository credential for the commands that contact the remote.
+Configure proxies, CA bundles and SSH through environment variables such as `HTTPS_PROXY`, `SSL_CERT_FILE`, `GIT_SSH_COMMAND` and `SSH_AUTH_SOCK` or through `~/.ssh/config`, and repository credentials through `credentials_service`; settings in `~/.gitconfig` or `/etc/gitconfig`, credential helpers included, do not apply to knowledge sync.
 
-A checkout created by an earlier release keeps its `.git` beside the knowledge files.
-The first sync after upgrading moves it to the current layout when that `.git` records the configured `repo_url` as its origin: MindRoom creates a fresh control-plane repository, deletes the in-tree `.git`, and force-aligns tracked files as any sync does, leaving untracked files in place.
-Nothing is carried over from the old `.git` and no Git command runs against it, so a repository config written before this rule cannot survive the upgrade.
-Any other `.git` in the folder — one whose origin differs because `repo_url` changed, one left by an interrupted clone, or somebody else's repository reached through a link — makes the sync fail with an error instead of being deleted; delete the folder and the next sync clones it afresh.
+Bases that share a folder share one Git directory.
+The directory is keyed by the resolved folder path, so changing a base's `path` starts a new repository in the new folder, which must be empty and is cloned afresh; delete the old directory under `<storage>/knowledge_git/` to reclaim its space.
+It holds repository content only: remote URLs are written without credentials, credentials reach Git only through the environment of a single command, and fetches do not write `FETCH_HEAD`.
+Deleting only the knowledge folder restores its files from the Git directory on the next sync without fetching history again; delete both to clone afresh.
+
+A checkout created by an earlier release keeps its `.git` directory inside the knowledge folder.
+The first sync after upgrading moves that directory to its new location with a single rename, so the object store is neither copied nor fetched again and the published index stays valid without re-embedding.
+Before the moved repository is used, MindRoom replaces its config with one holding only the repository format and the configured `repo_url`, and deletes everything else Git could run or be redirected by, including hooks, `info/`, reflogs, `FETCH_HEAD`, worktree and submodule metadata, and alternates.
+An interrupted move finishes on the next sync.
+The sync fails with an error instead when the folder's `.git` is a link or a `gitdir:` file, which is never followed, or when the knowledge folder and `<storage>` are on different filesystems or mounts, because the move would have to copy the whole object store.
+In the second case, stop MindRoom, move the `.git` directory to the path the error names, and start MindRoom again; in either case you can instead delete the folder so the next sync clones it afresh.
 
 ### Sync Behavior
 
@@ -337,7 +343,7 @@ Any other `.git` in the folder — one whose origin differs because `repo_url` c
 - Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
 - Explicit dashboard/API reindex or sync runs Git sync first for Git-backed bases.
 - Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
-- MindRoom disables implicit LFS smudge during clone, checkout, and reset for every Git-backed knowledge base.
+- MindRoom disables implicit LFS smudge during checkout and reset for every Git-backed knowledge base.
 - When `lfs: true`, MindRoom explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - When sync realigns the checkout to a different fetched revision, it forcibly checks out and resets tracked files, discarding tracked edits and restoring tracked deletions.
 - If local HEAD already equals the fetched revision, sync skips that reset, so ordinary tracked edits or deletions can remain; LFS hydration is a separate step.
@@ -441,7 +447,7 @@ MindRoom reads the key when needed and mints a repository-scoped installation to
 The control-plane runtime caches that token until shortly before GitHub's reported expiry.
 Scheduled refresh children receive the cached token and expiry only through their stdin request pipe, then pass the token only to Git.
 The handoff includes the non-secret App, installation, repository, and key-path identity, and a child ignores the token if its current credentials no longer match.
-MindRoom never copies the token into the checkout config, credential store, refresh-child launch environment, metadata, or logs.
+MindRoom never copies the token into the repository config, credential store, refresh-child launch environment, metadata, or logs.
 
 ## Embedder Configuration
 

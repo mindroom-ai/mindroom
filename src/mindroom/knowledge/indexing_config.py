@@ -259,28 +259,23 @@ def storage_key_for_base(base_id: str, knowledge_path: Path) -> str:
     return f"{_safe_identifier(base_id)}_{digest}"
 
 
-#: Control-plane namespace for Git directories. It is a sibling of the state
-#: roots dedicated workers mount, never a child of one, because the Git
-#: directory of a knowledge checkout decides which commands Git runs.
+#: Primary-owned directory holding the Git directory of every Git-backed base.
+#: It sits beside the ``agents/`` and private-instance state roots that workers
+#: mount, never inside one, because a Git directory chooses the programs Git runs.
 _KNOWLEDGE_GIT_DIRNAME = "knowledge_git"
 
 
-def knowledge_git_dir(control_storage_root: Path, knowledge_path: Path) -> Path:
-    """Return the control-plane Git directory backing one knowledge checkout.
+def knowledge_git_dir(storage_root: Path, knowledge_path: Path) -> Path:
+    """Return the MindRoom-owned Git directory behind one knowledge checkout.
 
-    The checkout itself lives wherever the base is configured, which for a
-    private base or a workspace-relative base is a tree the agent's file tools
-    and its worker container can write. The Git directory must not be, so it is
-    kept here -- under the primary storage root, outside every scoped state
-    root a worker is given -- and passed to Git explicitly.
-
-    Keyed by the physical checkout rather than by base: bases that share a
-    source root share one worktree, so they must share the repository behind
-    it too, exactly as they shared an in-tree ``.git`` before.
+    Keyed by the resolved checkout path rather than by base: bases that share a
+    folder share its worktree and source lock, so they share one repository.
+    Changing a base's path therefore starts a new repository, and the old one
+    is left behind holding repository content but no credentials.
     """
     resolved = knowledge_path.resolve()
     digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:16]
-    return (control_storage_root / _KNOWLEDGE_GIT_DIRNAME / f"{_safe_identifier(resolved.name)}_{digest}").resolve()
+    return storage_root.resolve() / _KNOWLEDGE_GIT_DIRNAME / f"{_safe_identifier(resolved.name)}_{digest}"
 
 
 def _filter_settings_key(values: Iterable[str]) -> str:

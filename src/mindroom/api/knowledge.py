@@ -398,7 +398,6 @@ async def _git_status(
         git_checkout_present,
         root,
         knowledge_git_dir(runtime_paths.storage_root, root),
-        timeout_seconds=_DASHBOARD_GIT_FILE_LIST_TIMEOUT_SECONDS,
     )
     return {
         "repo_url": redact_url_credentials(git_config.repo_url),

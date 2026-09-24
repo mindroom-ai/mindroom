@@ -4927,6 +4927,7 @@ path = "mindroom.knowledge.file_listing"
 depends_on = [
     "mindroom.git_invocation",
     "mindroom.knowledge.redaction",
+    "mindroom.path_confinement",
     "mindroom.path_globs",
 ]
 
@@ -4991,10 +4992,15 @@ depends_on = [
     "mindroom.git_invocation",
     "mindroom.knowledge.file_listing",
     "mindroom.knowledge.github_app_auth",
+    "mindroom.knowledge.legacy_git_checkout",
     "mindroom.knowledge.redaction",
-    "mindroom.path_confinement",
 ]
 visibility = ["mindroom.knowledge.manager"]
+
+[[modules]]
+path = "mindroom.knowledge.legacy_git_checkout"
+depends_on = ["mindroom.git_invocation"]
+visibility = ["mindroom.knowledge.git_source"]
 
 [[modules]]
 path = "mindroom.knowledge.github_app_auth"

@@ -129,29 +129,18 @@ def _assert_file_mode_metadata_blocks_old_semantic_index(
 
 
 def _checkout_git_dir(tmp_path: Path, path: Path) -> Path:
-    """Return the control-plane Git directory the API resolves for one checkout."""
+    """Return the MindRoom-owned Git directory the API resolves for one checkout."""
     return knowledge_git_dir(_runtime_paths(tmp_path).storage_root, path)
 
 
 def _init_git_checkout(tmp_path: Path, path: Path, *tracked_paths: str) -> None:
-    """Create a checkout laid out the way MindRoom clones one: Git directory outside."""
+    """Create a checkout laid out as MindRoom keeps one: its Git directory under the storage root."""
     git_dir = _checkout_git_dir(tmp_path, path)
     git_dir.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "init", f"--separate-git-dir={git_dir}"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-    )
-    (path / ".git").unlink()
+    env = {**os.environ, "GIT_DIR": str(git_dir), "GIT_WORK_TREE": str(path)}
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True, env=env)
     if tracked_paths:
-        subprocess.run(
-            ["git", "add", *tracked_paths],
-            cwd=path,
-            check=True,
-            capture_output=True,
-            env={**os.environ, "GIT_DIR": str(git_dir), "GIT_WORK_TREE": str(path)},
-        )
+        subprocess.run(["git", "add", *tracked_paths], cwd=path, check=True, capture_output=True, env=env)
 
 
 def _test_client(tmp_path: Path) -> TestClient:

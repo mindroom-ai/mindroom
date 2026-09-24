@@ -50,6 +50,7 @@ from mindroom.constants import (
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_embedder_api_key
 from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
+from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
 from mindroom.knowledge.collections import build_vector_db, candidate_collection_name
@@ -1744,33 +1745,38 @@ def test_base_files_endpoint_still_returns_sizes_and_timestamps(tmp_path: Path) 
     assert payload["files"][0]["modified"]
 
 
-def _committed_git_checkout(path: Path) -> None:
+def _committed_git_checkout(path: Path, git_dir: Path) -> None:
+    """Commit ``doc.md`` in a checkout whose Git directory lives apart, as MindRoom keeps one."""
     path.mkdir()
+    git_dir.parent.mkdir(parents=True, exist_ok=True)
     (path / "doc.md").write_text("body", encoding="utf-8")
+    env = {**os.environ, "GIT_DIR": str(git_dir), "GIT_WORK_TREE": str(path)}
     for args in (
         ("init", "-b", "main"),
         ("add", "doc.md"),
         ("-c", "user.email=tests@example.com", "-c", "user.name=MindRoom Tests", "commit", "-m", "doc"),
     ):
-        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True, env=env)
 
 
 def test_dashboard_git_listing_never_runs_checkout_fsmonitor(tmp_path: Path) -> None:
-    """Dashboard reads must not run a program the checkout's own Git config names.
+    """Dashboard reads must not run a program a .git inside the checkout names.
 
     A shared checkout may live in an agent workspace, where agent tools can write
-    ``.git/config``, while the dashboard lists it from the primary process.
+    a ``.git`` beside the knowledge files, while the dashboard lists it from the
+    primary process.
     """
     docs_path = tmp_path / "docs"
-    _committed_git_checkout(docs_path)
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
+    runtime_paths = runtime_paths_for(config)
+    _committed_git_checkout(docs_path, knowledge_git_dir(runtime_paths.storage_root, docs_path))
     marker = tmp_path / "fsmonitor-ran"
     hook = tmp_path / "fsmonitor-hook"
     hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n", encoding="utf-8")
     hook.chmod(0o755)
+    subprocess.run(["git", "init", "--quiet"], cwd=docs_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "core.fsmonitor", str(hook)], cwd=docs_path, check=True, capture_output=True)
-    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")
-    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
-    runtime_paths = runtime_paths_for(config)
 
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
@@ -1791,7 +1797,8 @@ def test_git_listing_runs_git_without_caller_environment(
 ) -> None:
     """Listing must not hand the primary process' secrets or relative PATH entries to Git."""
     docs_path = tmp_path / "docs"
-    _committed_git_checkout(docs_path)
+    git_dir = tmp_path / "docs.git"
+    _committed_git_checkout(docs_path, git_dir)
     git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
     monkeypatch.setenv("MINDROOM_API_KEY", "dashboard-secret")
@@ -1805,31 +1812,31 @@ def test_git_listing_runs_git_without_caller_environment(
 
     monkeypatch.setattr(knowledge_file_listing_module.subprocess, "run", _recording_run)
 
-    assert list_git_tracked_knowledge_files(config, "docs", docs_path) == [docs_path.resolve() / "doc.md"]
-    assert len(envs) == 2
-    allowed_names = {
-        "PATH",
-        "GIT_ALLOW_PROTOCOL",
-        "GIT_NO_LAZY_FETCH",
-        *knowledge_file_listing_module._GIT_CONFIG_LOCATION_ENV,
-    }
-    for env in envs:
-        assert set(env) <= allowed_names
-        assert env["GIT_ALLOW_PROTOCOL"] == ""
-        assert all(Path(entry).is_absolute() for entry in env["PATH"].split(os.pathsep))
+    assert list_git_tracked_knowledge_files(config, "docs", docs_path, git_dir) == [docs_path.resolve() / "doc.md"]
+    assert len(envs) == 1
+    env = envs[0]
+    assert "dashboard-secret" not in str(env)
+    assert env["GIT_DIR"] == str(git_dir)
+    assert env["GIT_ALLOW_PROTOCOL"] == ""
+    assert all(Path(entry).is_absolute() for entry in env["PATH"].split(os.pathsep))
 
 
-def test_read_only_git_refuses_transports_that_checkout_config_allows(tmp_path: Path) -> None:
-    """Checkout config re-allowing a protocol must not open a transport during listing."""
+def test_read_only_git_refuses_transports_that_repository_config_allows(tmp_path: Path) -> None:
+    """Repository config re-allowing a protocol must not open a transport for a local command."""
     remote = tmp_path / "remote"
-    _committed_git_checkout(remote)
+    _committed_git_checkout(remote, remote / ".git")
     docs_path = tmp_path / "docs"
-    _committed_git_checkout(docs_path)
-    subprocess.run(["git", "config", "protocol.file.allow", "always"], cwd=docs_path, check=True, capture_output=True)
+    git_dir = tmp_path / "docs.git"
+    _committed_git_checkout(docs_path, git_dir)
+    subprocess.run(["git", f"--git-dir={git_dir}", "config", "protocol.file.allow", "always"], check=True)
 
-    result = knowledge_file_listing_module._run_read_only_git(
-        docs_path,
-        ["ls-remote", remote.resolve().as_uri()],
+    result = subprocess.run(
+        hardened_git_command(["ls-remote", remote.resolve().as_uri()]),
+        cwd=docs_path,
+        env=hardened_git_env(git_dir=git_dir, work_tree=docs_path),
+        check=False,
+        capture_output=True,
+        text=True,
         timeout=10.0,
     )
 
@@ -9287,13 +9294,11 @@ async def test_git_pull_that_changes_one_file_only_reindexes_that_file(
 
 
 @pytest.mark.asyncio
-async def test_unrecognized_in_tree_git_checkout_is_refused_not_deleted(tmp_path: Path) -> None:
-    """A .git MindRoom did not write is refused, never deleted.
+async def test_linked_worktree_checkout_is_refused_and_not_listed(tmp_path: Path) -> None:
+    """A .git pointer file is never followed: its target could be any repository.
 
-    Discarding means deleting a directory named by config, and a Git-backed base
-    can sit in a tree whose links an agent controls. Only a checkout recording
-    the configured remote as its own origin is replaced; a linked worktree, or
-    any repository reached through a swapped link, is left alone.
+    Earlier releases ran Git in such a checkout, which let whoever could write
+    the pointer choose the repository whose config and hooks Git executed.
     """
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
@@ -9346,7 +9351,7 @@ async def test_unrecognized_in_tree_git_checkout_is_refused_not_deleted(tmp_path
     resolved_git_config = manager.git_source._git_config()
     assert resolved_git_config is not None
 
-    with pytest.raises(RuntimeError, match="MindRoom cannot adopt"):
+    with pytest.raises(RuntimeError, match="is a link or a file, not a Git directory"):
         await manager.git_source._ensure_repository(resolved_git_config)
     git_dir = manager.git_source.git_dir
 
