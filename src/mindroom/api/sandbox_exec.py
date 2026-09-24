@@ -47,7 +47,6 @@ _WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES = 128 * 1024
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
 EXECUTION_ENV_TOOL_NAMES = constants.EXECUTION_ENV_TOOL_NAMES
-_WORKER_WRITABLE_IMPORT_ENV_NAMES = frozenset({"PYTHONPYCACHEPREFIX"})
 _PROTOCOL_CHILD_ISOLATION_ENV = MappingProxyType(
     {
         "PYTHONSAFEPATH": "1",
@@ -289,11 +288,16 @@ def _subprocess_passthrough_env() -> dict[str, str]:
 
 
 def _runner_python_path() -> str:
-    """Return the runner-owned `PYTHONPATH`: the project source plus the runner's own value."""
+    """Return the runner-owned `PYTHONPATH`: the project source plus the runner's own value.
+
+    Entries are made absolute against the runner's cwd, which is what they mean
+    to the runner itself; left relative, they would resolve against a child's
+    cwd, which is the worker workspace.
+    """
     python_path_parts = [str(_project_src_path())]
     existing_python_path = os.environ.get("PYTHONPATH", "")
     if existing_python_path:
-        python_path_parts.append(existing_python_path)
+        python_path_parts.extend(str(Path(entry).resolve()) for entry in existing_python_path.split(os.pathsep))
     return os.pathsep.join(python_path_parts)
 
 
@@ -345,15 +349,16 @@ def child_receives_credentials_encryption_key(tool_name: str) -> bool:
 def isolated_protocol_child_env(env: dict[str, str]) -> dict[str, str]:
     """Return `env` with every worker-writable import source removed.
 
-    `PYTHONPYCACHEPREFIX` points at the worker cache, so leaving it set lets a
-    forged `.pyc` shadow an image-provided module. `PYTHONPATH` is reset to
-    runner-owned entries: the child runs the runner's own interpreter, which
-    finds its site-packages natively, and the worker env's extra entries include
-    the runner's user site, which lives under the worker root because dedicated
-    runners set HOME there. The added names are the env form of `-P`, `-s` and
-    `-B`: no cwd on `sys.path`, no user site, and no bytecode written back out.
+    Every `PYTHON*` name is dropped so the child's interpreter startup is fully
+    runner-defined; `PYTHONPYCACHEPREFIX`, for one, points at the worker cache,
+    where a forged `.pyc` would shadow a runner module. `PYTHONPATH` is then
+    reset to runner-owned entries: the child runs the runner's own interpreter,
+    which finds its site-packages natively, and the worker env's extra entries
+    include the runner's user site, which lives under the worker root because
+    dedicated runners set HOME there. The added names are the env form of `-P`,
+    `-s` and `-B`: no cwd on `sys.path`, no user site, and no bytecode written.
     """
-    isolated = {key: value for key, value in env.items() if key not in _WORKER_WRITABLE_IMPORT_ENV_NAMES}
+    isolated = {key: value for key, value in env.items() if not key.startswith("PYTHON")}
     isolated["PYTHONPATH"] = _runner_python_path()
     isolated.update(_PROTOCOL_CHILD_ISOLATION_ENV)
     return isolated

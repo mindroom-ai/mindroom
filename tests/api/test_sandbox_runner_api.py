@@ -2440,6 +2440,8 @@ def test_isolated_child_ignores_worker_writable_imports(
 
     Dedicated runners set HOME to the worker root, so the runner's own user site
     lives there too; that directory must not reach the child through PYTHONPATH.
+    A relative entry in the runner's own PYTHONPATH must not resolve against the
+    child's cwd, which is the worker workspace.
     """
     worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker-root")
     worker_paths.workspace.mkdir(parents=True)
@@ -2448,12 +2450,16 @@ def test_isolated_child_ignores_worker_writable_imports(
     user_site = worker_paths.root / ".local" / "lib" / python_version / "site-packages"
     user_site.mkdir(parents=True)
     (user_site / "mindroom_user_site_probe.py").write_text("raise SystemExit(99)\n", encoding="utf-8")
-    sitecustomize_marker = tmp_path / "sitecustomize-ran"
-    (user_site / "sitecustomize.py").write_text(
-        f"import pathlib\npathlib.Path({str(sitecustomize_marker)!r}).write_text('ran')\n",
-        encoding="utf-8",
-    )
+    sitecustomize_markers = []
+    for planted_dir in (user_site, worker_paths.workspace):
+        marker = tmp_path / f"sitecustomize-ran-in-{planted_dir.name}"
+        (planted_dir / "sitecustomize.py").write_text(
+            f"import pathlib\npathlib.Path({str(marker)!r}).write_text('ran')\n",
+            encoding="utf-8",
+        )
+        sitecustomize_markers.append(marker)
     monkeypatch.setattr(sandbox_exec_module.site, "getusersitepackages", lambda: str(user_site))
+    monkeypatch.setenv("PYTHONPATH", ".")
 
     python_executable, environment, cwd = sandbox_exec_module.resolve_subprocess_worker_context(
         worker_paths,
@@ -2493,7 +2499,29 @@ def test_isolated_child_ignores_worker_writable_imports(
         "user_site": False,
         "mindroom": True,
     }
-    assert not sitecustomize_marker.exists()
+    assert not any(marker.exists() for marker in sitecustomize_markers)
+
+
+def test_isolated_protocol_child_env_owns_every_python_startup_name() -> None:
+    """Inherited `PYTHON*` names must not configure the secret-bearing child's interpreter."""
+    environment = sandbox_exec_module.isolated_protocol_child_env(
+        {
+            "PYTHONHOME": "/worker/prefix",
+            "PYTHONSTARTUP": "/worker/startup.py",
+            "PYTHONPYCACHEPREFIX": "/worker/cache/pycache",
+            "PYTHONPATH": "/worker/site-packages",
+            "PATH": "/worker/venv/bin:/usr/bin",
+        },
+    )
+
+    assert {name for name in environment if name.startswith("PYTHON")} == {
+        "PYTHONPATH",
+        "PYTHONSAFEPATH",
+        "PYTHONNOUSERSITE",
+        "PYTHONDONTWRITEBYTECODE",
+    }
+    assert "/worker/site-packages" not in environment["PYTHONPATH"].split(os.pathsep)
+    assert environment["PATH"] == "/worker/venv/bin:/usr/bin"
 
 
 def test_prepared_shell_execution_env_resolved_env_wins_over_extra_passthrough(tmp_path: Path) -> None:

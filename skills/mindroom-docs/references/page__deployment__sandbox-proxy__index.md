@@ -380,7 +380,7 @@ If the warm template fails to start, dispatch falls back to spawn-per-call and r
 Only `shell` and `python` children run on the worker virtualenv interpreter, because that virtualenv is their runtime and they never receive the credentials encryption key.
 They can still receive their own leased credentials, which then share the agent-writable runtime those tools execute in.
 Every other tool call carries the credentials encryption key and its consumed credential lease into the child, so that child runs on the runner's own interpreter and its own site-packages instead.
-Those children start with `PYTHONSAFEPATH`, `PYTHONNOUSERSITE`, and `PYTHONDONTWRITEBYTECODE` set, without `PYTHONPYCACHEPREFIX`, and with `PYTHONPATH` limited to the project source and the runner's own value.
+Those children start with `PYTHONSAFEPATH`, `PYTHONNOUSERSITE`, and `PYTHONDONTWRITEBYTECODE` set, with every other inherited `PYTHON*` setting such as `PYTHONPYCACHEPREFIX` removed, and with `PYTHONPATH` limited to the project source and the runner's own value resolved against the runner's cwd.
 The worker workspace, the worker virtualenv, the worker root's `$HOME/.local`, and the worker bytecode cache therefore cannot contribute imports.
 The worker virtualenv stays available to tool code through `PATH` and `VIRTUAL_ENV`, but packages installed into it, for example with `pip_install_package`, are importable only from `shell` and `python`.
 This boundary assumes the runner's own installation is not writable by the worker uid.
