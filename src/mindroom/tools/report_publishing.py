@@ -3,6 +3,7 @@
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolMetadata,
     ToolStatus,
 )
@@ -11,6 +12,7 @@ from mindroom.tool_system.registration import register_builtin_tool_metadata
 register_builtin_tool_metadata(
     ToolMetadata(
         name="report_publishing",
+        file_access=ToolFileAccess.NONE,
         display_name="Report Publishing",
         description="Share reports through public links that you can revoke",
         category=ToolCategory.PRODUCTIVITY,

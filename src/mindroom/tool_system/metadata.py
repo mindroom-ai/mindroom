@@ -1201,6 +1201,8 @@ def _declared_tool_metadata_from_broken_plugin_source(module_path: Path) -> dict
             display_name=_literal_string_keyword(node, "display_name", module_constants) or tool_name,
             description=_literal_string_keyword(node, "description", module_constants) or "Unavailable plugin tool",
             category=ToolCategory.INTEGRATIONS,
+            # Placeholder for a plugin module that failed to load; the tool is never constructed.
+            file_access=ToolFileAccess.NONE,
         )
     return metadata_by_name
 

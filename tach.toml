@@ -5296,6 +5296,7 @@ expose = [
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
     "ToolConfigOverrideError",
+    "ToolFileAccess",
     "ToolInitOverrideError",
     "ToolManagedInitArg",
     "ToolMetadata",

@@ -8,6 +8,7 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
 )
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="google_docs",
+    file_access=ToolFileAccess.NONE,
     display_name="Google Docs",
     description="Create, read, and edit documents through the connected user's Google Docs",
     category=ToolCategory.PRODUCTIVITY,

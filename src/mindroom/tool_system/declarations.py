@@ -161,12 +161,13 @@ class ToolMetadata:
     display_name: str
     description: str
     category: ToolCategory
+    # Required so every tool, including plugins and MCP servers, states how it reaches local files.
+    file_access: ToolFileAccess
     status: ToolStatus = ToolStatus.AVAILABLE
     setup_type: SetupType = SetupType.NONE
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY
     requires_primary_runtime: bool = False
     consumes_workspace_paths: bool = False
-    file_access: ToolFileAccess = ToolFileAccess.NONE
     # Runs arbitrary programs (shell, interpreters, containers); independent of the file_access class.
     executes_code: bool = False
     requires_room_context: bool = False

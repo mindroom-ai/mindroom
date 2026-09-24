@@ -177,6 +177,7 @@ def test_registration_preserves_primary_runtime_requirement() -> None:
 
         @register_tool_with_metadata(
             name="test_primary_runtime_registration",
+            file_access=ToolFileAccess.NONE,
             display_name="Primary Runtime Registration",
             description="Test-only primary-runtime declaration.",
             category=ToolCategory.DEVELOPMENT,
@@ -200,6 +201,7 @@ def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Leaked Tool",
         description="Temporary leaked tool metadata",
         category=ToolCategory.DEVELOPMENT,
@@ -609,6 +611,7 @@ def test_registration_rejects_missing_oauth_fallback_config_field() -> None:
 
         @register_tool_with_metadata(
             name="invalid_oauth_fallback",
+            file_access=ToolFileAccess.NONE,
             display_name="Invalid OAuth Fallback",
             description="Invalid test metadata.",
             category=ToolCategory.DEVELOPMENT,
@@ -666,6 +669,7 @@ def test_get_tool_by_name_does_not_infer_hidden_constructor_kwargs(tmp_path: Pat
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Hidden Runtime Tool",
         description="Test-only toolkit for constructor contract coverage.",
         category=ToolCategory.DEVELOPMENT,
@@ -711,6 +715,7 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Explicit Runtime Tool",
         description="Test-only toolkit for explicit constructor contract coverage.",
         category=ToolCategory.DEVELOPMENT,
@@ -770,6 +775,7 @@ def test_validate_authored_overrides_accepts_declared_field_types_and_nulls() ->
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Authored Override Tool",
         description="Test-only toolkit for authored override validation.",
         category=ToolCategory.DEVELOPMENT,
@@ -814,6 +820,7 @@ def test_validate_authored_overrides_accepts_inherit_sentinel_for_required_field
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Authored Override Inherit Required",
         description="Test-only toolkit for inherit sentinel coverage.",
         category=ToolCategory.DEVELOPMENT,
@@ -845,6 +852,7 @@ def test_validate_authored_overrides_accepts_string_lists_for_text_fields_with_a
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Authored Override String Array Compat",
         description="Test-only toolkit for string-array compatibility coverage.",
         category=ToolCategory.DEVELOPMENT,
@@ -879,6 +887,7 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Authored Override Errors",
         description="Test-only toolkit for override error coverage.",
         category=ToolCategory.DEVELOPMENT,

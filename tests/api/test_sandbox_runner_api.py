@@ -56,6 +56,7 @@ from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolFileAccess,
     ToolMetadata,
     ToolStatus,
 )
@@ -1982,7 +1983,7 @@ def test_subprocess_plugin_receives_full_config_and_explicit_refresh(
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolManagedInitArg\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class RuntimeConfigPluginTool(Toolkit):\n"
@@ -2003,6 +2004,7 @@ def test_subprocess_plugin_receives_full_config_and_explicit_refresh(
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='runtime_config_plugin',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Runtime Config Plugin',\n"
         "    description='Inspect received runtime config',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -2834,6 +2836,7 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
+            file_access=ToolFileAccess.NONE,
             display_name="Dummy",
             description="Dummy",
             category=ToolCategory.DEVELOPMENT,
@@ -2897,6 +2900,7 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
     registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
+            file_access=ToolFileAccess.NONE,
             display_name="Dummy",
             description="Dummy",
             category=ToolCategory.DEVELOPMENT,
@@ -3378,7 +3382,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ConfigField, ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoPluginTool(Toolkit):\n"
         "    def __init__(self, label: str | None = None) -> None:\n"
@@ -3387,6 +3391,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='demo_plugin',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Demo Plugin',\n"
         "    description='Demo plugin tool',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -3442,7 +3447,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_overr
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ConfigField, ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoPluginInitTool(Toolkit):\n"
         "    def __init__(self, base_dir: str | None = None) -> None:\n"
@@ -3451,6 +3456,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_overr
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='demo_plugin_init',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Demo Plugin Init',\n"
         "    description='Demo plugin tool with init overrides',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
@@ -3967,6 +3973,7 @@ def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
     registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
+            file_access=ToolFileAccess.NONE,
             display_name="Runner Auto Save",
             description="Test-only runner auto-save coverage.",
             category=ToolCategory.DEVELOPMENT,

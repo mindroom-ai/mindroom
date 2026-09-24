@@ -133,7 +133,7 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "self_config_pl
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -141,6 +141,7 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "self_config_pl
         "\n"
         "@register_tool_with_metadata(\n"
         f"    name='{tool_name}',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Plugin Tool',\n"
         "    description='Plugin-defined tool',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"

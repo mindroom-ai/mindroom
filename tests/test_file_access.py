@@ -23,7 +23,9 @@ def test_workspace_mode_accepts_relative_and_absolute_paths_inside_workspace(tmp
     for raw in ("docs/report.pdf", str(report)):
         authorized = resolve_agent_file(raw, workspace_root=workspace, file_access="workspace", field_name="attachment")
         assert authorized == AuthorizedFile(
-            root=workspace, relative=Path("docs/report.pdf"), display_path=str(report.resolve())
+            root=workspace,
+            relative=Path("docs/report.pdf"),
+            display_path=str(report.resolve()),
         )
 
 

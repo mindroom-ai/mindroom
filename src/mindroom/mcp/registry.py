@@ -15,6 +15,7 @@ from mindroom.tool_system.catalog import (
     SetupType,
     ToolAuthoredOverrideValidator,
     ToolCategory,
+    ToolFileAccess,
     ToolManagedInitArg,
     ToolMetadata,
     ToolStatus,
@@ -147,6 +148,8 @@ def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetada
         description=server_config.summary or "Tools provided by this MCP server",
         icon=server_config.icon,
         category=ToolCategory.DEVELOPMENT,
+        # A local stdio server is an operator-launched program that file_access cannot confine.
+        file_access=ToolFileAccess.UNRESTRICTED if server_config.transport == "stdio" else ToolFileAccess.NONE,
         status=ToolStatus.REQUIRES_CONFIG if is_oauth else ToolStatus.AVAILABLE,
         setup_type=SetupType.OAUTH if is_oauth else SetupType.NONE,
         auth_provider=auth_provider,

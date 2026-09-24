@@ -37,7 +37,7 @@ def register_tool_with_metadata(
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY,
     requires_primary_runtime: bool = False,
     consumes_workspace_paths: bool = False,
-    file_access: ToolFileAccess = ToolFileAccess.NONE,
+    file_access: ToolFileAccess,
     executes_code: bool = False,
     requires_room_context: bool = False,
     icon: str | None = None,
