@@ -94,7 +94,8 @@ get_pull_request("mindroom-ai/mindroom", 123)
 Todo items are scoped to the current Matrix room and resolved thread, so separate threads can carry independent plans.
 Each item can have a priority, dependency list, status, and assigned agent name.
 Assigning work to an agent, or changing work assigned to an agent, is refused unless the requester may address that agent in the current room under its `access` policy.
-Each item records the human requester who last created or changed it.
+Each item records the human requester who wrote its title, and other changes keep that attribution.
+Reassigning an item without rewriting its title also requires that its recorded requester may address the new agent.
 State is stored under `mindroom_data/todo/` and survives restarts.
 Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
 
@@ -110,7 +111,7 @@ Future persisted timestamps beyond the relevant cooldown or backstop window are 
 Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
 Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
 Each poke carries the item's recorded human requester as its original sender, so the assigned agent applies its normal reply access and tool authorization to that human.
-Items without a recorded human requester, such as items written by automation turns, are never poked, and one poke never mixes items from different requesters.
+Items without a recorded human requester, such as items titled in turns requested by another agent or items written before requesters were recorded, are never poked, and one poke never mixes items from different requesters.
 
 | Environment variable | Default | Behavior |
 | --- | --- | --- |

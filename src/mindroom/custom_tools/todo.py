@@ -570,7 +570,7 @@ def _configured_agent_names() -> set[str]:
     ctx = get_tool_runtime_context()
     if ctx is None:
         return set()
-    return set((ctx.config.agents or {}).keys())
+    return set((ctx.current_config.agents or {}).keys())
 
 
 def _unknown_assigned_agent_message(agent_name: str, configured: set[str]) -> str | None:
@@ -580,21 +580,28 @@ def _unknown_assigned_agent_message(agent_name: str, configured: set[str]) -> st
     return None
 
 
-def _unauthorized_assignee_message(agent_name: str) -> str | None:
-    """Refuse todo work for a configured agent that the current requester may not address in this room."""
+def _may_address(requester_id: str, agent_name: str) -> bool:
+    """Return whether a requester may direct todo work to one agent in the current room."""
     ctx = _runtime_context()
     config = ctx.current_config
     # Unconfigured assignees have no reply policy and are never poked; new ones are rejected as unknown.
-    if agent_name not in config.agents or is_sender_allowed_for_responder(
-        ctx.requester_id,
+    return agent_name not in config.agents or is_sender_allowed_for_responder(
+        requester_id,
         agent_name,
         ctx.room_id,
         config,
         ctx.runtime_paths,
         ctx.require_agent_reply_memberships(),
-    ):
+    )
+
+
+def _unauthorized_assignee_message(agent_name: str) -> str | None:
+    """Refuse todo work for a configured agent that the current requester may not address in this room."""
+    if _may_address(_runtime_context().requester_id, agent_name):
         return None
-    return f"Cannot assign todo work to '{agent_name}': that agent is not allowed to reply to you in this room."
+    return (
+        f"Cannot give or change todo work for '{agent_name}': that agent is not allowed to reply to you in this room."
+    )
 
 
 def _assignee_error(agent_name: str, configured: set[str]) -> str | None:
@@ -611,7 +618,7 @@ def _human_requester_id() -> str | None:
 
 
 def _record_requester(item: dict[str, Any], requester_id: str | None) -> None:
-    """Attribute an item's poke to the human who last shaped it, or to nobody."""
+    """Attribute an item's poke to the human who wrote its title, or to nobody."""
     if requester_id is None:
         item.pop("requester_id", None)
     else:
@@ -858,11 +865,19 @@ class TodoTools(Toolkit):
                 return no_write(f"Todo `{todo_id}` not found.")
 
             item = items_by_id[todo_id]
+            new_agent = assigned_agent.strip() if assigned_agent else ""
             # Changing an agent's work, or handing work to an agent, needs the requester's access to that agent.
-            for target_agent in (item.get("assigned_agent", ""), assigned_agent.strip() if assigned_agent else ""):
+            for target_agent in (item.get("assigned_agent", ""), new_agent):
                 unauthorized_agent = _unauthorized_assignee_message(target_agent)
                 if unauthorized_agent is not None:
                     return no_write(unauthorized_agent)
+            # A kept title stays attributed to its author, who must also be allowed to address a new assignee.
+            title_author = item.get("requester_id")
+            if not clean_title and title_author and not _may_address(title_author, new_agent):
+                return no_write(
+                    f"Cannot give todo `{todo_id}` to '{new_agent}': "
+                    "the person who wrote it is not allowed to address that agent in this room.",
+                )
             dep_ids: list[str] | None = None
             now = _now_iso()
             if depends_on is not None:
@@ -896,7 +911,8 @@ class TodoTools(Toolkit):
                 return no_write("No fields to update.")
 
             item["updated_at"] = now
-            _record_requester(item, requester_id)
+            if clean_title:
+                _record_requester(item, requester_id)
             data["updated_at"] = now
             unblocked_message = ""
             if status and status.lower() in TERMINAL_STATUSES:
