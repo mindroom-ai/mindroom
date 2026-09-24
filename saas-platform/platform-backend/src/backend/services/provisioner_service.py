@@ -174,36 +174,27 @@ def _instance_matrix_registration_shared_secret(instance_id: str) -> str:
     return _stable_instance_secret("matrix-registration", instance_id)
 
 
+def instance_platform_sso_secret(instance_id: str) -> str:
+    """Derive the per-instance key that signs dashboard login tickets for one tenant runtime."""
+    return _stable_instance_secret("platform-sso", instance_id)
+
+
 def _stable_instance_secret(purpose: str, instance_id: str) -> str:
     """Derive one stable per-instance secret from the platform root secret.
 
     WARNING: when INSTANCE_CREDENTIALS_ENCRYPTION_SECRET is unset, PROVISIONER_API_KEY doubles
     as the HMAC root secret. Rotating PROVISIONER_API_KEY without first setting
     INSTANCE_CREDENTIALS_ENCRYPTION_SECRET silently invalidates every derived per-instance
-    secret (credential encryption keys, Matrix registration shared secrets) for existing tenants.
+    secret (credential encryption keys, Matrix registration shared secrets, dashboard SSO keys) for existing tenants.
     """
     root_secret = (INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY).strip()
     if not root_secret:
         msg = "INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY must be configured"
         raise HTTPException(status_code=500, detail=msg)
-    return _derive_instance_secret(root_secret, purpose, instance_id)
-
-
-def _derive_instance_secret(root_secret: str, purpose: str, instance_id: Any) -> str:
-    """Derive one per-instance secret from a root secret that never leaves the control plane."""
     digest = hmac.digest(
         root_secret.encode("utf-8"), f"mindroom.{purpose}.v1:{instance_id}".encode("utf-8"), hashlib.sha256
     )
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-
-def instance_matrix_oidc_client_secret(root_secret: str, instance_id: Any) -> str:
-    """Return the Synapse OIDC client secret for one instance.
-
-    The platform issuer derives the same value when authenticating that instance's token
-    requests, so a tenant that reads its own Secret cannot redeem another tenant's codes.
-    """
-    return _derive_instance_secret(root_secret, "matrix-oidc-client", instance_id)
 
 
 def _matrix_localpart_from_email(email: str) -> str:
@@ -636,12 +627,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             "deepseek_key": "",
             "sandbox_proxy_token": sandbox_proxy_token,
             "credentials_encryption_key": credentials_encryption_key,
-            "matrix_oidc_client_secret": (
-                instance_matrix_oidc_client_secret(INSTANCE_MATRIX_OIDC_CLIENT_SECRET, customer_id)
-                if INSTANCE_MATRIX_OIDC_CLIENT_SECRET
-                else ""
-            ),
+            "matrix_oidc_client_secret": INSTANCE_MATRIX_OIDC_CLIENT_SECRET or "",
             "matrix_registration_shared_secret": _instance_matrix_registration_shared_secret(customer_id),
+            "platform_sso_secret": instance_platform_sso_secret(customer_id),
         }
         instance_secret_hash = _instance_secret_hash(instance_secret_data)
         # Use upgrade --install to handle both new and re-provisioning cases
@@ -659,6 +647,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             f"customer={customer_id}",
             "--set",
             f"baseDomain={base_domain}",
+            "--set",
+            f"platformDomain={PLATFORM_DOMAIN}",
             "--set",
             f"accountId={account_id}",
             "--set",

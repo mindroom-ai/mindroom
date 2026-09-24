@@ -9,11 +9,10 @@ import json
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote
 
 import jwt
 from backend.config import (
-    INSTANCE_BASE_DOMAIN,
     MATRIX_OIDC_CLIENT_ID,
     MATRIX_OIDC_CLIENT_SECRET,
     MATRIX_OIDC_ENABLED,
@@ -22,10 +21,13 @@ from backend.config import (
     MATRIX_OIDC_PRIVATE_KEY,
     PLATFORM_DOMAIN,
 )
-from backend.deps import _extract_bearer_token, ensure_supabase, limiter, verify_user
-from backend.entitlements import assert_instance_entitlement
-from backend.services import instances_data
-from backend.services.provisioner_service import instance_matrix_oidc_client_secret
+from backend.deps import _extract_bearer_token, limiter
+from backend.routes.sso import (
+    assert_instance_login_allowed,
+    parse_instance_url,
+    platform_cookie_user,
+    platform_login_redirect,
+)
 from cachetools import TTLCache
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
@@ -94,40 +96,11 @@ def _authorize_url(request: Request) -> str:
     return f"{_issuer()}/authorize{suffix}"
 
 
-def _platform_login_redirect(request: Request) -> RedirectResponse:
-    target = quote(_authorize_url(request), safe="")
-    return RedirectResponse(f"https://app.{PLATFORM_DOMAIN}/auth/login?redirect_to={target}")
-
-
 def _validate_redirect_uri(redirect_uri: str) -> str:
-    parsed = urlparse(redirect_uri)
-    if parsed.scheme != "https" or parsed.path != "/_synapse/client/oidc/callback":
+    target = parse_instance_url(redirect_uri, host_prefix="matrix.")
+    if target is None or target.path != "/_synapse/client/oidc/callback":
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
-
-    hostname = (parsed.hostname or "").lower()
-    suffix = f".matrix.{(INSTANCE_BASE_DOMAIN or PLATFORM_DOMAIN).lower()}"
-    if not hostname.endswith(suffix):
-        raise HTTPException(status_code=400, detail="Invalid redirect_uri")
-
-    instance_id = hostname[: -len(suffix)]
-    if not instance_id or "." in instance_id:
-        raise HTTPException(status_code=400, detail="Invalid redirect_uri")
-    return instance_id
-
-
-def _load_owned_instance(instance_id: str, account_id: str) -> dict[str, Any]:
-    instance = instances_data.get_owned_instance(ensure_supabase(), instance_id, account_id)
-    if instance is None:
-        raise HTTPException(status_code=403, detail="Instance not found or access denied")
-    return instance
-
-
-def _assert_instance_subscription_allows_login(instance: dict[str, Any]) -> None:
-    sb = ensure_supabase()
-    result = sb.table("subscriptions").select("*").eq("id", instance["subscription_id"]).limit(1).execute()
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Subscription not found")
-    assert_instance_entitlement(result.data[0], "sign in to")
+    return target.instance_id
 
 
 def _subject_from_user(user: dict[str, Any]) -> str:
@@ -193,8 +166,7 @@ def _client_auth_from_basic(authorization: str | None) -> tuple[str | None, str 
     return client_id, client_secret
 
 
-def _client_credentials(params: dict[str, str], authorization: str | None) -> str:
-    """Return the client secret after checking the client ID."""
+def _require_client_auth(params: dict[str, str], authorization: str | None) -> None:
     basic_client_id, basic_client_secret = _client_auth_from_basic(authorization)
     client_id = basic_client_id or params.get("client_id") or ""
     client_secret = basic_client_secret or params.get("client_secret") or ""
@@ -202,27 +174,14 @@ def _client_credentials(params: dict[str, str], authorization: str | None) -> st
         raise HTTPException(status_code=401, detail="Invalid client authentication")
     if not MATRIX_OIDC_CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="Matrix OIDC client secret is not configured")
-    return client_secret
-
-
-def _require_instance_client_secret(client_secret: str, instance_id: str) -> None:
-    """Accept only the secret provisioned to the Synapse the code was issued for."""
-    expected = instance_matrix_oidc_client_secret(MATRIX_OIDC_CLIENT_SECRET, instance_id)
-    if not hmac.compare_digest(client_secret.encode("utf-8"), expected.encode("utf-8")):
+    if not hmac.compare_digest(client_secret, MATRIX_OIDC_CLIENT_SECRET):
         raise HTTPException(status_code=401, detail="Invalid client authentication")
 
 
-def _decode_code(code: str) -> dict[str, Any]:
-    try:
-        claims = _decode_claims(code, audience=MATRIX_OIDC_CLIENT_ID)
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=400, detail="Invalid authorization code") from None
-    if claims.get("typ") != "matrix_oidc_code" or not claims.get("instance_id"):
+def _consume_code(code: str, redirect_uri: str) -> dict[str, Any]:
+    claims = _decode_claims(code, audience=MATRIX_OIDC_CLIENT_ID)
+    if claims.get("typ") != "matrix_oidc_code":
         raise HTTPException(status_code=400, detail="Invalid authorization code")
-    return claims
-
-
-def _consume_code(claims: dict[str, Any], redirect_uri: str) -> None:
     if claims.get("redirect_uri") != redirect_uri:
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
 
@@ -230,6 +189,7 @@ def _consume_code(claims: dict[str, Any], redirect_uri: str) -> None:
     if not jti or jti in _USED_AUTH_CODE_IDS:
         raise HTTPException(status_code=400, detail="Authorization code has already been used")
     _USED_AUTH_CODE_IDS[jti] = True
+    return claims
 
 
 def _build_id_token_claims(code_claims: dict[str, Any]) -> dict[str, Any]:
@@ -315,17 +275,11 @@ async def authorize(
         raise HTTPException(status_code=400, detail="Invalid OIDC authorization request")
 
     instance_id = _validate_redirect_uri(redirect_uri)
-    token = request.cookies.get("mindroom_jwt")
-    if not token:
-        return _platform_login_redirect(request)
+    user = await platform_cookie_user(request)
+    if user is None:
+        return platform_login_redirect(_authorize_url(request))
 
-    try:
-        user = await verify_user(authorization=f"Bearer {token}", request=request)
-    except HTTPException:
-        return _platform_login_redirect(request)
-
-    instance = _load_owned_instance(instance_id, str(user["account_id"]))
-    _assert_instance_subscription_allows_login(instance)
+    assert_instance_login_allowed(instance_id, str(user["account_id"]))
     code = _sign_claims(
         _build_code_claims(user=user, instance_id=instance_id, redirect_uri=redirect_uri, scope=scope, nonce=nonce)
     )
@@ -339,13 +293,12 @@ async def token(request: Request, authorization: str | None = Header(default=Non
     """Exchange a Synapse authorization code for OIDC tokens."""
     _require_enabled()
     params = _parse_request_body(await request.body())
-    client_secret = _client_credentials(params, authorization)
+    _require_client_auth(params, authorization)
     if params.get("grant_type") != "authorization_code":
         raise HTTPException(status_code=400, detail="Unsupported grant_type")
-    code_claims = _decode_code(params.get("code") or "")
-    # Authenticate before consuming so a stolen code cannot be burned without the tenant's secret.
-    _require_instance_client_secret(client_secret, str(code_claims["instance_id"]))
-    _consume_code(code_claims, params.get("redirect_uri") or "")
+    code = params.get("code") or ""
+    redirect_uri = params.get("redirect_uri") or ""
+    code_claims = _consume_code(code, redirect_uri)
     access_token = _sign_claims(_build_access_token_claims(code_claims))
     id_token = _sign_claims(_build_id_token_claims(code_claims))
     return {

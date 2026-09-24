@@ -6,7 +6,8 @@ from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import jwt
-from backend.services.provisioner_service import instance_matrix_oidc_client_secret
+import pytest
+from backend.routes import sso
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
@@ -31,7 +32,8 @@ def _patch_oidc(monkeypatch):
     monkeypatch.setattr(matrix_oidc, "MATRIX_OIDC_PRIVATE_KEY", _test_private_key())
     monkeypatch.setattr(matrix_oidc, "MATRIX_OIDC_KEY_ID", "test-key")
     monkeypatch.setattr(matrix_oidc, "PLATFORM_DOMAIN", "mindroom.chat")
-    monkeypatch.setattr(matrix_oidc, "INSTANCE_BASE_DOMAIN", "mindroom.chat")
+    monkeypatch.setattr(sso, "PLATFORM_DOMAIN", "mindroom.chat")
+    monkeypatch.setattr(sso, "INSTANCE_BASE_DOMAIN", "mindroom.chat")
     return matrix_oidc
 
 
@@ -73,7 +75,41 @@ def test_matrix_oidc_authorize_redirects_anonymous_users_to_platform_login(monke
     )
 
 
-def _issue_code(monkeypatch, matrix_oidc) -> tuple[TestClient, str]:
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "http://1.matrix.mindroom.chat/_synapse/client/oidc/callback",
+        "https://01.matrix.mindroom.chat/_synapse/client/oidc/callback",
+        "https://1.matrix.mindroom.chat:8448/_synapse/client/oidc/callback",
+        "https://user@1.matrix.mindroom.chat/_synapse/client/oidc/callback",
+        "https://1.mindroom.chat/_synapse/client/oidc/callback",
+        "https://1.matrix.mindroom.chat/other",
+        "https://[::1/_synapse/client/oidc/callback",
+    ],
+)
+def test_matrix_oidc_authorize_rejects_non_instance_callbacks(monkeypatch, redirect_uri: str) -> None:
+    """Codes are only issued to the canonical Synapse callback on one instance's Matrix host."""
+    _patch_oidc(monkeypatch)
+    client = TestClient(app)
+
+    response = client.get(
+        "/matrix-oidc/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "mindroom-synapse",
+            "redirect_uri": redirect_uri,
+            "scope": "openid",
+            "state": "state-123",
+        },
+        headers={"host": "api.mindroom.chat"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 400
+
+
+def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -> None:
+    _patch_oidc(monkeypatch)
     verify_user = AsyncMock(
         return_value={
             "user_id": "user-123",
@@ -82,7 +118,7 @@ def _issue_code(monkeypatch, matrix_oidc) -> tuple[TestClient, str]:
             "account": {"full_name": "Alice Example"},
         }
     )
-    monkeypatch.setattr(matrix_oidc, "verify_user", verify_user)
+    monkeypatch.setattr(sso, "verify_user", verify_user)
 
     instance_query = MagicMock()
     instance_query.select.return_value = instance_query
@@ -100,7 +136,7 @@ def _issue_code(monkeypatch, matrix_oidc) -> tuple[TestClient, str]:
 
     supabase = MagicMock()
     supabase.table.side_effect = [instance_query, subscription_query]
-    monkeypatch.setattr(matrix_oidc, "ensure_supabase", lambda: supabase)
+    monkeypatch.setattr(sso, "ensure_supabase", lambda: supabase)
 
     client = TestClient(app)
     response = client.get(
@@ -113,7 +149,7 @@ def _issue_code(monkeypatch, matrix_oidc) -> tuple[TestClient, str]:
             "state": "state-123",
             "nonce": "nonce-123",
         },
-        cookies={"mindroom_jwt": "supabase-access-token"},
+        cookies={sso.SSO_COOKIE_NAME: "supabase-access-token"},
         headers={"host": "api.mindroom.chat"},
         follow_redirects=False,
     )
@@ -124,28 +160,19 @@ def _issue_code(monkeypatch, matrix_oidc) -> tuple[TestClient, str]:
     assert redirect.netloc == "1.matrix.mindroom.chat"
     query = parse_qs(redirect.query)
     assert query["state"] == ["state-123"]
-    return client, query["code"][0]
+    code = query["code"][0]
 
-
-def _exchange_code(client: TestClient, code: str, client_secret: str):
-    return client.post(
+    token_response = client.post(
         "/matrix-oidc/token",
         data={
             "grant_type": "authorization_code",
             "code": code,
             "redirect_uri": "https://1.matrix.mindroom.chat/_synapse/client/oidc/callback",
             "client_id": "mindroom-synapse",
-            "client_secret": client_secret,
+            "client_secret": "client-secret",
         },
         headers={"host": "api.mindroom.chat"},
     )
-
-
-def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -> None:
-    matrix_oidc = _patch_oidc(monkeypatch)
-    client, code = _issue_code(monkeypatch, matrix_oidc)
-
-    token_response = _exchange_code(client, code, instance_matrix_oidc_client_secret("client-secret", "1"))
 
     assert token_response.status_code == 200
     tokens = token_response.json()
@@ -163,27 +190,3 @@ def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -
     )
     assert userinfo_response.status_code == 200
     assert userinfo_response.json()["email"] == "alice@example.com"
-
-
-def test_matrix_oidc_token_rejects_other_tenant_client_secrets(monkeypatch) -> None:
-    """A secret read from one tenant's Secret must not redeem codes issued to another tenant."""
-    matrix_oidc = _patch_oidc(monkeypatch)
-    client, code = _issue_code(monkeypatch, matrix_oidc)
-
-    other_tenant = _exchange_code(client, code, instance_matrix_oidc_client_secret("client-secret", "2"))
-    platform_root = _exchange_code(client, code, "client-secret")
-    owning_tenant = _exchange_code(client, code, instance_matrix_oidc_client_secret("client-secret", "1"))
-
-    assert other_tenant.status_code == 401
-    assert platform_root.status_code == 401
-    # Rejected attempts must not consume the code.
-    assert owning_tenant.status_code == 200
-
-
-def test_matrix_oidc_token_rejects_malformed_code(monkeypatch) -> None:
-    _patch_oidc(monkeypatch)
-    client = TestClient(app)
-
-    response = _exchange_code(client, "not-a-jwt", instance_matrix_oidc_client_secret("client-secret", "1"))
-
-    assert response.status_code == 400

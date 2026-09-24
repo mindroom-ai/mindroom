@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.model_defaults import ELEVENLABS_TTS
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="eleven_labs",
+    file_access=ToolFileAccess.NONE,
     worker_inert_agent_functions=("text_to_speech",),
     display_name="Eleven Labs",
     description="Text-to-speech and sound effect generation using AI voices",

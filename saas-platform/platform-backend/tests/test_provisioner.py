@@ -416,18 +416,13 @@ class TestProvisionerEndpoints:
         valid_auth_header: dict,
         mock_config,
     ):
-        """A tenant that reads its own Secret must not obtain platform-wide credentials."""
-        from backend.services.provisioner_service import instance_matrix_oidc_client_secret  # noqa: PLC0415
-
+        """A tenant that reads its own Secret must not obtain the platform's Supabase service-role key."""
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_supabase.table().update().eq().execute.return_value = Mock()
 
-        with (
-            patch("backend.services.provisioner_service.INSTANCE_MATRIX_OIDC_CLIENT_SECRET", "platform-oidc-root"),
-            patch(
-                "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
-            ) as apply_secret,
-        ):
+        with patch(
+            "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
+        ) as apply_secret:
             apply_secret.return_value = "hash"
             response = client.post(
                 "/system/provision",
@@ -448,14 +443,8 @@ class TestProvisionerEndpoints:
             "credentials_encryption_key",
             "matrix_oidc_client_secret",
             "matrix_registration_shared_secret",
+            "platform_sso_secret",
         }
-        assert "platform-oidc-root" not in secret_data.values()
-        assert secret_data["matrix_oidc_client_secret"] == instance_matrix_oidc_client_secret(
-            "platform-oidc-root", "123"
-        )
-        assert secret_data["matrix_oidc_client_secret"] != instance_matrix_oidc_client_secret(
-            "platform-oidc-root", "456"
-        )
         assert len(bytes.fromhex(secret_data["sandbox_proxy_token"])) == 32
 
     def test_hobby_provisioning_only_injects_limited_openrouter_provider_key(

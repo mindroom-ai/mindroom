@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="matrix_api",
+    file_access=ToolFileAccess.NONE,
     display_name="Matrix API",
     description="Low-level Matrix event, state, and room search operations (send_event, get_state, put_state, redact, get_event, search)",
     category=ToolCategory.COMMUNICATION,

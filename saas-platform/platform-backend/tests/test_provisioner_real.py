@@ -61,6 +61,7 @@ class TestProvisionerCommandValidation:
 
         captured_helm_args = []
         captured_secret_manifests = []
+        captured_secret_patches = []
         operations = []
 
         async def capture_helm_command(args):
@@ -72,6 +73,12 @@ class TestProvisionerCommandValidation:
             if args[:2] == ["apply", "-f"]:
                 captured_secret_manifests.append(json.loads(Path(args[2]).read_text(encoding="utf-8")))
                 operations.append("secret")
+            if args[:3] == ["get", "secret", "mindroom-api-keys-123"] and "--ignore-not-found" not in args:
+                # The live Secret still holds the platform key written by older releases.
+                live_keys = [*captured_secret_manifests[-1]["stringData"], "supabase_service_key"]
+                return (0, " ".join(live_keys), "")
+            if args[:2] == ["patch", "secret"]:
+                captured_secret_patches.append(json.loads(args[args.index("-p") + 1]))
             return (0, "Success", "")
 
         with (
@@ -132,15 +139,21 @@ class TestProvisionerCommandValidation:
         assert "sandbox_proxy_token" not in set_args
         assert "credentials_encryption_key" not in set_args
         assert "matrix_registration_shared_secret" not in set_args
+        assert "platform_sso_secret" not in set_args
         assert set_file_args == {}
 
         secret_data = captured_secret_manifests[0]["stringData"]
         assert secret_data["sandbox_proxy_token"]
         assert secret_data["credentials_encryption_key"]
         assert secret_data["matrix_registration_shared_secret"]
+        assert secret_data["platform_sso_secret"]
+        assert secret_data["platform_sso_secret"] != secret_data["matrix_registration_shared_secret"]
+        assert "supabase_service_key" not in secret_data
         # Before Helm so restarted pods read new values; after Helm in case legacy pruning deleted it.
         assert operations == ["secret", "helm", "secret"]
         assert captured_secret_manifests[0] == captured_secret_manifests[1]
+        # Stale-key cleanup removes only the retired platform key, never a key the provisioner still writes.
+        assert captured_secret_patches == [{"data": {"supabase_service_key": None}}] * 2
 
     def test_instance_secrets_are_stable_and_instance_scoped(self):
         """Provisioner-derived instance secrets should be stable without being shared across tenants."""
@@ -154,18 +167,15 @@ class TestProvisionerCommandValidation:
             second = provisioner_module._instance_credentials_encryption_key("123")
             other = provisioner_module._instance_credentials_encryption_key("456")
             registration_secret = provisioner_module._instance_matrix_registration_shared_secret("123")
-
-        oidc_secret = provisioner_module.instance_matrix_oidc_client_secret("oidc-root", "123")
+            platform_sso_secret = provisioner_module.instance_platform_sso_secret("123")
+            other_platform_sso_secret = provisioner_module.instance_platform_sso_secret("456")
 
         assert first == second
         assert first != other
         assert first != registration_secret
+        assert platform_sso_secret not in {first, registration_secret, other_platform_sso_secret}
         assert len(base64.urlsafe_b64decode(f"{first}=")) == 32
         assert len(base64.urlsafe_b64decode(f"{registration_secret}=")) == 32
-        assert oidc_secret == provisioner_module.instance_matrix_oidc_client_secret("oidc-root", 123)
-        assert oidc_secret != provisioner_module.instance_matrix_oidc_client_secret("oidc-root", "456")
-        assert oidc_secret != provisioner_module.instance_matrix_oidc_client_secret("other-root", "123")
-        assert len(base64.urlsafe_b64decode(f"{oidc_secret}=")) == 32
 
     @pytest.mark.asyncio
     async def test_instance_secret_apply_uses_private_manifest_file(self):
@@ -251,6 +261,7 @@ class TestProvisionerCommandValidation:
             patch.multiple(
                 "backend.services.provisioner_service",
                 PROVISIONER_API_KEY="test-key",
+                PLATFORM_DOMAIN="platform.example.test",
                 INSTANCE_BASE_DOMAIN="local",
                 INSTANCE_STORAGE_CLASS_NAME="standard",
                 INSTANCE_MINDROOM_IMAGE="ghcr.io/mindroom-ai/mindroom:latest",
@@ -304,6 +315,7 @@ class TestProvisionerCommandValidation:
                 set_file_args[key] = value
 
         assert set_args["baseDomain"] == "local"
+        assert set_args["platformDomain"] == "platform.example.test"
         assert set_args["storageClassName"] == "standard"
         assert set_args["mindroom_image"] == "ghcr.io/mindroom-ai/mindroom:latest"
         assert set_args["mindroom_image_pull_policy"] == "IfNotPresent"
@@ -334,11 +346,7 @@ class TestProvisionerCommandValidation:
         assert "instanceSecrets.hash" in set_string_args
         assert "matrix-client-secret" not in " ".join(helm_args)
         assert set_file_args == {}
-        # The platform root secret stays in the control plane; the tenant only gets its derived secret.
-        assert captured_secret_manifests[0]["stringData"]["matrix_oidc_client_secret"] == (
-            provisioner_service.instance_matrix_oidc_client_secret("matrix-client-secret", "123")
-        )
-        assert "matrix-client-secret" not in json.dumps(captured_secret_manifests)
+        assert captured_secret_manifests[0]["stringData"]["matrix_oidc_client_secret"] == "matrix-client-secret"
         assert captured_secret_manifests[0]["stringData"]["matrix_registration_shared_secret"]
 
     @pytest.mark.asyncio
