@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
+    from agno.run.requirement import RunRequirement
     from agno.tools.function import Function
     from structlog.stdlib import BoundLogger
 
@@ -52,6 +53,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.relation_lookup import RelationLookup
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
     from mindroom.message_target import MessageTarget
+    from mindroom.response_turn import PausedAttempt
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling import SchedulingRuntime
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
@@ -133,6 +135,7 @@ class ToolRuntimeContext:
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
     config_provider: Callable[[], Config] | None = None
+    cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None
 
     @property
     def current_config(self) -> Config:

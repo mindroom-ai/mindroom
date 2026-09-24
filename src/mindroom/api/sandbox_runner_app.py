@@ -17,6 +17,7 @@ from mindroom.api.sandbox_runner import (
     startup_runner_token_from_env,
 )
 from mindroom.api.sandbox_runner import router as sandbox_runner_router
+from mindroom.api.sandbox_runner_cli import router as sandbox_runner_cli_router
 from mindroom.api.sandbox_runner_scripts import (
     prepare_script_worker_before_serving,
 )
@@ -80,6 +81,7 @@ app = FastAPI(title="MindRoom Sandbox Runner", lifespan=_lifespan)
 app.include_router(sandbox_runner_router)
 app.include_router(worker_computer_router)
 app.include_router(sandbox_runner_scripts_router)
+app.include_router(sandbox_runner_cli_router)
 
 
 @app.get("/healthz")
