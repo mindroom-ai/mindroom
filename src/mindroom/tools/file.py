@@ -258,6 +258,8 @@ class _MindRoomFileTools(AgnoFileTools):
             return blocked_file_action_message("searching content", directory, self.base_dir)
         if is_within_base_dir(search_dir, self.base_dir):
             return super().search_content(query, directory, limit)
+        if not search_dir.is_dir():
+            return f"Error: '{directory}' is not a directory"
         rooted = copy.copy(self)
         rooted.base_dir = search_dir
         result = AgnoFileTools.search_content(rooted, query, None, limit)

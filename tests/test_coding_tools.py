@@ -1335,6 +1335,8 @@ class TestFileToolFileAccess:
         assert [match["file"] for match in result["files"]] == expected
         assert [match["file"] for match in relative_result["files"]] == expected
         assert "needle outside" in result["files"][0]["snippet"]
+        missing = outside_dir / "missing"
+        assert tool.search_content("needle", str(missing)) == f"Error: '{missing}' is not a directory"
 
     def test_file_tool_unrestricted_allows_outside_and_relative_paths(self, tmp_path: Path) -> None:
         """File tools should allow outside absolute paths while keeping relative paths anchored."""
