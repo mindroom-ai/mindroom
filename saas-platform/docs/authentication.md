@@ -30,8 +30,9 @@ The runtime evaluates these modes in order:
    Missing required headers are rejected without falling back to a Supabase cookie.
    Only enable this mode behind a verified access layer that strips client-supplied identity headers and injects authenticated values.
 2. **Supabase auth** is enabled by the instance's Supabase URL and anon key.
-   It accepts a bearer token or `mindroom_jwt` cookie and rejects a user whose ID differs from a configured `ACCOUNT_ID`.
-   Hosted provisioning sets that account ID for the customer instance.
+   It accepts a bearer token or `mindroom_jwt` cookie and rejects a user whose ID differs from `ACCOUNT_ID`.
+   Every user of the Supabase project holds a valid token, so `ACCOUNT_ID` is required: without it the runtime logs an error at startup and refuses every Supabase-authenticated request.
+   Hosted provisioning sets that account ID for the customer instance and rejects provisioning requests without one.
 3. **Standalone auth** applies without Supabase or trusted upstream auth.
    When `MINDROOM_API_KEY` is set, protected endpoints require that key as a bearer token or a dashboard login cookie.
    Without the key, standalone mode does not require authentication.
@@ -49,7 +50,7 @@ This is separate from the instance dashboard/API Supabase authentication path.
 ## Key Settings
 
 - Platform backend: `PLATFORM_DOMAIN` controls the shared cookie domain, links, and allowed origins; Supabase URL, anon key, and service key configure platform identity and server operations.
-- Instance chart: `supabaseUrl`, `supabaseAnonKey`, and `accountId` configure hosted Supabase authentication and its account check.
+- Instance chart: `supabaseUrl`, `supabaseAnonKey`, and `accountId` configure hosted Supabase authentication and its account check; the chart fails to render when either Supabase value is set without `accountId`.
 - Optional access layer: `trustedUpstreamAuth.enabled` selects upstream authentication; its headers and JWT settings must match that layer.
 - Standalone runtime: `MINDROOM_API_KEY` enables the standalone credential requirement.
 
@@ -58,6 +59,7 @@ This is separate from the instance dashboard/API Supabase authentication path.
 - Missing tenant cookie: check the configured domain, HTTPS, and whether a host-only exception applies.
 - API `401`: check the credentials required by the active authentication mode.
 - Supabase API `403`: check the configured account ID; cookie-authenticated mutations can also fail origin checks.
+- Supabase API `500` reporting that `ACCOUNT_ID` is not set: set it to the instance owner's Supabase user ID (chart value `accountId`).
 - With hosted Supabase authentication, unauthenticated dashboard requests redirect to the configured platform login URL.
 - Standalone API-key dashboards redirect unauthenticated users to `/login`; unauthenticated API requests return `401`.
 - Trusted-upstream authentication failures return `401` without a login redirect, even when a platform login URL is configured.

@@ -484,6 +484,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     """Provision (or re-provision) a tenant instance and return the portal response payload."""
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
+    # The instance's Supabase auth admits only this account; without it every project user would be admin.
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise HTTPException(status_code=400, detail="account_id is required")
     tier = data.get("tier", "free")
     existing_instance_id = data.get("instance_id")  # For re-provisioning
 

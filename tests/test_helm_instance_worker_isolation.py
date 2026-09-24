@@ -271,6 +271,33 @@ def test_instance_chart_rejects_unsupported_worker_seccomp_profile() -> None:
     assert "kubernetesWorkerSeccompProfile" in completed.stderr
 
 
+@pytest.mark.parametrize("account_id_args", [(), ("accountId=",), ("accountId=  ",)])
+def test_instance_chart_requires_account_id_with_supabase_auth(account_id_args: tuple[str, ...]) -> None:
+    """Supabase auth without an owner account binding would admit every user of the Supabase project."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/instance"),
+        "supabaseUrl=https://project.supabase.example",
+        "supabaseAnonKey=anon-key",
+        set_string_args=account_id_args,
+    )
+
+    assert completed.returncode != 0
+    assert "accountId is required when supabaseUrl or supabaseAnonKey is set" in completed.stderr
+
+
+def test_instance_chart_renders_account_id_with_supabase_auth() -> None:
+    """The owner account binding reaches the runtime alongside the Supabase settings."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "supabaseUrl=https://project.supabase.example",
+        "supabaseAnonKey=anon-key",
+        "accountId=account-owner",
+    )
+    env = _env_by_name(_container(_resource(docs, "Deployment", "mindroom-demo"), "mindroom"))
+
+    assert env["ACCOUNT_ID"]["value"] == "account-owner"
+
+
 def test_instance_chart_sets_public_url_for_oauth_redirects() -> None:
     """Hosted instances should derive OAuth callbacks from their public dashboard origin."""
     docs = _render_chart(

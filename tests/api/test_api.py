@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
+from structlog.testing import capture_logs
 
 from mindroom import constants, frontend_assets
 from mindroom.api import auth, config_lifecycle, frontend, homeassistant_integration, main
@@ -527,6 +528,22 @@ def test_initialize_api_app_initializes_fresh_app_state(tmp_path: Path) -> None:
     assert main._app_context(fresh_app).config_data == {}
     assert hasattr(config_lifecycle.require_api_state(fresh_app).config_lock, "acquire")
     assert auth._app_auth_state(fresh_app).runtime_paths == runtime_paths
+
+
+@pytest.mark.parametrize("account_id", [None, "", "   "])
+def test_initialize_api_app_logs_error_for_supabase_without_account_id(
+    tmp_path: Path,
+    account_id: str | None,
+) -> None:
+    """Enabling Supabase auth without an instance owner is reported as a hard error at startup."""
+    process_env = {"SUPABASE_URL": "https://supabase.example.com", "SUPABASE_ANON_KEY": "anon-key"}
+    if account_id is not None:
+        process_env["ACCOUNT_ID"] = account_id
+
+    with capture_logs() as logs:
+        main.initialize_api_app(FastAPI(), _runtime_paths(tmp_path, process_env=process_env))
+
+    assert any(log["log_level"] == "error" and "ACCOUNT_ID" in log["event"] for log in logs)
 
 
 def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
@@ -5303,7 +5320,7 @@ def _set_platform_auth(
     valid_tokens: set[str],
     platform_login_url: str = "https://platform.example.com/login",
     public_url: str | None = None,
-    account_id: str | None = None,
+    account_id: str | None = "user-123",
     user_id: str = "user-123",
 ) -> None:
     """Configure the API module for platform-managed cookie auth tests."""
@@ -5342,13 +5359,50 @@ def _set_platform_auth(
 def test_supabase_cookie_auth_allows_access(
     test_client: TestClient,
 ) -> None:
-    """Platform requests should authenticate from the mindroom_jwt cookie."""
+    """Platform requests should authenticate the instance owner from the mindroom_jwt cookie."""
     valid_cookie_token = "valid-cookie-token"  # noqa: S105
-    _set_platform_auth(valid_tokens={valid_cookie_token})
+    _set_platform_auth(valid_tokens={valid_cookie_token}, account_id="user-123", user_id="user-123")
     test_client.cookies.set("mindroom_jwt", valid_cookie_token)
 
     response = test_client.post("/api/config/load", headers={"Origin": "http://testserver"})
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize("account_id", [None, "", "   "])
+def test_supabase_auth_without_account_id_refuses_requests(
+    test_client: TestClient,
+    account_id: str | None,
+) -> None:
+    """Supabase auth must fail closed when no instance owner is bound."""
+    valid_token = "valid-token"  # noqa: S105
+    _set_platform_auth(valid_tokens={valid_token}, account_id=account_id, user_id="other-user")
+
+    bearer_response = test_client.put(
+        "/api/config/save",
+        json={"agents": {}},
+        headers={"Authorization": f"Bearer {valid_token}"},
+    )
+    test_client.cookies.set("mindroom_jwt", valid_token)
+    cookie_response = test_client.post("/api/config/load", headers={"Origin": "http://testserver"})
+
+    for response in (bearer_response, cookie_response):
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Supabase auth is enabled but ACCOUNT_ID is not set"
+
+
+def test_supabase_bearer_auth_rejects_non_owner(
+    test_client: TestClient,
+) -> None:
+    """A valid token for another user of the shared Supabase project must not reach admin routes."""
+    valid_token = "valid-token"  # noqa: S105
+    _set_platform_auth(valid_tokens={valid_token}, account_id="account-owner", user_id="other-user")
+
+    response = test_client.put(
+        "/api/config/save",
+        json={"agents": {}},
+        headers={"Authorization": f"Bearer {valid_token}"},
+    )
+    assert response.status_code == 403
 
 
 def test_platform_frontend_redirects_to_login_when_cookie_missing(

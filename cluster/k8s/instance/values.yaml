@@ -92,6 +92,8 @@ matrixRegistrationSharedSecret: ""
 supabaseUrl: ""
 supabaseAnonKey: ""
 supabaseServiceKey: ""
+# Supabase user ID of the instance owner; required whenever supabaseUrl or supabaseAnonKey is set.
+accountId: ""
 
 trustedUpstreamAuth:
   enabled: "false"

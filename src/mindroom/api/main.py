@@ -313,7 +313,17 @@ def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
     """Initialize one API app instance with explicit runtime-bound state."""
     app_state = config_lifecycle.ensure_app_state(api_app)
-    app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
+    account_id = runtime_paths.env_value("ACCOUNT_ID")
+    app_state.api_auth_account_id = account_id
+    if (
+        runtime_paths.env_value("SUPABASE_URL")
+        and runtime_paths.env_value("SUPABASE_ANON_KEY")
+        and (account_id is None or not account_id.strip())
+    ):
+        logger.error(
+            "SUPABASE_URL and SUPABASE_ANON_KEY are set but ACCOUNT_ID is not; "
+            "all Supabase-authenticated dashboard and API requests will be refused",
+        )
     previous_state = app_state.api_state
     if previous_state is None:
         app_state.thread_export_runner = None
