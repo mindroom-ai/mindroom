@@ -5820,6 +5820,7 @@ from = ["mindroom.tool_approval"]
 
 [[interfaces]]
 expose = [
+    "INLINE_ATTACHMENT_BYTES_ENV",
     "WorkerAttachmentSaveReceipt",
     "attachment_save_uses_worker",
     "decode_attachment_save_bytes",

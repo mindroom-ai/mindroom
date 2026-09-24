@@ -484,6 +484,11 @@ async def test_download_size_limit_follows_the_inline_transfer_bound_while_strea
 
     assert result["code"] == "attachment_too_large"
     assert result["max_bytes"] == 10
+    assert result["limit_setting"] == "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
+    assert result["message"] == (
+        "The attachment is larger than the 10-byte download limit. "
+        "An operator can raise the limit with MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES."
+    )
     assert not (tmp_path / "storage" / "incoming_media").exists()
 
 
@@ -855,4 +860,5 @@ async def test_download_above_the_retained_media_limit_is_too_large(
     result = await _download(tool, context)
 
     assert result["code"] == "attachment_too_large"
+    assert "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES cannot raise" in result["message"]
     assert not (tmp_path / "storage" / "incoming_media").exists()

@@ -60,7 +60,7 @@ from mindroom.oauth.service import (
     oauth_connection_required,
 )
 from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
-from mindroom.tool_system.sandbox_proxy import inline_attachment_byte_limit
+from mindroom.tool_system.sandbox_proxy import INLINE_ATTACHMENT_BYTES_ENV, inline_attachment_byte_limit
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -808,11 +808,19 @@ class AtlassianToolkit(Toolkit):
 
         async def download_attachment(access_token: str, site: AtlassianSite) -> dict[str, object]:
             path = f"/wiki/rest/api/content/{page}/child/attachment/{confluence_attachment_id}/download"
-            downloaded = await download(access_token, site, "confluence", path, max_bytes=max_bytes)
+            downloaded = await download(
+                access_token,
+                site,
+                "confluence",
+                path,
+                max_bytes=max_bytes,
+                max_bytes_setting=INLINE_ATTACHMENT_BYTES_ENV,
+            )
             if media_payload_exceeds_limit(downloaded.content):
                 raise AtlassianError(
                     code="attachment_too_large",
-                    message="The attachment exceeds MindRoom's retained media size limit.",
+                    message="The attachment exceeds MindRoom's fixed retained media size limit, "
+                    f"which {INLINE_ATTACHMENT_BYTES_ENV} cannot raise.",
                 )
             display_name = _display_filename(downloaded.content_disposition, filename) or confluence_attachment_id
             mime_type = _mime_type(downloaded.content_type, display_name)

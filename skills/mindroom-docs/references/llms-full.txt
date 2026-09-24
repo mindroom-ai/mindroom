@@ -11269,7 +11269,9 @@ The stored file name is always generated from the attachment ID.
 
 - Search and listing functions return at most 50 results per call.
 - Each Jira or Confluence API call other than an attachment download must finish within 60 seconds and return at most 32 MiB, and a larger response returns `response_too_large`.
-- Attachment downloads are limited to the inline worker transfer size, 16 MiB by default, controlled by `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`.
+- Attachment downloads are limited to the inline worker transfer size, 16 MiB by default, and many real attachments are larger.
+- A larger attachment returns `attachment_too_large`, whose message names the limit and the `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` setting that raises it.
+- Raising that setting also raises the inline limit for `get_attachment(..., mindroom_output_path=...)`, and MindRoom's fixed 64 MiB limit for [registered files](https://docs.mindroom.chat/attachments/) still applies.
 - A download must finish within 120 seconds, including every redirect.
 - Page reads and attachment listings use Confluence search, so a page created moments ago can take a short time to appear, and archived or draft pages are not returned.
 - Only Atlassian Cloud is supported; Jira and Confluence Data Center use the existing `jira` and `confluence` tools.

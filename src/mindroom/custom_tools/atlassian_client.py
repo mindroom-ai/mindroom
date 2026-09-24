@@ -461,8 +461,11 @@ async def download(
     path: str,
     *,
     max_bytes: int,
+    max_bytes_setting: str,
 ) -> _AtlassianDownload:
     """Download one binary gateway path, following at most a few Atlassian-controlled redirects.
+
+    A body over max_bytes fails with a message naming max_bytes_setting, the setting that raises it.
 
     The bearer goes only to this product and site's gateway path, never to a media host.
     No hop receives another hop's cookies, and content-coded bodies are rejected before decoding.
@@ -496,7 +499,7 @@ async def download(
                         raise _unauthorized_error(await _bounded_body(response, _MAX_UNAUTHORIZED_BODY_BYTES))
                     if not response.is_success:
                         raise _download_status_error(response.status_code, from_gateway=from_gateway)
-                    return await _bounded_download(response, max_bytes)
+                    return await _bounded_download(response, max_bytes, max_bytes_setting)
     except TimeoutError:
         raise AtlassianError(
             code="download_timeout",
@@ -507,15 +510,17 @@ async def download(
     raise AtlassianError(code="redirect_rejected", message="Atlassian redirected the download too many times.")
 
 
-def _too_large(max_bytes: int) -> AtlassianError:
+def _too_large(max_bytes: int, max_bytes_setting: str) -> AtlassianError:
     return AtlassianError(
         code="attachment_too_large",
-        message=f"The attachment exceeds the {max_bytes}-byte download limit.",
+        message=f"The attachment is larger than the {max_bytes}-byte download limit. "
+        f"An operator can raise the limit with {max_bytes_setting}.",
         max_bytes=max_bytes,
+        limit_setting=max_bytes_setting,
     )
 
 
-async def _bounded_download(response: httpx.Response, max_bytes: int) -> _AtlassianDownload:
+async def _bounded_download(response: httpx.Response, max_bytes: int, max_bytes_setting: str) -> _AtlassianDownload:
     """Read the raw body, rejecting content coding and stopping as soon as it passes max_bytes."""
     encoding = response.headers.get("content-encoding", "").strip().lower()
     if encoding not in {"", "identity"}:
@@ -525,11 +530,11 @@ async def _bounded_download(response: httpx.Response, max_bytes: int) -> _Atlass
         )
     declared = response.headers.get("content-length", "").strip()
     if declared.isdecimal() and int(declared) > max_bytes:
-        raise _too_large(max_bytes)
+        raise _too_large(max_bytes, max_bytes_setting)
     try:
         content = await collect_bounded_bytes(response.aiter_raw(), max_bytes=max_bytes)
     except ByteLimitExceededError:
-        raise _too_large(max_bytes) from None
+        raise _too_large(max_bytes, max_bytes_setting) from None
     return _AtlassianDownload(
         content=content,
         content_type=response.headers.get("content-type"),
