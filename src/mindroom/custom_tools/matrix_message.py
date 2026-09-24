@@ -190,7 +190,7 @@ class MatrixMessageTools(Toolkit):
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", message=room_error)
-        if not room_access_allowed(context, resolved_room_id):
+        if not await room_access_allowed(context, resolved_room_id):
             return self._payload("error", room_id=resolved_room_id, message="Not authorized to access the target room.")
         dispatch = partial(
             self._dispatch_action,

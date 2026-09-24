@@ -1559,7 +1559,7 @@ class MatrixApiTools(Toolkit):
                 message="dry_run/allow_dangerous not applicable to read-only search action",
             )
 
-        if not room_access_allowed(context, resolved_room_id):
+        if not await room_access_allowed(context, resolved_room_id):
             return self._error_payload(
                 action=normalized_action,
                 room_id=resolved_room_id,

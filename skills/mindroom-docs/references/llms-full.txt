@@ -4347,7 +4347,7 @@ Callers must check `truncated` before claiming the unresolved list is complete.
 `thread_tags` also validates and normalizes predefined payload schemas for `blocked.data.blocked_by`, `waiting.data.waiting_on`, `priority.data.level`, and `due.data.deadline`.
 `thread_resolution` is an explicit opt-in capability backed by the `resolved` thread tag and does not read the removed experimental `com.mindroom.thread.resolution` event type.
 It is absent from starter configs and default tool sets, while `thread_tags` can list but cannot mutate `resolved` state.
-`matrix_api` defaults `room_id` to the active room, supports authorized cross-room targeting, never infers event IDs or state keys from thread context, and now also supports room-scoped full-text search through `action="search"`.
+`matrix_api` defaults `room_id` to the active room, supports cross-room targeting for rooms the requester is joined to, never infers event IDs or state keys from thread context, and now also supports room-scoped full-text search through `action="search"`.
 
 ## MindRoom Update Awareness
 
@@ -8805,7 +8805,7 @@ Pass each returned `name` as `recipient` in [matrix_message](https://docs.mindro
 `state` returns one exact state event when `event_type` is supplied, using an empty `state_key` by default.
 Without `event_type`, `state` returns a room-state summary with at most 100 non-member event previews and elides `m.room.member` events.
 `room_id` defaults to the active Matrix room.
-An alternate room is allowed only when the requester is authorized there under the configured room-access policy.
+An alternate room is allowed only when the requester has access to the agent under the configured room-access policy and is currently joined to that room.
 The tool requires an active Matrix `ToolRuntimeContext` and rate-limits each `(agent_name, requester_id, room_id)` combination to 20 actions per 30 seconds.
 
 ### Configuration
@@ -9092,7 +9092,7 @@ reset_thread_model()
 ### What It Does
 
 `matrix_api` supports `send_event`, `get_state`, `put_state`, `redact`, `get_event`, and `search`.
-It defaults `room_id` to the active room, but it also supports authorized cross-room access when the requester is allowed to act there.
+It defaults `room_id` to the active room, but it also supports cross-room access when the requester has access to the agent and is currently joined to that other room.
 It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations.
 `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs.
 Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.
@@ -9335,7 +9335,7 @@ It controls the returned tool output, not where the Matrix message is delivered.
 `read` returns message event IDs; thread reads also include edit options for editable messages.
 Room-timeline reads decrypt encrypted messages with the agent's available keys and omit messages they cannot decrypt.
 The room read limit counts fetched events, so edits and unreadable messages can leave fewer visible messages than `limit`.
-Room access checks apply before cross-room operations.
+Room access checks apply before cross-room operations, and a room other than the current one also requires the requester to be joined to it.
 Calls are rate limited to 12 actions per 30 seconds per agent, room, and requester; each file costs one additional action.
 
 ## Durable send retries
