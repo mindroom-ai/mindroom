@@ -59,9 +59,20 @@ def test_a_proof_does_not_carry_to_another_claim(tmp_path: Path) -> None:
     sign_relay_metadata(content, runtime_paths)
     proof = content[RELAY_PROOF_KEY]
 
+    assert isinstance(proof, str)
+    flipped = proof[:-1] + ("1" if proof.endswith("0") else "0")
+
     assert not relay_metadata_is_runtime_authored({**content, ORIGINAL_SENDER_KEY: "@admin:localhost"}, runtime_paths)
     assert not relay_metadata_is_runtime_authored({**content, SOURCE_KIND_KEY: "scheduled"}, runtime_paths)
-    assert not relay_metadata_is_runtime_authored({**content, RELAY_PROOF_KEY: proof[:-1] + "0"}, runtime_paths)
+    assert not relay_metadata_is_runtime_authored({**content, RELAY_PROOF_KEY: flipped}, runtime_paths)
+
+
+def test_a_non_ascii_proof_is_refused_without_raising(tmp_path: Path) -> None:
+    """Proof text arrives from an event body, so verification must never raise on it."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    content = {ORIGINAL_SENDER_KEY: "@owner:localhost", RELAY_PROOF_KEY: "é" * 64}
+
+    assert not relay_metadata_is_runtime_authored(content, runtime_paths)
 
 
 def test_proofs_do_not_transfer_between_installs(tmp_path: Path) -> None:

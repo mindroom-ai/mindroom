@@ -11,6 +11,7 @@ from typing import Any, ClassVar
 import nio
 from agno.tools import Toolkit
 
+from mindroom.constants import RELAY_PROOF_KEY
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
@@ -112,7 +113,7 @@ class MatrixApiTools(Toolkit):
         "redact": 2,
     }
     _HARD_BLOCKED_STATE_TYPES: ClassVar[frozenset[str]] = frozenset({"m.room.create"})
-    _RESERVED_CONTENT_PREFIXES: ClassVar[tuple[str, ...]] = ("com.mindroom.", "io.mindroom.")
+    _RESERVED_MINDROOM_PREFIXES: ClassVar[tuple[str, ...]] = ("com.mindroom.", "io.mindroom.")
     _DANGEROUS_STATE_TYPES: ClassVar[frozenset[str]] = frozenset(
         {
             "m.room.power_levels",
@@ -285,15 +286,71 @@ class MatrixApiTools(Toolkit):
         composes must never carry the namespaces ingress reads as runtime
         metadata. Nested payloads count: edits and sidecars promote inner
         objects into the content the receiving agent validates.
+
+        The walk keeps its own stack: content the model chose can nest deeply
+        enough to exhaust the interpreter's, and a rejection is only useful if
+        it reaches the caller.
+        """
+        found: set[str] = set()
+        pending: list[object] = [value]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, dict):
+                found.update(key for key in current if isinstance(key, str) and cls._is_reserved_name(key))
+                pending.extend(current.values())
+            elif isinstance(current, list):
+                pending.extend(current)
+        return sorted(found)
+
+    @classmethod
+    def _without_relay_proof(cls, value: object) -> object:
+        """Return *value* with runtime relay proofs removed wherever they appear.
+
+        A proof is the runtime's signature over one relayed identity, so handing
+        one back to the model would give it a token to replay. The identity and
+        source kind stay visible: they are what the event says, not authority.
         """
         if isinstance(value, dict):
-            found = {key for key in value if isinstance(key, str) and key.startswith(cls._RESERVED_CONTENT_PREFIXES)}
-            for item in value.values():
-                found.update(cls._reserved_content_keys(item))
-            return sorted(found)
+            return {key: cls._without_relay_proof(item) for key, item in value.items() if key != RELAY_PROOF_KEY}
         if isinstance(value, list):
-            return sorted({key for item in value for key in cls._reserved_content_keys(item)})
-        return []
+            return [cls._without_relay_proof(item) for item in value]
+        return value
+
+    @classmethod
+    def _is_reserved_name(cls, name: str) -> bool:
+        """Return whether one content key or event type belongs to MindRoom's runtime namespaces."""
+        return name.startswith(cls._RESERVED_MINDROOM_PREFIXES)
+
+    @classmethod
+    def _reserved_event_type_error(
+        cls,
+        *,
+        action: str,
+        room_id: str,
+        event_type: str,
+        state_key: str | None = None,
+    ) -> str | None:
+        """Reject writes to event types MindRoom's own runtime owns and reads back.
+
+        A runtime-owned event is an instruction, not a message: a scheduled
+        task's state event names the requester its fire will later speak for,
+        and the runtime signs that identity when it fires. Rejecting reserved
+        content keys is not enough, because such a payload can carry the
+        identity inside a field of its own -- so the model must not be able to
+        author one of these events from the agent's Matrix account at all.
+        """
+        if not cls._is_reserved_name(event_type):
+            return None
+        state_key_payload = {} if state_key is None else {"state_key": state_key}
+        return cls._error_payload(
+            action=action,
+            room_id=room_id,
+            event_type=event_type,
+            message=(
+                f"Event type '{event_type}' is reserved for MindRoom runtime state and cannot be written by a tool."
+            ),
+            **state_key_payload,
+        )
 
     @classmethod
     def _content_summary(
@@ -624,6 +681,14 @@ class MatrixApiTools(Toolkit):
         state_key: str,
         allow_dangerous: bool,
     ) -> tuple[str | None, bool]:
+        reserved_error = cls._reserved_event_type_error(
+            action=action,
+            room_id=room_id,
+            event_type=event_type,
+            state_key=state_key,
+        )
+        if reserved_error is not None:
+            return reserved_error, False
         if event_type in cls._HARD_BLOCKED_STATE_TYPES:
             return (
                 cls._error_payload(
@@ -660,6 +725,13 @@ class MatrixApiTools(Toolkit):
         room_id: str,
         event_type: str,
     ) -> str | None:
+        reserved_error = cls._reserved_event_type_error(
+            action="send_event",
+            room_id=room_id,
+            event_type=event_type,
+        )
+        if reserved_error is not None:
+            return reserved_error
         if event_type == "m.room.redaction":
             return cls._error_payload(
                 action="send_event",
@@ -938,7 +1010,7 @@ class MatrixApiTools(Toolkit):
                 event_type=normalized_event_type,
                 state_key=resolved_state_key,
                 found=True,
-                content=response.content,
+                content=self._without_relay_proof(response.content),
             )
         return self._error_payload(
             action="get_state",
@@ -1271,7 +1343,7 @@ class MatrixApiTools(Toolkit):
                 "room_id": room_id,
                 "event_id": normalized_event_id,
                 "found": True,
-                "event": raw_event,
+                "event": self._without_relay_proof(raw_event),
             }
             if "type" in raw_event:
                 payload["event_type"] = raw_event["type"]
@@ -1400,7 +1472,8 @@ class MatrixApiTools(Toolkit):
         `room_id` defaults to the current Matrix tool runtime context room.
         `search` enforces a single-room scope via `room_id`; if `filter.rooms` is supplied it must match that room.
         `search` always uses the top-level `limit`; `filter.limit` is rejected to avoid conflicting inputs.
-        `content` may not set `com.mindroom.*` or `io.mindroom.*` keys; those are reserved for runtime metadata.
+        `com.mindroom.*` and `io.mindroom.*` are reserved for runtime metadata: `content` may not set keys in
+        those namespaces, and `send_event`/`put_state` may not write event types in them.
         `dry_run` is supported for send_event, put_state, and redact.
         `allow_dangerous` only affects put_state for a small set of high-risk room-state event types.
         `search` rejects `dry_run` and `allow_dangerous` because it is read-only.

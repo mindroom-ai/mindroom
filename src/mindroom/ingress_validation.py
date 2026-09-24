@@ -144,11 +144,11 @@ class IngressValidator:
         sender_agent_name = self.managed_entity_name_for_sender(sender)
         if sender_agent_name is None and not sender_is_own_entity:
             return False
-        if not self._original_sender_claim_is_runtime_authored(sender=sender, content=content):
+        if not self.original_sender_claim_is_runtime_authored(sender=sender, content=content):
             return False
         return source_kind_allows_trusted_original_sender(source_kind)
 
-    def _original_sender_claim_is_runtime_authored(self, *, sender: str, content: Mapping[str, Any]) -> bool:
+    def original_sender_claim_is_runtime_authored(self, *, sender: str, content: Mapping[str, Any]) -> bool:
         """Return whether an original-sender claim carries this runtime's authorship proof.
 
         Managed accounts also deliver model-authored content, so a claim to
@@ -216,7 +216,7 @@ class IngressValidator:
             return True
         # An unproven original sender must not survive as payload metadata: a
         # router relay would otherwise inherit it and re-stamp it as its own.
-        return self._original_sender_claim_is_runtime_authored(sender=event.sender, content=content)
+        return self.original_sender_claim_is_runtime_authored(sender=event.sender, content=content)
 
     def is_trusted_internal_relay_event(self, event: DispatchEvent) -> bool:
         """Return whether one agent-authored relay should bypass user-turn coalescing."""

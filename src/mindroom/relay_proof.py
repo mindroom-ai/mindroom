@@ -10,12 +10,16 @@ chose the relayed identity.
 Every runtime relay stamps a keyed proof over the identity claim it authored,
 and ingress refuses an ``original_sender`` whose proof is missing or wrong. The
 key lives only in the install's storage root and is never rendered into a
-prompt or an event, so content a model composes cannot carry a proof for an
-identity the runtime did not choose.
+prompt or an event, so a model cannot compute a proof for an identity the
+runtime did not choose.
 
 The proof covers the identity claim, not the event body: it shows runtime code
 authored *this* ``(original_sender, source_kind)`` pair, which is exactly what
-the trust decision reads.
+the trust decision reads. A proof is therefore a bearer token for its pair --
+it does not expire and is not bound to one event -- so model-facing surfaces
+must neither let the model author the metadata (``matrix_api`` rejects the
+reserved namespaces) nor hand back a proof it could replay (``matrix_api``
+strips them from the events and state it returns).
 """
 
 from __future__ import annotations
@@ -66,9 +70,11 @@ def relay_metadata_is_runtime_authored(content: Mapping[str, Any], runtime_paths
     proof = content.get(RELAY_PROOF_KEY)
     if not isinstance(proof, str):
         return False
+    # Compare as bytes: a str comparison rejects non-ASCII input by raising,
+    # and this value arrives from an event body.
     return hmac.compare_digest(
-        proof,
-        _relay_proof(original_sender, content.get(SOURCE_KIND_KEY), runtime_paths),
+        proof.encode("utf-8", "surrogatepass"),
+        _relay_proof(original_sender, content.get(SOURCE_KIND_KEY), runtime_paths).encode(),
     )
 
 
@@ -94,8 +100,13 @@ def _load_or_create_signing_key(path: Path) -> bytes:
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-        temp_path.write_bytes(secrets.token_bytes(_SIGNING_KEY_BYTES))
-        temp_path.chmod(0o600)
+        # Create private: the key must never exist world-readable, not even
+        # between writing it and publishing it.
+        temp_fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(temp_fd, "wb") as temp_file:
+            temp_file.write(secrets.token_bytes(_SIGNING_KEY_BYTES))
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
         # A concurrent runtime may publish the key first; whichever lands wins.
         with suppress(FileExistsError):
             os.link(temp_path, path)

@@ -578,7 +578,10 @@ class VisibleVoiceEchoLifecycle:
         normalized_source: dict[str, Any],
     ) -> dict[str, Any]:
         payload_metadata = payload_metadata_from_source(normalized_source, trust_internal_metadata=True)
-        inherited_original_sender = payload_metadata.original_sender
+        inherited_original_sender = self._inheritable_original_sender(
+            normalized_source,
+            payload_metadata.original_sender,
+        )
         relay_original_sender = original_sender_for_router_relay(
             requester_id=requester_user_id,
             requester_entity_name=self.deps.ingress.managed_entity_name_for_sender(requester_user_id),
@@ -603,6 +606,26 @@ class VisibleVoiceEchoLifecycle:
             extra_content[VOICE_TRANSCRIPT_KEY] = True
         sign_relay_metadata(extra_content, self.deps.runtime.runtime_paths)
         return extra_content
+
+    def _inheritable_original_sender(
+        self,
+        normalized_source: dict[str, Any],
+        original_sender: str | None,
+    ) -> str | None:
+        """Return an inherited requester only when the runtime is known to have chosen it.
+
+        This echo signs whatever identity it relays, so a claim the runtime did
+        not author must not be laundered into a proof of the runtime's own.
+        """
+        if original_sender is None:
+            return None
+        sender = normalized_source.get("sender")
+        content = normalized_source.get("content")
+        if not isinstance(sender, str) or not isinstance(content, dict):
+            return None
+        if self.deps.ingress.original_sender_claim_is_runtime_authored(sender=sender, content=content):
+            return original_sender
+        return None
 
 
 def _is_raw_audio_fallback(event: PreparedIngress) -> bool:
