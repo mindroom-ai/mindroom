@@ -28,6 +28,8 @@ Additional Atlassian sites can be added as separate, independently connected too
 | `confluence_add_comment` | Confluence | yes | Add a footer comment to a page. |
 
 Plain-text Jira descriptions and comments are converted to Atlassian Document Format, with blank lines separating paragraphs.
+`jira_transition_issue` picks an exact transition ID first, then an exact transition name, then a target status that only one transition leads to, ignoring case for names.
+When several transitions share that name or target status, it returns `transition_ambiguous` with the candidates and changes nothing.
 Confluence bodies use the Confluence storage format, which is XHTML such as `<p>Hello</p>`.
 Every result is a JSON object with `status` set to `ok` or `error`.
 Successful results name the `product` and the `site` that answered.

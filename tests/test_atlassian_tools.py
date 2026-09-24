@@ -424,31 +424,53 @@ async def test_jira_update_and_comment_write_the_requested_issue(
 
 
 @pytest.mark.asyncio
-async def test_jira_transition_accepts_a_name_and_rejects_unavailable_steps(
+@pytest.mark.parametrize(
+    ("transitions", "requested", "expected"),
+    [
+        ((("31", "Start", "In Progress"), ("41", "31", "Done")), "31", "31"),
+        ((("31", "Start", "In Progress"), ("41", "Close", "Done")), "close", "41"),
+        ((("31", "Start", "In Progress"), ("41", "Close", "Done")), "DONE", "41"),
+        ((("11", "Done", "Closed"), ("21", "Finish", "Done")), "done", "11"),
+        ((("11", "Review", "In Review"), ("21", "Review", "Blocked")), "review", "transition_ambiguous"),
+        ((("11", "Close", "Done"), ("21", "Resolve", "Done")), "Done", "transition_ambiguous"),
+        ((("41", "Close", "Done"),), "Reopen", "transition_not_available"),
+    ],
+)
+async def test_jira_transition_resolves_one_transition_or_changes_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    transitions: tuple[tuple[str, str, str], ...],
+    requested: str,
+    expected: str,
 ) -> None:
-    """A transition name resolves to its ID, and an unknown one never posts."""
+    """An exact ID wins, then an exact name, then a unique target status; an ambiguous match never posts."""
     tool, gateway = _connected(tmp_path, monkeypatch)
-    transitions = gateway_url("jira", "/rest/api/3/issue/PROJ-4/transitions")
+    endpoint = gateway_url("jira", "/rest/api/3/issue/PROJ-4/transitions")
     posted: list[object] = []
 
     def transitions_endpoint(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
             posted.append(json_body(request))
             return httpx.Response(204)
-        return httpx.Response(200, json={"transitions": [{"id": "41", "name": "Close", "to": {"name": "Done"}}]})
+        return httpx.Response(
+            200,
+            json={"transitions": [{"id": id_, "name": name, "to": {"name": to}} for id_, name, to in transitions]},
+        )
 
-    gateway.route("GET", transitions, transitions_endpoint)
-    gateway.route("POST", transitions, transitions_endpoint)
+    gateway.route("GET", endpoint, transitions_endpoint)
+    gateway.route("POST", endpoint, transitions_endpoint)
 
-    moved = json.loads(await tool.jira_transition_issue(issue_key="PROJ-4", transition="done"))
-    rejected = json.loads(await tool.jira_transition_issue(issue_key="PROJ-4", transition="Reopen"))
+    result = json.loads(await tool.jira_transition_issue(issue_key="PROJ-4", transition=requested))
 
-    assert posted == [{"transition": {"id": "41"}}]
-    assert moved["transition"] == {"id": "41", "name": "Close", "to_status": "Done"}
-    assert rejected["code"] == "transition_not_available"
-    assert rejected["available_transitions"] == [{"id": "41", "name": "Close", "to_status": "Done"}]
+    summaries = [{"id": id_, "name": name, "to_status": to} for id_, name, to in transitions]
+    if expected.isdecimal():
+        assert posted == [{"transition": {"id": expected}}]
+        assert result["transition"] == next(item for item in summaries if item["id"] == expected)
+    else:
+        assert posted == []
+        assert result["code"] == expected
+        candidates = result.get("candidate_transitions", result.get("available_transitions"))
+        assert candidates == summaries
 
 
 @pytest.mark.asyncio

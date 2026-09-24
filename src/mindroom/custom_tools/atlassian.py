@@ -279,6 +279,34 @@ def _transition_summary(transition: object) -> dict[str, object]:
     }
 
 
+def _casefolded(value: object) -> str | None:
+    return value.casefold() if isinstance(value, str) else None
+
+
+def _resolve_transition(requested: str, available: list[dict[str, object]]) -> dict[str, object]:
+    """Pick a transition by exact ID, else by name, else by target status, refusing any ambiguous match."""
+    by_id = next((item for item in available if item["id"] == requested), None)
+    if by_id is not None:
+        return by_id
+    wanted = requested.casefold()
+    for field, label in (("name", "name"), ("to_status", "target status")):
+        matches = [item for item in available if _casefolded(item[field]) == wanted]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            raise AtlassianError(
+                code="transition_ambiguous",
+                message=f"Several transitions have that {label}, so nothing was changed. "
+                "Retry with the ID of one candidate transition.",
+                candidate_transitions=matches,
+            )
+    raise AtlassianError(
+        code="transition_not_available",
+        message="That transition is not available for this issue from its current status.",
+        available_transitions=available,
+    )
+
+
 def _attachment_summary(item: object) -> dict[str, object]:
     item_data = _mapping(item)
     extensions = _mapping(item_data.get("extensions"))
@@ -630,7 +658,7 @@ class AtlassianToolkit(Toolkit):
 
         Args:
             issue_key: Issue key such as PROJ-123.
-            transition: Transition ID or name from jira_get_issue, such as "31" or "In Progress".
+            transition: Transition ID from jira_get_issue such as "31", or a transition or target status name.
 
         """
         try:
@@ -643,23 +671,7 @@ class AtlassianToolkit(Toolkit):
             path = f"/rest/api/3/issue/{key}/transitions"
             data = _mapping(await request_json(access_token, site, "jira", "GET", path))
             available = [_transition_summary(item) for item in data.get("transitions") or [] if isinstance(item, dict)]
-            wanted = requested.casefold()
-            match = next(
-                (
-                    item
-                    for item in available
-                    if item["id"] == requested
-                    or (isinstance(item["name"], str) and item["name"].casefold() == wanted)
-                    or (isinstance(item["to_status"], str) and item["to_status"].casefold() == wanted)
-                ),
-                None,
-            )
-            if match is None:
-                raise AtlassianError(
-                    code="transition_not_available",
-                    message="That transition is not available for this issue from its current status.",
-                    available_transitions=available,
-                )
+            match = _resolve_transition(requested, available)
             await request_json(access_token, site, "jira", "POST", path, json_body={"transition": {"id": match["id"]}})
             return {"issue": _issue_reference({"key": key}, site), "transition": match}
 
