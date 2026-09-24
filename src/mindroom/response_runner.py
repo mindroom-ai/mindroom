@@ -110,6 +110,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.scheduled_run_records import record_silent_schedule_started_if_needed
+from mindroom.skill_learning.worker import queue_skill_learning
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
@@ -2117,6 +2118,16 @@ class ResponseRunner:
                 session_id=session_id,
                 execution_identity=execution_identity,
             )
+            try:
+                queue_skill_learning(
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                    agent_name=agent_name,
+                    session_id=session_id,
+                    execution_identity=execution_identity,
+                )
+            except Exception:
+                self.deps.logger.exception("Could not queue skill learning", agent=agent_name)
             if self.deps.runtime.config.resolve_entity(agent_name).memory_backend == "mem0":
                 create_background_task(
                     store_conversation_memory(

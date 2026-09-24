@@ -150,6 +150,7 @@ agents:
 | `tools` | list | `[]` | Agent-specific tool entries — plain strings or single-key dicts with config overrides (see [Tools](https://docs.mindroom.chat/tools/) and [Per-Agent Tool Configuration](#per-agent-tool-configuration)); effective tools are `tools + defaults.tools` with duplicates removed |
 | `include_default_tools` | bool | `true` | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out |
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/)) |
+| `skill_learning` | object | disabled | Opt-in background Markdown skill learning; see [Automatic skill learning](https://docs.mindroom.chat/skills/#automatic-skill-learning) for settings, scope and costs. Separate from Agno `learning_mode`. |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
 | `participation` | object or null | `null` | Opt into adaptive replies in existing multi-human threads across authorized rooms, including ad hoc rooms; see [Adaptive Participation](#adaptive-participation) |

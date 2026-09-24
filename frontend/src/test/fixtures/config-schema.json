@@ -441,6 +441,19 @@
           "description": "Allow this agent to modify its own configuration via a tool",
           "title": "Allow Self Config"
         },
+        "skill_learning": {
+          "$ref": "#/$defs/SkillLearningConfig",
+          "default": {
+            "enabled": false,
+            "model": null,
+            "cooldown_seconds": 300,
+            "max_input_chars": 24000,
+            "max_output_chars": 12000,
+            "timeout_seconds": 60,
+            "max_attempts": 3
+          },
+          "description": "Opt-in automatic Markdown skill learning in this agent workspace"
+        },
         "delegate_to": {
           "default": [],
           "description": "Allowed agents for run_subagent and continue_subagent, including this agent when explicitly listed",
@@ -3338,6 +3351,73 @@
         }
       },
       "title": "RouterConfig",
+      "type": "object"
+    },
+    "SkillLearningConfig": {
+      "additionalProperties": false,
+      "description": "Review completed standalone agent turns for reusable Markdown procedures.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Review completed standalone turns for reusable workspace skills",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reviewer model alias; defaults to the agent model",
+          "title": "Model"
+        },
+        "cooldown_seconds": {
+          "default": 300,
+          "description": "Seconds to coalesce completed turns before review",
+          "maximum": 86400,
+          "minimum": 0,
+          "title": "Cooldown Seconds",
+          "type": "integer"
+        },
+        "max_input_chars": {
+          "default": 24000,
+          "description": "Maximum combined trace and skill context characters per review",
+          "maximum": 100000,
+          "minimum": 1000,
+          "title": "Max Input Chars",
+          "type": "integer"
+        },
+        "max_output_chars": {
+          "default": 12000,
+          "description": "Maximum characters in a generated SKILL.md",
+          "maximum": 32000,
+          "minimum": 500,
+          "title": "Max Output Chars",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "default": 60,
+          "description": "Maximum seconds per model review",
+          "maximum": 300,
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "max_attempts": {
+          "default": 3,
+          "description": "Maximum review or publication attempts per queued generation",
+          "maximum": 5,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        }
+      },
+      "title": "SkillLearningConfig",
       "type": "object"
     },
     "SpeechServiceConfig": {

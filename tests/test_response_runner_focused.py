@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from functools import partial
@@ -30,6 +31,7 @@ from agno.run.requirement import RunRequirement
 from agno.session.agent import AgentSession
 from agno.tools.function import Function, FunctionCall
 from agno.tools.toolkit import Toolkit
+from structlog.testing import capture_logs
 
 from mindroom import agents as agents_module
 from mindroom import approval_receipt, cli_approval_waits, interactive, response_runner
@@ -45,7 +47,7 @@ from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.agent import TeamConfig
+from mindroom.config.agent import AgentPrivateConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
@@ -9726,3 +9728,50 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
     assert outcome.terminal_status == "cancelled"
     assert landed == [STREAM_STATUS_COMPLETED]
     assert _approval_reply_edits(client)[-1] == (STREAM_STATUS_COMPLETED, "**[Response cancelled by user]**")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("private", [False, True])
+async def test_completed_response_queues_scoped_skill_learning(
+    tmp_path: Path,
+    streaming: bool,
+    private: bool,
+) -> None:
+    """Both persisted response drivers enqueue learning through completed post-effects."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    config = coordinator.deps.runtime.config
+    config.agents["general"].skill_learning.enabled = True
+    config.memory.backend = "file"
+    if private:
+        config.agents["general"].private = AgentPrivateConfig(per="user")
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=30,
+        max_response_chars=30,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    with (
+        capture_logs() as logs,
+        patch("mindroom.model_loading.get_model_instance", return_value=model) as model_factory,
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=streaming),
+        ),
+    ):
+        await coordinator.generate_response(_plain_request(_target()))
+    assert model_factory.called, logs
+    queue_path = coordinator.deps.runtime_paths.storage_root / "skill_learning.db"
+    assert queue_path.exists(), logs
+    with sqlite3.connect(queue_path) as connection:
+        rows = connection.execute("SELECT scope FROM reviews").fetchall()
+    assert len(rows) == 1
+    scope = json.loads(rows[0][0])
+    assert scope["agent"] == "general"
+    assert scope["identity"]["requester_id"] == "@user:localhost"
+    assert scope["private"] is private
+    assert ("private_instances" in scope["workspace"]) is private
