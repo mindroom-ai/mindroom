@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.tools import python as python_tools_module
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @dataclass
@@ -28,6 +32,18 @@ def test_python_tools_preserve_both_install_entrypoints() -> None:
 
     assert "pip_install_package" in tool.functions
     assert "uv_pip_install_package" in tool.functions
+
+
+def test_python_tools_read_files_outside_base_dir(tmp_path: Path) -> None:
+    """Python runs arbitrary code, so its file helpers are not confined to base_dir."""
+    base = tmp_path / "ws"
+    base.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("hello")
+
+    tool = python_tools_module.python_tools()(base_dir=base)
+
+    assert tool.read_file(str(outside)) == "hello"
 
 
 @pytest.mark.parametrize("installer_name", ["pip_install_package", "uv_pip_install_package"])

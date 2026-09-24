@@ -48,7 +48,7 @@ from mindroom.credentials import get_runtime_credentials_manager, save_scoped_cr
 from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
-from mindroom.tool_system.declarations import ToolExecutionTarget
+from mindroom.tool_system.declarations import ToolExecutionTarget, ToolFileAccess
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     TOOL_REGISTRY,
@@ -778,6 +778,7 @@ def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Pat
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Runner Redirect",
         description="Test-only runner redirect coverage.",
         category=ToolCategory.DEVELOPMENT,
@@ -1003,6 +1004,7 @@ async def test_static_runner_redirect_resolves_agent_workspace_without_prepared_
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Static Runner Redirect",
         description="Test-only static runner redirect coverage.",
         category=ToolCategory.DEVELOPMENT,
@@ -1055,6 +1057,7 @@ async def test_worker_redirect_uses_agent_workspace_not_worker_scratch(tmp_path:
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Worker Redirect",
         description="Test-only worker redirect coverage.",
         category=ToolCategory.DEVELOPMENT,
@@ -1141,6 +1144,7 @@ def test_proxy_payload_includes_tool_config_overrides(monkeypatch: pytest.Monkey
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Proxy Configured Tool",
         description="Test-only proxy payload coverage.",
         category=ToolCategory.DEVELOPMENT,
@@ -1580,6 +1584,7 @@ def _sandbox_proxy_test_metadata(
 ) -> ToolMetadata:
     return ToolMetadata(
         name=name,
+        file_access=ToolFileAccess.NONE,
         display_name=name,
         description=name,
         category=ToolCategory.DEVELOPMENT,

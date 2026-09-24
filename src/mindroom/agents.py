@@ -43,6 +43,7 @@ from mindroom.tool_system.catalog import (
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
+    ToolFileAccess,
 )
 from mindroom.tool_system.dynamic_toolkits import (
     VisibleToolSurface,
@@ -81,7 +82,7 @@ if TYPE_CHECKING:
     from mindroom.agent_knowledge_descriptions import KnowledgeSourceDescription
     from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
-    from mindroom.config.models import DefaultsConfig
+    from mindroom.config.models import DefaultsConfig, FileAccess
     from mindroom.credentials import CredentialsManager
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -892,19 +893,41 @@ def _render_tool_execution_environment(
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
     worker_scope: WorkerScope | None,
+    file_access: FileAccess,
+    unconfined_tool_names: tuple[str, ...],
+    primary_only_unconfined_tool_names: tuple[str, ...],
 ) -> str:
-    """Describe effective per-tool execution routing to the model."""
+    """Describe effective per-tool execution routing and file access to the model."""
 
     def tool_list(names: tuple[str, ...]) -> str:
         return ", ".join(f"`{name}`" for name in names) if names else "none"
 
+    if not worker_routed_tool_names and not local_tool_names:
+        return "## Tool Execution Environment\n- No tools are available in this runtime."
+
+    file_access_description = {
+        "workspace": "agent workspace and attachments only",
+        "unrestricted": "any path the tool's process can reach",
+    }[file_access]
+    file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
+    if unconfined_tool_names:
+        file_access_lines.append(
+            f"- Not confined by file_access (only a worker isolates them): {tool_list(unconfined_tool_names)}.",
+        )
+    if primary_only_unconfined_tool_names:
+        file_access_lines.append(
+            "- Not confined by file_access and unable to run in a worker (trusted primary runtime only): "
+            f"{tool_list(primary_only_unconfined_tool_names)}.",
+        )
+
     if not worker_routed_tool_names:
-        if not local_tool_names:
-            return "## Tool Execution Environment\n- No tools are available in this runtime."
-        return (
-            "## Tool Execution Environment\n"
-            f"- All available tools run in the primary MindRoom runtime: {tool_list(local_tool_names)}.\n"
-            "- No tools use a worker runtime."
+        return "\n".join(
+            [
+                "## Tool Execution Environment",
+                f"- All available tools run in the primary MindRoom runtime: {tool_list(local_tool_names)}.",
+                "- No tools use a worker runtime.",
+                *file_access_lines,
+            ],
         )
 
     backend = primary_worker_backend_name(runtime_paths)
@@ -937,8 +960,22 @@ def _render_tool_execution_environment(
                 f"{idle_behavior}; persisted files and caches remain until an operator deletes that worker state.",
             ),
         )
+    lines.extend(file_access_lines)
     lines.append("- Execution location is determined per tool; this agent is not sandboxed as a whole.")
     return "\n".join(lines)
+
+
+def _unconfined_tool_names(tool_names: tuple[str, ...], *, requires_primary_runtime: bool) -> tuple[str, ...]:
+    """Return sorted tools not confined by file_access, split by whether a worker can isolate them."""
+    return tuple(
+        sorted(
+            name
+            for name in tool_names
+            if name in TOOL_METADATA
+            and TOOL_METADATA[name].file_access is ToolFileAccess.UNCONFINED
+            and TOOL_METADATA[name].requires_primary_runtime is requires_primary_runtime
+        ),
+    )
 
 
 def _registry_tool_routes_through_worker(
@@ -1608,6 +1645,15 @@ def _build_agent_role_context(
             local_tool_names=local_tool_names,
             worker_routed_tool_names=worker_routed_tool_names,
             worker_scope=agent_runtime.execution.execution_scope,
+            file_access=config.resolve_entity(agent_name).file_access,
+            unconfined_tool_names=_unconfined_tool_names(
+                (*local_tool_names, *worker_routed_tool_names),
+                requires_primary_runtime=False,
+            ),
+            primary_only_unconfined_tool_names=_unconfined_tool_names(
+                (*local_tool_names, *worker_routed_tool_names),
+                requires_primary_runtime=True,
+            ),
         )
         workspace = agent_runtime.workspace
         full_context += _build_additional_context(
