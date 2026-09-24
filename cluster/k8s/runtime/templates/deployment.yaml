@@ -502,6 +502,11 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
         {{- if eq .Values.workers.backend "static_runner" }}
+        {{- /*
+        The runner executes untrusted tool code, so it must never see the runtime storage PVC
+        (credentials, Matrix keys and tokens, file-sourced config) or the credentials encryption key.
+        Its storage path is private emptyDir scratch that keeps the primary's path spelling.
+        */}}
         - name: sandbox-runner
           image: {{ include "mindroom-runtime.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -531,13 +536,6 @@ spec:
                   name: {{ $proxyTokenSecretName }}
                   key: {{ .Values.workers.sandbox.proxyToken.key }}
             {{- end }}
-            {{- if $credentialsEncryptionKeySecretName }}
-            - name: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $credentialsEncryptionKeySecretName }}
-                  key: {{ .Values.workers.sandbox.credentialsEncryptionKey.key }}
-            {{- end }}
           resources:
             {{- toYaml .Values.workers.staticRunner.resources | nindent 12 }}
           {{- with .Values.securityContext }}
@@ -551,7 +549,7 @@ spec:
               subPath: {{ .Values.config.key }}
               readOnly: true
             {{- end }}
-            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
+            - name: sandbox-storage
               mountPath: {{ .Values.storage.mountPath }}
             - name: sandbox-workspace
               mountPath: /app/workspace
@@ -588,6 +586,8 @@ spec:
         {{- end }}
         {{- if eq .Values.workers.backend "static_runner" }}
         - name: sandbox-workspace
+          emptyDir: {}
+        - name: sandbox-storage
           emptyDir: {}
         {{- end }}
         {{- if .Values.workers.kubernetes.agentVault.accessTool.enabled }}

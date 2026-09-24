@@ -188,8 +188,8 @@ Both modes store agent data in the same per-agent directory structure.
 `workerBackend: static_runner` is the default.
 The primary runtime talks to a shared sidecar over `localhost`.
 This keeps the deployment simple, but all proxied tool calls share the same runner process.
-The runner reads and writes the same agent storage directories as the main process.
-When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value so the primary runtime and static runner sidecar receive the same key.
+The runner does not mount the MindRoom storage PVC; its storage path is private `emptyDir` scratch, so file and shell work there does not persist in the primary's agent workspaces.
+When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value; only the primary runtime receives it.
 
 ### Dedicated Worker Mode
 

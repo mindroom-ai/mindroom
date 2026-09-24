@@ -145,6 +145,11 @@ def _env_by_name(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {env["name"]: env for env in container["env"]}
 
 
+def _mounted_volumes(deployment: dict[str, Any], container: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    volumes = {volume["name"]: volume for volume in deployment["spec"]["template"]["spec"]["volumes"]}
+    return {mount["mountPath"]: volumes[mount["name"]] for mount in container["volumeMounts"]}
+
+
 def _instance_secret_hash(**overrides: str) -> str:
     secret_data = {
         "openai_key": "",
@@ -665,8 +670,8 @@ def test_instance_chart_exposes_public_matrix_url_to_desktop_pairing() -> None:
     assert env["MINDROOM_DESKTOP_MATRIX_HOMESERVER"]["value"] == "https://alice.matrix.staging.mindroom.chat"
 
 
-def test_instance_chart_static_runner_uses_shared_credentials_encryption_key_secret() -> None:
-    """Static runner mode should give both runtime containers the same Secret-backed credential key."""
+def test_instance_chart_static_runner_withholds_credentials_encryption_key() -> None:
+    """Only the primary may receive the key that decrypts the tenant credential store."""
     credentials_encryption_key = "test-encryption-key"
     docs = _render_chart(
         Path("cluster/k8s/instance"),
@@ -692,26 +697,18 @@ def test_instance_chart_static_runner_uses_shared_credentials_encryption_key_sec
             },
         },
     }
-    assert _env_by_name(runner_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == {
-        "name": "MINDROOM_CREDENTIALS_ENCRYPTION_KEY",
-        "valueFrom": {
-            "secretKeyRef": {
-                "name": "mindroom-api-keys-demo",
-                "key": "credentials_encryption_key",
-            },
-        },
-    }
+    assert "credentials_encryption_key" not in json.dumps(runner_container)
 
 
 def test_instance_chart_wires_credentials_encryption_env_when_key_is_unset() -> None:
-    """Instance runtime containers should consistently read the key from the shared Secret."""
+    """The primary should read the key from the instance Secret even before a value is set."""
     docs = _render_chart(Path("cluster/k8s/instance"))
     deployment = _resource(docs, "Deployment", "mindroom-demo")
     mindroom_container = _container(deployment, "mindroom")
     runner_container = _container(deployment, "sandbox-runner")
     annotations = deployment["spec"]["template"]["metadata"]["annotations"]
 
-    expected_env = {
+    assert _env_by_name(mindroom_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == {
         "name": "MINDROOM_CREDENTIALS_ENCRYPTION_KEY",
         "valueFrom": {
             "secretKeyRef": {
@@ -720,9 +717,27 @@ def test_instance_chart_wires_credentials_encryption_env_when_key_is_unset() -> 
             },
         },
     }
-    assert _env_by_name(mindroom_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == expected_env
-    assert _env_by_name(runner_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == expected_env
+    assert "MINDROOM_CREDENTIALS_ENCRYPTION_KEY" not in _env_by_name(runner_container)
     assert annotations["mindroom.ai/instance-secret-hash"] == _instance_secret_hash()
+
+
+def test_instance_chart_static_runner_sees_only_scratch_storage() -> None:
+    """The default hosted sidecar must not reach tenant secrets or the config the primary hot-reloads."""
+    deployment = _resource(_render_chart(Path("cluster/k8s/instance")), "Deployment", "mindroom-demo")
+    mindroom_container = _container(deployment, "mindroom")
+    runner_container = _container(deployment, "sandbox-runner")
+    mindroom_volumes = _mounted_volumes(deployment, mindroom_container)
+    runner_volumes = _mounted_volumes(deployment, runner_container)
+
+    assert mindroom_volumes["/mindroom_data"]["persistentVolumeClaim"] == {"claimName": "mindroom-storage-demo"}
+    assert _env_by_name(mindroom_container)["MINDROOM_CONFIG_PATH"]["value"] == "/mindroom_data/config/config.yaml"
+    assert runner_volumes == {
+        "/app/config.yaml": {"name": "config", "configMap": {"name": "mindroom-config-demo"}},
+        "/mindroom_data": {"name": "sandbox-storage", "emptyDir": {}},
+        "/app/workspace": {"name": "sandbox-workspace", "emptyDir": {}},
+    }
+    assert all(mount.get("readOnly") for mount in runner_container["volumeMounts"] if mount["name"] == "config")
+    assert _env_by_name(runner_container)["MINDROOM_STORAGE_PATH"]["value"] == "/mindroom_data"
 
 
 def test_instance_chart_credentials_encryption_key_rotation_changes_pod_template() -> None:
@@ -2894,8 +2909,8 @@ def test_runtime_chart_uses_default_worker_auth_secret() -> None:
     assert "data" not in worker_auth_secret
 
 
-def test_runtime_chart_static_runner_uses_credentials_encryption_key_secret() -> None:
-    """Static runner mode should wire the optional credential key Secret into both containers."""
+def test_runtime_chart_static_runner_withholds_credentials_encryption_key() -> None:
+    """Only the primary may receive the optional credential key Secret."""
     docs = _render_chart(
         Path("cluster/k8s/runtime"),
         "workers.sandbox.proxyToken.value=test-token",
@@ -2906,7 +2921,8 @@ def test_runtime_chart_static_runner_uses_credentials_encryption_key_secret() ->
     deployment = _resource(docs, "Deployment", "mindroom-runtime")
     mindroom_container = _container(deployment, "mindroom")
     runner_container = _container(deployment, "sandbox-runner")
-    expected_env = {
+
+    assert _env_by_name(mindroom_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == {
         "name": "MINDROOM_CREDENTIALS_ENCRYPTION_KEY",
         "valueFrom": {
             "secretKeyRef": {
@@ -2915,9 +2931,33 @@ def test_runtime_chart_static_runner_uses_credentials_encryption_key_secret() ->
             },
         },
     }
+    assert "runtime-credentials" not in json.dumps(runner_container)
 
-    assert _env_by_name(mindroom_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == expected_env
-    assert _env_by_name(runner_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == expected_env
+
+def test_runtime_chart_static_runner_sees_only_scratch_storage() -> None:
+    """The static sidecar must not reach runtime storage, including a file-sourced config."""
+    config_path = "/app/agent_data/active/config.yaml"
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=static_runner",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "config.source=file",
+        f"config.path={config_path}",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    mindroom_container = _container(deployment, "mindroom")
+    runner_container = _container(deployment, "sandbox-runner")
+
+    assert _mounted_volumes(deployment, mindroom_container)["/app/agent_data"]["persistentVolumeClaim"] == {
+        "claimName": "mindroom-runtime-storage",
+    }
+    assert _mounted_volumes(deployment, runner_container) == {
+        "/app/agent_data": {"name": "sandbox-storage", "emptyDir": {}},
+        "/app/workspace": {"name": "sandbox-workspace", "emptyDir": {}},
+    }
+    assert _env_by_name(runner_container)["MINDROOM_STORAGE_PATH"]["value"] == "/app/agent_data"
 
 
 def test_runtime_chart_state_storage_renders_existing_pvc_mounts_and_init_permissions(tmp_path: Path) -> None:

@@ -104,6 +104,11 @@
 
 {{- define "mindroom.staticRunnerContainer" -}}
 {{- $values := .values -}}
+{{- /*
+The runner executes untrusted tool code as the primary's uid, so it must never see the tenant storage PVC
+(credentials, Matrix keys and tokens, the live config) or the credentials encryption key.
+Its storage path is private emptyDir scratch that keeps the primary's path spelling.
+*/ -}}
 - name: sandbox-runner
   image: {{ $values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
   imagePullPolicy: {{ $values.mindroom_image_pull_policy | default "Always" }}
@@ -118,11 +123,6 @@
       secretKeyRef:
         name: {{ include "mindroom.instanceSecretName" $values }}
         key: sandbox_proxy_token
-  - name: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
-    valueFrom:
-      secretKeyRef:
-        name: {{ include "mindroom.instanceSecretName" $values }}
-        key: credentials_encryption_key
   - name: MINDROOM_CONFIG_PATH
     value: "/app/config.yaml"
   - name: MINDROOM_STORAGE_PATH
@@ -134,7 +134,7 @@
     mountPath: /app/config.yaml
     subPath: config.yaml
     readOnly: true
-  - name: storage
+  - name: sandbox-storage
     mountPath: {{ $values.storagePath }}
   - name: sandbox-workspace
     mountPath: /app/workspace
@@ -149,5 +149,7 @@
 
 {{- define "mindroom.staticRunnerVolume" -}}
 - name: sandbox-workspace
+  emptyDir: {}
+- name: sandbox-storage
   emptyDir: {}
 {{- end }}

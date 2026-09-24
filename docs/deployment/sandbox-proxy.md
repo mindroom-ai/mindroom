@@ -118,15 +118,17 @@ This is the `workerBackend: static_runner` Helm mode.
 See `cluster/k8s/instance/templates/deployment-mindroom.yaml` for the full manifest.
 The sidecar gets:
 
-- An `emptyDir` volume for worker-local scratch files and caches.
-- Access to the same shared storage that holds agent data directories.
-- Read-only access to config for plugin tool registration.
-- The configured credentials-encryption key so it can consume encrypted credential leases.
+- Private `emptyDir` scratch volumes for worker-local files and caches, one of them mounted at the primary's storage path so absolute workspace paths from the primary resolve inside the sidecar.
+- Read-only access to the ConfigMap config for plugin tool registration.
+- The sandbox proxy token that authenticates requests from the primary runtime.
+
+The sidecar never mounts the primary storage PVC, so tool code cannot read persisted credentials, Matrix encryption keys, Matrix access tokens, sessions, or the live config that the primary hot-reloads.
+It never receives the credentials-encryption key; credential leases are resolved by the primary and delivered in memory for one call.
+Like the Compose topology, file and shell work in the sidecar stays in worker-local scratch, is not shared with the primary's agent workspaces, and is lost when the pod restarts.
 
 > [!WARNING]
-> The Kubernetes `static_runner` sidecar is not a secrets or filesystem isolation boundary.
-> It can read the full shared storage mount, including persisted credential data, and tools running in the sidecar may access its environment.
-> Use dedicated Kubernetes workers when agent-scoped filesystem and credential isolation are required.
+> All agents share one sidecar, so tool calls from different agents can see each other's scratch files and the runner's own proxy token.
+> Use dedicated Kubernetes workers when persistent agent workspaces or per-agent filesystem isolation are required.
 
 ### Kubernetes dedicated workers (`workerBackend: kubernetes`)
 
@@ -577,7 +579,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   This explicit worker-pool policy applies even when Computer is disabled, regardless of which tools an agent selects.
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their prior launch settings and compatible identities.
-- With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
+- With `workerBackend: static_runner`, the Kubernetes sidecar uses only `emptyDir` scratch space and does not mount the primary storage PVC or receive the credentials-encryption key.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
