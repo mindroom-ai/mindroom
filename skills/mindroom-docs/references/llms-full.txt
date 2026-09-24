@@ -19627,18 +19627,6 @@ Agents can join existing rooms, create new rooms with AI-generated topics, respo
 
 Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_rooms_exist()` (public). DM rooms can be detected with `async is_dm_room(client, room_id) -> bool`.
 
-Any homeserver account can publish a managed alias such as `#lobby:<server>` before MindRoom does, so a resolved alias alone never makes a room managed.
-MindRoom keeps a resolved room only when the router created it and is joined with admin power; in room version 12 and later the creator outranks every power level.
-A room not yet verified for its key must also publish the alias as its canonical or alternative alias, which stops one key's alias from adopting another key's room.
-A room not yet recorded for its key must also have no user outside the room's configured `admins` holding admin power (100) or, from room version 12, being a co-creator.
-Later alias or admin drift in the recorded room is logged as `managed_room_policy_drift` instead, because the router still owns the room.
-A recorded room the router verified keeps its record through a transient state-read failure, and records written before this check are re-verified on their next readable pass.
-Every room reconciliation pass on startup or config reload also requires the room to be at least as protected as configured: encrypted when required, and no more open in join rule or directory listing than its policy.
-Failing to open a room further or to adjust its power levels only leaves it stricter, so that is logged without refusing the room.
-A refused room is removed from `matrix_state.yaml`, so its key stays unresolved: agents leave or never join it, no one is invited into it, and its members lose room-based access at once.
-The router stays in a refused room unless its state shows another account created it, so fixing the cause restores the room on the next pass without a re-invite.
-The router logs `managed_room_rejected` at error level and the dashboard's External Rooms page lists the refused alias with its reason.
-
 ## Threading (MSC3440)
 
 MindRoom emits thread replies following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md), using `m.relates_to` with `rel_type: m.thread`.
@@ -19833,8 +19821,6 @@ matrix_space:
 ```
 
 When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
-An existing Space must pass the same ownership check as managed rooms before MindRoom records it, links rooms into it, or invites anyone to it, and MindRoom never joins a Space it finds by alias.
-Other Space admins do not disqualify it, because the Space grants no room access and earlier releases made room invitees Space admins.
 The Space name is reconciled on each startup to match the configured value.
 Startup and config updates write child links without automatically granting human users root Space admin power.
 Concrete users from effective managed-room `invite_users` policies are invited to the root Space without receiving Space admin power.
@@ -20324,7 +20310,6 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`script_runs/legacy_recovery.py`][script-legacy-recovery] and [`workers/backends/kubernetes.py`][kubernetes-worker-backend] | [Script lifecycle tests][script-lifecycle-tests] cover exact legacy adoption and rejection after authority changes; [Kubernetes worker tests][kubernetes-worker-tests] cover byte-compatible unset RuntimeClass authority and rejection after configuration changes; [script-run tests][script-run-tests] verify atomic signature replacement. |
 | [`knowledge/legacy_metadata.py`][knowledge-legacy] | [Knowledge indexing tests][knowledge-indexing-tests] use independently written metadata from each field boundary and check preservation, nonmutation, repeated normalization, and corpus/query compatibility. |
 | [`matrix/legacy_state.py`][matrix-legacy-state] and [`matrix/users.py`][matrix-users] | [Matrix identity][matrix-identity-tests] and [agent manager][matrix-agent-tests] tests preserve durable account state, verify stable reloads, and exercise the missing-request fallback without network registration. |
-| [`matrix/state.py`][matrix-state] | [Managed-room ownership tests][managed-room-ownership-tests] load a literal pre-verification room record, forget it when its state is unreadable, and persist verification once its ownership is proven. |
 | [`config/legacy_access.py`][access-legacy] and [`config/legacy_fields.py`][config-legacy] | [Access migration tests][access-migration-tests] cover validated conversion, exact backup bytes, stable publication, and rejection paths; [configuration tests][agent-config-tests] cover every directed retired-field error. |
 | [`tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] | [Tool metadata tests][tool-metadata-tests] cover the directed `restrict_to_base_dir` rejection for the `file`, `coding`, and `python` tools. |
 | [`legacy_private_storage.py`][private-legacy] and [`legacy_private_storage_aliases.py`][private-legacy-aliases] | [Private-storage tests][private-storage-tests] cover verified owner relocation, content preservation, historical aliases, and tamper rejection. |
@@ -20432,7 +20417,6 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | M1 | Isolated | [`matrix/legacy_state.py`][matrix-legacy-state] backfills domains and asks the current state owner to rewrite noncanonical data. |
 | M2 | Tiny retained default | [`matrix/users.py`][matrix-users] falls back from missing `requested_username` to persisted actual username. |
 | M3 | Removed/superseded | [`thread_tags.py`][thread-tags] reads only one state event per thread-tag pair; the old thread-wide overlay is gone. |
-| M4 | Tiny retained default | [`matrix/state.py`][matrix-state] loads a managed room record without `router_verified` as unverified, so its next readable pass re-verifies it and unreadable state forgets it. |
 | T1 | Current behavior | [`tools/python.py`][python-tools] publishes both installer names over one implementation. |
 | T2 | Current behavior | [`tools/agentql.py`][agentql] adapts the currently installed AgentQL and browser-stealth combination. |
 | T3 | Current behavior | [`tools/brandfetch.py`][brandfetch] and [`custom_tools/coding.py`][coding-tools] retain public option and tool naming. |
@@ -20533,7 +20517,6 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [legacy-turn-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_turn_records.py
 [local-stack]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/cli/local_stack.py
 [matrix-legacy-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/legacy_state.py
-[matrix-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/state.py
 [matrix-users]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/users.py
 [mcp-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/mcp_gateway/legacy_schema.py
 [memory-config]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/memory/config.py
@@ -20593,7 +20576,6 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [knowledge-indexing-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_knowledge_indexing_config.py
 [legacy-revision-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_revision_replay.py
 [matrix-agent-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_agent_manager.py
-[managed-room-ownership-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_managed_room_ownership.py
 [matrix-identity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_identity.py
 [memory-flush-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_memory_auto_flush.py
 [oauth-store-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_oauth_credential_store.py

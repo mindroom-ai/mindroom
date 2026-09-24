@@ -467,18 +467,11 @@ class TestMatrixOperations:
                 "mindroom.matrix.rooms.is_dm_room",
                 side_effect=lambda _client, room_id: room_id == "!dm_room:localhost",
             ),
-            patch(
-                "mindroom.api.matrix_operations.rejected_managed_rooms",
-                return_value={"#lobby:localhost": "!squatted:localhost: created by @squatter:localhost"},
-            ),
         ):
             response = test_client.get("/api/matrix/agents/rooms")
 
             assert response.status_code == 200
             data = response.json()
-            assert data["rejected_managed_rooms"] == {
-                "#lobby:localhost": "!squatted:localhost: created by @squatter:localhost",
-            }
             assert "agents" in data
             assert len(data["agents"]) == 2
 

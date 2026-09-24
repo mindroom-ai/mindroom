@@ -19,8 +19,6 @@ class RoomStateSnapshot:
 
     room_id: str
     events: dict[tuple[str, str], dict[str, Any]]
-    # Sender of m.room.create; the homeserver stamps it, so room content cannot forge it.
-    creator: str | None = None
 
     def present_user_ids(self) -> set[str]:
         """Return joined or invited users, both of which already satisfy invitation."""
@@ -45,11 +43,9 @@ async def read_room_state(client: nio.AsyncClient, room_id: str) -> RoomStateSna
     if any(not isinstance(event.get("content"), dict) for event in response.events):
         logger.warning("room_reconciliation_state_content_invalid", room_id=room_id)
         return None
-    events = {(event["type"], event["state_key"]): event for event in response.events}
     return RoomStateSnapshot(
         room_id,
-        {key: dict(event["content"]) for key, event in events.items()},
-        creator=events.get(("m.room.create", ""), {}).get("sender"),
+        {(event["type"], event["state_key"]): dict(event["content"]) for event in response.events},
     )
 
 

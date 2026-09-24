@@ -60,7 +60,6 @@ from mindroom.matrix.rooms import (
     ensure_root_space,
     ensure_user_in_rooms,
     reconcile_managed_rooms,
-    refused_managed_room_ids,
 )
 from mindroom.matrix.stale_stream_cleanup import (
     recover_stale_streaming_messages,
@@ -2044,12 +2043,9 @@ class _MultiAgentOrchestrator:
             await self._setup_rooms_and_memberships(bots_to_setup)
         elif plan.matrix_space_changed or plan.room_metadata_changed:
             room_ids = await self._ensure_rooms_exist()
-            # Policy enforcement gates managed status, so it follows every room-existence pass.
-            await self._reconcile_managed_rooms(room_ids)
+            if plan.room_metadata_changed:
+                await self._reconcile_managed_rooms(room_ids)
             await self._ensure_root_space(room_ids)
-            # Forgetting a managed room revoked room grants, which only an authoritative refresh restores.
-            if self.agent_reply_memberships.needs_refresh(self._require_config()):
-                await self.refresh_agent_reply_memberships()
 
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
         """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
@@ -2230,12 +2226,8 @@ class _MultiAgentOrchestrator:
         self._resolve_bot_room_aliases(bots, config)
 
         async def _ensure_internal_user_memberships() -> None:
-            # Records for keys no longer configured are never re-verified, so the internal user skips them.
-            configured_rooms = config.get_all_configured_rooms()
             all_rooms = load_rooms(runtime_paths=self.runtime_paths)
-            all_room_ids = {
-                room_key: room.room_id for room_key, room in all_rooms.items() if room_key in configured_rooms
-            }
+            all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
             if all_room_ids and config.mindroom_user is not None:
                 await ensure_user_in_rooms(
                     constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
@@ -2248,8 +2240,6 @@ class _MultiAgentOrchestrator:
             if bot.agent_name == ROUTER_AGENT_NAME:
                 await bot.ensure_rooms()
         snapshots = await self._reconcile_managed_rooms(room_ids)
-        # Reconciliation forgets rooms whose policy it cannot enforce, so other bots must not join them.
-        self._resolve_bot_room_aliases(bots, config)
         await self._ensure_room_invitations(snapshots)
         await _ensure_internal_user_memberships()
 
@@ -2270,9 +2260,7 @@ class _MultiAgentOrchestrator:
         assert router_bot.client is not None
 
         config = self._require_config()
-        recorded_room_ids = self._recorded_room_ids()
         room_ids = await ensure_all_rooms_exist(router_bot.client, config, self.runtime_paths)
-        self._fence_forgotten_room_grants(recorded_room_ids)
         logger.info("ensured_room_existence", room_count=len(room_ids))
         return room_ids
 
@@ -2281,20 +2269,7 @@ class _MultiAgentOrchestrator:
         router = self._router_bot()
         if router is None or router.client is None:
             return {}
-        recorded_room_ids = self._recorded_room_ids()
-        snapshots = await reconcile_managed_rooms(router.client, self._require_config(), self.runtime_paths, room_ids)
-        self._fence_forgotten_room_grants(recorded_room_ids)
-        return snapshots
-
-    def _recorded_room_ids(self) -> dict[str, str]:
-        """Return the managed room each persisted room key currently names."""
-        return {room_key: room.room_id for room_key, room in load_rooms(runtime_paths=self.runtime_paths).items()}
-
-    def _fence_forgotten_room_grants(self, recorded_room_ids: dict[str, str]) -> None:
-        """Revoke room-backed grants until the pass's closing refresh when it forgot or replaced a managed room."""
-        current_room_ids = self._recorded_room_ids()
-        if any(current_room_ids.get(room_key) != room_id for room_key, room_id in recorded_room_ids.items()):
-            self.invalidate_agent_reply_memberships(reason="managed_room_forgotten")
+        return await reconcile_managed_rooms(router.client, self._require_config(), self.runtime_paths, room_ids)
 
     async def _ensure_root_space(self, room_ids: dict[str, str] | None = None) -> None:
         """Ensure the optional root Matrix Space exists and link the current managed rooms."""
@@ -2424,10 +2399,7 @@ class _MultiAgentOrchestrator:
             else None
         )
 
-        refused_room_ids = refused_managed_room_ids()
         for room_id in joined_rooms:
-            if room_id in refused_room_ids:
-                continue
             configured_bots = configured_bot_user_ids_for_room(config, room_id, self.runtime_paths)
             managed = bool(configured_bots) or is_configured_room(config, room_id, self.runtime_paths)
             if not managed and internal_user_id is None:

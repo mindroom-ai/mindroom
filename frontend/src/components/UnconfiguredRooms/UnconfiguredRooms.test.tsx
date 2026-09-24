@@ -88,26 +88,4 @@ describe("UnconfiguredRooms", () => {
       screen.getByText(/1 external room found across 1 entity/i),
     ).toBeInTheDocument();
   });
-
-  it("alerts about managed rooms the runtime refused", async () => {
-    (global.fetch as Mock).mockResolvedValueOnce(
-      jsonResponse({
-        agents: [],
-        rejected_managed_rooms: {
-          "#lobby:localhost":
-            "!squatted:localhost: created by @squatter:localhost, not @mindroom_router:localhost",
-        },
-      }),
-    );
-
-    render(<UnconfiguredRooms />);
-
-    expect(
-      await screen.findByText(/MindRoom refused these managed rooms/),
-    ).toBeInTheDocument();
-    expect(screen.getByText("#lobby:localhost")).toBeInTheDocument();
-    expect(
-      screen.getByText(/created by @squatter:localhost/),
-    ).toBeInTheDocument();
-  });
 });

@@ -34,13 +34,6 @@ class MatrixRoom(BaseModel):
     alias: str
     name: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    # LEGACY_COMPAT: Managed room records without a router-verified flag.
-    # Legacy format: Room records omit router_verified because the alias target was adopted without an ownership check.
-    # Last legacy release: v2026.9.270; replacement: the next release records router_verified: true after verifying ownership.
-    # Handling: A missing flag loads as unverified, so the next readable pass re-verifies the room and unreadable state forgets it.
-    # Coverage: tests/test_managed_room_ownership.py::test_unreadable_room_recorded_before_ownership_checks_is_forgotten,
-    # tests/test_managed_room_ownership.py::test_legacy_record_of_the_routers_room_becomes_verified.
-    router_verified: bool = False
 
     @field_serializer("created_at")
     def serialize_datetime(self, dt: datetime) -> str:
@@ -113,14 +106,8 @@ class MatrixState(BaseModel):
         return self.rooms.get(key)
 
     def add_room(self, key: str, room_id: str, alias: str, name: str) -> None:
-        """Record a managed room the router created or verified it controls."""
-        self.rooms[key] = MatrixRoom(
-            room_id=room_id,
-            alias=alias,
-            name=name,
-            created_at=datetime.now(tz=UTC),
-            router_verified=True,
-        )
+        """Add or update a room."""
+        self.rooms[key] = MatrixRoom(room_id=room_id, alias=alias, name=name, created_at=datetime.now(tz=UTC))
 
     def get_room_aliases(self) -> dict[str, str]:
         """Get mapping of room keys and full aliases to room IDs."""

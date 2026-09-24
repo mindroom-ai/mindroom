@@ -24,7 +24,7 @@ from mindroom.matrix.invited_rooms_store import (
     should_accept_invites,
     should_persist_invited_rooms,
 )
-from mindroom.matrix.rooms import leave_non_dm_rooms, router_retained_room_ids
+from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
@@ -395,7 +395,6 @@ class BotRoomLifecycle:
             root_space_id = matrix_state_for_runtime(self.deps.runtime_paths).space_room_id
             if root_space_id is not None:
                 configured_rooms.add(root_space_id)
-            configured_rooms.update(router_retained_room_ids())
 
         return list(current_rooms - configured_rooms)
 

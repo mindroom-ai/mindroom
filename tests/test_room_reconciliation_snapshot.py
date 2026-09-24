@@ -12,7 +12,6 @@ from mindroom.matrix import rooms as matrix_rooms
 from mindroom.topic_generator import ensure_room_has_topic
 from tests.access_schema_support import membership_config
 from tests.conftest import runtime_paths_for
-from tests.managed_room_helpers import router_owned_room_events
 
 
 @pytest.mark.asyncio
@@ -168,10 +167,9 @@ async def test_one_failed_room_does_not_cancel_healthy_reconciliation(tmp_path: 
         room_id,
     )
 
-    async def policy(_client: nio.AsyncClient, room_key: str, *_args: object, **_kwargs: object) -> bool:
+    async def policy(_client: nio.AsyncClient, room_key: str, *_args: object, **_kwargs: object) -> None:
         if room_key == "broken":
             raise error
-        return True
 
     with patch.object(matrix_rooms, "_reconcile_joined_existing_room", side_effect=policy):
         result = await matrix_rooms.reconcile_managed_rooms(
@@ -215,13 +213,11 @@ async def test_root_space_reuses_one_fresh_snapshot(tmp_path: Path, monkeypatch:
     config.matrix_space.enabled = True
     client = AsyncMock()
     client.homeserver = "https://example.com"
-    client.user_id = "@router:example.com"
     space_id = "!space:example.com"
     monkeypatch.setattr(matrix_rooms, "_ensure_root_space_exists", AsyncMock(return_value=space_id))
     monkeypatch.setattr(matrix_rooms, "_set_room_avatar_if_available", AsyncMock())
     client.room_get_state.return_value = nio.RoomGetStateResponse(
         [
-            *router_owned_room_events(client.user_id, "#_mindroom_root_space:example.com"),
             {"type": "m.room.name", "state_key": "", "content": {"name": config.matrix_space.name}},
             {
                 "type": "m.space.child",

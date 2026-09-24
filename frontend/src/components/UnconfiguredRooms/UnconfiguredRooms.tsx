@@ -34,7 +34,6 @@ interface RoomLeaveRequest {
 
 interface AgentRoomsResponse {
   agents: MatrixEntityRoomsInfo[];
-  rejected_managed_rooms?: Record<string, string>;
 }
 
 interface LeaveRoomsBulkResponse {
@@ -45,9 +44,6 @@ interface LeaveRoomsBulkResponse {
 export function UnconfiguredRooms() {
   const [entitiesRooms, setEntitiesRooms] = useState<MatrixEntityRoomsInfo[]>(
     [],
-  );
-  const [rejectedRooms, setRejectedRooms] = useState<Record<string, string>>(
-    {},
   );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -63,7 +59,6 @@ export function UnconfiguredRooms() {
         API_ENDPOINTS.matrix.agentsRooms,
       );
       setEntitiesRooms(response.agents);
-      setRejectedRooms(response.rejected_managed_rooms ?? {});
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to load external rooms",
@@ -216,25 +211,6 @@ export function UnconfiguredRooms() {
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
-
-      {Object.keys(rejectedRooms).length > 0 && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>
-            <p>
-              MindRoom refused these managed rooms, so agents do not route to,
-              authorize from, or invite into them:
-            </p>
-            <ul className="mt-2 space-y-1">
-              {Object.entries(rejectedRooms).map(([alias, reason]) => (
-                <li key={alias} className="break-all">
-                  <code className="font-mono">{alias}</code>: {reason}
-                </li>
-              ))}
-            </ul>
-          </AlertDescription>
         </Alert>
       )}
 

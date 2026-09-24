@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING
-from unittest.mock import ANY, AsyncMock
+from unittest.mock import ANY, AsyncMock, Mock
 
 import nio
 import pytest
@@ -300,11 +300,12 @@ async def test_aliases_of_same_room_do_not_reconcile_concurrently(
     config = membership_config(tmp_path, agent_rooms=["first", "second"])
     client = AsyncMock()
     client.homeserver = "https://example.com"
-    client.user_id = "@router:example.com"
+    client.rooms = {"!same:example.com": Mock()}
+    client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse("#alias:example.com", "!same:example.com", [])
     active = 0
     peak = 0
 
-    async def reconcile(*_args: object, **_kwargs: object) -> bool:
+    async def reconcile(*_args: object, **_kwargs: object) -> None:
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
@@ -312,20 +313,17 @@ async def test_aliases_of_same_room_do_not_reconcile_concurrently(
             await asyncio.sleep(0)
         finally:
             active -= 1
-        return True
 
+    monkeypatch.setattr(matrix_rooms, "_add_room", Mock())
     monkeypatch.setattr(matrix_rooms, "_reconcile_joined_existing_room", reconcile)
+    result = await matrix_rooms.ensure_all_rooms_exist(client, config, runtime_paths_for(config))
+    client.user_id = "@router:example.com"
     client.room_get_state.return_value = nio.RoomGetStateResponse(
         [
             {"type": "m.room.member", "state_key": client.user_id, "content": {"membership": "join"}},
         ],
         "!same:example.com",
     )
-    snapshots = await matrix_rooms.reconcile_managed_rooms(
-        client,
-        config,
-        runtime_paths_for(config),
-        {"first": "!same:example.com", "second": "!same:example.com"},
-    )
-    assert set(snapshots) == {"!same:example.com"}
+    await matrix_rooms.reconcile_managed_rooms(client, config, runtime_paths_for(config), result)
+    assert result == {"first": "!same:example.com", "second": "!same:example.com"}
     assert peak == 1

@@ -27,8 +27,6 @@ _ROOM_ADMIN_POWER_LEVEL = 100
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 _DEFAULT_USER_POWER_LEVEL = 0
 _POWER_USER_POWER_LEVEL = 50
-# Room v12 (MSC4289) gives creators unbounded power and keeps them out of power_levels.users.
-_FIRST_PRIVILEGED_CREATOR_ROOM_VERSION = 12
 
 _MANAGED_ROOM_EVENT_POWER_LEVELS = {
     THREAD_TAGS_EVENT_TYPE: 0,
@@ -304,84 +302,6 @@ def _room_power_level_for_user(power_levels_content: dict[str, Any], user_id: st
             return user_level
     users_default = power_levels_content.get("users_default")
     return users_default if isinstance(users_default, int) else _DEFAULT_USER_POWER_LEVEL
-
-
-def _creators_outrank_power_levels(snapshot: RoomStateSnapshot) -> bool:
-    """Return whether this room version gives creators power above every power level."""
-    room_version = snapshot.events.get(("m.room.create", ""), {}).get("room_version", "1")
-    return (
-        isinstance(room_version, str)
-        and room_version.isdigit()
-        and int(room_version) >= _FIRST_PRIVILEGED_CREATOR_ROOM_VERSION
-    )
-
-
-def room_ownership_problem(  # noqa: PLR0911 - each unowned Matrix state is a separate fail-closed exit
-    snapshot: RoomStateSnapshot,
-    owner_user_id: str,
-) -> str | None:
-    """Return why one account does not own and administer a room, or None when it does.
-
-    Only the server-stamped creator, the owner's membership, and integer power
-    levels granting it admin power prove ownership; room content cannot.
-    """
-    if snapshot.creator != owner_user_id:
-        return f"created by {snapshot.creator}, not {owner_user_id}"
-    if snapshot.events.get(("m.room.member", owner_user_id), {}).get("membership") != "join":
-        return f"{owner_user_id} is not joined"
-    power_levels = snapshot.events.get((_POWER_LEVELS_EVENT_TYPE, ""))
-    if power_levels is None:
-        return "power levels are missing"
-    users = power_levels.get("users", {})
-    levels = [
-        *(users.values() if isinstance(users, dict) else [users]),
-        *(power_levels[key] for key in ("users_default", "state_default") if key in power_levels),
-    ]
-    if any(type(level) is not int for level in levels):
-        return "power levels hold non-integer values"
-    if _creators_outrank_power_levels(snapshot):
-        return None
-    required_power = max(_ROOM_ADMIN_POWER_LEVEL, power_levels.get("state_default", _DEFAULT_STATE_EVENT_POWER_LEVEL))
-    owner_power = _room_power_level_for_user(power_levels, owner_user_id)
-    if owner_power < required_power:
-        return f"{owner_user_id} has power {owner_power}, below {required_power}"
-    return None
-
-
-def room_alias_problem(snapshot: RoomStateSnapshot, room_alias: str) -> str | None:
-    """Return why a room does not publish one alias as its canonical or alternative alias, or None when it does."""
-    canonical_alias = snapshot.events.get(("m.room.canonical_alias", ""), {})
-    alt_aliases = canonical_alias.get("alt_aliases")
-    if canonical_alias.get("alias") == room_alias or (isinstance(alt_aliases, list) and room_alias in alt_aliases):
-        return None
-    return f"the room does not publish {room_alias}"
-
-
-def room_admin_problem(
-    snapshot: RoomStateSnapshot,
-    owner_user_id: str,
-    admin_user_ids: Iterable[str],
-) -> str | None:
-    """Return which users outside the configured admins hold admin power in an owned room, or None.
-
-    From room v12 creators outrank power levels, so co-creators count as admins.
-    """
-    power_levels = snapshot.events[(_POWER_LEVELS_EVENT_TYPE, "")]
-    if power_levels.get("users_default", _DEFAULT_USER_POWER_LEVEL) >= _ROOM_ADMIN_POWER_LEVEL:
-        return "every user holds admin power"
-    admins = {
-        user_id
-        for user_id in power_levels.get("users", {})
-        if _room_power_level_for_user(power_levels, user_id) >= _ROOM_ADMIN_POWER_LEVEL
-    }
-    if _creators_outrank_power_levels(snapshot):
-        additional_creators = snapshot.events[("m.room.create", "")].get("additional_creators")
-        if isinstance(additional_creators, list):
-            admins.update(user_id for user_id in additional_creators if isinstance(user_id, str))
-    rivals = sorted(admins - {owner_user_id, *admin_user_ids})
-    if rivals:
-        return f"users outside the configured admins hold admin power: {', '.join(rivals)}"
-    return None
 
 
 async def room_admin_power_user(
@@ -846,8 +766,5 @@ __all__ = [
     "join_room",
     "leave_room",
     "room_admin_power_user",
-    "room_admin_problem",
-    "room_alias_problem",
     "room_encryption_enabled",
-    "room_ownership_problem",
 ]

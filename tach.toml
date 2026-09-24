@@ -5453,10 +5453,7 @@ expose = [
     "join_room",
     "leave_room",
     "room_admin_power_user",
-    "room_admin_problem",
-    "room_alias_problem",
     "room_encryption_enabled",
-    "room_ownership_problem",
 ]
 from = ["mindroom.matrix.client_room_admin"]
 
