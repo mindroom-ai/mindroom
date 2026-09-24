@@ -59,7 +59,8 @@ def resolve_agent_file(
             resolved = candidate.resolve(strict=True)
         # Python 3.12 raises RuntimeError for symlink loops; 3.13 raises OSError.
         except (OSError, RuntimeError) as exc:
-            msg = f"{field_name} '{raw_path}' does not exist or cannot be read: {exc.strerror or exc}"
+            detail = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
+            msg = f"{field_name} '{raw_path}' does not exist or cannot be read: {detail}"
             raise ValueError(msg) from exc
         root = Path(resolved.anchor)
         canonical_root = root
