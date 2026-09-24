@@ -152,7 +152,6 @@ def _instance_secret_hash(**overrides: str) -> str:
         "openrouter_key": "",
         "google_key": "",
         "deepseek_key": "",
-        "supabase_service_key": "",
         "sandbox_proxy_token": "",
         "credentials_encryption_key": "",
         "matrix_oidc_client_secret": "",
@@ -166,7 +165,6 @@ def _instance_secret_hash(**overrides: str) -> str:
         secret_data["openrouter_key"],
         secret_data["google_key"],
         secret_data["deepseek_key"],
-        secret_data["supabase_service_key"],
         secret_data["sandbox_proxy_token"],
         secret_data["credentials_encryption_key"],
         secret_data["matrix_oidc_client_secret"],
@@ -808,6 +806,21 @@ def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
     assert "registration_shared_secret_path: /etc/mindroom-secrets/matrix_registration_shared_secret" in synapse_config
     assert "registration_shared_secret:" not in synapse_config
     assert yaml.safe_load(synapse_config)["password_config"] == {"enabled": True}
+
+
+def test_instance_chart_never_gives_tenant_the_supabase_service_key() -> None:
+    """Tenant workloads are untrusted and must never hold the platform's RLS-bypassing key."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "supabaseServiceKey=must-not-render-service-key",
+    )
+    secret = _resource(docs, "Secret", "mindroom-api-keys-demo")
+    mindroom_env = _env_by_name(_container(_resource(docs, "Deployment", "mindroom-demo"), "mindroom"))
+
+    assert "must-not-render-service-key" not in json.dumps(docs)
+    assert not any("service_key" in key for key in secret["stringData"])
+    assert not any("SERVICE_KEY" in name for name in mindroom_env)
+    assert "SUPABASE_ANON_KEY" in mindroom_env
 
 
 def test_instance_chart_points_platform_login_at_platform_domain() -> None:

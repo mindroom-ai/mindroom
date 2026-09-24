@@ -160,8 +160,6 @@ spec:
           value: {{ .Values.matrixHomeserverStartupTimeoutSeconds | quote }}
         - name: SUPABASE_URL
           value: {{ .Values.supabaseUrl | quote }}
-        - name: SUPABASE_SERVICE_KEY_FILE
-          value: "/etc/secrets/supabase_service_key"
         - name: SUPABASE_ANON_KEY
           value: {{ .Values.supabaseAnonKey | quote }}
         {{- if $trustedUpstreamAuthEnabled }}
