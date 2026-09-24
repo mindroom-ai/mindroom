@@ -2923,6 +2923,7 @@ visibility = ["mindroom.memory.config"]
 [[modules]]
 path = "mindroom.memory._file_backend"
 depends_on = [
+    "mindroom.atomic_file",
     "mindroom.constants",
     "mindroom.embedding_errors",
     "mindroom.logging_config",
@@ -2930,6 +2931,7 @@ depends_on = [
     "mindroom.memory._shared",
     "mindroom.memory._semantic_file_search",
     "mindroom.memory_scope_ids",
+    "mindroom.path_confinement",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory._backend", "mindroom.memory.functions"]
