@@ -99,9 +99,10 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
   --set anthropic_key="your-key" \
   --set openrouter_key="your-key" \
   --set supabaseUrl="https://your-project.supabase.co" \
-  --set supabaseAnonKey="your-anon-key" \
-  --set supabaseServiceKey="your-service-key"
+  --set supabaseAnonKey="your-anon-key"
 ```
+
+Never give an instance the Supabase service-role key; the runtime authenticates with the anon key only.
 
 Only enable trusted upstream auth when the instance is behind a verified access layer that strips client-supplied copies of those headers and injects authenticated values itself:
 
@@ -326,6 +327,10 @@ Its `env` values shape is a map with `extra` and `envFrom`, not the list shown a
 For production SaaS instance provisioning, the instance chart is rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`.
 After Helm completes, the platform backend applies `mindroom-api-keys-{instance_id}` directly with Kubernetes so legacy chart-managed Secret pruning cannot remove it.
 Tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
+Tenant workloads are untrusted, so the instance Secret holds only instance-scoped credentials and never the platform's Supabase service-role key.
+The sandbox proxy token is random per instance.
+The Synapse OIDC client secret is derived per instance from `matrixOidc.clientSecret`, which stays in the control plane; the issuer accepts it only for authorization codes issued to that instance.
+Each provision removes Secret keys the provisioner no longer writes, because `kubectl apply` keeps keys dropped from `stringData`.
 
 ## Ingress
 

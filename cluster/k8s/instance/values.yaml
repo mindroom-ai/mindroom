@@ -88,10 +88,9 @@ credentials_encryption_key: ""
 # With instanceSecrets.create=false, populate matrix_registration_shared_secret in the existing instance Secret instead.
 matrixRegistrationSharedSecret: ""
 
-# Supabase (shared auth)
+# Supabase (shared auth). Tenant workloads get only the public anon key, never the service-role key.
 supabaseUrl: ""
 supabaseAnonKey: ""
-supabaseServiceKey: ""
 
 trustedUpstreamAuth:
   enabled: "false"

@@ -117,7 +117,6 @@ GOOGLE_API_KEY = _get_secret("GOOGLE_API_KEY", "")
 OPENROUTER_API_KEY = _get_secret("OPENROUTER_API_KEY", "")
 OPENROUTER_PROVISIONING_API_KEY = _get_secret("OPENROUTER_PROVISIONING_API_KEY", "")
 DEEPSEEK_API_KEY = _get_secret("DEEPSEEK_API_KEY", "")
-SANDBOX_PROXY_TOKEN = _get_secret("SANDBOX_PROXY_TOKEN", "")
 
 
 def _build_allowed_origins(domain: str, environment: str) -> list[str]:

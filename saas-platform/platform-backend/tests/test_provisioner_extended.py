@@ -180,7 +180,8 @@ class TestProvisionerExtended:
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "789"}])
 
         # Make namespace creation fail (non-FileNotFoundError)
-        mock_kubectl.side_effect = [Exception("Namespace already exists"), (0, "OK", "")]
+        # Then: Secret apply, and the Secret key listing with nothing stale to remove.
+        mock_kubectl.side_effect = [Exception("Namespace already exists"), (0, "OK", ""), (0, "", "")]
 
         with patch("backend.services.provisioner_service.run_helm") as mock_helm:
             mock_helm.return_value = (0, "Deployed", "")

@@ -153,11 +153,17 @@ class TestProvisionerCommandValidation:
             other = provisioner_module._instance_credentials_encryption_key("456")
             registration_secret = provisioner_module._instance_matrix_registration_shared_secret("123")
 
+        oidc_secret = provisioner_module.instance_matrix_oidc_client_secret("oidc-root", "123")
+
         assert first == second
         assert first != other
         assert first != registration_secret
         assert len(base64.urlsafe_b64decode(f"{first}=")) == 32
         assert len(base64.urlsafe_b64decode(f"{registration_secret}=")) == 32
+        assert oidc_secret == provisioner_module.instance_matrix_oidc_client_secret("oidc-root", 123)
+        assert oidc_secret != provisioner_module.instance_matrix_oidc_client_secret("oidc-root", "456")
+        assert oidc_secret != provisioner_module.instance_matrix_oidc_client_secret("other-root", "123")
+        assert len(base64.urlsafe_b64decode(f"{oidc_secret}=")) == 32
 
     @pytest.mark.asyncio
     async def test_instance_secret_apply_uses_private_manifest_file(self):
@@ -165,10 +171,12 @@ class TestProvisionerCommandValidation:
         captured = {}
 
         async def capture_kubectl_command(args, namespace=None):
-            path = Path(args[2])
-            captured["mode"] = path.stat().st_mode & 0o777
-            captured["manifest"] = json.loads(path.read_text(encoding="utf-8"))
-            return (0, "Success", "")
+            if args[:2] == ["apply", "-f"]:
+                path = Path(args[2])
+                captured["mode"] = path.stat().st_mode & 0o777
+                captured["manifest"] = json.loads(path.read_text(encoding="utf-8"))
+                return (0, "Success", "")
+            return (0, "credentials_encryption_key ", "")
 
         with patch.object(provisioner_service, "run_kubectl", side_effect=capture_kubectl_command):
             await provisioner_service._apply_instance_secret(
@@ -178,6 +186,46 @@ class TestProvisionerCommandValidation:
         assert captured["mode"] == 0o600
         assert captured["manifest"]["metadata"]["name"] == "mindroom-api-keys-123"
         assert captured["manifest"]["stringData"]["credentials_encryption_key"] == "secret-key-value"
+
+    @pytest.mark.asyncio
+    async def test_instance_secret_apply_removes_keys_no_longer_written(self):
+        """Re-applying must delete retired keys such as the old platform service key from tenant Secrets."""
+        calls = []
+
+        async def capture_kubectl_command(args, namespace=None):
+            calls.append((args, namespace))
+            if args[:2] == ["get", "secret"]:
+                return (0, "credentials_encryption_key supabase_service_key ", "")
+            return (0, "Success", "")
+
+        with patch.object(provisioner_service, "run_kubectl", side_effect=capture_kubectl_command):
+            await provisioner_service._apply_instance_secret(
+                "123", "mindroom-instances", {"credentials_encryption_key": "secret-key-value"}
+            )
+
+        patch_args, patch_namespace = calls[-1]
+        assert patch_args[:4] == ["patch", "secret", "mindroom-api-keys-123", "--type=merge"]
+        assert json.loads(patch_args[5]) == {"data": {"supabase_service_key": None}}
+        assert patch_namespace == "mindroom-instances"
+        assert "secret-key-value" not in " ".join(arg for args, _ in calls for arg in args)
+
+    @pytest.mark.asyncio
+    async def test_instance_secret_apply_skips_patch_without_stale_keys(self):
+        """An up-to-date Secret needs no follow-up patch."""
+        calls = []
+
+        async def capture_kubectl_command(args, namespace=None):
+            calls.append(args)
+            if args[:2] == ["get", "secret"]:
+                return (0, "credentials_encryption_key ", "")
+            return (0, "Success", "")
+
+        with patch.object(provisioner_service, "run_kubectl", side_effect=capture_kubectl_command):
+            await provisioner_service._apply_instance_secret(
+                "123", "mindroom-instances", {"credentials_encryption_key": "secret-key-value"}
+            )
+
+        assert [args[0] for args in calls] == ["apply", "get"]
 
     @pytest.mark.asyncio
     async def test_helm_install_command_honors_instance_overrides(self):
@@ -284,7 +332,11 @@ class TestProvisionerCommandValidation:
         assert "instanceSecrets.hash" in set_string_args
         assert "matrix-client-secret" not in " ".join(helm_args)
         assert set_file_args == {}
-        assert captured_secret_manifests[0]["stringData"]["matrix_oidc_client_secret"] == "matrix-client-secret"
+        # The platform root secret stays in the control plane; the tenant only gets its derived secret.
+        assert captured_secret_manifests[0]["stringData"]["matrix_oidc_client_secret"] == (
+            provisioner_service.instance_matrix_oidc_client_secret("matrix-client-secret", "123")
+        )
+        assert "matrix-client-secret" not in json.dumps(captured_secret_manifests)
         assert captured_secret_manifests[0]["stringData"]["matrix_registration_shared_secret"]
 
     @pytest.mark.asyncio

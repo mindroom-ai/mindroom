@@ -14,7 +14,7 @@ import json
 import os
 import secrets
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any
@@ -52,9 +52,7 @@ from backend.config import (
     OPENROUTER_PROVISIONING_API_KEY,
     PLATFORM_DOMAIN,
     PROVISIONER_API_KEY,
-    SANDBOX_PROXY_TOKEN,
     SUPABASE_ANON_KEY,
-    SUPABASE_SERVICE_KEY,
     SUPABASE_URL,
     logger,
 )
@@ -188,10 +186,24 @@ def _stable_instance_secret(purpose: str, instance_id: str) -> str:
     if not root_secret:
         msg = "INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY must be configured"
         raise HTTPException(status_code=500, detail=msg)
+    return _derive_instance_secret(root_secret, purpose, instance_id)
+
+
+def _derive_instance_secret(root_secret: str, purpose: str, instance_id: Any) -> str:
+    """Derive one per-instance secret from a root secret that never leaves the control plane."""
     digest = hmac.digest(
         root_secret.encode("utf-8"), f"mindroom.{purpose}.v1:{instance_id}".encode("utf-8"), hashlib.sha256
     )
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def instance_matrix_oidc_client_secret(root_secret: str, instance_id: Any) -> str:
+    """Return the Synapse OIDC client secret for one instance.
+
+    The platform issuer derives the same value when authenticating that instance's token
+    requests, so a tenant that reads its own Secret cannot redeem another tenant's codes.
+    """
+    return _derive_instance_secret(root_secret, "matrix-oidc-client", instance_id)
 
 
 def _matrix_localpart_from_email(email: str) -> str:
@@ -296,7 +308,33 @@ async def _apply_instance_secret(instance_id: str, namespace: str, secret_data: 
     if code != 0:
         msg = f"Failed to apply instance Secret {secret_name}: {err or out}"
         raise RuntimeError(msg)
+    await _remove_stale_instance_secret_keys(secret_name, namespace, secret_data.keys())
     return _instance_secret_hash(secret_data)
+
+
+async def _remove_stale_instance_secret_keys(secret_name: str, namespace: str, current_keys: Iterable[str]) -> None:
+    """Delete Secret keys the provisioner no longer writes.
+
+    `kubectl apply` leaves keys dropped from `stringData` in the live Secret, so a retired
+    credential would otherwise stay mounted in tenant pods.
+    """
+    code, out, err = await run_kubectl(
+        ["get", "secret", secret_name, "-o=go-template={{range $key, $value := .data}}{{$key}} {{end}}"],
+        namespace=namespace,
+    )
+    if code != 0:
+        msg = f"Failed to inspect instance Secret {secret_name}: {err or out}"
+        raise RuntimeError(msg)
+    stale_keys = sorted(set(out.split()) - set(current_keys))
+    if not stale_keys:
+        return
+    patch = json.dumps({"data": dict.fromkeys(stale_keys)})
+    code, out, err = await run_kubectl(
+        ["patch", "secret", secret_name, "--type=merge", "-p", patch], namespace=namespace
+    )
+    if code != 0:
+        msg = f"Failed to remove stale keys from instance Secret {secret_name}: {err or out}"
+        raise RuntimeError(msg)
 
 
 async def _existing_instance_secret_value(instance_id: str, namespace: str, key: str) -> str | None:
@@ -568,7 +606,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         logger.warning("Failed to update URLs for instance %s", customer_id)
 
     # Keep this non-empty so shell/file/python proxying doesn't fail at runtime.
-    sandbox_proxy_token = SANDBOX_PROXY_TOKEN or secrets.token_hex(32)
+    # Always per instance: a shared token would let one tenant authenticate to every tenant's runner.
+    sandbox_proxy_token = secrets.token_hex(32)
     # Existing instances may have plaintext credential files; preserve their current encryption state.
     credentials_encryption_key = await _provision_credentials_encryption_key(
         customer_id=customer_id, existing_instance_id=existing_instance_id, data=data, namespace=namespace
@@ -588,16 +627,20 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             namespace=namespace,
         )
         # User BYOK credentials live in tenant storage; hosted budgets use only a scoped OpenRouter key.
+        # Tenant workloads are untrusted, so every value here must be scoped to this instance.
         instance_secret_data = {
             "openai_key": "",
             "anthropic_key": "",
             "openrouter_key": openrouter_key,
             "google_key": "",
             "deepseek_key": "",
-            "supabase_service_key": SUPABASE_SERVICE_KEY or "",
             "sandbox_proxy_token": sandbox_proxy_token,
             "credentials_encryption_key": credentials_encryption_key,
-            "matrix_oidc_client_secret": INSTANCE_MATRIX_OIDC_CLIENT_SECRET or "",
+            "matrix_oidc_client_secret": (
+                instance_matrix_oidc_client_secret(INSTANCE_MATRIX_OIDC_CLIENT_SECRET, customer_id)
+                if INSTANCE_MATRIX_OIDC_CLIENT_SECRET
+                else ""
+            ),
             "matrix_registration_shared_secret": _instance_matrix_registration_shared_secret(customer_id),
         }
         instance_secret_hash = _instance_secret_hash(instance_secret_data)

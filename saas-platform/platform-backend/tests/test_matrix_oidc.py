@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import jwt
+from backend.services.provisioner_service import instance_matrix_oidc_client_secret
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
@@ -72,8 +73,7 @@ def test_matrix_oidc_authorize_redirects_anonymous_users_to_platform_login(monke
     )
 
 
-def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -> None:
-    matrix_oidc = _patch_oidc(monkeypatch)
+def _issue_code(monkeypatch, matrix_oidc) -> tuple[TestClient, str]:
     verify_user = AsyncMock(
         return_value={
             "user_id": "user-123",
@@ -124,19 +124,28 @@ def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -
     assert redirect.netloc == "1.matrix.mindroom.chat"
     query = parse_qs(redirect.query)
     assert query["state"] == ["state-123"]
-    code = query["code"][0]
+    return client, query["code"][0]
 
-    token_response = client.post(
+
+def _exchange_code(client: TestClient, code: str, client_secret: str):
+    return client.post(
         "/matrix-oidc/token",
         data={
             "grant_type": "authorization_code",
             "code": code,
             "redirect_uri": "https://1.matrix.mindroom.chat/_synapse/client/oidc/callback",
             "client_id": "mindroom-synapse",
-            "client_secret": "client-secret",
+            "client_secret": client_secret,
         },
         headers={"host": "api.mindroom.chat"},
     )
+
+
+def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -> None:
+    matrix_oidc = _patch_oidc(monkeypatch)
+    client, code = _issue_code(monkeypatch, matrix_oidc)
+
+    token_response = _exchange_code(client, code, instance_matrix_oidc_client_secret("client-secret", "1"))
 
     assert token_response.status_code == 200
     tokens = token_response.json()
@@ -154,3 +163,27 @@ def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -
     )
     assert userinfo_response.status_code == 200
     assert userinfo_response.json()["email"] == "alice@example.com"
+
+
+def test_matrix_oidc_token_rejects_other_tenant_client_secrets(monkeypatch) -> None:
+    """A secret read from one tenant's Secret must not redeem codes issued to another tenant."""
+    matrix_oidc = _patch_oidc(monkeypatch)
+    client, code = _issue_code(monkeypatch, matrix_oidc)
+
+    other_tenant = _exchange_code(client, code, instance_matrix_oidc_client_secret("client-secret", "2"))
+    platform_root = _exchange_code(client, code, "client-secret")
+    owning_tenant = _exchange_code(client, code, instance_matrix_oidc_client_secret("client-secret", "1"))
+
+    assert other_tenant.status_code == 401
+    assert platform_root.status_code == 401
+    # Rejected attempts must not consume the code.
+    assert owning_tenant.status_code == 200
+
+
+def test_matrix_oidc_token_rejects_malformed_code(monkeypatch) -> None:
+    _patch_oidc(monkeypatch)
+    client = TestClient(app)
+
+    response = _exchange_code(client, "not-a-jwt", instance_matrix_oidc_client_secret("client-secret", "1"))
+
+    assert response.status_code == 400
