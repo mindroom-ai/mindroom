@@ -1605,6 +1605,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.attachment_helpers"
+depends_on = [
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.state",
+    "mindroom.requester_identity",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.attachments"
 depends_on = [
     "mindroom.media_delivery",
@@ -1685,6 +1693,7 @@ visibility = [
 [[modules]]
 path = "mindroom.custom_tools.matrix_room"
 depends_on = [
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.matrix.room_history_reads",
     "mindroom.custom_tools.matrix_helpers",
@@ -1695,6 +1704,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.thread_resolution"
 depends_on = [
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.matrix.thread_room_scan",
     "mindroom.thread_tags",
     "mindroom.tool_system.runtime_context",
@@ -1703,6 +1713,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.thread_tags"
 depends_on = [
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.matrix.room_history_reads",
     "mindroom.matrix.thread_room_scan",
     "mindroom.thread_tag_vocabulary",
@@ -2833,6 +2844,7 @@ visibility = [
     "mindroom.matrix.personal_rooms",
     "mindroom.api.matrix_operations",
     "mindroom.bot",
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.personal_room_lifecycle",
     "mindroom.bot_room_lifecycle",
     "mindroom.commands.encryption_commands",
@@ -6421,6 +6433,7 @@ path = "mindroom.custom_tools.matrix_message_idempotency"
 depends_on = [
     "mindroom.authorization",
     "mindroom.background_tasks",
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.durable_write",
     "mindroom.file_locks",
     "mindroom.matrix.client_delivery",

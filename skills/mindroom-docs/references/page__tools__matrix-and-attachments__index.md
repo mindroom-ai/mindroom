@@ -87,7 +87,7 @@ Pass each returned `name` as `recipient` in [matrix_message](https://docs.mindro
 `state` returns one exact state event when `event_type` is supplied, using an empty `state_key` by default.
 Without `event_type`, `state` returns a room-state summary with at most 100 non-member event previews and elides `m.room.member` events.
 `room_id` defaults to the active Matrix room.
-An alternate room is allowed only when the requester is authorized there under the configured room-access policy.
+An alternate room is allowed only when the requester has access to the agent under the configured room-access policy and is currently joined to that room.
 The tool requires an active Matrix `ToolRuntimeContext` and rate-limits each `(agent_name, requester_id, room_id)` combination to 20 actions per 30 seconds.
 
 ### Configuration
@@ -374,7 +374,7 @@ reset_thread_model()
 ### What It Does
 
 `matrix_api` supports `send_event`, `get_state`, `put_state`, `redact`, `get_event`, and `search`.
-It defaults `room_id` to the active room, but it also supports authorized cross-room access when the requester is allowed to act there.
+It defaults `room_id` to the active room, but it also supports cross-room access when the requester has access to the agent and is currently joined to that other room.
 It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations.
 `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs.
 Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.

@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.authorization import is_sender_allowed_for_responder
+from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.state import resolve_room_id
+from mindroom.requester_identity import equivalent_requester_ids
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -29,7 +31,23 @@ def normalize_str_list(values: list[str] | None, *, field_name: str) -> tuple[li
     return normalized, None
 
 
-def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
+async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str) -> bool:
+    """Return whether the requester currently belongs to one requested room.
+
+    Responder access answers whether a requester may converse with this agent,
+    never whether they belong to one specific room, so any room other than the
+    conversation room additionally requires proven current membership. A
+    membership fetch that fails counts as not joined.
+    """
+    if room_id == context.room_id:
+        return True
+    member_ids = await get_room_members(context.client, room_id)
+    return member_ids is not None and not member_ids.isdisjoint(
+        equivalent_requester_ids(context.requester_id, context.current_config, context.runtime_paths),
+    )
+
+
+async def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
     """Return whether the requester may act in the given room."""
     if not isinstance(room_id, str) or not room_id:
         return False
@@ -42,7 +60,7 @@ def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
         context.current_config,
         context.runtime_paths,
         context.require_agent_reply_memberships(),
-    )
+    ) and await requester_joined_target_room(context, room_id)
 
 
 def resolve_requested_room_id(
