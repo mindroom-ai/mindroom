@@ -437,15 +437,43 @@ def write_startup_manifest(
     """Write one sandbox-runner startup manifest and return its path."""
     manifest_path = sandbox_startup_manifest_path(storage_root)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
+    _write_manifest_without_following_symlinks(
+        manifest_path,
         _startup_manifest_json(
             runtime_paths,
             tool_validation_snapshot=tool_validation_snapshot,
             public_runtime=public_runtime,
         ),
-        encoding="utf-8",
     )
     return manifest_path
+
+
+def _write_manifest_without_following_symlinks(manifest_path: Path, payload: str) -> None:
+    """Write the manifest without following symlinks planted in the worker's own root.
+
+    The manifest directory sits inside the runtime root a dedicated worker mounts
+    read-write, so a symlink left there would otherwise redirect this write onto
+    any file the primary can reach.
+    """
+    try:
+        directory_fd = os.open(manifest_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        msg = f"Sandbox startup manifest directory must be a real directory: {manifest_path.parent}"
+        raise OSError(msg) from exc
+    try:
+        descriptor = os.open(
+            manifest_path.name,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+            0o666,
+            dir_fd=directory_fd,
+        )
+    except OSError as exc:
+        msg = f"Sandbox startup manifest must be a real file: {manifest_path}"
+        raise OSError(msg) from exc
+    finally:
+        os.close(directory_fd)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as manifest_file:
+        manifest_file.write(payload)
 
 
 def _is_json_object(value: object) -> TypeGuard[dict[str, object]]:

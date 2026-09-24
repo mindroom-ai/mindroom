@@ -145,6 +145,11 @@ class _BoundWorkerStateRoot:
     absent_root: Path | None = None
     absent_name: str | None = None
 
+    @property
+    def exists(self) -> bool:
+        """Return whether the validated worker tree is present."""
+        return self.worker_fd is not None
+
     def remove(self) -> None:
         """Remove the validated worker tree or confirm that it is still absent."""
         if self.worker_fd is None:
