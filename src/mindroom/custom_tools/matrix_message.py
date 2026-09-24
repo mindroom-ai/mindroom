@@ -31,6 +31,7 @@ from mindroom.requester_identity import is_human_requester_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
+    from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.matrix.message_extras import MessageExtraSection
 
@@ -67,9 +68,15 @@ class MatrixMessageTools(Toolkit):
     _MAX_READ_LIMIT: ClassVar[int] = 50
     _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset({"send", "read", "edit", "react"})
 
-    def __init__(self, *, tool_output_workspace_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        tool_output_workspace_root: Path | None = None,
+        file_access: FileAccess = "workspace",
+    ) -> None:
         self._operations = matrix_conversation_operations.MatrixMessageOperations(
             tool_output_workspace_root=tool_output_workspace_root,
+            file_access=file_access,
         )
         super().__init__(name="matrix_message", tools=[self.matrix_message])
 
@@ -110,7 +117,7 @@ class MatrixMessageTools(Toolkit):
 
         Set recipient to an agent/team name from matrix_room(action="agents") to request a response, including from yourself for a human requester. Only that recipient is dispatched; without recipient, names in the body do not start agents. Room-mode recipients use the room timeline and cannot accept new_thread or an explicit thread. Sending returns immediately; run_subagent waits for an answer.
 
-        Send text, attachments, or both. attachments is an ordered list of att_* IDs or local file paths (max 5); relative paths use the workspace. Use ./ for a filename starting with att_. Files arrive before recipient dispatch.
+        Send text, attachments, or both. attachments is an ordered list of att_* IDs or file paths inside the agent workspace (max 5). Use ./ for a filename starting with att_. Files arrive before recipient dispatch.
 
         edit/react require event_id; react uses message as emoji (default 👍). message_extras adds optional collapsible sections to send/edit. Interactive prompts require normal response delivery. Use matrix_room for room details and thread discovery.
 
@@ -122,7 +129,7 @@ class MatrixMessageTools(Toolkit):
             thread_id: Thread root ID; current conversation by default, "room" for room timeline.
             new_thread: Start a separate thread; send only, cannot combine with thread_id.
             event_id: Message event ID to edit or react to.
-            attachments: Ordered att_* IDs or file paths; send only, maximum 5.
+            attachments: Ordered att_* IDs or workspace file paths; send only, maximum 5.
             message_extras: Collapsible sections with title/content; optional content_type and collapsed.
             limit: Messages to read, 1-50; default 20.
             idempotency_key: Nonblank key (max 256 characters) for durable text-only send retries.
@@ -183,7 +190,7 @@ class MatrixMessageTools(Toolkit):
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", message=room_error)
-        if not room_access_allowed(context, resolved_room_id):
+        if not await room_access_allowed(context, resolved_room_id):
             return self._payload("error", room_id=resolved_room_id, message="Not authorized to access the target room.")
         dispatch = partial(
             self._dispatch_action,

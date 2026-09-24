@@ -37,6 +37,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
+    worker_root_path,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
@@ -2741,7 +2742,12 @@ router:
     volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
     mount_paths = {mount["mountPath"] for mount in volume_mounts}
     expected_worker_root = f"/app/worker/workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
-    assert mount_paths == {"/app/worker/agents/code", expected_worker_root, "/app/config.yaml"}
+    assert mount_paths == {
+        "/app/worker/agents/code",
+        expected_worker_root,
+        f"{expected_worker_root}/.shared_credentials",
+        "/app/config.yaml",
+    }
 
 
 def test_kubernetes_backend_user_worker_mounts_knowledge_for_all_addressed_agents(tmp_path: Path) -> None:
@@ -2883,6 +2889,51 @@ def test_kubernetes_backend_uses_custom_worker_prefix_for_storage_path() -> None
     expected_worker_root = f"/app/worker/sandbox-workers/{worker_dir_name(worker_key)}"
 
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_worker_root
+
+
+def test_kubernetes_backend_mounts_shared_credential_mirror_read_only() -> None:
+    """Worker code must not be able to delete or relink the primary's credential mirror."""
+    backend, apps_api, _core_api = _backend()
+    worker_key = "v1:tenant-123:shared:code"
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    mounts_by_path = {mount["mountPath"]: mount for mount in volume_mounts}
+    expected_worker_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
+
+    assert mounts_by_path[expected_worker_root].get("readOnly") is None
+    assert mounts_by_path[f"{expected_worker_root}/.shared_credentials"] == {
+        "name": mounts_by_path[expected_worker_root]["name"],
+        "mountPath": f"{expected_worker_root}/.shared_credentials",
+        "subPath": f"workers/{worker_dir_name(worker_key)}/.shared_credentials",
+        "readOnly": True,
+    }
+
+
+def test_kubernetes_backend_prepares_mirror_before_applying_deployment(tmp_path: Path) -> None:
+    """Kubelet must find a primary-owned mirror directory, never a planted link, when it mounts the pod."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "storage",
+    )
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    mirror = worker_root_path(runtime_paths.storage_root, _TEST_SCOPED_WORKER_KEY_A) / ".shared_credentials"
+    mirror.parent.mkdir(parents=True)
+    mirror.symlink_to(runtime_paths.storage_root / "credentials", target_is_directory=True)
+    apply_deployment = backend._resources.apply_deployment
+    mirror_states: list[tuple[bool, bool]] = []
+
+    def record_mirror_then_apply(**kwargs: object) -> object:
+        mirror_states.append((mirror.is_symlink(), mirror.is_dir()))
+        return apply_deployment(**kwargs)
+
+    backend._resources.apply_deployment = record_mirror_then_apply
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert mirror_states == [(False, True)]
 
 
 def test_kubernetes_backend_user_scope_mounts_only_user_scope_agent_roots(tmp_path: Path) -> None:

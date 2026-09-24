@@ -41,6 +41,15 @@ class IncompleteResponsesStreamError(ModelProviderError):
     """A Responses stream cannot safely reuse accumulated output in a retry."""
 
 
+class MinimalModeUnavailableError(RuntimeError):
+    """Minimal mode cannot serve a turn; the message already names its recovery command."""
+
+
+def minimal_mode_failure_message(reason: str, agent_name: str) -> str:
+    """Include the command that recovers a conversation from unavailable minimal mode."""
+    return f"{reason.rstrip('.')}. Return to standard mode with `!mode {agent_name} standard`."
+
+
 def run_error_event_text(event: RunErrorEvent | TeamRunErrorEvent, *, entity_label: str = "Agent") -> str:
     """Return credential-redacted error text for an Agno streaming error event."""
     if event.content:
@@ -59,6 +68,15 @@ def run_error_event_text(event: RunErrorEvent | TeamRunErrorEvent, *, entity_lab
         return redact_sensitive_text(f"{entity_label} run failed ({', '.join(details)})")
 
     return f"{entity_label} run failed without provider error details"
+
+
+def run_error_event_exception(event: RunErrorEvent | TeamRunErrorEvent) -> Exception:
+    """Restore the failure class Agno flattened into a streaming error event."""
+    text = run_error_event_text(event)
+    # Agno reports an untyped exception's class name as its stable error_type.
+    if event.error_type == MinimalModeUnavailableError.__name__:
+        return MinimalModeUnavailableError(text)
+    return Exception(text)
 
 
 def _run_error_additional_message(data: object) -> str | None:
@@ -140,7 +158,7 @@ def _is_transient_provider_error(error: Exception) -> bool:
     )
 
 
-def get_user_friendly_error_message(error: Exception, agent_name: str | None = None) -> str:
+def get_user_friendly_error_message(error: Exception, agent_name: str | None = None) -> str:  # noqa: PLR0911
     """Return a user-friendly error message.
 
     Args:
@@ -163,6 +181,9 @@ def get_user_friendly_error_message(error: Exception, agent_name: str | None = N
         error=repr(error),
     )
 
+    if isinstance(error, MinimalModeUnavailableError):
+        # Keyword classification would mask the standard-mode recovery command.
+        return f"{agent_prefix}⚠️ Error: {safe_error}"
     if is_model_safeguard_refusal(error):
         return (
             f"{agent_prefix}⚠️ This model's safeguards blocked the request. "

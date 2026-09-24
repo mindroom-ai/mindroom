@@ -42,6 +42,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.session_ids import create_session_id
+from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -1772,6 +1773,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Tool Hooks Runtime Event Tool",
         description="Test tool for runtime hook event delivery.",
         category=ToolCategory.DEVELOPMENT,
@@ -2097,6 +2099,7 @@ async def test_create_agent_prepends_bridge_to_real_tool_functions(tmp_path: Pat
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Tool Hooks Test Tool",
         description="Test tool for tool hook interception.",
         category=ToolCategory.DEVELOPMENT,

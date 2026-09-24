@@ -18,7 +18,7 @@ from mindroom import agents, constants
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.connection_agents import resolve_connection_agent, resolve_connection_user
 from mindroom.config.main import Config
-from mindroom.config.models import ToolConfigEntry
+from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, hook
@@ -47,7 +47,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.api.connection_agents import AgentToolContext
-    from mindroom.config.models import EffectiveToolConfig
     from mindroom.mcp_gateway.types import InvocationResult
 
 
@@ -255,6 +254,106 @@ async def test_selected_schema_builds_only_selected_toolkit(
 
 
 @pytest.mark.asyncio
+async def test_selected_schema_prepares_only_selected_function(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Schema preparation does not inspect another function in the selected toolkit."""
+
+    def selected(value: str) -> str:
+        return value
+
+    def unrelated(secret: int) -> int:
+        return secret
+
+    toolkit = Toolkit(name="calculator")
+    toolkit.functions = {
+        "selected": Function(name="selected", entrypoint=selected),
+        "unrelated": Function(name="unrelated", entrypoint=unrelated),
+    }
+    prepared: list[str] = []
+    original = Function.process_entrypoint
+
+    def track_preparation(function: Function, strict: bool = False) -> None:
+        prepared.append(function.name)
+        original(function, strict=strict)
+
+    monkeypatch.setattr(Function, "process_entrypoint", track_preparation)
+    _replace_calculator(monkeypatch, toolkit)
+
+    result = await gateway.get_tool(context, toolkit="calculator", function="selected")
+
+    assert "error" not in result
+    assert result["inputSchema"]["properties"] == {"value": {"type": "string"}}
+    assert prepared == ["selected"]
+
+
+@pytest.mark.asyncio
+async def test_same_named_function_uses_selected_toolkit_schema_and_entrypoint(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A namespaced selector describes and invokes only the selected toolkit function."""
+    calls: list[str] = []
+
+    def list_calendar(date: str) -> str:
+        calls.append("calendar")
+        return date
+
+    def list_files(path: str) -> str:
+        calls.append("files")
+        return path
+
+    calendar = Toolkit(name="calendar")
+    calendar.functions = {
+        "list": Function(
+            name="list",
+            entrypoint=list_calendar,
+            parameters={
+                "type": "object",
+                "properties": {"date": {"type": "string"}},
+                "required": ["date"],
+            },
+            instructions="Use ISO dates.",
+        ),
+    }
+    files = Toolkit(name="files")
+    files.functions = {
+        "list": Function(
+            name="list",
+            entrypoint=list_files,
+            parameters={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            instructions="Use an absolute path.",
+        ),
+    }
+    entries = {
+        name: EffectiveToolConfig(name=name, tool_config_overrides={}, authored_name=name)
+        for name in ("calendar", "files")
+    }
+    toolkits = {"calendar": calendar, "files": files}
+    monkeypatch.setattr(gateway, "_entries", lambda _context: entries)
+    monkeypatch.setattr(gateway_toolkits, "_build_native", lambda _context, entry: toolkits[entry.name])
+
+    schema = await gateway.get_tool(context, toolkit="files", function="list")
+    result = await gateway.invoke_tool(
+        context,
+        toolkit="files",
+        function="list",
+        arguments={"path": "/documents"},
+    )
+
+    assert "error" not in schema
+    assert schema["inputSchema"]["properties"] == {"path": {"type": "string"}}
+    assert schema["inputSchema"]["required"] == ["path"]
+    assert result == {"result": "/documents"}
+    assert calls == ["files"]
+
+
+@pytest.mark.asyncio
 async def test_unassigned_tool_and_unknown_function_fail_closed(context: AgentToolContext) -> None:
     """Unassigned tool and unknown function fail closed."""
     for toolkit, function in [("shell", "run_shell_command"), ("calculator", "run_shell_command")]:
@@ -265,8 +364,17 @@ async def test_unassigned_tool_and_unknown_function_fail_closed(context: AgentTo
 
 
 @pytest.mark.asyncio
-async def test_invalid_arguments_are_rejected_before_tool_body(context: AgentToolContext) -> None:
+async def test_invalid_arguments_are_rejected_before_tool_body(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Invalid arguments are rejected before tool body."""
+
+    def add(a: float, b: float) -> float:
+        del a, b
+        pytest.fail("Invalid arguments reached the tool body")
+
+    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[add]))
     for arguments in [{"a": "wrong", "b": 1}, {"a": 1}, {"a": float("nan"), "b": 1}, {"x": "a" * 65536}]:
         result = await gateway.invoke_tool(context, toolkit="calculator", function="add", arguments=arguments)
         assert "result" not in result

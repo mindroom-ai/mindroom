@@ -32,6 +32,7 @@ from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
 
 from mindroom import ai_runtime
+from mindroom.agent_cli.lifetime import CliTurnLifetime, response_cli_lifetime
 from mindroom.ai_turn_state import AITurnState
 from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
 from mindroom.cancellation import build_cancelled_error
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
     from agno.run.team import RunPausedEvent as TeamRunPausedEvent
     from agno.run.team import TeamRunOutput
 
+    from mindroom.agent_modes import AgentMode
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
@@ -306,6 +308,7 @@ class ResponseTurnContext:
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
     scheduled_history_budget: ScheduledHistoryBudget | None = None
+    agent_mode: AgentMode = "standard"
 
 
 @dataclass(frozen=True)
@@ -362,6 +365,7 @@ class CompletedAttempt:
     runtime_model_name: str | None = None
     output_tokens: int | None = None
     tool_executions: tuple[ToolExecution, ...] = ()
+    control_executions: tuple[ToolExecution, ...] = ()
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     metadata_content: dict[str, Any] | None = None
     status: RunStatus = RunStatus.completed
@@ -407,6 +411,7 @@ class PausedAttempt:
     response_presentation_state: dict[str, object] = field(default_factory=dict)
     approval_agent_name: str | None = None
     delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
+    cli_call: dict[str, object] | None = None
     continuation_count: int = 0
 
 
@@ -912,11 +917,15 @@ async def run_blocking_response_turn(
     """Run one blocking response turn to a final user-visible text."""
     run = TurnRunState()
     try:
-        async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
+        async with (
+            response_cli_lifetime() as cli_lifetime,
+            _open_scope_off_event_loop(adapter.open_scope) as scope_context,
+        ):
             run.scope_context = scope_context
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
             for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+                cli_lifetime.continuation_count = continuation_count
                 try:
                     with helper_usage_context(scope_context):
                         resolution = await adapter.run_attempt(run, continuation)
@@ -930,6 +939,7 @@ async def run_blocking_response_turn(
                         continuation_count=continuation_count,
                     )
                 finally:
+                    await cli_lifetime.retire_attempt()
                     if adapter.finalize_attempt is not None:
                         await adapter.finalize_attempt(run.scope_context)
                 if isinstance(settled, str):
@@ -1152,7 +1162,7 @@ def _settle_completed_attempt(
             response_text=ai_runtime.EMPTY_RESPONSE_NOTICE,
         )
     decision = continuation_decision_from_tools(
-        resolution.tool_executions,
+        (*resolution.tool_executions, *resolution.control_executions),
         original_prompt=continuation.original_prompt,
         continuation_count=continuation_count,
     )
@@ -1207,13 +1217,46 @@ def _settle_completed_attempt(
     )
 
 
-async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
+async def stream_response_turn[ChunkT](
     ctx: ResponseTurnContext,
     adapter: StreamingTurnAdapter[ChunkT],
     sinks: TurnSinks,
     *,
     continuation: DynamicContinuationRunState,
     resumed_attempt: ResumedAttempt | None = None,
+    initial_continuation_count: int = 0,
+) -> AsyncGenerator[ChunkT, None]:
+    """Own the whole response while binding context only during pulls and close."""
+    lifetime = CliTurnLifetime()
+    stream = context_bound_async_stream(
+        context_factory=lifetime.bind,
+        stream_factory=lambda: _stream_response_turn(
+            ctx,
+            adapter,
+            sinks,
+            continuation=continuation,
+            cli_lifetime=lifetime,
+            resumed_attempt=resumed_attempt,
+            initial_continuation_count=initial_continuation_count,
+        ),
+    )
+    try:
+        async with closing_async_stream(stream):
+            async for chunk in stream:
+                yield chunk
+    finally:
+        await lifetime.close()
+
+
+async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
+    ctx: ResponseTurnContext,
+    adapter: StreamingTurnAdapter[ChunkT],
+    sinks: TurnSinks,
+    *,
+    continuation: DynamicContinuationRunState,
+    cli_lifetime: CliTurnLifetime,
+    resumed_attempt: ResumedAttempt | None = None,
+    initial_continuation_count: int = 0,
 ) -> AsyncGenerator[ChunkT, None]:
     """Run one streaming response turn, yielding the attempt chunks as they arrive."""
     run = TurnRunState()
@@ -1222,8 +1265,11 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
             run.scope_context = scope_context
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
-            initial_count = resumed_attempt.continuation_count if resumed_attempt is not None else 0
+            initial_count = (
+                resumed_attempt.continuation_count if resumed_attempt is not None else initial_continuation_count
+            )
             for continuation_count in range(initial_count, DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+                cli_lifetime.continuation_count = continuation_count
                 resolution: StreamAttemptResolution | None = None
                 keep_going = False
                 try:
@@ -1311,6 +1357,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         if sinks.on_completed is not None:
                             sinks.on_completed(resolution)
                 finally:
+                    await cli_lifetime.retire_attempt()
                     if adapter.finalize_attempt is not None:
                         await adapter.finalize_attempt(run.scope_context)
                 if not keep_going:

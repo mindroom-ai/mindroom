@@ -496,7 +496,8 @@ Use `dynamic_workflow_run` to publish a completed Dynamic Workflow HTML report.
 Use `static_site` to publish a copied workspace directory that contains `index.html` and optional CSS, JavaScript, images, fonts, or JSON assets.
 A `static_site` source path may also point at one workspace HTML file, which is copied and served as `index.html`.
 The static site source path is workspace-relative and the published copy is stored under `MINDROOM_STORAGE_PATH/report_publishing/artifacts/<slug>/`.
-A static site snapshot may contain at most 200 files and 10 MiB of total data, and publishing fails with an explanatory error beyond either limit.
+A static site snapshot may contain at most 200 files, 200 directories nested at most 32 levels deep, and 10 MiB of total data, and publishing fails with an explanatory error beyond any of those limits.
+The snapshot copies only regular files, reading every entry through no-follow directory descriptors below the workspace root, so a symlink, a special file, or an entry swapped while the copy runs fails the publish instead of leaking the link target.
 Static site links serve under the trailing-slash form `/reports/public/<slug>/`, and the slash-less form redirects there so relative asset URLs resolve.
 JavaScript is allowed for static sites, but the public route serves static sites with a sandbox CSP that omits `allow-same-origin` and sets `connect-src 'none'`.
 That means scripts can drive local page interactivity, but they cannot act as logged-in MindRoom dashboard code or call MindRoom APIs.
@@ -633,6 +634,7 @@ manage_team(
 `get_own_config()` returns the current agent's authored YAML block.
 `update_own_config()` only changes fields that you pass explicitly.
 On this branch, `update_own_config()` can modify `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.
+`update_own_config()` requires a requester listed in `administrators`, like [`config_manager`], and every call raises an approval card even when `tool_approval.default` is `auto_approve`.
 The update path validates tool names against the live registry and validates knowledge base IDs against the current config.
 It also preserves inline tool overrides for retained tools when a string-only tool list is provided.
 Updates are validated through `AgentConfig.model_validate()` before the file is saved.
