@@ -88,6 +88,8 @@ Providers can enforce allowed email domains, allowed hosted-domain claims, and c
 If a configured restriction cannot be checked from verified provider claims, the callback fails closed and no credential is saved.
 
 The built-in GitHub provider uses the generic framework for GitHub App user tokens, requests no classic OAuth scopes, and requires S256 PKCE.
+The built-in Atlassian provider uses the generic framework for Atlassian Cloud OAuth 2.0 (3LO), stores tokens only in the requester's `user` scope like GitHub, and requests only the scopes its [Jira and Confluence functions](tools/atlassian.md#scopes) call.
+Additional Atlassian sites get separate providers through `AtlassianConnectionConfig`, and every Atlassian provider reads its app client from the shared `atlassian_oauth_client` service unless a connection names another.
 Built-in Google providers use the generic framework for Drive, Docs, Calendar, Sheets, and Gmail.
 Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
 Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service.

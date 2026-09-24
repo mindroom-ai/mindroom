@@ -70,6 +70,7 @@ MindRoom's architecture consists of several key components working together.
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
 | `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
+| `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle and sync callbacks |
 | `matrix/durable_ingestion.py` | Validates owned batches, invokes journal admission, runs ordered hooks/callbacks, and acknowledges nio |
 | `matrix/journal_ingress.py` | Typed event classification from nio provenance and reconstruction of stored events |

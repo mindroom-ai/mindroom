@@ -43,6 +43,7 @@ nav = [
     { "Matrix Desktop Bridge" = "tools/desktop.md" },
     { "Messaging & Social" = "tools/messaging-and-social.md" },
     { "Project Management" = "tools/project-management.md" },
+    { "Atlassian Cloud" = "tools/atlassian.md" },
     { "Calendar & Scheduling" = "tools/calendar-and-scheduling.md" },
     { "Memory & Storage" = "tools/memory-and-storage.md" },
     { "Agent Orchestration" = "tools/agent-orchestration.md" },
