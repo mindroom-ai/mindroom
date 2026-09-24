@@ -6,6 +6,7 @@ import json
 import os
 from collections import OrderedDict
 from pathlib import Path
+from stat import S_IMODE
 from tempfile import NamedTemporaryFile
 from threading import Lock
 from typing import TYPE_CHECKING, cast
@@ -26,8 +27,12 @@ _durable_directory_identities_lock = Lock()
 def create_directory_durable(path: Path, *, mode: int) -> None:
     """Create one directory and durably publish it when directory fsync is available."""
     path.mkdir(mode=mode, parents=True, exist_ok=True)
-    path.chmod(mode)
     stat = path.stat()
+    # Directories already published at this mode are left alone so a caller that only
+    # reads a directory it does not own (a read-only mount) is not forced to write.
+    if S_IMODE(stat.st_mode) != mode:
+        path.chmod(mode)
+        stat = path.stat()
     identity = (stat.st_dev, stat.st_ino)
     with _durable_directory_identities_lock:
         if _durable_directory_identities.get(path) == identity:

@@ -2741,7 +2741,12 @@ router:
     volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
     mount_paths = {mount["mountPath"] for mount in volume_mounts}
     expected_worker_root = f"/app/worker/workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
-    assert mount_paths == {"/app/worker/agents/code", expected_worker_root, "/app/config.yaml"}
+    assert mount_paths == {
+        "/app/worker/agents/code",
+        expected_worker_root,
+        f"{expected_worker_root}/.shared_credentials",
+        "/app/config.yaml",
+    }
 
 
 def test_kubernetes_backend_user_worker_mounts_knowledge_for_all_addressed_agents(tmp_path: Path) -> None:
@@ -2883,6 +2888,27 @@ def test_kubernetes_backend_uses_custom_worker_prefix_for_storage_path() -> None
     expected_worker_root = f"/app/worker/sandbox-workers/{worker_dir_name(worker_key)}"
 
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_worker_root
+
+
+def test_kubernetes_backend_mounts_shared_credential_mirror_read_only() -> None:
+    """Worker code must not be able to delete or relink the primary's credential mirror."""
+    backend, apps_api, _core_api = _backend()
+    worker_key = "v1:tenant-123:shared:code"
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    mounts_by_path = {mount["mountPath"]: mount for mount in volume_mounts}
+    expected_worker_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
+
+    assert mounts_by_path[expected_worker_root].get("readOnly") is None
+    assert mounts_by_path[f"{expected_worker_root}/.shared_credentials"] == {
+        "name": mounts_by_path[expected_worker_root]["name"],
+        "mountPath": f"{expected_worker_root}/.shared_credentials",
+        "subPath": f"workers/{worker_dir_name(worker_key)}/.shared_credentials",
+        "readOnly": True,
+    }
 
 
 def test_kubernetes_backend_mounts_broad_agents_tree_for_user_scope() -> None:

@@ -1,6 +1,7 @@
 """Tests for the centralized credentials manager."""
 
 import base64
+import errno
 import stat
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.credentials import (
     CredentialsManager,
+    WorkerCredentialPathError,
     _merge_credential_layers,
     _reset_credentials_manager_cache,
     get_runtime_credentials_manager,
@@ -25,7 +27,12 @@ from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SHARED_CREDENTIALS_PATH_ENV,
 )
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
+from mindroom.tool_system.worker_routing import (
+    ResolvedWorkerTarget,
+    ToolExecutionIdentity,
+    resolve_worker_target,
+    worker_root_path,
+)
 
 
 def _test_encryption_key() -> str:
@@ -145,7 +152,7 @@ class TestCredentialsManager:
     ) -> None:
         """Permission failures should identify the path, mode, and ownership fix."""
         credentials_dir = tmp_path / "credentials"
-        credentials_dir.mkdir()
+        credentials_dir.mkdir(mode=0o755)
         original_chmod = Path.chmod
 
         def deny_credentials_chmod(path: Path, mode: int) -> None:
@@ -1281,6 +1288,129 @@ class TestCredentialsManager:
             "api_key": "env-key",
             "_source": "env",
         }
+
+    @pytest.mark.parametrize("linked_directory", [".shared_credentials", "credentials"])
+    def test_worker_directory_symlink_is_dropped_instead_of_followed(
+        self,
+        temp_credentials_dir: Path,
+        linked_directory: str,
+    ) -> None:
+        """Worker-planted links into the shared store must not be read, mirrored, or unlinked."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("openai", {"api_key": "shared-key", "_source": "env"})
+        sync_shared_credentials_to_worker("worker-a", allowed_services=frozenset(), credentials_manager=manager)
+
+        worker_root = worker_root_path(manager.storage_root, "worker-a")
+        planted_link = worker_root / linked_directory
+        planted_link.rmdir()
+        planted_link.symlink_to(Path("../..") / temp_credentials_dir.name, target_is_directory=True)
+
+        sync_shared_credentials_to_worker("worker-a", allowed_services=frozenset(), credentials_manager=manager)
+
+        worker_manager = manager.for_worker("worker-a")
+        assert not planted_link.is_symlink()
+        assert worker_manager.list_services() == []
+        assert worker_manager.shared_manager().list_services() == []
+        assert worker_manager.load_credentials("openai") is None
+        assert manager.load_credentials("openai") == {"api_key": "shared-key", "_source": "env"}
+
+    def test_worker_directory_symlink_to_private_oauth_scope_is_dropped(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """A mirror link aimed at another requester's OAuth scope must leave those tokens intact."""
+        manager = CredentialsManager(temp_credentials_dir)
+        victim_manager = manager.for_primary_runtime_scope("@victim:example.org", None)
+        victim_manager.save_credentials("google_calendar", {"token": "victim-token"})
+        sync_shared_credentials_to_worker("worker-a", allowed_services=frozenset(), credentials_manager=manager)
+
+        worker_root = worker_root_path(manager.storage_root, "worker-a")
+        planted_link = worker_root / ".shared_credentials"
+        planted_link.rmdir()
+        planted_link.symlink_to(victim_manager.base_path, target_is_directory=True)
+
+        sync_shared_credentials_to_worker("worker-a", allowed_services=frozenset(), credentials_manager=manager)
+
+        assert not planted_link.is_symlink()
+        assert victim_manager.load_credentials("google_calendar") == {"token": "victim-token"}
+
+    def test_worker_credential_path_replaced_by_a_file_fails_closed(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Anything other than a directory or a droppable link must stop the sync."""
+        manager = CredentialsManager(temp_credentials_dir)
+        sync_shared_credentials_to_worker("worker-a", allowed_services=frozenset(), credentials_manager=manager)
+
+        planted_file = worker_root_path(manager.storage_root, "worker-a") / ".shared_credentials"
+        for child in planted_file.iterdir():
+            child.unlink()
+        planted_file.rmdir()
+        planted_file.write_text("not a directory", encoding="utf-8")
+
+        with pytest.raises(WorkerCredentialPathError, match=str(planted_file)):
+            sync_shared_credentials_to_worker(
+                "worker-a",
+                allowed_services=frozenset(),
+                credentials_manager=manager,
+            )
+
+    def test_worker_store_never_follows_a_directory_swapped_mid_operation(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """A worker swapping its store for a link while the primary works must never win."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("openai", {"api_key": "shared-key"})
+        manager.save_credentials("victim", {"token": "do-not-delete"})
+        worker_credentials = worker_root_path(manager.storage_root, "worker-a") / "credentials"
+        shared_link_target = Path("../..") / temp_credentials_dir.name
+
+        for _attempt in range(200):
+            worker_manager = manager.for_worker("worker-a")
+            worker_credentials.rmdir()
+            worker_credentials.symlink_to(shared_link_target, target_is_directory=True)
+            assert worker_manager.list_services() == []
+            assert worker_manager.load_credentials("openai") is None
+            worker_manager.delete_credentials("victim")
+            worker_credentials.unlink()
+            worker_credentials.mkdir()
+
+        assert manager.list_services() == ["openai", "victim"]
+
+    def test_symlinked_credential_files_are_neither_listed_nor_loaded(
+        self,
+        temp_credentials_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Credential payloads are owned regular files, so links are never followed."""
+        outside_path = tmp_path / "outside_credentials.json"
+        outside_path.write_text('{"api_key":"outside"}', encoding="utf-8")
+        manager = CredentialsManager(temp_credentials_dir)
+        (temp_credentials_dir / "openai_credentials.json").symlink_to(outside_path)
+
+        assert manager.list_services() == []
+        assert manager.load_credentials("openai") is None
+
+    def test_credentials_directory_symlink_is_never_read_through(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A credential directory replaced by a link must not expose the link target."""
+        shared_dir = tmp_path / "credentials"
+        manager = CredentialsManager(shared_dir)
+        manager.save_credentials("openai", {"api_key": "shared-key"})
+        linked_dir = tmp_path / "linked"
+        linked_dir.symlink_to(shared_dir, target_is_directory=True)
+        linked_manager = CredentialsManager(linked_dir)
+
+        assert linked_manager.list_services() == []
+        assert linked_manager.load_credentials("openai") is None
+        with pytest.raises(OSError) as failure:  # noqa: PT011
+            linked_manager.save_credentials("openai", {"api_key": "overwritten"})
+
+        assert failure.value.errno in {errno.ELOOP, errno.ENOTDIR}
+        assert manager.load_credentials("openai") == {"api_key": "shared-key"}
 
     def test_sync_shared_credentials_to_worker_can_copy_ui_credentials_for_unscoped_workers(
         self,

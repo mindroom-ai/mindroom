@@ -1828,6 +1828,24 @@ models:
         backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
 
+def test_docker_backend_mounts_shared_credential_mirror_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker code must not be able to delete or relink the primary's credential mirror."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
+    worker_root = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    assert volumes[str(worker_root)] == {"bind": "/app/worker", "mode": "rw"}
+    assert volumes[str(worker_root / ".shared_credentials")] == {
+        "bind": "/app/worker/.shared_credentials",
+        "mode": "ro",
+    }
+
+
 def test_docker_backend_syncs_shared_credentials_from_runtime_storage_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

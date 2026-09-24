@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import base64
 import binascii
+import errno
 import hashlib
 import json
 import os
 import re
 import secrets
+import stat
 import threading
 from collections.abc import Mapping
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -24,16 +27,29 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from mindroom import runtime_env_policy as _runtime_env_policy
 from mindroom.credential_policy import credential_service_policy
-from mindroom.durable_write import create_directory_durable, replace_file_durable
+from mindroom.durable_write import create_directory_durable
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.worker_routing import worker_root_path
+from mindroom.tool_system.worker_routing import (
+    WORKER_CREDENTIALS_DIRNAME,
+    WORKER_SHARED_CREDENTIALS_DIRNAME,
+    worker_root_path,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
-_WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
+_CREDENTIALS_FILE_SUFFIX = "_credentials.json"
+# Worker roots are mounted read-write into worker containers under the primary's own
+# uid, so credential directories are opened once per operation and never resolved by
+# name again while that operation runs.
+_CREDENTIALS_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# A missing path, a link, and a non-directory parent all mean the same thing to the
+# store: no credential payload it owns is stored there.
+_ABSENT_CREDENTIALS_ERRNOS = frozenset({errno.ELOOP, errno.ENOENT, errno.ENOTDIR})
 _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME = "private_oauth"
 # Sanitized scope directory parts never start with "_", so this literal cannot
 # collide with a requester directory inside the primary-runtime scoped store.
@@ -45,6 +61,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "CredentialsManager",
+    "WorkerCredentialPathError",
     "delete_scoped_credentials",
     "get_runtime_credentials_manager",
     "get_runtime_shared_credentials_manager",
@@ -70,6 +87,10 @@ class _CredentialsManagerKey:
 
 _credentials_managers: dict[_CredentialsManagerKey, CredentialsManager] = {}
 _credentials_manager_lock = threading.Lock()
+
+
+class WorkerCredentialPathError(RuntimeError):
+    """Raised when a worker credential directory is not a real directory."""
 
 
 def validate_service_name(service: str) -> str:
@@ -163,14 +184,6 @@ def _private_permissions_error(path: Path, mode: int) -> PermissionError:
     )
 
 
-def _set_private_permissions(path: Path, mode: int) -> None:
-    """Set a private mode or fail with actionable ownership guidance."""
-    try:
-        path.chmod(mode)
-    except PermissionError as exc:
-        raise _private_permissions_error(path, mode) from exc
-
-
 def _credential_owned_directory_chain(path: Path) -> list[Path]:
     """Return credential-owned directories that should be private."""
     chain = [path, *path.parents]
@@ -180,11 +193,111 @@ def _credential_owned_directory_chain(path: Path) -> list[Path]:
     return [path]
 
 
+@contextmanager
+def _opened_credentials_directory(path: Path) -> Iterator[int]:
+    """Open one credential directory, refusing a link at its final path component."""
+    directory_fd = os.open(path, _CREDENTIALS_DIRECTORY_FLAGS)
+    try:
+        yield directory_fd
+    finally:
+        os.close(directory_fd)
+
+
+def _credentials_file_entries(directory_fd: int) -> list[tuple[str, os.stat_result]]:
+    """List the owned regular credential payloads inside one opened credential directory."""
+    entries = []
+    for entry in os.scandir(directory_fd):
+        if not entry.name.endswith(_CREDENTIALS_FILE_SUFFIX):
+            continue
+        try:
+            entry_stat = entry.stat(follow_symlinks=False)
+        except OSError:
+            # A concurrent save replaces entries by rename, so a vanished one is not ours.
+            continue
+        if stat.S_ISREG(entry_stat.st_mode):
+            entries.append((entry.name, entry_stat))
+    return entries
+
+
+def _read_credentials_payload(path: Path) -> bytes | None:
+    """Return one stored credential payload, or None when no owned regular file is stored."""
+    try:
+        with _opened_credentials_directory(path.parent) as directory_fd:
+            file_fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            with os.fdopen(file_fd, "rb") as payload_file:
+                if not stat.S_ISREG(os.fstat(payload_file.fileno()).st_mode):
+                    return None
+                return payload_file.read()
+    except OSError as exc:
+        if exc.errno in _ABSENT_CREDENTIALS_ERRNOS:
+            return None
+        raise
+
+
 def _harden_existing_credential_files(path: Path) -> None:
     """Make existing credential payloads owner-readable only."""
-    for credentials_path in path.glob("*_credentials.json"):
-        if not credentials_path.is_symlink() and credentials_path.is_file():
-            _set_private_permissions(credentials_path, 0o600)
+    try:
+        directory_fd = os.open(path, _CREDENTIALS_DIRECTORY_FLAGS)
+    except OSError as exc:
+        if exc.errno not in _ABSENT_CREDENTIALS_ERRNOS:
+            raise
+        return
+    try:
+        for name, entry_stat in _credentials_file_entries(directory_fd):
+            if stat.S_IMODE(entry_stat.st_mode) == 0o600:
+                continue
+            try:
+                os.chmod(name, 0o600, dir_fd=directory_fd)
+            except PermissionError as chmod_error:
+                raise _private_permissions_error(path / name, 0o600) from chmod_error
+    finally:
+        os.close(directory_fd)
+
+
+def _validate_worker_credential_directories(worker_root: Path, credential_paths: tuple[Path, ...]) -> None:
+    """Fail closed before the primary touches one worker's credential directories.
+
+    The worker root is mounted read-write into the worker container under the primary's
+    own uid, so worker code can swap the credential directories for links into the
+    deployment-wide credential store or another requester's scoped store. The root is
+    checked first so no link hides behind a parent that was not validated. The two
+    credential directories are MindRoom's alone, so a link planted there is dropped and
+    recreated rather than locking every requester out of a shared worker for good.
+    """
+    _require_worker_directory(worker_root)
+    for path in credential_paths:
+        _drop_planted_symlink(path)
+        _require_worker_directory(path)
+
+
+def _require_worker_directory(path: Path) -> None:
+    """Refuse a worker credential path that exists but is not a directory."""
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        msg = f"Cannot inspect worker credential path '{path}'"
+        raise WorkerCredentialPathError(msg) from exc
+    if not stat.S_ISDIR(mode):
+        msg = (
+            f"Worker credential path '{path}' is not a directory. "
+            "Remove it so MindRoom can recreate the directory it owns."
+        )
+        raise WorkerCredentialPathError(msg)
+
+
+def _drop_planted_symlink(path: Path) -> None:
+    """Remove a link planted in place of a credential directory MindRoom owns."""
+    if not path.is_symlink():
+        return
+    logger.warning("Removing symlink planted in place of a worker credential directory", path=str(path))
+    try:
+        # Unlinking drops the link itself; a directory that replaced it meanwhile raises.
+        path.unlink()
+    except OSError as exc:
+        msg = f"Cannot remove the symlink at worker credential path '{path}'"
+        raise WorkerCredentialPathError(msg) from exc
 
 
 def _existing_worker_credential_paths(storage_root: Path) -> tuple[Path, ...]:
@@ -197,7 +310,7 @@ def _existing_worker_credential_paths(storage_root: Path) -> tuple[Path, ...]:
     for worker_root in workers_root.iterdir():
         if worker_root.is_symlink() or not worker_root.is_dir():
             continue
-        for directory_name in ("credentials", _WORKER_SHARED_CREDENTIALS_DIRNAME):
+        for directory_name in (WORKER_CREDENTIALS_DIRNAME, WORKER_SHARED_CREDENTIALS_DIRNAME):
             credential_path = worker_root / directory_name
             if not credential_path.is_symlink() and credential_path.is_dir():
                 paths.append(credential_path)
@@ -206,22 +319,20 @@ def _existing_worker_credential_paths(storage_root: Path) -> tuple[Path, ...]:
 
 def _atomic_write_private_file(path: Path, payload: bytes) -> None:
     _ensure_private_directory(path.parent)
-    tmp_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(payload)
-            f.flush()
-            os.fsync(f.fileno())
-        replace_file_durable(tmp_path, path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
-
-
-def _has_encrypted_credentials_magic(path: Path) -> bool:
-    with path.open("rb") as f:
-        return f.read(len(_ENCRYPTED_CREDENTIALS_MAGIC)) == _ENCRYPTED_CREDENTIALS_MAGIC
+    tmp_name = f".{path.name}.{secrets.token_hex(8)}.tmp"
+    with _opened_credentials_directory(path.parent) as directory_fd:
+        try:
+            fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd)
+            with os.fdopen(fd, "wb") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.rename(tmp_name, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        except BaseException:
+            with suppress(OSError):
+                os.unlink(tmp_name, dir_fd=directory_fd)
+            raise
 
 
 class CredentialsManager:
@@ -278,8 +389,12 @@ class CredentialsManager:
     def for_worker(self, worker_key: str) -> CredentialsManager:
         """Return a credentials manager rooted in one worker's persistent state."""
         worker_root = worker_root_path(self.storage_root, worker_key)
-        worker_credentials_path = worker_root / "credentials"
-        worker_shared_credentials_path = worker_root / _WORKER_SHARED_CREDENTIALS_DIRNAME
+        worker_credentials_path = worker_root / WORKER_CREDENTIALS_DIRNAME
+        worker_shared_credentials_path = worker_root / WORKER_SHARED_CREDENTIALS_DIRNAME
+        _validate_worker_credential_directories(
+            worker_root,
+            (worker_credentials_path, worker_shared_credentials_path),
+        )
         return CredentialsManager(
             base_path=worker_credentials_path,
             shared_base_path=worker_shared_credentials_path,
@@ -381,20 +496,21 @@ class CredentialsManager:
         return self._load_credentials_file(normalized_service, credentials_path)
 
     def _load_credentials_file(self, normalized_service: str, credentials_path: Path) -> dict[str, Any] | None:
-        if credentials_path.exists():
-            try:
-                return self.decode_credentials(normalized_service, credentials_path.read_bytes())
-            except (OSError, TypeError, ValueError, InvalidTag) as exc:
-                logger.warning(
-                    "Failed to load encrypted credentials"
-                    if self._encryption_key is not None
-                    else "Failed to load credentials",
-                    service=normalized_service,
-                    path=str(credentials_path),
-                    error_type=type(exc).__name__,
-                )
+        try:
+            payload = _read_credentials_payload(credentials_path)
+            if payload is None:
                 return None
-        return None
+            return self.decode_credentials(normalized_service, payload)
+        except (OSError, TypeError, ValueError, InvalidTag) as exc:
+            logger.warning(
+                "Failed to load encrypted credentials"
+                if self._encryption_key is not None
+                else "Failed to load credentials",
+                service=normalized_service,
+                path=str(credentials_path),
+                error_type=type(exc).__name__,
+            )
+            return None
 
     def save_credentials(self, service: str, credentials: dict[str, Any]) -> None:
         """Save credentials for a service.
@@ -414,14 +530,15 @@ class CredentialsManager:
         credentials_path: Path,
         credentials: dict[str, Any],
     ) -> None:
+        stored_payload = _read_credentials_payload(credentials_path)
         if self._encryption_key is not None:
-            if credentials_path.exists() and self._load_credentials_file(normalized_service, credentials_path) is None:
+            if stored_payload is not None and self._load_credentials_file(normalized_service, credentials_path) is None:
                 msg = f"Stored credentials for {normalized_service} could not be loaded; refusing to overwrite"
                 raise ValueError(msg)
             payload = self.encode_credentials(normalized_service, credentials)
             _atomic_write_private_file(credentials_path, payload)
             return
-        if credentials_path.exists() and _has_encrypted_credentials_magic(credentials_path):
+        if stored_payload is not None and stored_payload.startswith(_ENCRYPTED_CREDENTIALS_MAGIC):
             msg = f"Stored credentials for {normalized_service} are encrypted; refusing to overwrite without a key"
             raise ValueError(msg)
         _atomic_write_private_file(credentials_path, self.encode_credentials(normalized_service, credentials))
@@ -434,8 +551,12 @@ class CredentialsManager:
 
         """
         credentials_path = self.get_credentials_path(service)
-        if credentials_path.exists():
-            credentials_path.unlink()
+        try:
+            with _opened_credentials_directory(credentials_path.parent) as directory_fd:
+                os.unlink(credentials_path.name, dir_fd=directory_fd)
+        except OSError as exc:
+            if exc.errno not in _ABSENT_CREDENTIALS_ERRNOS:
+                raise
 
     def list_services(self) -> list[str]:
         """List all services with stored credentials.
@@ -444,13 +565,18 @@ class CredentialsManager:
             List of service names
 
         """
-        services = []
-        if self.base_path.exists():
-            for path in self.base_path.glob("*_credentials.json"):
-                service = path.stem.replace("_credentials", "")
-                if _SERVICE_NAME_PATTERN.fullmatch(service):
-                    services.append(service)
-        return sorted(services)
+        try:
+            directory_fd = os.open(self.base_path, _CREDENTIALS_DIRECTORY_FLAGS)
+        except OSError as exc:
+            if exc.errno not in _ABSENT_CREDENTIALS_ERRNOS:
+                raise
+            return []
+        try:
+            names = [name for name, _entry_stat in _credentials_file_entries(directory_fd)]
+        finally:
+            os.close(directory_fd)
+        services = [name.removesuffix(_CREDENTIALS_FILE_SUFFIX) for name in names]
+        return sorted(service for service in services if _SERVICE_NAME_PATTERN.fullmatch(service))
 
     def get_api_key(self, service: str, key_name: str = "api_key") -> str | None:
         """Get an API key for a service.
