@@ -12,6 +12,7 @@ from agno.session.agent import AgentSession
 
 import mindroom.skill_learning.store as store_module
 import mindroom.skill_learning.worker as worker_module
+import mindroom.tool_system.skills as skills_module
 from mindroom.agent_modes import set_agent_mode
 from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentPrivateConfig
@@ -587,3 +588,68 @@ def test_queue_metadata_is_owner_readable_only(tmp_path: Path) -> None:
     config, paths = _learner(tmp_path)
     worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
     assert (tmp_path / "skill_learning.db").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("allowlist", [[], ["allowed", "ineligible", "overridden"]])
+@pytest.mark.asyncio
+async def test_review_context_contains_only_effective_accessible_skills(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    allowlist: list[str],
+) -> None:
+    """Review inputs respect configured access, eligibility and workspace precedence."""
+    config, paths = _learner(tmp_path)
+    config.agents["mind"].skills = allowlist
+    _persist(config, paths)
+    global_root = tmp_path / "global-skills"
+    workspace_root = tmp_path / "agents/mind/workspace/skills"
+    for root, name, description, metadata in [
+        (global_root, "hidden", "Hidden global procedure", ""),
+        (global_root, "allowed", "Allowed global procedure", ""),
+        (global_root, "overridden", "Overridden global procedure", ""),
+        (global_root, "ineligible", "Ineligible global procedure", "metadata: {openclaw: {os: [unavailable-os]}}\n"),
+        (workspace_root, "overridden", "Effective workspace procedure", ""),
+        (
+            workspace_root,
+            "workspace-ineligible",
+            "Ineligible workspace procedure",
+            "metadata: {openclaw: {os: [unavailable-os]}}\n",
+        ),
+    ]:
+        directory = root / name
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {description}\n{metadata}---\n{description} body.\n",
+        )
+    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [global_root])
+    contexts = []
+
+    async def review(**kwargs: object) -> SkillReview:
+        contexts.append(cast("str", kwargs["skill_context"]))
+        return worker_module.SkillReview(action="no_change")
+
+    monkeypatch.setattr(worker_module, "_review_session", review)
+    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
+    await worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle()
+    assert len(contexts) == 1
+    assert "Effective workspace procedure body." in contexts[0]
+    assert "Hidden global procedure" not in contexts[0]
+    assert "Overridden global procedure" not in contexts[0]
+    assert "Ineligible" not in contexts[0]
+    assert ("Allowed global procedure" in contexts[0]) == bool(allowlist)
+    store = store_module.SkillStore(workspace_root.parent)
+    with pytest.raises(ValueError, match="Protected"):
+        store.publish("hidden", MARKDOWN.replace("learned-task", "hidden"), action="create", expected={}, source="run")
+
+
+def test_create_rejects_case_insensitive_manual_frontmatter_collision(tmp_path: Path) -> None:
+    """A manual name protects its case variants regardless of the directory name."""
+    store = store_module.SkillStore(tmp_path)
+    manual_path = tmp_path / "skills/different-directory/SKILL.md"
+    manual_path.parent.mkdir(parents=True)
+    manual = MARKDOWN.replace("learned-task", "Learned-Task")
+    manual_path.write_text(manual)
+    with pytest.raises(ValueError, match="already exists"):
+        store.publish("learned-task", MARKDOWN, action="create", expected=store.snapshot(), source="run")
+    assert manual_path.read_text() == manual
+    assert not (tmp_path / "skills/learned-task/SKILL.md").exists()

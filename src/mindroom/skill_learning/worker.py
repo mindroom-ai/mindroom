@@ -26,7 +26,7 @@ from mindroom.provider_tool_policy import without_provider_tools
 from mindroom.redaction import redact_sensitive_data
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.skill_learning.store import SkillStore, digest
-from mindroom.tool_system.skills import list_skill_listings
+from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -299,7 +299,13 @@ class SkillLearningWorker:
                     return
                 store = SkillStore(Path(scope["workspace"]))
                 expected = await asyncio.to_thread(store.snapshot)
-                context = await asyncio.to_thread(self._skill_context, store, settings.max_input_chars // 3)
+                context = await asyncio.to_thread(
+                    self._skill_context,
+                    store,
+                    settings.max_input_chars // 3,
+                    config=config,
+                    agent_name=scope["agent"],
+                )
                 trace = trace[-(settings.max_input_chars - len(context)) :]
                 result = await asyncio.wait_for(
                     _review_session(
@@ -370,21 +376,28 @@ class SkillLearningWorker:
                 error_type=type(exc).__name__,
             )
 
-    @staticmethod
-    def _skill_context(store: SkillStore, budget: int) -> str:
+    def _skill_context(self, store: SkillStore, budget: int, *, config: Config, agent_name: str) -> str:
+        skills = build_agent_skills(
+            agent_name,
+            config,
+            self.runtime_paths,
+            workspace_skills_root=store.workspace / "skills",
+        )
+        if skills is None:
+            return ""
         owned = store.owned_names()
-        workspace_listings = list_skill_listings([store.workspace / "skills"])
+        effective = [skill for name in skills.get_skill_names() if (skill := skills.get_skill(name)) is not None]
+        workspace_root = store.workspace / "skills"
+        effective.sort(key=lambda skill: not Path(skill.source_path).is_relative_to(workspace_root))
         parts = []
         remaining = budget
-        for listing in workspace_listings:
-            ownership = "learner-owned" if listing.name in owned else "manual, protected"
-            content = f"{listing.name} ({ownership}): {listing.description}\n{store.read_skill(listing.path)}\n"
-            parts.append(content[:remaining])
-            remaining -= len(parts[-1])
-            if remaining <= 0:
-                return "".join(parts)
-        for listing in list_skill_listings():
-            content = f"{listing.name} (protected): {listing.description}\n"
+        for skill in effective:
+            if Path(skill.source_path).is_relative_to(workspace_root):
+                ownership = "learner-owned" if skill.name in owned else "manual, protected"
+                markdown = store.read_skill(Path(skill.source_path) / "SKILL.md")
+                content = f"{skill.name} ({ownership}): {skill.description}\n{markdown}\n"
+            else:
+                content = f"{skill.name} (protected): {skill.description}\n"
             parts.append(content[:remaining])
             remaining -= len(parts[-1])
             if remaining <= 0:
