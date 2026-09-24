@@ -181,6 +181,14 @@ Publication uses the resolved private workspace for private agents. Shared agent
 
 Only learner-owned files can be updated. Bundled, plugin, user-managed and manually authored workspace skill names are protected. The publisher rejects traversal, symlink paths, malformed frontmatter, oversized output and common credential-like strings. The reviewer is also instructed to omit credentials, personal facts and raw transcripts. These checks do not replace reviewing generated instructions before relying on them for sensitive work.
 
-The durable `skill_learning.db` queue stores scope metadata, source revision hashes and pending publication proposals, not raw conversation transcripts. Reviews run serially, at most four per cycle, with bounded retry attempts and exponential delay. Shutdown cancels work; pending proposals survive restart. Current configuration, private ownership and file revisions are checked again before publication. An interrupted publication is replayed by content hash; manually edited files are preserved.
+The durable `skill_learning.db` queue stores scope metadata, source revision hashes and pending publication proposals, not raw conversation transcripts. Reviews run serially across processes sharing the storage root, at most four per cycle, with bounded retry attempts and exponential delay. Shutdown cancels work; pending proposals survive restart. Current configuration, private ownership and file revisions are checked again before publication. An interrupted publication is replayed by content hash; manually edited files are preserved.
 
 Each workspace retains source revision and up to five previous versions per learned skill in `.skill-learning.json`. To roll back, disable learning and restore the chosen `previous` Markdown value to `skills/<name>/SKILL.md`. The manual edit prevents subsequent automatic replacement. To remove a learned skill, disable learning and delete its skill directory. Diagnostic logs report the agent, review outcome and source revision hash.
+
+
+The reviewer receives only effective eligible skills, honoring configured global allowlists and workspace precedence.
+Workspace descriptions and Markdown receive the same credential-pattern redaction as persisted traces; this does not classify or remove arbitrary personal information.
+Oversized traces retain complete role-bearing message objects and mark shortened text with `[truncated]`.
+Exhausted proposals are discarded without acknowledging newer queued generations, which receive a fresh review budget.
+Failure logs include the phase, exception type, attempt count, exhaustion state and bounded code locations, without exception messages, source lines, local variables or transcript content.
+All configuration fields, defaults and bounds are listed in the [agent configuration reference](configuration/agents.md#automatic-skill-learning).

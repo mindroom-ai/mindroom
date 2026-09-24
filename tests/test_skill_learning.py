@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import signal
 import sqlite3
 from typing import TYPE_CHECKING, cast
 
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
+from structlog.testing import capture_logs
 
 import mindroom.skill_learning.store as store_module
 import mindroom.skill_learning.worker as worker_module
@@ -20,6 +24,7 @@ from mindroom.provider_tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.usage_stats import collect_admin_usage
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
@@ -30,7 +35,7 @@ if TYPE_CHECKING:
 
 import pytest
 from agno.agent import Agent
-from agno.metrics import RunMetrics
+from agno.metrics import MessageMetrics, RunMetrics
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -161,7 +166,7 @@ def _persist(
                     session_id="session",
                     messages=[
                         Message(role="user", content="Repair and verify"),
-                        Message(role="tool", content=text, tool_call_id="tool-1"),
+                        Message(role="tool", content=text, tool_call_id="tool-1", tool_name="verify"),
                         Message(role="assistant", content="The test passed after repair"),
                     ],
                 ),
@@ -189,7 +194,7 @@ async def test_worker_reviews_persisted_trace_and_deduplicates(tmp_path: Path, m
     module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
     await module.SkillLearningWorker(paths, lambda: config)._run_cycle()
     assert len(reviews) == 1
-    assert '"role": "tool"' in reviews[0]
+    assert any(message["role"] == "tool" for run in json.loads(reviews[0]) for message in run["messages"])
     assert "The validation passed" in reviews[0]
     assert (tmp_path / "agents/mind/workspace/skills/learned-task/SKILL.md").exists()
 
@@ -339,6 +344,13 @@ async def test_input_and_output_budgets(tmp_path: Path, monkeypatch: pytest.Monk
     module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
     await module.SkillLearningWorker(paths, lambda: config)._run_cycle()
     assert len(cast("str", seen[0]["trace"])) + len(cast("str", seen[0]["skill_context"])) <= 1000
+    trace = json.loads(cast("str", seen[0]["trace"]))
+    assert trace
+    assert all(message["role"] in {"user", "assistant", "tool"} for run in trace for message in run["messages"])
+    tool = next(message for run in trace for message in run["messages"] if message["role"] == "tool")
+    assert tool["tool_call_id"] == "tool-1"
+    assert tool["tool_name"] == "verify"
+    assert "[truncated]" in tool["content"]
     assert not list(tmp_path.rglob("SKILL.md"))
 
 
@@ -460,6 +472,9 @@ async def test_reviewer_has_no_tools_and_records_content_free_usage(
             model="synthetic",
             model_provider="test",
             metrics=RunMetrics(input_tokens=7, output_tokens=3, total_tokens=10),
+            messages=[
+                Message(role="assistant", metrics=MessageMetrics(input_tokens=7, output_tokens=3, total_tokens=10)),
+            ],
         )
 
     monkeypatch.setattr(
@@ -471,7 +486,7 @@ async def test_reviewer_has_no_tools_and_records_content_free_usage(
     result = await worker_module._review_session(
         config=config,
         runtime_paths=paths,
-        scope={"agent": "mind", "session": "session"},
+        scope=worker_module._scope(config, paths, "mind", "session", None),
         trace="private trace",
         skill_context="",
         identity=None,
@@ -483,6 +498,10 @@ async def test_reviewer_has_no_tools_and_records_content_free_usage(
     assert len(helper_rows) == 1
     assert helper_rows[0]["metrics"]["total_tokens"] == 10
     assert "private trace" not in json.dumps(helper_rows)
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+    assert report.totals.total_tokens == 10
+    assert report.request_breakdown is not None
+    assert [(row.kind, row.totals.total_tokens) for row in report.request_breakdown] == [("skill_learning", 10)]
 
 
 @pytest.mark.asyncio
@@ -732,3 +751,195 @@ async def test_exhausted_inference_preserves_turn_queued_during_review(
     await worker._run_cycle()
     assert len(calls) == 2
     assert (tmp_path / "agents/mind/workspace/skills/learned-task/SKILL.md").exists()
+
+
+@pytest.mark.parametrize("entry", ["fifo", "symlink", "linked-parent"])
+@pytest.mark.parametrize("operation", ["snapshot", "context", "journal"])
+def test_store_and_context_reject_special_files_without_blocking(
+    tmp_path: Path,
+    entry: str,
+    operation: str,
+) -> None:
+    """Every learner read path refuses planted files before an ordinary pathname read."""
+    config, paths = _learner(tmp_path)
+    workspace = tmp_path / "agents/mind/workspace"
+    target = workspace / (".skill-learning.json" if operation == "journal" else "skills/manual/SKILL.md")
+    target.parent.mkdir(parents=True)
+    if entry == "fifo":
+        os.mkfifo(target)
+    elif entry == "symlink":
+        outside = tmp_path / "outside"
+        outside.write_text(MARKDOWN)
+        target.symlink_to(outside)
+    else:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / target.name).write_text(MARKDOWN)
+        target.parent.rmdir()
+        target.parent.symlink_to(outside, target_is_directory=True)
+    timed_out = []
+
+    def timeout(_signum: int, _frame: object) -> None:
+        timed_out.append(True)
+        msg = "Unsafe read blocked"
+        raise TimeoutError(msg)
+
+    old_handler = signal.signal(signal.SIGALRM, timeout)
+    signal.setitimer(signal.ITIMER_REAL, 1)
+    try:
+        store = store_module.SkillStore(workspace)
+        if operation == "context":
+            worker = worker_module.SkillLearningWorker(paths, lambda: config)
+            with pytest.raises(ValueError, match=r"Unsafe|regular file"):
+                worker._skill_context(store, 1000, config=config, agent_name="mind")
+        else:
+            with pytest.raises(ValueError, match=r"Unsafe|regular file"):
+                store.owned_names() if operation == "journal" else store.snapshot()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+    assert not timed_out
+
+
+def test_malformed_journal_is_rejected_at_load(tmp_path: Path) -> None:
+    """A durable journal is validated before ownership or publication uses its fields."""
+    (tmp_path / ".skill-learning.json").write_text('{"learned-task": {"markdown": 123}}')
+    with pytest.raises(ValueError, match="validation errors"):
+        store_module.SkillStore(tmp_path).owned_names()
+
+
+@pytest.mark.asyncio
+async def test_invalid_scope_does_not_starve_next_queue_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed durable row is retired without breaking the serial queue cycle."""
+    config, paths = _learner(tmp_path)
+    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="broken", execution_identity=None)
+    with sqlite3.connect(paths.storage_root / "skill_learning.db") as connection:
+        connection.execute("UPDATE reviews SET scope=?", ('{"agent": "mind", "session": 123}',))
+    _persist(config, paths)
+    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
+    calls = []
+
+    async def review(**kwargs: object) -> SkillReview:
+        calls.append(kwargs)
+        return worker_module.SkillReview(action="no_change")
+
+    monkeypatch.setattr(worker_module, "_review_session", review)
+    await worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle()
+    assert len(calls) == 1
+    with sqlite3.connect(paths.storage_root / "skill_learning.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM reviews WHERE generation > processed").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_skill_context_redacts_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Manual descriptions and bodies receive the same credential redaction as traces."""
+    config, paths = _learner(tmp_path)
+    _persist(config, paths)
+    path = tmp_path / "agents/mind/workspace/skills/manual/SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("---\nname: manual\ndescription: api_key=sk-description-secret123\n---\npassword=body-secret123\n")
+    contexts = []
+
+    async def review(**kwargs: object) -> SkillReview:
+        contexts.append(cast("str", kwargs["skill_context"]))
+        return worker_module.SkillReview(action="no_change")
+
+    monkeypatch.setattr(worker_module, "_review_session", review)
+    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
+    await worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle()
+    assert len(contexts) == 1
+    assert "manual, protected" in contexts[0]
+    assert "description-secret123" not in contexts[0]
+    assert "body-secret123" not in contexts[0]
+
+
+@pytest.mark.asyncio
+async def test_overlapping_workers_review_each_generation_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cross-process lock covers selection, inference and queue acknowledgement."""
+    config, paths = _learner(tmp_path)
+    _persist(config, paths)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def review(**kwargs: object) -> SkillReview:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            entered.set()
+            await release.wait()
+        return worker_module.SkillReview(action="no_change")
+
+    monkeypatch.setattr(worker_module, "_review_session", review)
+    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
+    first = asyncio.create_task(worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle())
+    await asyncio.wait_for(entered.wait(), 2)
+    second = asyncio.create_task(worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle())
+    await asyncio.sleep(0.05)
+    assert len(calls) == 1
+    _persist(config, paths, text="New generation")
+    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
+    release.set()
+    await asyncio.wait_for(asyncio.gather(first, second), 3)
+    assert len(calls) == 2
+    assert "New generation" in cast("str", calls[1]["trace"])
+
+
+@pytest.mark.asyncio
+async def test_cancelled_worker_releases_review_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancelled inference cannot strand another worker behind its file lock."""
+    config, paths = _learner(tmp_path)
+    _persist(config, paths)
+    entered = asyncio.Event()
+    calls = []
+
+    async def review(**kwargs: object) -> SkillReview:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            entered.set()
+            await asyncio.Event().wait()
+        return worker_module.SkillReview(action="no_change")
+
+    monkeypatch.setattr(worker_module, "_review_session", review)
+    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
+    first = asyncio.create_task(worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle())
+    await asyncio.wait_for(entered.wait(), 2)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await asyncio.wait_for(worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle(), 2)
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["inference", "context"])
+async def test_failure_logs_safe_locations_without_exception_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Troubleshooting metadata must not disclose provider echoes of private content."""
+    config, paths = _learner(tmp_path)
+    config.agents["mind"].skill_learning.max_attempts = 1
+    _persist(config, paths)
+    if phase == "context":
+        skill = tmp_path / "agents/mind/workspace/skills/manual/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text(
+            "---\nname: manual\ndescription: [private conversation about Alice password=secret-value\n---\nBody",
+        )
+
+    async def review(**_kwargs: object) -> SkillReview:
+        msg = "private conversation about Alice password=secret-value"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(worker_module, "_review_session", review)
+    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
+    with capture_logs() as logs:
+        await worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle()
+    failure = next(log for log in logs if log["event"] == "Skill learning review failed")
+    assert failure["phase"] == phase
+    assert failure["exhausted"] is True
+    assert failure["frames"]
+    assert "private conversation" not in json.dumps(failure)
+    assert "secret-value" not in json.dumps(failure)
+    assert "private conversation" not in json.dumps(logs)
