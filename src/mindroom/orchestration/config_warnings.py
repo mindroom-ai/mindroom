@@ -28,7 +28,8 @@ def warn_about_config_risks(config: Config, runtime_paths: RuntimePaths) -> None
 
 def _warn_about_unrestricted_file_access_with_worker_code_tools(config: Config, runtime_paths: RuntimePaths) -> None:
     """Log one warning per agent that isolates code tools in a worker but lets path tools read anything."""
-    ensure_tool_registry_loaded(runtime_paths, config)
+    # Code-execution tools are built in; loading plugins here would re-import plugin modules mid-reload.
+    ensure_tool_registry_loaded(runtime_paths)
     for agent_name in config.agents:
         entity = config.resolve_entity(agent_name)
         if entity.file_access != "unrestricted":
