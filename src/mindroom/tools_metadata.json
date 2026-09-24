@@ -6796,7 +6796,7 @@
           "validation": null
         }
       ],
-      "consumes_workspace_paths": false,
+      "consumes_workspace_paths": true,
       "default_execution_target": "primary",
       "dependencies": [
         "google-api-python-client",
