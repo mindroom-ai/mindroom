@@ -173,6 +173,8 @@ save_dag_file("from airflow import DAG\n", "generated/new_job.py")
 The toolkit creates one E2B sandbox at initialization time and reuses it for subsequent tool calls from that toolkit instance.
 It exposes `run_python_code()`, `upload_file()`, `download_png_result()`, `download_chart_data()`, `download_file_from_sandbox()`, `run_command()`, `stream_command()`, `run_background_command()`, `kill_background_command()`, `list_files()`, `read_file_content()`, `write_file_content()`, `watch_directory()`, `get_public_url()`, `run_server()`, `set_sandbox_timeout()`, `get_sandbox_status()`, `shutdown_sandbox()`, and `list_running_sandboxes()`.
 The media helpers operate on the most recent `run_python_code()` result, which is why chart and PNG download flows are companion actions instead of standalone reads.
+Local paths for `upload_file()`, `download_file_from_sandbox()`, `download_png_result()`, and `download_chart_data()` are relative to the agent workspace.
+Absolute local paths, `..`, and symlinks that leave the workspace are rejected, and agents without a workspace cannot transfer local files.
 `timeout` is passed into `Sandbox.create(...)`, and `sandbox_options` is splatted directly into that constructor.
 
 ### Configuration

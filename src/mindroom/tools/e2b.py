@@ -4,16 +4,23 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.e2b import E2BTools
+    from mindroom.custom_tools.e2b import MindRoomE2BTools
 
 
 @register_tool_with_metadata(
     name="e2b",
     requires_primary_runtime=True,
+    consumes_workspace_paths=True,
     display_name="E2B Code Execution",
     description="Code execution sandbox environment with Python, file operations, and web server capabilities",
     category=ToolCategory.DEVELOPMENT,
@@ -44,6 +51,7 @@ if TYPE_CHECKING:
             default=None,
         ),
     ],
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,),
     dependencies=["e2b_code_interpreter"],
     docs_url="https://docs.agno.com/tools/toolkits/others/e2b",
     function_names=(
@@ -68,8 +76,8 @@ if TYPE_CHECKING:
         "write_file_content",
     ),
 )
-def e2b_tools() -> type[E2BTools]:
-    """Return E2B code execution tools for secure sandbox environments."""
-    from agno.tools.e2b import E2BTools
+def e2b_tools() -> type[MindRoomE2BTools]:
+    """Return E2B code execution tools whose local file transfers stay in the agent workspace."""
+    from mindroom.custom_tools.e2b import MindRoomE2BTools
 
-    return E2BTools
+    return MindRoomE2BTools
