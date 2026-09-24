@@ -53,6 +53,22 @@ def _assert_helm_uses_external_instance_secret(helm_args: list[str]) -> None:
     assert "credentials_encryption_key" not in set_file_args
 
 
+_OWNER_ACCOUNT_ID = "11111111-1111-4111-8111-111111111111"
+
+
+def _mock_owner_account_tables(mock_supabase: MagicMock) -> MagicMock:
+    """Route Supabase tables to a new instance row and an owner account with an email; return the accounts table."""
+    instances_table = MagicMock()
+    instances_table.insert.return_value.execute.return_value = Mock(data=[{"instance_id": "123"}])
+    instances_table.update.return_value.eq.return_value.execute.return_value = Mock()
+    accounts_table = MagicMock()
+    accounts_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = Mock(
+        data=[{"email": "Owner.User+Test@example.com"}]
+    )
+    mock_supabase.table.side_effect = lambda table: {"accounts": accounts_table, "instances": instances_table}[table]
+    return accounts_table
+
+
 def _applied_instance_secret_data(apply_secret: AsyncMock) -> dict[str, str]:
     """Return the Secret payload passed to _apply_instance_secret."""
     from backend.services.provisioner_service import _apply_instance_secret
@@ -179,12 +195,19 @@ async def test_provision_openrouter_key_logs_superseded_hash_revoke_failure(capl
     assert "Failed to revoke superseded OpenRouter key old_hash for instance 123" in caplog.text
 
 
+def _is_existing_secret_value_lookup(args: list[str]) -> bool:
+    """Return whether kubectl args read one existing instance Secret value."""
+    return args[:3] == ["get", "secret", "mindroom-api-keys-456"] and any(
+        arg.startswith("-o=jsonpath=") for arg in args
+    )
+
+
 async def _kubectl_without_credentials_encryption_secret(args: list[str], namespace: str | None = None):
     """Return an empty response for a missing existing instance API key Secret."""
     _ = namespace
     if args[:2] == ["get", "pvc"]:
         return (0, '{"items":[]}', "")
-    if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
+    if _is_existing_secret_value_lookup(args):
         assert "--ignore-not-found" in args
         return (0, "", "")
     return (0, "Success", "")
@@ -195,7 +218,7 @@ async def _kubectl_with_credentials_encryption_secret(args: list[str], namespace
     _ = namespace
     if args[:2] == ["get", "pvc"]:
         return (0, '{"items":[]}', "")
-    if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
+    if _is_existing_secret_value_lookup(args):
         assert "--ignore-not-found" in args
         existing_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii").rstrip("=")
         return (0, base64.b64encode(existing_key.encode("utf-8")).decode("ascii"), "")
@@ -207,7 +230,7 @@ async def _kubectl_credentials_encryption_secret_lookup_fails(args: list[str], n
     _ = namespace
     if args[:2] == ["get", "pvc"]:
         return (0, '{"items":[]}', "")
-    if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
+    if _is_existing_secret_value_lookup(args):
         assert "--ignore-not-found" in args
         return (1, "", "Forbidden")
     return (0, "Success", "")
@@ -398,6 +421,47 @@ class TestProvisionerEndpoints:
         assert secret_data["anthropic_key"] == ""
         assert secret_data["google_key"] == ""
         assert secret_data["deepseek_key"] == ""
+
+    def test_provisioning_secret_holds_only_instance_scoped_credentials(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """A tenant that reads its own Secret must not obtain the platform's Supabase service-role key."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+
+        with patch(
+            "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
+        ) as apply_secret:
+            apply_secret.return_value = "hash"
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "byok"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        secret_data = _applied_instance_secret_data(apply_secret)
+        # Review any new key for tenant scoping before extending this set.
+        assert set(secret_data) == {
+            "openai_key",
+            "anthropic_key",
+            "openrouter_key",
+            "google_key",
+            "deepseek_key",
+            "sandbox_proxy_token",
+            "credentials_encryption_key",
+            "matrix_oidc_client_secret",
+            "matrix_registration_shared_secret",
+            "platform_sso_secret",
+        }
+        assert len(bytes.fromhex(secret_data["sandbox_proxy_token"])) == 32
 
     def test_hobby_provisioning_only_injects_limited_openrouter_provider_key(
         self,
@@ -639,17 +703,7 @@ class TestProvisionerEndpoints:
         mock_config,
     ):
         """Provisioning should authorize the platform owner inside the hosted Matrix tenant."""
-        account_id = "11111111-1111-4111-8111-111111111111"
-        instances_table = MagicMock()
-        instances_table.insert.return_value.execute.return_value = Mock(data=[{"instance_id": "123"}])
-        instances_table.update.return_value.eq.return_value.execute.return_value = Mock()
-        accounts_table = MagicMock()
-        accounts_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = Mock(
-            data=[{"email": "Owner.User+Test@example.com"}]
-        )
-        mock_supabase.table.side_effect = lambda table: {"accounts": accounts_table, "instances": instances_table}[
-            table
-        ]
+        _mock_owner_account_tables(mock_supabase)
 
         with patch.multiple(
             "backend.services.provisioner_service",
@@ -659,7 +713,7 @@ class TestProvisionerEndpoints:
         ):
             response = client.post(
                 "/system/provision",
-                json={"subscription_id": "sub_test_123", "account_id": account_id, "tier": "byok"},
+                json={"subscription_id": "sub_test_123", "account_id": _OWNER_ACCOUNT_ID, "tier": "byok"},
                 headers=valid_auth_header,
             )
 
@@ -675,6 +729,33 @@ class TestProvisionerEndpoints:
         assert set_string_args["roomDefaults.inviteUsers[0]"] == "@owner.user+test:123.mindroom.test"
         assert set_string_args["roomDefaults.admins[0]"] == "@owner.user+test:123.mindroom.test"
         _assert_helm_uses_external_instance_secret(helm_args)
+
+    def test_provision_does_not_authorize_unbound_owner_matrix_user_without_oidc(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Without platform OIDC nothing binds the derived owner MXID to the account, so it gets no authority."""
+        accounts_table = _mock_owner_account_tables(mock_supabase)
+
+        with patch("backend.services.provisioner_service.INSTANCE_MATRIX_OIDC_ENABLED", ""):
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": _OWNER_ACCOUNT_ID, "tier": "byok"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        set_string_args = _helm_set_string_args(mock_helm.call_args.args[0])
+        assert "administrators[0]" not in set_string_args
+        assert "roomDefaults.inviteUsers[0]" not in set_string_args
+        assert "roomDefaults.admins[0]" not in set_string_args
+        accounts_table.select.assert_not_called()
 
     def test_provision_re_provision_existing(
         self,

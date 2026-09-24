@@ -1358,7 +1358,7 @@ class TestAgentBot(AgentBotTestBase):
         assert attachment_id in generate_kwargs["model_prompt"]
         media = generate_kwargs["media"]
         assert len(media.files) == 1
-        assert str(media.files[0].filepath) == str(local_media_path)
+        assert str(media.files[0].filepath) == str(attachment_record.local_path)
         assert list(media.videos) == []
         tracker.record_handled_turn.assert_called_once_with(
             replace(

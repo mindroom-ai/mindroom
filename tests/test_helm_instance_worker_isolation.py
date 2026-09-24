@@ -152,11 +152,11 @@ def _instance_secret_hash(**overrides: str) -> str:
         "openrouter_key": "",
         "google_key": "",
         "deepseek_key": "",
-        "supabase_service_key": "",
         "sandbox_proxy_token": "",
         "credentials_encryption_key": "",
         "matrix_oidc_client_secret": "",
         "matrix_registration_shared_secret": "",
+        "platform_sso_secret": "",
     }
     secret_data.update(overrides)
     ordered_values = [
@@ -165,11 +165,11 @@ def _instance_secret_hash(**overrides: str) -> str:
         secret_data["openrouter_key"],
         secret_data["google_key"],
         secret_data["deepseek_key"],
-        secret_data["supabase_service_key"],
         secret_data["sandbox_proxy_token"],
         secret_data["credentials_encryption_key"],
         secret_data["matrix_oidc_client_secret"],
         secret_data["matrix_registration_shared_secret"],
+        secret_data["platform_sso_secret"],
     ]
     return hashlib.sha256("|".join(ordered_values).encode("utf-8")).hexdigest()
 
@@ -321,6 +321,27 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
         "#dev:42.example.test",
     ]
     assert synapse_config["autocreate_auto_join_rooms"] is False
+
+
+@pytest.mark.parametrize(
+    "oidc_args",
+    [(), ("matrixOidc.enabled=true", "matrixOidc.issuer=https://api.example.test/matrix-oidc")],
+    ids=["default", "oidc"],
+)
+def test_instance_chart_closes_public_synapse_registration(oidc_args: tuple[str, ...]) -> None:
+    """Tenant homeservers are public, so no mode may accept anonymous self-registration."""
+    docs = _render_chart(Path("cluster/k8s/instance"), *oidc_args)
+    synapse_config = yaml.safe_load(_resource(docs, "ConfigMap", "synapse-config-demo")["data"]["homeserver.yaml"])
+
+    assert synapse_config["enable_registration"] is False
+    assert synapse_config["enable_registration_without_verification"] is False
+    assert synapse_config["registration_shared_secret_path"] == (
+        "/etc/mindroom-secrets/matrix_registration_shared_secret"  # noqa: S105
+    )
+    assert synapse_config["rc_registration"] == {"per_second": 0.17, "burst_count": 3}
+    assert synapse_config["rc_login"]["failed_attempts"] == {"per_second": 0.17, "burst_count": 3}
+    assert synapse_config["rc_login"]["account"]["per_second"] < 1
+    assert synapse_config["rc_login"]["address"]["per_second"] < 1
 
 
 def test_instance_chart_wires_image_pull_secrets_to_control_plane_pods() -> None:
@@ -637,6 +658,21 @@ def test_instance_chart_worker_manager_can_only_patch_own_worker_auth_secret() -
     ]
 
 
+def test_instance_chart_mounts_api_tokens_only_where_the_api_is_used() -> None:
+    """Only the dedicated-worker control plane needs a Kubernetes API token in its pod."""
+    worker_docs = _render_instance_chart()
+    sidecar_docs = _render_chart(Path("cluster/k8s/instance"))
+    worker_pod = _resource(worker_docs, "Deployment", "mindroom-demo")["spec"]["template"]["spec"]
+    sidecar_pod = _resource(sidecar_docs, "Deployment", "mindroom-demo")["spec"]["template"]["spec"]
+    synapse_pod = _resource(sidecar_docs, "Deployment", "synapse-demo")["spec"]["template"]["spec"]
+
+    assert worker_pod["serviceAccountName"] == "mindroom-worker-manager-demo"
+    assert "automountServiceAccountToken" not in worker_pod
+    assert sidecar_pod["automountServiceAccountToken"] is False
+    assert "serviceAccountName" not in sidecar_pod
+    assert synapse_pod["automountServiceAccountToken"] is False
+
+
 def test_instance_chart_uses_tenant_worker_auth_secret() -> None:
     """Shared-namespace instances should reference a pre-created tenant token Secret."""
     docs = _render_instance_chart()
@@ -725,15 +761,16 @@ def test_instance_chart_wires_credentials_encryption_env_when_key_is_unset() -> 
     assert annotations["mindroom.ai/instance-secret-hash"] == _instance_secret_hash()
 
 
-def test_instance_chart_credentials_encryption_key_rotation_changes_pod_template() -> None:
-    """Changing the Secret-backed credential key should render a new pod template hash."""
+@pytest.mark.parametrize("secret_value", ["credentials_encryption_key", "platformSsoSecret"])
+def test_instance_chart_secret_key_rotation_changes_pod_template(secret_value: str) -> None:
+    """Changing a Secret-backed key the runtime reads at startup should render a new pod template hash."""
     first_docs = _render_chart(
         Path("cluster/k8s/instance"),
-        "credentials_encryption_key=first-key",
+        f"{secret_value}=first-key",
     )
     second_docs = _render_chart(
         Path("cluster/k8s/instance"),
-        "credentials_encryption_key=second-key",
+        f"{secret_value}=second-key",
     )
     first_deployment = _resource(first_docs, "Deployment", "mindroom-demo")
     second_deployment = _resource(second_docs, "Deployment", "mindroom-demo")
@@ -757,6 +794,7 @@ def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
         "matrixOidc.clientId=mindroom-synapse",
         "matrixOidc.clientSecret=must-not-render-oidc",
         "matrixRegistrationSharedSecret=must-not-render-registration",
+        "platformSsoSecret=must-not-render-platform-sso",
     )
     mindroom = _resource(docs, "Deployment", "mindroom-demo")
     synapse = _resource(docs, "Deployment", "synapse-demo")
@@ -769,6 +807,16 @@ def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
     assert "must-not-render" not in rendered
     assert "must-not-render-oidc" not in rendered
     assert "must-not-render-registration" not in rendered
+    assert "must-not-render-platform-sso" not in rendered
+    platform_sso_secret_env = next(
+        env for env in mindroom_container["env"] if env["name"] == "MINDROOM_PLATFORM_SSO_SECRET"
+    )
+    assert platform_sso_secret_env["valueFrom"]["secretKeyRef"] == {
+        "name": "tenant-runtime-secrets",
+        "key": "platform_sso_secret",
+        "optional": True,
+    }
+    assert mindroom_env["MINDROOM_PLATFORM_SSO_URL"] == "https://api.mindroom.chat/instance-sso/authorize"
     assert mindroom["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "tenant-runtime-secrets"
     assert synapse["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "tenant-runtime-secrets"
     assert mindroom["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/instance-secret-hash"] == "abc123"
@@ -779,6 +827,31 @@ def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
     assert "registration_shared_secret_path: /etc/mindroom-secrets/matrix_registration_shared_secret" in synapse_config
     assert "registration_shared_secret:" not in synapse_config
     assert yaml.safe_load(synapse_config)["password_config"] == {"enabled": True}
+
+
+def test_instance_chart_never_gives_tenant_the_supabase_service_key() -> None:
+    """Tenant workloads are untrusted and must never hold the platform's RLS-bypassing key."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "supabaseServiceKey=must-not-render-service-key",
+    )
+    secret = _resource(docs, "Secret", "mindroom-api-keys-demo")
+    mindroom_env = _env_by_name(_container(_resource(docs, "Deployment", "mindroom-demo"), "mindroom"))
+
+    assert "must-not-render-service-key" not in json.dumps(docs)
+    assert not any("service_key" in key for key in secret["stringData"])
+    assert not any("SERVICE_KEY" in name for name in mindroom_env)
+    assert "SUPABASE_ANON_KEY" in mindroom_env
+
+
+def test_instance_chart_points_platform_login_at_platform_domain() -> None:
+    """Split platform and instance domains keep platform login and SSO on the platform hosts."""
+    docs = _render_chart(Path("cluster/k8s/instance"), "baseDomain=tenants.example.test", "platformDomain=example.test")
+    mindroom_env = _env_by_name(_container(_resource(docs, "Deployment", "mindroom-demo"), "mindroom"))
+
+    assert mindroom_env["MINDROOM_PUBLIC_URL"]["value"] == "https://demo.tenants.example.test"
+    assert mindroom_env["MINDROOM_PLATFORM_LOGIN_URL"]["value"] == "https://app.example.test/auth/login"
+    assert mindroom_env["MINDROOM_PLATFORM_SSO_URL"]["value"] == "https://api.example.test/instance-sso/authorize"
 
 
 def test_instance_chart_numeric_customer_uses_valid_instance_secret_name() -> None:
@@ -792,6 +865,7 @@ def test_instance_chart_numeric_customer_uses_valid_instance_secret_name() -> No
 
     assert secret["metadata"]["name"] == "mindroom-api-keys-1"
     assert secret["stringData"]["matrix_registration_shared_secret"]
+    assert secret["stringData"]["platform_sso_secret"] == ""
     assert deployment["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "mindroom-api-keys-1"
 
 
@@ -897,6 +971,22 @@ def test_platform_chart_rejects_trusted_upstream_without_user_id_header() -> Non
     assert (
         "provisioner.trustedUpstreamAuth.userIdHeader is required when provisioner.trustedUpstreamAuth.enabled=true"
     ) in completed.stderr
+
+
+@pytest.mark.parametrize("webhook_secret", ["", " ", "whsec_test"])
+def test_platform_chart_requires_stripe_webhook_secret_with_stripe_key(webhook_secret: str) -> None:
+    """Stripe webhooks are forgeable without a signing secret, so Stripe billing must not deploy without one."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/platform"),
+        "stripe.secretKey=sk_test",
+        f"stripe.webhookSecret={webhook_secret}",
+        release_name="mindroom-platform",
+    )
+    if not webhook_secret.strip():
+        assert completed.returncode != 0
+        assert "stripe.webhookSecret is required when stripe.secretKey is set" in completed.stderr
+    else:
+        completed.check_returncode()
 
 
 def test_platform_chart_wires_instance_credentials_encryption_secret() -> None:

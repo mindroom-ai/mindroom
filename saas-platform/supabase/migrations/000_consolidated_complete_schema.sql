@@ -22,6 +22,17 @@ BEGIN
 END$$;
 
 -- ============================================================================
+-- FUNCTION PRIVILEGES
+-- ============================================================================
+-- PostgreSQL grants EXECUTE on new functions to PUBLIC, Supabase also grants it
+-- on new public functions to anon and authenticated, and PostgREST exposes every
+-- executable public function as /rest/v1/rpc/<name>. Functions created by this
+-- role are not executable by PUBLIC, anon, or authenticated unless a GRANT below
+-- allows it.
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM anon, authenticated;
+
+-- ============================================================================
 -- ACCOUNTS TABLE (Linked to auth.users)
 -- ============================================================================
 -- The accounts.id is the SAME as auth.users.id for perfect linking
@@ -554,7 +565,9 @@ CREATE POLICY "Admins can manage all webhook events" ON webhook_events
     FOR ALL USING (is_admin())
     WITH CHECK (is_admin());
 
-GRANT EXECUTE ON FUNCTION soft_delete_account TO authenticated, service_role;
+-- RLS policies call is_admin() as the querying role.
+GRANT EXECUTE ON FUNCTION is_admin() TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION soft_delete_account TO service_role;
 GRANT EXECUTE ON FUNCTION restore_account TO service_role;
 GRANT EXECUTE ON FUNCTION hard_delete_account TO service_role;
 
@@ -572,21 +585,6 @@ GRANT ALL ON TABLE usage TO service_role;
 GRANT USAGE, SELECT ON SEQUENCE instance_id_seq TO authenticated;
 GRANT USAGE ON SEQUENCE instance_id_seq TO anon;  -- anon doesn't need UPDATE
 GRANT USAGE, SELECT, UPDATE ON SEQUENCE instance_id_seq TO service_role;  -- service role needs full access
-
--- Helper to run privileged SQL via service role (used by tooling scripts)
-CREATE OR REPLACE FUNCTION exec_sql(query TEXT)
-RETURNS VOID
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-BEGIN
-    EXECUTE query;
-END;
-$$;
-
-REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO service_role;
 
 REVOKE INSERT, UPDATE ON TABLE accounts FROM authenticated;
 GRANT SELECT ON TABLE accounts TO authenticated;

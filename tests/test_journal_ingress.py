@@ -48,7 +48,7 @@ from mindroom.matrix.journal_ingress import (
     ingestion_timeline_views,
     parse_journal_event,
 )
-from mindroom.pending_event_worker import _BATCH_SIZE, PendingEventWorker
+from mindroom.pending_event_worker import _BATCH_SIZE, _MAX_RETRY_DELAY_SECONDS, PendingEventWorker
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
 from tests.conftest import request_envelope
 from tests.journal_helpers import admit_dispatch_event
@@ -2643,6 +2643,44 @@ class TestRoomRetryBackoff:
             assert retry_sleeps[-1][0] == 1
         finally:
             await worker.stop()
+
+    async def test_a_long_outage_retries_the_event_until_it_succeeds(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A callback failure never settles its event, however long the outage lasts.
+
+        An exception says nothing about whether the event itself is at fault, so
+        an unreachable homeserver or model provider must hold the room's lane
+        rather than drop the user's message. Deterministic refusals settle
+        inside the callback instead.
+        """
+        outage_failures = 25
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$message" and attempts.count("$message") <= outage_failures:
+                msg = "homeserver unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$message", ts=1_000))
+        await TestPendingEventWorker._admit(alice, text_event("$later", ts=2_000))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        try:
+            for index in range(outage_failures):
+                await _eventually(lambda index=index: len(retry_sleeps) > index)
+                assert await alice.is_pending("$message")
+                retry_sleeps[index][1].set()
+            await _eventually_async(lambda: alice.pending(room_id=ROOM))
+        finally:
+            await worker.stop()
+
+        assert attempts == ["$message"] * (outage_failures + 1) + ["$later"]
+        assert retry_sleeps[-1][0] == _MAX_RETRY_DELAY_SECONDS
 
     async def test_each_room_wakes_at_its_own_retry_without_new_admission(
         self,

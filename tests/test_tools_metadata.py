@@ -1,10 +1,15 @@
 """Test tool metadata JSON snapshot for dashboard consumption."""
 
+import contextlib
 import gc
+import inspect
 import json
 import sys
+import threading
 import weakref
+from collections.abc import Iterator
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Never
@@ -24,7 +29,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
-from mindroom.tool_system.declarations import SetupType, ToolValidationInfo
+from mindroom.tool_system.declarations import SetupType, ToolExecutionTarget, ToolFileAccess, ToolValidationInfo
 from mindroom.tool_system.metadata import (
     _AUTHORED_OVERRIDE_INHERIT,
     ConfigField,
@@ -39,6 +44,7 @@ from mindroom.tool_system.metadata import (
     get_tool_by_name,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
+    validate_authored_tool_entry_overrides,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry_state import (
@@ -52,6 +58,7 @@ from mindroom.tool_system.registry_state import (
     restore_tool_registry_snapshot,
 )
 from mindroom.tool_system.worker_routing import (
+    ResolvedWorkerTarget,
     ToolExecutionIdentity,
     resolve_worker_target,
 )
@@ -175,6 +182,7 @@ def test_registration_preserves_primary_runtime_requirement() -> None:
 
         @register_tool_with_metadata(
             name="test_primary_runtime_registration",
+            file_access=ToolFileAccess.NONE,
             display_name="Primary Runtime Registration",
             description="Test-only primary-runtime declaration.",
             category=ToolCategory.DEVELOPMENT,
@@ -198,6 +206,7 @@ def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Leaked Tool",
         description="Temporary leaked tool metadata",
         category=ToolCategory.DEVELOPMENT,
@@ -384,6 +393,111 @@ async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pyte
     result = await tool._async_crawl("https://example.com")
 
     assert result == "public content"
+
+
+# Research toolkits whose URL functions download pages from the MindRoom process through the server-fetch guard.
+_LOCAL_URL_FETCH_TOOLS = ("crawl4ai", "trafilatura", "website")
+# Research toolkits that still download model-chosen URLs locally without the guard; each is tracked separately.
+_UNGUARDED_LOCAL_URL_FETCH_TOOLS = ("agentql", "newspaper")
+# Research toolkits that forward URLs to a hosted service instead of downloading them locally.
+_HOSTED_URL_FETCH_TOOLS = (
+    "brightdata",
+    "browserbase",
+    "exa",
+    "firecrawl",
+    "jina",
+    "oxylabs",
+    "scrapegraph",
+    "serper",
+    "spider",
+    "tavily",
+)
+
+
+def _url_functions(tool_name: str) -> list[tuple[str, str]]:
+    """Return each statically defined toolkit function and the URL parameter it accepts."""
+    toolkit_class = BUILTIN_TOOL_REGISTRY[tool_name]()
+    functions: list[tuple[str, str]] = []
+    for function_name in BUILTIN_TOOL_METADATA[tool_name].function_names:
+        method = getattr(toolkit_class, function_name, None)
+        if method is None:
+            continue
+        functions.extend(
+            (function_name, parameter)
+            for parameter in inspect.signature(method).parameters
+            if "url" in parameter.lower()
+        )
+    return functions
+
+
+@contextlib.contextmanager
+def _recording_loopback_server() -> Iterator[tuple[str, list[object]]]:
+    """Serve a loopback page that records every accepted connection."""
+    connections: list[object] = []
+
+    class RecordingHandler(BaseHTTPRequestHandler):
+        def setup(self) -> None:
+            connections.append(self.client_address)
+            super().setup()
+
+        def do_GET(self) -> None:
+            body = b"<html><body><article><p>loopback secret</p></article></body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *_args: object) -> None:  # noqa: A002, ARG002
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), RecordingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/api/config/raw", connections
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_research_url_tools_declare_their_fetch_path() -> None:
+    """Every research toolkit taking URLs must be classified as a guarded, unguarded, or hosted fetcher."""
+    url_tools = sorted(
+        tool_name
+        for tool_name, metadata in BUILTIN_TOOL_METADATA.items()
+        if tool_name in BUILTIN_TOOL_REGISTRY
+        and metadata.category is ToolCategory.RESEARCH
+        and _url_functions(tool_name)
+    )
+
+    assert url_tools == sorted((*_LOCAL_URL_FETCH_TOOLS, *_UNGUARDED_LOCAL_URL_FETCH_TOOLS, *_HOSTED_URL_FETCH_TOOLS))
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        *_LOCAL_URL_FETCH_TOOLS,
+        # Newspaper4k needs no browser, so it shows that this check catches an unguarded local download.
+        pytest.param(
+            "newspaper",
+            marks=pytest.mark.xfail(strict=True, reason="Newspaper4k downloads are unguarded and tracked separately."),
+        ),
+    ],
+)
+def test_local_url_fetch_tools_do_not_contact_loopback_targets(tool_name: str) -> None:
+    """Local page fetchers must refuse loopback targets before connecting unless they default to a worker."""
+    if BUILTIN_TOOL_METADATA[tool_name].default_execution_target is ToolExecutionTarget.WORKER:
+        pytest.skip("Worker execution keeps downloads behind the worker egress policy.")
+    toolkit = BUILTIN_TOOL_REGISTRY[tool_name]()()
+
+    with _recording_loopback_server() as (url, connections):
+        for function_name, parameter in _url_functions(tool_name):
+            argument = [url] if parameter.endswith("urls") else url
+            with contextlib.suppress(ServerFetchUrlError):
+                getattr(toolkit, function_name)(**{parameter: argument})
+
+    assert connections == []
 
 
 def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -607,6 +721,7 @@ def test_registration_rejects_missing_oauth_fallback_config_field() -> None:
 
         @register_tool_with_metadata(
             name="invalid_oauth_fallback",
+            file_access=ToolFileAccess.NONE,
             display_name="Invalid OAuth Fallback",
             description="Invalid test metadata.",
             category=ToolCategory.DEVELOPMENT,
@@ -664,6 +779,7 @@ def test_get_tool_by_name_does_not_infer_hidden_constructor_kwargs(tmp_path: Pat
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Hidden Runtime Tool",
         description="Test-only toolkit for constructor contract coverage.",
         category=ToolCategory.DEVELOPMENT,
@@ -709,6 +825,7 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Explicit Runtime Tool",
         description="Test-only toolkit for explicit constructor contract coverage.",
         category=ToolCategory.DEVELOPMENT,
@@ -768,6 +885,7 @@ def test_validate_authored_overrides_accepts_declared_field_types_and_nulls() ->
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Authored Override Tool",
         description="Test-only toolkit for authored override validation.",
         category=ToolCategory.DEVELOPMENT,
@@ -812,6 +930,7 @@ def test_validate_authored_overrides_accepts_inherit_sentinel_for_required_field
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Authored Override Inherit Required",
         description="Test-only toolkit for inherit sentinel coverage.",
         category=ToolCategory.DEVELOPMENT,
@@ -843,6 +962,7 @@ def test_validate_authored_overrides_accepts_string_lists_for_text_fields_with_a
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Authored Override String Array Compat",
         description="Test-only toolkit for string-array compatibility coverage.",
         category=ToolCategory.DEVELOPMENT,
@@ -877,6 +997,7 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
 
     @register_tool_with_metadata(
         name=tool_name,
+        file_access=ToolFileAccess.NONE,
         display_name="Authored Override Errors",
         description="Test-only toolkit for override error coverage.",
         category=ToolCategory.DEVELOPMENT,
@@ -1334,3 +1455,245 @@ def test_resolved_tool_state_cache_evicts_on_config_gc(
         assert not metadata_module._RESOLVED_TOOL_STATE_CACHE
     finally:
         metadata_module.clear_resolved_tool_state_cache()
+
+
+def test_code_execution_tools_declare_unconfined_file_access() -> None:
+    """Tools that run arbitrary programs cannot be confined in-process."""
+    for name in ("shell", "python", "docker", "script", "claude_agent"):
+        assert TOOL_METADATA[name].file_access is ToolFileAccess.UNCONFINED, name
+        assert TOOL_METADATA[name].executes_code, name
+
+
+_UNCONFINED_LOCAL_FILE_TOOLS = (
+    "agentql",
+    "airflow",
+    "browserbase",
+    "composio",
+    "csv",
+    "duckdb",
+    "groq",
+    "moviepy_video_tools",
+    "newspaper",
+    "openai",
+    "pandas",
+    "postgres",
+    "redshift",
+    "slack",
+    "sql",
+    "visualization",
+    "web_browser_tools",
+)
+
+
+def test_tools_reaching_local_files_outside_file_access_are_declared_unconfined() -> None:
+    """Tools whose queries, paths, or URLs reach local files without file_access confinement must say so."""
+    for name in _UNCONFINED_LOCAL_FILE_TOOLS:
+        metadata = TOOL_METADATA[name]
+        assert metadata.file_access is ToolFileAccess.UNCONFINED, name
+        assert not metadata.executes_code, name
+
+
+def test_only_code_execution_tools_execute_code() -> None:
+    """The executes_code flag stays independent of the file_access class."""
+    assert {name for name, metadata in TOOL_METADATA.items() if metadata.executes_code} == {
+        "claude_agent",
+        "docker",
+        "python",
+        "script",
+        "shell",
+    }
+
+
+def test_path_tools_follow_agent_file_access_and_receive_it() -> None:
+    """Tools that take model-supplied paths follow and receive the agent file_access."""
+    for name in ("file", "coding", "attachments", "matrix_message", "gmail", "google_drive", "browser", "e2b"):
+        metadata = TOOL_METADATA[name]
+        assert metadata.file_access is ToolFileAccess.AGENT, name
+        assert ToolManagedInitArg.FILE_ACCESS in metadata.managed_init_args, name
+
+
+def test_tools_default_to_no_file_access() -> None:
+    """Tools without local file paths declare no file access."""
+    assert TOOL_METADATA["calculator"].file_access is ToolFileAccess.NONE
+
+
+def _file_access_worker_target(agent_name: str) -> ResolvedWorkerTarget:
+    return resolve_worker_target(
+        None,
+        agent_name,
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name=agent_name,
+            requester_id="@user:localhost",
+            room_id="!room:localhost",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session",
+        ),
+        tenant_id=None,
+        account_id=None,
+    )
+
+
+def test_get_tool_by_name_passes_agent_file_access(tmp_path: Path) -> None:
+    """The managed file_access arg resolves the constructing agent's setting; unknown agents inherit the default and no config stays confined."""
+    tool_name = "test_file_access_tool"
+
+    class FileAccessToolkit(Toolkit):
+        def __init__(self, *, file_access: str) -> None:
+            self.file_access = file_access
+            super().__init__(name=tool_name, tools=[])
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="File Access Tool",
+        description="Test-only toolkit for file_access injection.",
+        category=ToolCategory.DEVELOPMENT,
+        file_access=ToolFileAccess.AGENT,
+        managed_init_args=(ToolManagedInitArg.FILE_ACCESS,),
+    )
+    def _file_access_tool_factory() -> type[FileAccessToolkit]:
+        return FileAccessToolkit
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    config = Config.model_validate(
+        {
+            "defaults": {"file_access": "unrestricted"},
+            "agents": {
+                "admin": {"display_name": "Admin", "file_access": "unrestricted"},
+                "plain": {"display_name": "Plain", "file_access": "workspace"},
+            },
+        },
+    )
+
+    def build(runtime_config: Config | None, worker_target: ResolvedWorkerTarget | None) -> str:
+        tool = get_tool_by_name(
+            tool_name,
+            runtime_paths,
+            runtime_config=runtime_config,
+            worker_target=worker_target,
+            disable_sandbox_proxy=True,
+        )
+        assert isinstance(tool, FileAccessToolkit)
+        return tool.file_access
+
+    try:
+        assert build(config, _file_access_worker_target("admin")) == "unrestricted"
+        assert build(config, _file_access_worker_target("plain")) == "workspace"
+        assert build(None, _file_access_worker_target("admin")) == "workspace"
+        assert build(config, None) == "unrestricted"
+        assert build(config, _file_access_worker_target("stranger")) == "unrestricted"
+    finally:
+        TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+
+
+def test_file_access_on_code_tool_accepts_only_unconfined() -> None:
+    """Code tools accept an explicit no-op unconfined file_access and nothing else."""
+    validated = validate_authored_tool_entry_overrides(
+        "shell",
+        {"file_access": "unconfined"},
+        config_path_prefix="agents.a.tools",
+    )
+    assert "file_access" not in validated
+    for value in ("workspace", "unrestricted", True, None):
+        with pytest.raises(ToolConfigOverrideError, match="worker_tools"):
+            validate_authored_tool_entry_overrides(
+                "shell",
+                {"file_access": value},
+                config_path_prefix="agents.a.tools",
+            )
+
+
+def test_file_access_on_primary_only_unconfined_tool_does_not_suggest_worker_routing() -> None:
+    """Tools that cannot run in a worker must not be told to isolate themselves with worker_tools."""
+    validate_authored_tool_entry_overrides(
+        "duckdb",
+        {"file_access": "unconfined"},
+        config_path_prefix="agents.a.tools",
+    )
+    with pytest.raises(ToolConfigOverrideError, match="trusted with the primary runtime") as exc_info:
+        validate_authored_tool_entry_overrides(
+            "duckdb",
+            {"file_access": "workspace"},
+            config_path_prefix="agents.a.tools",
+        )
+    assert "worker_tools" not in str(exc_info.value)
+
+
+def test_file_access_on_other_tools_points_to_agent_setting() -> None:
+    """Per-tool file_access is refused for tools that follow or ignore the agent setting."""
+    for tool_name in ("gmail", "calculator"):
+        with pytest.raises(ToolConfigOverrideError, match=r"agents\.<name>\.file_access|defaults\.file_access"):
+            validate_authored_tool_entry_overrides(
+                tool_name,
+                {"file_access": "unconfined"},
+                config_path_prefix="agents.a.tools",
+            )
+
+
+def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
+    """The removed per-tool restriction field points authors to the agent file_access setting."""
+    for tool_name in ("file", "coding", "python"):
+        with pytest.raises(
+            ToolConfigOverrideError,
+            match=rf"agents\.a\.tools\.{tool_name}\.restrict_to_base_dir was removed; use agents\.<name>\.file_access",
+        ):
+            validate_authored_tool_entry_overrides(
+                tool_name,
+                {"restrict_to_base_dir": False},
+                config_path_prefix="agents.a.tools",
+            )
+
+
+def test_file_access_rules_survive_the_validation_snapshot() -> None:
+    """Worker validation snapshots keep each tool's file-access class."""
+    snapshot = {
+        "runner": ToolValidationInfo(name="runner", file_access=ToolFileAccess.UNCONFINED),
+        "reader": ToolValidationInfo(name="reader", file_access=ToolFileAccess.AGENT),
+    }
+    restored = deserialize_tool_validation_snapshot(serialize_tool_validation_snapshot(snapshot))
+    assert restored["runner"].file_access is ToolFileAccess.UNCONFINED
+    assert restored["reader"].file_access is ToolFileAccess.AGENT
+    validate_authored_tool_entry_overrides("runner", {"file_access": "unconfined"}, tool_metadata=restored)
+    with pytest.raises(ToolConfigOverrideError, match=r"defaults\.file_access"):
+        validate_authored_tool_entry_overrides("reader", {"file_access": "unconfined"}, tool_metadata=restored)
+
+
+def test_deserialize_tool_validation_snapshot_rejects_unknown_file_access() -> None:
+    """Validation snapshot payloads type-check the file-access class strictly."""
+    with pytest.raises(TypeError, match="file_access"):
+        deserialize_tool_validation_snapshot({"shell": {"file_access": "sometimes"}})
+
+
+def test_config_load_rejects_workspace_file_access_on_shell(tmp_path: Path) -> None:
+    """Config runtime validation applies the file_access authored-key rules."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    def validate(value: str) -> None:
+        Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "router": {"model": "default"},
+                "agents": {
+                    "code": {
+                        "display_name": "Code",
+                        "model": "default",
+                        "tools": [{"shell": {"file_access": value}}],
+                    },
+                },
+            },
+            runtime_paths,
+        )
+
+    validate("unconfined")
+    for value in ("workspace", "unrestricted"):
+        with pytest.raises(ConfigRuntimeValidationError, match="worker_tools"):
+            validate(value)

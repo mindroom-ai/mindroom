@@ -50,6 +50,8 @@ class PublishableReport:
     title: str
     requested_by: str
     artifact_kind: str = _ARTIFACT_KIND_HTML_FILE
+    # Trusted root a copied static-site source is walked from through descriptors.
+    artifact_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -155,9 +157,12 @@ class ReportPublishingStore:
                 raise ReportPublishingError(msg)
             return _relative_artifact_path(source.artifact_path, self._storage_root)
         if source.artifact_kind == ARTIFACT_KIND_STATIC_SITE:
+            if source.artifact_root is None:
+                msg = "Static site publishing requires an authorized source root."
+                raise ReportPublishingError(msg)
             destination_dir = self._report_publishing_root / "artifacts" / slug
             try:
-                snapshot_static_site(source.artifact_path, destination_dir)
+                snapshot_static_site(source.artifact_root, source.artifact_path, destination_dir)
             except (OSError, StaticSiteSnapshotError) as exc:
                 raise ReportPublishingError(str(exc)) from exc
             return _relative_artifact_path(destination_dir, self._storage_root)

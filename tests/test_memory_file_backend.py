@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -2089,3 +2090,204 @@ async def test_shared_file_memory_uses_workspace_root_without_affecting_other_ag
     assert any(memory["memory"] == "Default scope memory" for memory in calc_memories)
     assert (workspace / "MEMORY.md").exists()
     assert (agent_workspace_root_path(storage_path, "calculator") / "MEMORY.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_file_backend_ignores_symlinked_memory_entries(
+    storage_path: Path,
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """Links planted in the tool workspace must never be read by the primary process."""
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    secret = outside_dir / "environ.md"
+    secret.write_text("ANTHROPIC_API_KEY=super-secret-value\n", encoding="utf-8")
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    (workspace / "memory").mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").symlink_to(secret)
+    (workspace / "memory" / "planted.md").symlink_to(secret)
+    (workspace / "memory" / "linked").symlink_to(outside_dir, target_is_directory=True)
+
+    prompt_parts = await build_memory_prompt_parts("api key", "general", storage_path, config)
+    assert "super-secret-value" not in prompt_parts.session_preamble
+    assert "super-secret-value" not in prompt_parts.transient_turn_context
+    assert await list_all_agent_memories("general", storage_path, config) == []
+    assert await search_agent_memories("secret", "general", storage_path, config, limit=5) == []
+    assert await get_agent_memory("file:memory/planted.md:1", "general", storage_path, config) is None
+    assert await get_agent_memory("file:memory/linked/environ.md:1", "general", storage_path, config) is None
+
+
+@pytest.mark.asyncio
+async def test_file_backend_add_refuses_to_write_through_a_symlinked_entrypoint(
+    storage_path: Path,
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A planted link must not redirect a memory write outside the scope."""
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    target = tmp_path / "outside.md"
+    target.write_text("Untouched target.\n", encoding="utf-8")
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").symlink_to(target)
+
+    with pytest.raises(OSError, match="Too many levels of symbolic links"):
+        await add_agent_memory("Fresh memory entry", "general", storage_path, config)
+
+    assert target.read_text(encoding="utf-8") == "Untouched target.\n"
+
+
+@pytest.mark.asyncio
+# A regression blocks forever on the FIFO, so the run is aborted instead of hanging.
+@pytest.mark.timeout(10, method="thread")
+async def test_file_backend_skips_non_regular_memory_entries(storage_path: Path, config: Config) -> None:
+    """A FIFO entrypoint must not block the per-turn prompt build."""
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    (workspace / "memory").mkdir(parents=True, exist_ok=True)
+    os.mkfifo(workspace / "MEMORY.md")
+    os.mkfifo(workspace / "memory" / "blocking.md")
+
+    prompt_parts = await build_memory_prompt_parts("anything", "general", storage_path, config)
+
+    assert "[File memory entrypoint (agent)]" not in prompt_parts.session_preamble
+    assert await list_all_agent_memories("general", storage_path, config) == []
+
+
+@pytest.mark.asyncio
+async def test_file_backend_caps_oversized_memory_files(storage_path: Path, config: Config) -> None:
+    """An oversized memory file is read up to its cap instead of unbounded."""
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    daily_file = workspace / "memory" / "big.md"
+    daily_file.parent.mkdir(parents=True, exist_ok=True)
+    filler_line = "Filler note about deployment runbooks.\n"
+    daily_file.write_text(
+        filler_line * (1 + (1 << 20) // len(filler_line)) + "Sentinel note beyond the cap.\n",
+        encoding="utf-8",
+    )
+
+    results = await list_all_agent_memories("general", storage_path, config)
+
+    assert [result["memory"] for result in results] == ["Filler note about deployment runbooks."]
+    assert await search_agent_memories("sentinel", "general", storage_path, config, limit=5) == []
+
+
+@pytest.mark.asyncio
+async def test_file_backend_lists_nested_memory_files_and_skips_bad_siblings(
+    storage_path: Path,
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """The no-follow walk finds nested notes while a planted sibling is skipped."""
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    outside = tmp_path / "outside.md"
+    outside.write_text("Outside secret note.\n", encoding="utf-8")
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    nested = workspace / "memory" / "projects" / "api.md"
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    nested.write_text("Nested project note.\n", encoding="utf-8")
+    (workspace / "memory" / "daily.md").write_text("Daily note.\n", encoding="utf-8")
+    (workspace / "memory" / "planted.md").symlink_to(outside)
+
+    results = await list_all_agent_memories("general", storage_path, config)
+
+    assert [(result["id"], result["memory"]) for result in results] == [
+        ("file:memory/daily.md:1", "Daily note."),
+        ("file:memory/projects/api.md:1", "Nested project note."),
+    ]
+    nested_memory = await get_agent_memory("file:memory/projects/api.md:1", "general", storage_path, config)
+    assert nested_memory is not None
+    assert nested_memory["memory"] == "Nested project note."
+
+
+@pytest.mark.asyncio
+async def test_file_backend_limits_memory_directory_depth(storage_path: Path, config: Config) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    directory = workspace / "memory"
+    for level in range(1, 10):
+        directory /= f"level{level}"
+        directory.mkdir(parents=True)
+        (directory / "note.md").write_text(f"Note at level {level}.\n", encoding="utf-8")
+
+    results = await list_all_agent_memories("general", storage_path, config)
+
+    assert sorted(result["memory"] for result in results) == sorted(f"Note at level {level}." for level in range(1, 9))
+
+
+@pytest.mark.asyncio
+async def test_file_backend_append_writes_header_and_separator(storage_path: Path, config: Config) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    entrypoint = workspace / "MEMORY.md"
+
+    await add_agent_memory("First fact", "general", storage_path, config)
+    first_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
+    assert entrypoint.read_text(encoding="utf-8") == f"# Memory\n\n- [id={first_id}] First fact\n"
+
+    entrypoint.write_text("# Memory\n\nCurated line without newline", encoding="utf-8")
+    await add_agent_memory("Second fact", "general", storage_path, config)
+    second_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
+    assert entrypoint.read_text(encoding="utf-8") == (
+        f"# Memory\n\nCurated line without newline\n- [id={second_id}] Second fact\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_backend_rewrite_keeps_file_permissions(storage_path: Path, config: Config) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    daily_file = workspace / "memory" / "2026-06-13.md"
+    daily_file.parent.mkdir(parents=True, exist_ok=True)
+    daily_file.write_text("Old raw note.\n", encoding="utf-8")
+    daily_file.chmod(0o640)
+
+    await update_agent_memory("file:memory/2026-06-13.md:1", "New raw note.", "general", storage_path, config)
+
+    assert daily_file.read_text(encoding="utf-8") == "New raw note.\n"
+    assert daily_file.stat().st_mode & 0o777 == 0o640
+
+
+@pytest.mark.asyncio
+async def test_file_backend_refuses_to_rewrite_undecodable_memory_file(storage_path: Path, config: Config) -> None:
+    """A lossy decode must fail loudly instead of writing replacement characters back."""
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    daily_file = workspace / "memory" / "2026-06-13.md"
+    daily_file.parent.mkdir(parents=True, exist_ok=True)
+    original = b"Caf\xe9 note.\n- [id=m_latin] Structured caf\xe9 note.\n"
+    daily_file.write_bytes(original)
+
+    listed = await list_all_agent_memories("general", storage_path, config)
+    assert {result["id"] for result in listed} == {"m_latin", "file:memory/2026-06-13.md:1"}
+
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        await update_agent_memory("m_latin", "Changed.", "general", storage_path, config)
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        await delete_agent_memory("file:memory/2026-06-13.md:1", "general", storage_path, config)
+
+    assert daily_file.read_bytes() == original

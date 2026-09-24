@@ -19,6 +19,7 @@ Commands start with `!` and are normally handled by the router agent.
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
 | `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent |
+| `!mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
 | `!room_model [name\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) |
 | `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room |
@@ -61,7 +62,7 @@ Display available commands or get detailed help on a specific topic.
 !help edit_schedule
 ```
 
-**Topics:** `schedule`, `config`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
+**Topics:** `schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
 
 ### `!hi`
 
@@ -203,6 +204,31 @@ Only the same Matrix requester in the same agent scope can confirm the matching 
 `!desktop rotate` starts the same flow while leaving the current target active until confirmation.
 The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
 See [Matrix Desktop Bridge](tools/desktop.md) for local login and allowlist instructions.
+
+### `!mode`
+
+Switch one agent's tool interface for its next Matrix response in the current conversation.
+Minimal mode exposes only Bash to the model; the agent's configured tools remain available through the MindRoom CLI.
+Standard mode restores the usual tool interface.
+
+```
+!mode helper minimal
+!mode helper show
+!mode helper standard
+!mode helper reset
+```
+
+The choice survives restarts without changing `config.yaml`.
+For agents using threads, run the command inside an existing thread and continue talking to the agent in that same thread.
+For agents using `thread_mode: room`, the choice applies to the whole room, including commands sent from a thread.
+Private agents store the choice separately for each requester.
+Other agents and conversations are unaffected; teams and OpenAI-compatible API requests do not use this selection.
+
+You must be authorized to use the named agent.
+Minimal mode requires the agent's existing run, check, and kill shell permissions, a canonical workspace, and a supported dedicated Docker worker deployment.
+Unsupported deployment settings are rejected before saving the choice.
+If shell permissions or deployment settings later change, minimal responses fail closed.
+Run `!mode helper standard` or `!mode helper reset` in the same conversation to remove the saved choice and restore standard mode.
 
 ### `!model`
 

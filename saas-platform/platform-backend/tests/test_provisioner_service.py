@@ -70,6 +70,21 @@ class TestHelmArgsAssembly:
         assert set_string_pairs[0] == "matrixAutoJoinRoomKeys[0]=analysis"
         assert len(set_string_pairs) == len(provisioner_service._HOSTED_MATRIX_AUTO_JOIN_ROOM_KEYS)
 
+    def test_matrix_oidc_helm_args_normalize_enabled_flag_for_chart(self):
+        """Any enabled flag spelling renders the chart's OIDC branch, matching the owner authorization gate."""
+        helm_args: list[str] = []
+        with patch.multiple(
+            provisioner_service,
+            INSTANCE_MATRIX_OIDC_ENABLED="1",
+            INSTANCE_MATRIX_OIDC_ISSUER="",
+            INSTANCE_MATRIX_OIDC_CLIENT_ID="",
+        ):
+            provisioner_service._append_matrix_oidc_helm_args(helm_args)
+
+        set_pairs = [helm_args[i + 1] for i, arg in enumerate(helm_args) if arg == "--set"]
+        assert "matrixOidc.enabled=true" in set_pairs
+        assert "matrixOidc.enabled=1" not in set_pairs
+
     def test_matrix_oidc_helm_args_disabled(self):
         """Disabled hosted OIDC adds no Helm arguments."""
         helm_args: list[str] = []

@@ -18,6 +18,7 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput, RunStatus
 from agno.tools.calculator import CalculatorTools
 
+from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_storage import create_session_storage, get_agent_session, get_team_session
 from mindroom.agents import create_agent
 from mindroom.approval_tools import toolkit_owners_for_agents
@@ -46,7 +47,11 @@ from mindroom.teams import (
     continue_paused_team_run,
     materialize_exact_team_members,
 )
-from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
+from mindroom.tool_system.runtime_context import (
+    LiveToolDispatchContext,
+    ToolDispatchContext,
+    build_execution_identity_from_runtime_context,
+)
 from mindroom.usage_stats import collect_admin_usage, collect_self_usage
 from mindroom.usage_storage import quote_identifier
 from tests.conftest import unwrap_extracted_collaborator
@@ -79,9 +84,9 @@ class _HelperModel(RecordingModel):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("caller", ["agent", "private_agent", "team"])
+@pytest.mark.parametrize("caller", ["agent", "private_agent", "team", "cli_agent", "private_cli_agent"])
 @pytest.mark.parametrize("outcome", ["completed", "error", "cancel"])
-async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # noqa: PLR0915
+async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # noqa: C901, PLR0915 - shared native/CLI ownership outcomes
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caller: str,
@@ -90,7 +95,11 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     """Approval resume must retain paid helper output in its real caller store even if the resumed run fails."""
     config, paths = _make_config(tmp_path)
     config.agents["general"] = config.agents.pop("test_agent")
+    is_cli = caller in {"cli_agent", "private_cli_agent"}
     config.agents["general"].tools = [ToolConfigEntry(name="calculator")]
+    if is_cli:
+        config.agents["general"].tools.append(ToolConfigEntry(name="shell"))
+        config.administrators = ["@user:localhost"]
     config.defaults.learning = False
     config.memory.backend = "none"
     config.models["default"].provider = "synthetic"
@@ -99,7 +108,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         {"default": "auto_approve", "rules": [{"match": "add", "action": "require_approval"}]},
     )
     config.agents["general"].private = (
-        AgentPrivateConfig(per="user", root="mind_data") if caller == "private_agent" else None
+        AgentPrivateConfig(per="user", root="mind_data") if caller in {"private_agent", "private_cli_agent"} else None
     )
     if caller == "team":
         config.agents["second"] = AgentConfig(display_name="Second")
@@ -214,6 +223,10 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 toolkit_owners=owners,
             )
             assert captured is not None
+            if is_cli:
+                # Reconstruct an interrupted minimal response using its exact saved approval.
+                paused.metadata = {**(paused.metadata or {}), "agent_mode": "minimal"}
+                scope_context.storage.upsert_run(paused, session_id="approval-session")
             if caller == "team":
                 captured = _attach_team_pause_presentation(
                     captured,
@@ -232,6 +245,26 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
             else:
                 close_agent_runtime_state_dbs(actor, shared_scope_storage=scope_context.storage)
     calls = (ApprovalCall("approved", "add", "general", 2**62, toolkit_name="calculator"),)
+    cli_call = None
+    if is_cli:
+        cli_call = CliApprovalCall(
+            toolkit="calculator",
+            function="add",
+            call_id="approved",
+            parent_bash_call_id="interrupted-bash",
+            arguments={"a": 2, "b": 3},
+            requirements=tuple(paused.requirements or ()),
+            delegation_depth=0,
+        ).to_dict()
+
+        async def recovered_response(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
+            # The approved helper has already run; the old Bash is never replayed.
+            if outcome == "error":
+                msg = "Resumed provider failed"
+                raise RuntimeError(msg)
+            return CompletedApprovalRun(response_text="Finished.", metadata_content={})
+
+        monkeypatch.setattr("mindroom.approval_execution._stream_continuation_turn", recovered_response)
 
     async def resume() -> CompletedApprovalRun | PausedAttempt:
         if caller == "team":
@@ -273,9 +306,14 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 state="claimed",
                 calls=calls,
                 request_body="Add 2 and 3",
+                cli_call=cli_call,
             ),
             execution_identity=identity,
-            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            tool_dispatch=(
+                LiveToolDispatchContext.from_runtime_context(context)
+                if is_cli
+                else ToolDispatchContext(execution_identity=identity)
+            ),
             decisions={"approved": True},
             denial_reasons={"approved": None},
             tool_trace_collector=[],
