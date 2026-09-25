@@ -19,7 +19,7 @@ REDACTION_FAILED = "[redaction failed]"
 __all__ = [
     "REDACTED",
     "REDACTION_FAILED",
-    "contains_sensitive_text",
+    "contains_credential",
     "redact_log_event",
     "redact_sensitive_data",
     "redact_sensitive_text",
@@ -530,22 +530,16 @@ def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     return _redact_sensitive_text_fail_closed(value, max_length=max_length)
 
 
-def contains_sensitive_text(value: str) -> bool:
-    """Return whether redaction would change any line-bounded slice of arbitrarily long text."""
-    chunk: list[str] = []
-    size = 0
-    for line in value.splitlines(keepends=True):
-        if chunk and size + len(line) > _MAX_TEXT_INPUT_LENGTH:
-            if _chunk_is_sensitive("".join(chunk)):
-                return True
-            chunk, size = [], 0
-        chunk.append(line)
-        size += len(line)
-    return bool(chunk) and _chunk_is_sensitive("".join(chunk))
+def contains_credential(value: str) -> bool:
+    """Return whether text holds a literal credential: a private key, a known token format, or a URL secret.
 
-
-def _chunk_is_sensitive(chunk: str) -> bool:
-    return redact_sensitive_text(chunk) != chunk
+    Unlike redaction, placeholder assignments such as ``OPENAI_API_KEY=<your key>`` do not count.
+    """
+    return bool(
+        _PRIVATE_KEY_PATTERN.search(value)
+        or _TOKEN_LIKE_PATTERN.search(value)
+        or any(_redact_url(match.group("url")) != match.group("url") for match in _URL_PATTERN.finditer(value)),
+    )
 
 
 def _normalized_structured_value(value: object) -> object:

@@ -10,12 +10,14 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Iterable, Sequence
 
     from agno.models.message import Message
+    from agno.run.agent import RunOutput
     from agno.session.agent import AgentSession
 
 _CONVERSATION_ROLES = frozenset({"user", "assistant", "tool"})
@@ -28,21 +30,22 @@ _MIN_MESSAGE_CHARS = 2_000
 
 
 def conversation_messages(session: AgentSession) -> list[Message]:
-    """Return this session's own user, assistant, and tool messages in order."""
+    """Return the user, assistant, and tool messages of this session's model-visible runs, in order."""
     return [
         message
         for run in session.runs or []
+        if is_model_history_visible_run(run)
         for message in run.messages or []
         if message.role in _CONVERSATION_ROLES and not message.from_history
     ]
 
 
-def count_model_replies(session: AgentSession, run_ids: Collection[str]) -> int:
-    """Count assistant messages, one per model request including tool-calling steps, in the given runs."""
+def count_model_replies(runs: Iterable[RunOutput]) -> int:
+    """Count assistant messages, one per model request including tool-calling steps, in model-visible runs."""
     return sum(
         1
-        for run in session.runs or []
-        if run.run_id in run_ids
+        for run in runs
+        if is_model_history_visible_run(run)
         for message in run.messages or []
         if message.role == "assistant" and not message.from_history
     )
@@ -78,7 +81,8 @@ def render_transcript(messages: Sequence[Message], *, budget_chars: int) -> str:
     if omitted_messages:
         sections.append(f"[{omitted_messages} further messages omitted to fit the review budget.]")
     sections.extend(verbatim)
-    return "\n\n".join(sections)
+    # Conversation content must not close the reviewer's <conversation> evidence block.
+    return "\n\n".join(sections).replace("</conversation>", "<\\/conversation>")
 
 
 def _digest_line(message: Message) -> str | None:

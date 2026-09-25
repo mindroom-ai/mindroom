@@ -15,7 +15,6 @@ from agno.skills import LocalSkills, Skills
 from agno.skills.errors import SkillValidationError
 from agno.skills.loaders import SkillLoader
 
-from mindroom import yaml_io
 from mindroom.constants import runtime_env_values
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
@@ -25,6 +24,7 @@ from mindroom.tool_system.workspace_skills import (
     FRONTMATTER_PATTERN,
     SKILL_FILENAME,
     load_workspace_skills,
+    parse_skill_markdown,
     parse_skill_metadata,
     read_support_file,
     record_skill_use,
@@ -451,25 +451,17 @@ def _read_skill_frontmatter(
         logger.warning("Failed to read skill file", path=str(skill_path), error=str(exc))
         return None
 
-    match = FRONTMATTER_PATTERN.match(content)
-    if not match:
+    if not FRONTMATTER_PATTERN.match(content):
         if allow_missing:
             return {}
         logger.warning("Skill missing frontmatter", path=str(skill_path))
         return None
 
-    frontmatter_text = match.group(1)
     try:
-        frontmatter = yaml_io.safe_load(frontmatter_text) or {}
+        return parse_skill_markdown(content)[0]
     except Exception as exc:
         logger.warning("Failed to parse skill frontmatter", path=str(skill_path), error=str(exc))
         return None
-
-    if not isinstance(frontmatter, dict):
-        logger.warning("Skill frontmatter must be a mapping", path=str(skill_path))
-        return None
-
-    return frontmatter
 
 
 def _normalize_skill_identity(

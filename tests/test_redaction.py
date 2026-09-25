@@ -15,7 +15,7 @@ from mindroom import redaction
 from mindroom.redaction import (
     REDACTED,
     REDACTION_FAILED,
-    contains_sensitive_text,
+    contains_credential,
     redact_log_event,
     redact_sensitive_data,
     redact_sensitive_text,
@@ -998,9 +998,14 @@ def test_private_key_blocks_are_redacted_through_their_end_or_the_text_end() -> 
     assert redact_sensitive_text("-----BEGIN RSA PRIVATE KEY-----\nMIIabc") == REDACTED
 
 
-def test_contains_sensitive_text_scans_text_beyond_one_redaction_window() -> None:
-    """Credential checks cover every line of long text instead of failing on the redaction size limit."""
-    filler = "plain line\n" * 20_000
-    assert not contains_sensitive_text(filler)
-    assert contains_sensitive_text(filler + "token sk-abcdefghijklmnopqrstu\n")
-    assert contains_sensitive_text("connect to https://alice:secret@db.example.test")
+def test_contains_credential_flags_literal_secrets_but_not_placeholders() -> None:
+    """Learned skills may describe setup steps, so placeholder assignments are not credentials."""
+    for placeholder in ("Set OPENAI_API_KEY=<your key>", "Authorization: Bearer $TOKEN", "password: ask the user"):
+        assert not contains_credential(placeholder)
+    for secret in (
+        "token sk-abcdefghijklmnopqrstu",
+        "connect to https://alice:secret@db.example.test",
+        "https://api.example.test/?token=abc123",
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIabc",
+    ):
+        assert contains_credential(secret)

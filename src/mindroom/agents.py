@@ -61,7 +61,7 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
-from mindroom.tool_system.skills import build_agent_skills
+from mindroom.tool_system.skills import agent_workspace_skills_root, build_agent_skills
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
@@ -2006,7 +2006,11 @@ def create_agent(
             agent_name,
             config,
             runtime_paths,
-            workspace_skills_root=workspace.root / "skills" if workspace is not None else None,
+            workspace_skills_root=agent_workspace_skills_root(
+                runtime_paths,
+                agent_name,
+                workspace_root=workspace.root if workspace is not None else None,
+            ),
             output_file_policy=_agent_tool_output_file_policy(
                 agent_runtime,
                 runtime_paths,

@@ -45,7 +45,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
-from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.event_journal import (
     ApprovalContinuation,
@@ -1224,7 +1224,7 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         queue_memory_persistence: Callable[[], None] | None = None,
-        queue_skill_review: Callable[[str], None] | None = None,
+        queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build post-response effect deps bound to one request's room."""
@@ -2080,9 +2080,9 @@ class ResponseRunner:
             for index, turn in enumerate(continuation.memory_thread_history)
         )
 
-    def _approval_skill_review(self, continuation: ApprovalContinuation) -> Callable[[str], None] | None:
+    def _approval_skill_review(self, continuation: ApprovalContinuation) -> Callable[[str], Awaitable[None]] | None:
         """Return the normal skill-review handoff for a completed agent continuation."""
-        if continuation.entity_kind != "agent":
+        if continuation.entity_kind != "agent" or is_automation_source_kind(continuation.source_kind):
             return None
         return self._skill_review(
             agent_name=continuation.entity_name,
@@ -2091,6 +2091,7 @@ class ResponseRunner:
                 continuation.execution_identity,
                 error_prefix="Approval continuation execution_identity",
             ),
+            attempt_run_ids=(),
         )
 
     def _skill_review(
@@ -2099,17 +2100,23 @@ class ResponseRunner:
         agent_name: str,
         session_id: str,
         execution_identity: ToolExecutionIdentity | None,
-    ) -> Callable[[str], None]:
-        """Build the completed-agent handoff that counts one run toward a background skill review."""
+        attempt_run_ids: Sequence[str],
+    ) -> Callable[[str], Awaitable[None]]:
+        """Build the handoff that counts a completed response's persisted runs toward a background skill review.
 
-        def queue(run_id: str) -> None:
-            queue_skill_review(
+        Dynamic-tool continuations and empty-run retries persist each attempt as its own run, so every attempt
+        of the response is counted, falling back to the final run ID when the response had a single attempt.
+        """
+
+        async def queue(response_run_id: str) -> None:
+            await asyncio.to_thread(
+                queue_skill_review,
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
                 agent_name=agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,
-                run_id=run_id,
+                run_ids=list(attempt_run_ids) or [response_run_id],
             )
 
         return queue
@@ -5503,14 +5510,15 @@ class ResponseRunner:
             thread_history=memory_thread_history,
             user_id=request.user_id,
         )
-        # Like Hermes skipping cron reviews, scheduled runs have no human in the loop to learn from.
+        # Like Hermes skipping cron reviews, automated runs have no human in the loop to learn from.
         queue_skill_review = (
             None
-            if request.response_envelope.source_kind in {SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND}
+            if is_automation_source_kind(request.response_envelope.source_kind)
             else self._skill_review(
                 agent_name=self.deps.agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,
+                attempt_run_ids=attempt_run_ids,
             )
         )
 

@@ -17,9 +17,9 @@ from typing import TYPE_CHECKING
 
 from yaml import YAMLError
 
-from mindroom.atomic_file import atomic_write_bytes_at
+from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.path_confinement import open_directory_within_root
-from mindroom.redaction import contains_sensitive_text
+from mindroom.redaction import contains_credential
 from mindroom.tool_system.workspace_skills import (
     MAX_SKILL_FILE_BYTES,
     SKILL_FILENAME,
@@ -116,7 +116,7 @@ def _validate_content(relative_path: str, content: str) -> None:
     if len(content.encode()) > MAX_SKILL_FILE_BYTES:
         msg = f"{relative_path} exceeds {MAX_SKILL_FILE_BYTES} bytes."
         raise SkillEditError(msg)
-    if contains_sensitive_text(content):
+    if contains_credential(content):
         msg = f"{relative_path} contains credential-like text; remove secrets and describe how to obtain them instead."
         raise SkillEditError(msg)
 
@@ -133,8 +133,13 @@ def _split_relative_path(relative_path: str) -> tuple[str | None, str]:
 
 
 @contextmanager
-def _open_skill(root_fd: int, name: str) -> Iterator[int]:
-    _validate_skill_name(name)
+def _open_skill(root_fd: int, name: str, *, writable: bool) -> Iterator[int]:
+    """Open one skill directory; only learner-valid names are ever written, any visible directory can be read."""
+    if writable:
+        _validate_skill_name(name)
+    elif "/" in name or name.startswith("."):
+        msg = f"Invalid skill directory {name!r}."
+        raise SkillEditError(msg)
     with open_directory_within_root(root_fd, name) as skill_fd:
         yield skill_fd
 
@@ -143,7 +148,7 @@ def read_skill_file(skills_root: Path, name: str, relative_path: str = SKILL_FIL
     """Return one workspace skill file and whether its skill is learner-owned, or None when absent."""
     _split_relative_path(relative_path)
     try:
-        with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+        with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name, writable=False) as skill_fd:
             return _read_skill_file(skill_fd, name, relative_path)
     except FileNotFoundError:
         return None
@@ -163,7 +168,7 @@ def _read_skill_file(skill_fd: int, name: str, relative_path: str) -> SkillFile 
 
 def support_file_paths(skills_root: Path, name: str) -> list[str]:
     """Return every visible support file of one workspace skill as ``directory/filename``."""
-    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name, writable=False) as skill_fd:
         present = set(list_entries(skill_fd, directories=True)) & _SUPPORT_DIRECTORIES
         files: list[str] = []
         for directory in sorted(present):
@@ -206,17 +211,17 @@ def write_skill_file(
     if directory is None:
         _validate_markdown(name, content, new=False)
     _validate_content(relative_path, content)
-    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name, writable=True) as skill_fd:
         current = _require_writable(skill_fd, name, relative_path, expected_digest)
         if current is not None:
             _save_history(root_fd, name, relative_path, current.content)
         if directory is None:
-            atomic_write_bytes_at(skill_fd, filename, content.encode())
+            _write_keeping_mode(skill_fd, filename, content)
         else:
             if directory not in list_entries(skill_fd, directories=True):
                 os.mkdir(directory, dir_fd=skill_fd)
             with open_directory_within_root(skill_fd, directory) as support_fd:
-                atomic_write_bytes_at(support_fd, filename, content.encode())
+                _write_keeping_mode(support_fd, filename, content)
         _record_patch(root_fd, name)
 
 
@@ -226,7 +231,7 @@ def remove_skill_file(skills_root: Path, name: str, relative_path: str, *, expec
     if directory is None:
         msg = "SKILL.md cannot be removed; only support files can."
         raise SkillEditError(msg)
-    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name, writable=True) as skill_fd:
         current = _require_writable(skill_fd, name, relative_path, expected_digest)
         if current is None:
             msg = f"{relative_path} does not exist."
@@ -253,6 +258,16 @@ def _require_writable(skill_fd: int, name: str, relative_path: str, expected_dig
         )
         raise SkillEditError(msg)
     return current
+
+
+def _write_keeping_mode(directory_fd: int, filename: str, content: str) -> None:
+    """Replace a file atomically; an existing file keeps the permissions its owner gave it."""
+    atomic_write_bytes_at(
+        directory_fd,
+        filename,
+        content.encode(),
+        file_mode=existing_file_mode(directory_fd, filename),
+    )
 
 
 def _record_patch(root_fd: int, name: str) -> None:

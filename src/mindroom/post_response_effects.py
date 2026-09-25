@@ -55,7 +55,7 @@ class PostResponseEffectsDeps:
     logger: structlog.stdlib.BoundLogger
     add_interactive_buttons: Callable[[str, interactive.InteractiveMetadata], Awaitable[None]] | None = None
     queue_memory_persistence: Callable[[], None] | None = None
-    queue_skill_review: Callable[[str], None] | None = None
+    queue_skill_review: Callable[[str], Awaitable[None]] | None = None
     persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, str | None, DeliveredResponse], None] | None = None
@@ -137,7 +137,7 @@ class PostResponseEffectsSupport:
         room_id: str,
         membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
-        queue_skill_review: Callable[[str], None] | None = None,
+        queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
@@ -240,7 +240,7 @@ async def apply_post_response_effects(
 
     if outcome.run_succeeded and outcome.response_run_id is not None and deps.queue_skill_review is not None:
         try:
-            deps.queue_skill_review(outcome.response_run_id)
+            await deps.queue_skill_review(outcome.response_run_id)
         except Exception:
             deps.logger.exception(
                 "Failed to queue skill review after response",

@@ -97,6 +97,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
+| `orchestration/background_workers.py` | Config-gated start and stop of the memory auto-flush and skill-learning workers |
 | `config_bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
 | `cli/config_bundle.py` | Bundle install receipts and initialize-only runtime bootstrap command adapter |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
@@ -123,6 +124,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
+| `config/skill_learning.py` | Opt-in agent settings for background skill reviews: interval, reviewer model, notices, and archival |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
 | `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries |
@@ -210,6 +212,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
+| `background_loop.py` | Wakeable loops and cross-thread wake signals shared by durable per-session background workers |
 | `skill_learning/queue.py` | Durable per-conversation review counters: run-ID accounting, scope keys, retries, and retention |
 | `skill_learning/worker.py` | Background worker that counts completed runs, triggers reviews at the interval, and posts change notices |
 | `skill_learning/reviewer.py` | One bounded skill review: Hermes-derived prompt, skill-only tools, read-before-write, and input budget |

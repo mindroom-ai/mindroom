@@ -52,6 +52,7 @@ MindRoom's architecture consists of several key components working together.
 | `orchestrator.py` | MultiAgentOrchestrator — boots entities, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (sync loops, config diffing, room invitations) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
+| `orchestration/background_workers.py` | Config-gated start and stop of the memory auto-flush and skill-learning workers |
 | `config_bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
 | `cli/config_bundle.py` | Bundle install receipts and initialize-only runtime bootstrap command adapter |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
@@ -60,6 +61,7 @@ MindRoom's architecture consists of several key components working together.
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
+| `background_loop.py` | Wakeable loops and cross-thread wake signals shared by durable per-session background workers |
 | `skill_learning/queue.py` | Durable per-conversation review counters: run-ID accounting, scope keys, retries, and retention |
 | `skill_learning/worker.py` | Background worker that counts completed runs, triggers reviews at the interval, and posts change notices |
 | `skill_learning/reviewer.py` | One bounded skill review: Hermes-derived prompt, skill-only tools, read-before-write, and input budget |
@@ -109,6 +111,7 @@ MindRoom's architecture consists of several key components working together.
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
+| `config/skill_learning.py` | Opt-in agent settings for background skill reviews: interval, reviewer model, notices, and archival |
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |

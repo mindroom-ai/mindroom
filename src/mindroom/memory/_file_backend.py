@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast
 from zoneinfo import ZoneInfo
 
-from mindroom.atomic_file import atomic_write_bytes_at
+from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.constants import resolve_config_relative_path
 from mindroom.embedding_errors import classified_embedder_error
 from mindroom.logging_config import get_logger
@@ -335,15 +335,6 @@ def _read_scope_markdown_files(scope_path: Path) -> list[_ScopeMemoryFile]:
         return []
 
 
-def _existing_file_mode(directory_fd: int, name: str) -> int | None:
-    """Return a regular entry's permission bits so a rewrite keeps them."""
-    try:
-        file_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return None
-    return stat.S_IMODE(file_stat.st_mode) & 0o777 if stat.S_ISREG(file_stat.st_mode) else None
-
-
 def _require_rewritable(memory_file: _ScopeMemoryFile) -> None:
     if not memory_file.rewritable:
         msg = (
@@ -363,7 +354,7 @@ def _write_scope_markdown_file(scope_path: Path, relative_path: Path, payload: b
             directory_fd,
             relative_path.name,
             payload,
-            file_mode=_existing_file_mode(directory_fd, relative_path.name),
+            file_mode=existing_file_mode(directory_fd, relative_path.name),
         )
 
 
