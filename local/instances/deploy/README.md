@@ -101,16 +101,22 @@ Before starting the sandbox runner, Compose initializes its scratch volume owner
 
 The sandbox runner joins only its own `sandbox-network`, so tool code cannot open connections to MindRoom, PostgreSQL, Redis, Authelia, or the homeserver over Docker networking.
 The `sandbox-relay` container joins both networks, forwards only the runner port, caps connections per address, and does not route other traffic.
-The runner keeps outbound internet access for package installs and web requests, so like any other client it can reach public routes and every port that any instance or other host service publishes on the host's interfaces.
+The runner keeps outbound internet access for package installs and web requests, so like any other client it can reach public routes and every port that other host services publish on the host's external interfaces.
 `MINDROOM_API_KEY` protects the MindRoom API on those paths, and PostgreSQL and Redis publish no host ports.
 
 ### 4. Access Your Instance
 
-After starting, these direct host-port endpoints are exposed on the host:
+After starting, these direct host-port endpoints are published on the host's loopback interface only:
 - **MindRoom**: `http://localhost:{MINDROOM_PORT}` (e.g., `http://localhost:8765`)
 - **Matrix Server** (if enabled): `http://localhost:{MATRIX_PORT}` (e.g., `http://localhost:8448`)
 
-The dashboard asks for the `MINDROOM_API_KEY` stored in `envs/{instance_name}.env`, and API clients send it as a bearer token.
+Remote access goes through Traefik, so Authelia cannot be bypassed through a host port.
+
+The dashboard asks for the `MINDROOM_API_KEY` stored in `envs/{instance_name}.env`, including after an Authelia login, and API clients send it as a bearer token.
+Containers on the shared `mynetwork` can reach the runtime by container name, so this key is what protects the dashboard from other instances on the same host.
+
+The dashboard accepts browser changes only from its public origin, `https://{DOMAIN}` by default.
+Without Traefik, set `MINDROOM_PUBLIC_URL=http://localhost:{MINDROOM_PORT}` in `envs/{instance_name}.env` and restart before editing through the loopback port.
 
 Some services, especially Synapse, can take a moment before they answer requests on those ports.
 

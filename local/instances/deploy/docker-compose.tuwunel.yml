@@ -28,7 +28,7 @@ services:
         server=${MATRIX_SERVER_NAME:-m-${INSTANCE_DOMAIN}}:443
         }
     ports:
-      - "${MATRIX_PORT:-8448}:6167"
+      - "127.0.0.1:${MATRIX_PORT:-8448}:6167"
     extra_hosts:
       - "${MATRIX_SERVER_NAME}:host-gateway"
       - "host.docker.internal:host-gateway"

@@ -285,12 +285,40 @@ def test_compose_builds_from_repo_root() -> None:
 
 
 def test_matrix_compose_files_publish_localhost_ports() -> None:
-    """Matrix overlays should publish the allocated host port described by the CLI and docs."""
+    """Matrix overlays should publish the allocated host port on loopback only."""
     tuwunel_compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.tuwunel.yml").read_text())
     synapse_compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.synapse.yml").read_text())
 
-    assert tuwunel_compose["services"]["tuwunel"]["ports"] == ["${MATRIX_PORT:-8448}:6167"]
-    assert synapse_compose["services"]["synapse"]["ports"] == ["${MATRIX_PORT:-8448}:8008"]
+    assert tuwunel_compose["services"]["tuwunel"]["ports"] == ["127.0.0.1:${MATRIX_PORT:-8448}:6167"]
+    assert synapse_compose["services"]["synapse"]["ports"] == ["127.0.0.1:${MATRIX_PORT:-8448}:8008"]
+
+
+def test_runtime_publishes_localhost_port_with_overridable_public_url() -> None:
+    """The dashboard host port must not bypass Traefik and Authelia."""
+    compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
+    runtime = compose["services"]["mindroom"]
+
+    assert runtime["ports"] == ["127.0.0.1:${MINDROOM_PORT:-8765}:8765"]
+    assert "MINDROOM_PUBLIC_URL=${MINDROOM_PUBLIC_URL:-https://${INSTANCE_DOMAIN}}" in runtime["environment"]
+
+
+@pytest.mark.parametrize("bridge", ["telegram", "slack"])
+def test_bridge_appservice_ports_publish_on_localhost(bridge: str) -> None:
+    """Homeservers reach appservices by container name, so host ports stay on loopback."""
+    template = Path(f"local/instances/deploy/templates/bridges/docker-compose.{bridge}.j2").read_text()
+    compose = yaml.safe_load(deploy.Template(template).render(port=29317, instance_name="alpha"))
+
+    assert compose["services"][bridge]["ports"] == ["127.0.0.1:29317:29317"]
+
+
+def test_synapse_url_previews_block_private_networks() -> None:
+    """URL previews must not let Synapse fetch loopback or container-network services."""
+    template = Path("local/instances/deploy/templates/synapse/homeserver.yaml.j2").read_text()
+    rendered = deploy.Template(template).render(postgres_password="test", redis_password="test")  # noqa: S106
+    homeserver = yaml.safe_load(rendered)
+
+    blacklist = homeserver["url_preview_ip_range_blacklist"]
+    assert {"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7"} <= set(blacklist)
 
 
 def test_matrix_compose_files_expose_public_url_to_desktop_pairing() -> None:

@@ -17,7 +17,8 @@ services:
       - ${DATA_DIR}/mindroom_data:/app/mindroom_data
       - ${DATA_DIR}/logs:/app/logs
     ports:
-      - "${MINDROOM_PORT:-8765}:8765"
+      # Loopback only: remote access goes through Traefik (and Authelia when enabled).
+      - "127.0.0.1:${MINDROOM_PORT:-8765}:8765"
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MINDROOM_STORAGE_PATH=/app/mindroom_data
@@ -28,7 +29,7 @@ services:
       - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
       - HOME=/app
       - MEM0_DIR=/app/mindroom_data/memory/mem0  # Used by mem0
-      - MINDROOM_PUBLIC_URL=https://${INSTANCE_DOMAIN}
+      - MINDROOM_PUBLIC_URL=${MINDROOM_PUBLIC_URL:-https://${INSTANCE_DOMAIN}}
       - MINDROOM_PORT=${MINDROOM_PORT:-8765}
       - MINDROOM_API_KEY=${MINDROOM_API_KEY:-}
     networks:
