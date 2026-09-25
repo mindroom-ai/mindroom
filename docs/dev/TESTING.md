@@ -137,6 +137,13 @@ In strict mode, async test functions require an explicit `@pytest.mark.asyncio` 
 Tests run in parallel by default via `pytest-xdist` (`-n auto` in `addopts`).
 To run serially for debugging, pass `-n0`: `uv run --all-extras pytest tests/ -n0`.
 
+### Temporary Files
+
+On Linux, the root `conftest.py` points the suite's temp root at the `/dev/shm` tmpfs when `TMPDIR` is unset and at least 1 GiB is free there.
+Most test time on a real disk is fsync from SQLite journals and atomic JSON stores, and tmpfs makes it free.
+Everything written through `tempfile` then lands under pytest's base directory, which pytest prunes to the last three runs.
+Export `TMPDIR` to run against a real disk instead.
+
 ### Timeouts and Durations
 
 Each test has a 60-second timeout (`--timeout 60` in `addopts`).
