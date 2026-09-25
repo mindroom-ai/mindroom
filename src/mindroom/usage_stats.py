@@ -22,6 +22,7 @@ from mindroom.usage_stats_storage import (
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
+from mindroom.usage_storage import SYSTEM_USAGE_ENTITY
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -476,13 +477,19 @@ class _UsageAccumulator:
         if row_totals is None:
             return
         self.total = self.total.plus(row_totals)
-        self.sessions.add((row.source.path_label, row.row_key))
+        is_system = row.source.scope == "system"
+        if not is_system:
+            self.sessions.add((row.source.path_label, row.row_key))
         models: Mapping[tuple[str, str], TokenTotals] = {}
         if not uses_runs:
             models = self._add_cumulative_models(row, row_totals)
         if entity_id is not None:
-            self.buckets.setdefault(entity_id, _Aggregate()).add(row_totals)
-            _add_model_totals(self.entity_cumulative_model_buckets.setdefault(entity_id, {}), models)
+            self.buckets.setdefault(entity_id, _Aggregate()).add(row_totals, count=0 if is_system else 1)
+            _add_model_totals(
+                self.entity_cumulative_model_buckets.setdefault(entity_id, {}),
+                models,
+                count=0 if is_system else 1,
+            )
 
     def _add_cumulative_models(
         self,
@@ -495,7 +502,7 @@ class _UsageAccumulator:
             self.cumulative_model_unavailable_sources.add(row.source.path_label)
         elif any("unknown" in key for key in models):
             self.cumulative_model_unavailable_sources.add(row.source.path_label)
-        _add_model_totals(self.cumulative_model_buckets, models)
+        _add_model_totals(self.cumulative_model_buckets, models, count=0 if row.source.scope == "system" else 1)
         return models
 
 
@@ -605,7 +612,7 @@ class _RequestUsageAccumulator:
         except ValueError:
             self.unavailable_sources.add(row.source.path_label)
             return
-        if not row.session_metrics_available or retained != session_totals:
+        if row.source.scope != "system" and (not row.session_metrics_available or retained != session_totals):
             self.unavailable_sources.add(row.source.path_label)
 
     def rows(self) -> tuple[UsageRequestBreakdownRow, ...]:
@@ -1293,6 +1300,8 @@ def _self_source_allowed(source: UsageStorageSource, expected_agent: str | None)
 
 
 def _admin_entity_id(row: UsageSessionRow) -> str | None:
+    if row.source.scope == "system":
+        return SYSTEM_USAGE_ENTITY if row.entity_id == SYSTEM_USAGE_ENTITY else None
     if row.source.scope in {"shared_agent", "private_agent"}:
         entity_id = row.source.source_agent_id
         return entity_id if entity_id in row.source.allowed_agent_ids else None

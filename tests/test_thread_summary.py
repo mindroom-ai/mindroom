@@ -13,6 +13,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import nio
 import pytest
 from agno.models.vertexai.claude import Claude as VertexAIClaude
+from agno.run.agent import RunOutput
 from pydantic import ValidationError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -2377,7 +2378,7 @@ class TestGenerateSummary:
         config = _mock_config()
         rp = _mock_runtime_paths()
         mock_model = _TemperatureAwareModel()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = _ThreadSummary(summary="🧵 ISSUE-133 prompt preserved")
 
         with (
@@ -2434,7 +2435,7 @@ class TestGenerateSummary:
         config = _mock_config(summary_temperature=0.1)
         rp = _mock_runtime_paths()
         mock_model = _TemperatureAwareModel(temperature=0.9)
-        mock_response = MagicMock(
+        mock_response = RunOutput(
             content=_ThreadEnrichment(
                 summary="🧵 Login parser hardening",
                 tags=["Bug Fix", "bug-fix", "resolved!"],
@@ -2468,7 +2469,7 @@ class TestGenerateSummary:
 
     async def test_initial_enrichment_rejects_summary_only_output(self) -> None:
         """The initial call must not persist a summary without its requested tags."""
-        mock_response = MagicMock(content=_ThreadSummary(summary="🧵 Missing tags"))
+        mock_response = RunOutput(content=_ThreadSummary(summary="🧵 Missing tags"))
 
         with (
             patch("mindroom.model_loading.get_model_instance", return_value=_TemperatureAwareModel()),
@@ -2490,7 +2491,7 @@ class TestGenerateSummary:
         generated_tags: list[str],
     ) -> None:
         """Invalid or automatic-excluded tags should not discard the valid refreshed summary."""
-        mock_response = MagicMock(
+        mock_response = RunOutput(
             content=_ThreadEnrichment(
                 summary="🧵 Invalid tags",
                 tags=generated_tags,
@@ -2513,7 +2514,7 @@ class TestGenerateSummary:
 
     async def test_later_summary_rejects_unrequested_enrichment_output(self) -> None:
         """A later summary call must never revive automatic tagging."""
-        mock_response = MagicMock(
+        mock_response = RunOutput(
             content=_ThreadEnrichment(
                 summary="🧵 Unexpected retag",
                 tags=["bug"],
@@ -2539,7 +2540,7 @@ class TestGenerateSummary:
         config = _mock_config(summary_temperature=0.1)
         rp = _mock_runtime_paths()
         mock_model = _TemperatureAwareModel(temperature=0.9)
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = _ThreadSummary(summary="🧪 ISSUE-148 matrix cache invalidate-and-refetch live test")
 
         with (
@@ -2669,7 +2670,7 @@ class TestGenerateSummary:
         config = _mock_config(model_name="haiku")
         rp = _mock_runtime_paths()
         mock_model = _TemperatureAwareModel()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = _ThreadSummary(summary="🧵 Room-specific summary model")
 
         with (
@@ -2688,7 +2689,7 @@ class TestGenerateSummary:
         config = _mock_config(summary_temperature=None)
         rp = _mock_runtime_paths()
         mock_model = _TemperatureAwareModel(temperature=0.9)
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = _ThreadSummary(summary="🧪 ISSUE-149 provider default summary")
 
         with (
@@ -2712,7 +2713,7 @@ class TestGenerateSummary:
         config = _mock_config()
         rp = _mock_runtime_paths()
         mock_model = _ModelWithoutTemperature()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = _ThreadSummary(summary="🧵 ISSUE-153 unsupported provider summary")
         monkeypatch.delenv("MINDROOM_LOG_FORMAT", raising=False)
         setup_logging(level="WARNING", runtime_paths=_logging_runtime_paths(tmp_path))
@@ -2752,7 +2753,7 @@ class TestGenerateSummary:
         config = _mock_config(summary_temperature=0.4)
         rp = _mock_runtime_paths()
         mock_model = VertexAIClaude(id="claude-sonnet-5", temperature=0.9)
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = _ThreadSummary(summary="🧵 ISSUE-200 vertex claude summary")
         monkeypatch.delenv("MINDROOM_LOG_FORMAT", raising=False)
         setup_logging(level="WARNING", runtime_paths=_logging_runtime_paths(tmp_path))
@@ -2796,7 +2797,7 @@ class TestGenerateSummary:
         history = _make_thread_history(5)
         config = _mock_config()
         rp = _mock_runtime_paths()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = _ThreadSummary(summary="\U0001f527 Auth deployment discussed and approved")
 
         with (
@@ -2813,7 +2814,7 @@ class TestGenerateSummary:
         history = _make_thread_history(5)
         config = _mock_config()
         rp = _mock_runtime_paths()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = None
 
         with (
@@ -2830,7 +2831,7 @@ class TestGenerateSummary:
         history = _make_thread_history(5)
         config = _mock_config()
         rp = _mock_runtime_paths()
-        mock_response = MagicMock(content={"summary": "unvalidated"})
+        mock_response = RunOutput(content={"summary": "unvalidated"})
 
         with (
             patch("mindroom.model_loading.get_model_instance"),

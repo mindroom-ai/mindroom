@@ -203,6 +203,10 @@ The details must reconcile every token counter to the session total; absent, mal
 Session aggregates do not retain dates or requester attribution for these counters, and deleted sessions remain unavailable.
 Shared-agent self reports omit the cumulative fields because their totals are requester-filtered retained runs rather than whole session aggregates.
 
+`get_all_usage()` also includes recorded internal AI work under `system:internal`, including routing, room topics, schedule interpretation, thread summaries, voice normalization, and provider-reported transcription tokens.
+This overhead contributes tokens but adds no conversations or top-level replies, and no human requester is inferred for it.
+It is excluded from personal and private-agent usage reports. Historical internal calls and transcription tokens not reported by the provider remain unavailable.
+
 ### Private-Agent Accounting
 
 `private_agent_breakdown` separates usage by `agent_name` and, for admin reports, canonical `user_id`.

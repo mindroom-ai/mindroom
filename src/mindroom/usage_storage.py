@@ -7,8 +7,24 @@ from typing import TYPE_CHECKING, Literal, cast
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-type IndependentUsageKind = Literal["compaction_summary", "memory_auto_flush", "dynamic_workflow", "live_voice"]
+type IndependentUsageKind = Literal[
+    "compaction_summary",
+    "memory_auto_flush",
+    "dynamic_workflow",
+    "live_voice",
+    "routing",
+    "room_topic",
+    "schedule_parse",
+    "thread_summary",
+    "voice_normalization",
+    "voice_transcription",
+]
 type UsageKind = Literal["run"] | IndependentUsageKind
+
+SYSTEM_USAGE_ENTITY = "system:internal"
+SYSTEM_USAGE_STORAGE_NAME = "system"
+SYSTEM_USAGE_SESSION_TABLE = "system_sessions"
+SYSTEM_USAGE_RELATIVE_PATH = "system/sessions/system.db"
 
 TOKEN_FIELDS = (
     "input_tokens",

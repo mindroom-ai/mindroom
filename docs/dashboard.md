@@ -361,6 +361,13 @@ Team member tokens contribute to model, requester, daily, and request detail wit
 Requester totals sum to the entity's `retained_run_totals`, which can differ from its cumulative `totals`.
 The report-level `model_coverage` and `user_coverage` also apply to entity retained detail.
 
+Organization reports include internal AI work under the `system:internal` entity: routing, room topics, schedule interpretation, thread summaries, voice normalization, and provider-reported transcription tokens.
+These counters contribute to model, daily, and request totals without increasing conversation or AI reply counts.
+System overhead has no assumed human requester and is excluded from personal and private-agent reports.
+Request `kind` identifies the operation as `routing`, `room_topic`, `schedule_parse`, `thread_summary`, `voice_normalization`, or `voice_transcription`.
+Only newly recorded provider counters are available; historical internal calls are not reconstructed, and transcription duration is not converted into estimated tokens.
+A usage storage failure is logged without discarding a successful internal response.
+
 `cumulative_model_breakdown` uses per-model details stored with session aggregates and includes compacted usage still present in retained sessions.
 The same rows appear within each entity in `breakdown`.
 Each row contains all token counters and `session_count`; one multi-model session counts once for every model it used, and duplicate entries for the same provider and model are combined first.
