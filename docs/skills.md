@@ -180,21 +180,24 @@ All fields, defaults, and bounds are listed in the [agent configuration referenc
 
 ### When reviews run
 
-Every successful standalone-agent response adds its model replies to a counter for its conversation, counting each tool-calling step and the final answer.
+Every successful standalone-agent response in Matrix, including an approved continuation, adds its model replies to a counter for its conversation, counting each tool-calling step and the final answer in every attempt of the response.
 A review runs once the counter reaches `review_interval`, and the counter then starts again.
-Scheduled responses are never counted, just as Hermes skips reviews for cron jobs, and team responses are excluded.
+Automated responses from schedules, hooks, and external triggers are never counted, just as Hermes skips reviews for cron jobs, and team responses are excluded.
 When anyone other than the learner changes the workspace skills, for example an agent writing a skill with its file tools, the counter starts again because that lesson is already saved.
 Conversations are counted per agent and private instance, not per requester, so a thread shared by several people is reviewed once.
 Minimal-mode turns count like standard turns.
 The queue in `skill_learning_state.json` in the storage root holds run IDs, counters, and scope metadata, never message content.
 Reviews run one at a time across processes that share the storage root.
-A failed review is retried with a growing delay and abandoned after three failures.
+A failed review, including a provider error, is retried with a growing delay and abandoned after three failures.
+Shutdown interrupts a running review, which runs again after the next start.
 
 ### What a review can do
 
 The reviewer is a separate model run that can only call `skills_list`, `skill_view`, and `skill_manage`.
 It receives the persisted conversation as evidence it must not obey: older turns as one-line digests and the newest 24 messages verbatim, including tool calls and results, with credential-like values redacted.
-One review may read at most 75% of the review model's `context_window` across all of its requests, capped at 600,000 tokens and defaulting to 120,000 tokens when the model sets no window.
+Runs that model history hides, such as errored, cancelled, or paused runs, are left out.
+One review may read about 75% of the review model's `context_window` across all of its requests, capped at 600,000 tokens and defaulting to 120,000 tokens when the model sets no window.
+The budget is estimated at four characters per token.
 It makes at most 16 tool calls and stops after `timeout_seconds`.
 The review prompt adapts Hermes' rules: build class-level skills, capture lessons rather than logs, treat user corrections as first-class signals, prefer patches over rewrites, and never capture environment-specific failures, negative claims about tools, transient errors, one-off narratives, or unresolved attempts.
 Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](configuration/index.md#built-in-prompt-overrides).
@@ -202,7 +205,7 @@ Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](configu
 `skill_manage` can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/`, `templates/`, `scripts/`, or `assets/`.
 Before changing an existing file, the reviewer must load its current version with `skill_view` in the same review, and a write against any other version is refused.
 A new skill needs a lowercase hyphenated name matching its directory, a description of at most 60 characters, and the ownership marker below.
-Files containing credential-like text are refused.
+Files containing a literal credential, such as a private key, a known API token format, or a password in a URL, are refused, while placeholders like `OPENAI_API_KEY=<your key>` are allowed.
 Workspace skill scripts still cannot be executed through `get_skill_script`.
 
 ### Ownership
@@ -227,6 +230,8 @@ Copy a saved version back to restore it.
 Before each review, learned skills with no use, creation, or learner edit for `archive_after_days` days move to `skills/.archive/`, and nothing is deleted.
 Archived directories are named `<skill>--<timestamp>`; move one back to `skills/<skill>/` to restore it.
 A use is recorded in `skills/.usage.json` whenever the agent loads a workspace skill through the skill tools or reads it as a minimal-mode context document.
-With `notify: true`, a review that changed skills posts an `m.notice` in the conversation, such as ``💾 Skill review: created `deploy-checks` ``.
-Review usage counts against the source conversation as `kind: skill_learning` in the [dashboard usage reports](dashboard.md).
+Rewrites keep a file's existing permissions.
+Archival is logged rather than announced, because other conversations may share the workspace.
+With `notify: true`, a review that changed skills posts an `m.notice` in the conversation naming only the skills that review changed, such as ``💾 Skill review: created `deploy-checks` ``.
+Review usage counts against the source conversation as `kind: skill_learning` in the [dashboard usage reports](dashboard.md), except for a review that times out or is interrupted before the model run returns.
 Learned skills are generated from conversation content, so review them before relying on them for sensitive work.

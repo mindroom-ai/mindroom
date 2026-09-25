@@ -6,10 +6,10 @@ Hidden entries under ``skills/`` (usage, history, archive) are never discovered 
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import stat
-import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -34,7 +34,6 @@ SKILL_FILENAME = "SKILL.md"
 FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 MAX_SKILL_FILE_BYTES = 1_048_576
 _USAGE_FILENAME = ".usage.json"
-_USAGE_LOCK = threading.Lock()
 
 
 class SkillUsage(BaseModel):
@@ -218,11 +217,18 @@ def load_skill_usage(root_fd: int) -> dict[str, SkillUsage]:
 
 
 def update_skill_usage(root_fd: int, directory: str, update: Callable[[SkillUsage], SkillUsage]) -> None:
-    """Replace one skill's usage record through an atomic descriptor-bound write."""
-    with _USAGE_LOCK:
+    """Replace one skill's usage record atomically while holding the skills directory lock.
+
+    The lock is taken on the already pinned directory itself, so every thread and process sharing the workspace
+    serializes without opening a lock file by pathname.
+    """
+    fcntl.flock(root_fd, fcntl.LOCK_EX)
+    try:
         usage = load_skill_usage(root_fd)
         usage[directory] = update(usage.get(directory, SkillUsage()))
         atomic_write_bytes_at(root_fd, _USAGE_FILENAME, _USAGE.dump_json(usage, exclude_defaults=True))
+    finally:
+        fcntl.flock(root_fd, fcntl.LOCK_UN)
 
 
 def record_skill_use(skill_path: Path) -> None:

@@ -1048,6 +1048,7 @@ visibility = [
     "mindroom.history.replay",
     "mindroom.history.storage",
     "mindroom.sync_restart_retry",
+    "mindroom.skill_learning.transcript",
 ]
 
 [[modules]]
@@ -2989,6 +2990,7 @@ depends_on = [
     "mindroom.model_loading",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
+    "mindroom.background_loop",
 ]
 
 [[modules]]
@@ -7595,7 +7597,9 @@ visibility = ["mindroom.skill_learning.reviewer", "mindroom.skill_learning.worke
 
 [[modules]]
 path = "mindroom.skill_learning.transcript"
-depends_on = ["mindroom.redaction"]
+depends_on = ["mindroom.redaction",
+    "mindroom.history_run_visibility",
+]
 visibility = ["mindroom.skill_learning.reviewer", "mindroom.skill_learning.worker"]
 
 [[modules]]
@@ -7620,6 +7624,9 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
+    "mindroom.atomic_file",
+    "mindroom.path_confinement",
+    "mindroom.background_loop",
 ]
 visibility = ["mindroom.orchestrator", "mindroom.response_runner", "mindroom.skill_learning.worker"]
 
@@ -7637,5 +7644,11 @@ depends_on = [
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.transcript",
     "mindroom.tool_system.skills",
+    "mindroom.background_loop",
 ]
 visibility = ["mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.background_loop"
+depends_on = []
+visibility = ["mindroom.memory.auto_flush", "mindroom.skill_learning.queue", "mindroom.skill_learning.worker"]

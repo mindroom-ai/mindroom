@@ -68,7 +68,12 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
 )
-from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND, ScheduledHistoryBudget
+from mindroom.dispatch_source import (
+    HOOK_SOURCE_KIND,
+    SCHEDULED_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
+    ScheduledHistoryBudget,
+)
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.event_journal import (
     ApprovalCall,
@@ -9732,14 +9737,14 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("private", [False, True])
-@pytest.mark.parametrize("scheduled", [False, True])
+@pytest.mark.parametrize("source_kind", ["message", SCHEDULED_SOURCE_KIND, HOOK_SOURCE_KIND])
 async def test_completed_response_counts_toward_a_scoped_skill_review(
     tmp_path: Path,
     streaming: bool,
     private: bool,
-    scheduled: bool,
+    source_kind: str,
 ) -> None:
-    """Both response drivers record the completed run for skill review, except scheduled runs like Hermes' cron."""
+    """Both response drivers record the completed run for skill review, except automation like Hermes' cron."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert bot.client is not None
@@ -9749,16 +9754,15 @@ async def test_completed_response_counts_toward_a_scoped_skill_review(
     if private:
         config.agents["general"].private = AgentPrivateConfig(per="user")
     request = _plain_request(_target())
-    if scheduled:
-        request = replace(
-            request,
-            response_envelope=request_envelope(
-                target=request.response_envelope.target,
-                prompt=request.prompt,
-                user_id=request.user_id,
-                source_kind=SCHEDULED_SOURCE_KIND,
-            ),
-        )
+    request = replace(
+        request,
+        response_envelope=request_envelope(
+            target=request.response_envelope.target,
+            prompt=request.prompt,
+            user_id=request.user_id,
+            source_kind=source_kind,
+        ),
+    )
     model = SyntheticModel(
         id="synthetic",
         min_response_chars=30,
@@ -9777,7 +9781,7 @@ async def test_completed_response_counts_toward_a_scoped_skill_review(
         await coordinator.generate_response(request)
     assert model_factory.called, logs
     state_path = coordinator.deps.runtime_paths.storage_root / "skill_learning_state.json"
-    if scheduled:
+    if source_kind != "message":
         assert not state_path.exists()
         return
     (entry,) = json.loads(state_path.read_text())["entries"].values()
@@ -9785,3 +9789,48 @@ async def test_completed_response_counts_toward_a_scoped_skill_review(
     assert entry["identity"]["requester_id"] == "@user:localhost"
     assert (entry["worker_key"] is not None) is private
     assert len(entry["pending_run_ids"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_kind", ["message", SCHEDULED_SOURCE_KIND])
+async def test_approved_continuation_counts_toward_skill_review_unless_automated(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    """A resumed agent run counts like any response, while a resumed scheduled run stays excluded."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-1",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        sources=ResponseSources(("$source",), ("$source",)),
+        calls=(),
+        state="ready",
+        execution_identity=serialize_tool_execution_identity(identity),
+        source_kind=source_kind,
+    )
+    queue = runner._approval_skill_review(continuation)
+    if source_kind != "message":
+        assert queue is None
+        return
+    assert queue is not None
+    await queue("run-1")
+    state = json.loads((runner.deps.runtime_paths.storage_root / "skill_learning_state.json").read_text())
+    assert [entry["pending_run_ids"] for entry in state["entries"].values()] == [["run-1"]]

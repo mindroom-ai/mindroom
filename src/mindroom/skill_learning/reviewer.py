@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from agno.agent import Agent
+from agno.run.base import RunStatus
 
 from mindroom import model_loading
 from mindroom.agent_storage import create_session_storage
@@ -51,7 +52,8 @@ _CHARS_PER_TOKEN = 4
 # The transcript is replayed on every request of the review, so it may use a quarter of the aggregate budget.
 _TRANSCRIPT_BUDGET_SHARE = 4
 
-type _SkillAction = Literal["create", "patch", "edit", "write_file", "remove_file"]
+# A plain alias: Agno does not unwrap PEP 695 type aliases when it builds the provider schema.
+_SkillAction = Literal["create", "patch", "edit", "write_file", "remove_file"]
 
 
 @dataclass(frozen=True)
@@ -186,6 +188,12 @@ class _ReviewTools:
         arguments = (name, content, old_string, new_string, file_path, file_content)
         if self._exhausted():
             return self._refusal(_BUDGET_EXHAUSTED, *arguments)
+        entry = self.catalog.get(name)
+        if action != "create" and entry is not None and entry.owner != "learner":
+            return self._refusal(
+                f"Skill {name!r} is {entry.owner}-owned and read-only; mention the needed change in your reply.",
+                *arguments,
+            )
         relative_path = file_path or SKILL_FILENAME
         try:
             if action == "create":
@@ -200,10 +208,8 @@ class _ReviewTools:
                 await self._write(name, SKILL_FILENAME, _required(content, "content"))
             elif action == "write_file":
                 await self._write(name, _required(file_path, "file_path"), _required(file_content, "file_content"))
-            elif action == "remove_file":
-                await self._remove(name, _required(file_path, "file_path"))
             else:
-                return self._refusal(f"Unknown action {action!r}.", *arguments)
+                await self._remove(name, _required(file_path, "file_path"))
         except (SkillEditError, OSError) as exc:
             return self._refusal(str(exc), *arguments)
         self.changes.setdefault(name, "updated")
@@ -367,3 +373,6 @@ async def review_conversation(
         kind="skill_learning",
         requester_id=identity.requester_id if identity is not None else None,
     )
+    if response.status in {RunStatus.error, RunStatus.cancelled}:
+        msg = f"Skill review run ended with status {response.status.value}"
+        raise RuntimeError(msg)
