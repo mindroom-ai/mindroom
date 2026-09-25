@@ -1079,7 +1079,11 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.google_adc"
-depends_on = ["mindroom.startup_errors"]
+depends_on = [
+    "mindroom.constants",
+    "mindroom.runtime_env_policy",
+    "mindroom.startup_errors",
+]
 visibility = [
     "mindroom.cli.doctor",
     "mindroom.model_loading",

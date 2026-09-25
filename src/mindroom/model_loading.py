@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
-from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path, runtime_openai_base_url
+from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_openai_base_url
 from mindroom.credentials_sync import get_api_key_for_provider, get_model_api_key, get_ollama_host, get_secret_from_env
-from mindroom.google_adc import load_google_application_credentials
+from mindroom.google_adc import populate_vertexai_claude_runtime_kwargs
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, ZAI_BASE_URL_DEFAULT
@@ -17,7 +17,6 @@ from mindroom.provider_stream_retry import install_provider_stream_retry_hook
 from mindroom.runtime_env_policy import (
     AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
     AZURE_OPENAI_ENV_BY_KEY,
-    VERTEXAI_CLAUDE_ENV_BY_KEY,
 )
 from mindroom.tool_system.dependencies import ensure_optional_deps
 
@@ -190,25 +189,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if canonical_provider_key == "vertexai_claude":
         # Vertex authenticates with Google credentials and never sends an API key.
         extra_kwargs.pop("api_key", None)
-        if "project_id" not in extra_kwargs:
-            project_id = runtime_paths.env_value(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"])
-            if project_id:
-                extra_kwargs["project_id"] = project_id
-        if "region" not in extra_kwargs:
-            region = runtime_paths.env_value(VERTEXAI_CLAUDE_ENV_BY_KEY["region"])
-            if region:
-                extra_kwargs["region"] = region
-        if "base_url" not in extra_kwargs:
-            base_url = runtime_paths.env_value("ANTHROPIC_VERTEX_BASE_URL")
-            if base_url:
-                extra_kwargs["base_url"] = base_url
-        client_params = dict(cast("dict[str, Any]", extra_kwargs.get("client_params") or {}))
-        if "credentials" not in client_params and (
-            google_application_credentials := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-        ):
-            client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
-        if client_params:
-            extra_kwargs["client_params"] = client_params
+        populate_vertexai_claude_runtime_kwargs(extra_kwargs, runtime_paths)
 
     if canonical_provider_key == "azure":
         _populate_azure_openai_runtime_kwargs(extra_kwargs, runtime_paths)

@@ -13,7 +13,7 @@ import httpx
 import typer
 
 from mindroom import constants
-from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
+from mindroom.constants import RuntimePaths, env_key_for_provider
 from mindroom.credentials_sync import (
     get_api_key_for_provider,
     get_memory_llm_api_key,
@@ -365,33 +365,17 @@ def _validate_vertexai_claude_connection(
     runtime_paths: RuntimePaths,
 ) -> tuple[bool | None, str]:
     """Validate the configured Vertex AI Claude model with the runtime request path."""
+    from mindroom.google_adc import populate_vertexai_claude_runtime_kwargs  # noqa: PLC0415
+
     extra_kwargs = dict(model_config.extra_kwargs or {})
-    project_env = VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]
-    region_env = VERTEXAI_CLAUDE_ENV_BY_KEY["region"]
-    project_id = extra_kwargs.get("project_id") or runtime_paths.env_value(project_env)
-    region = extra_kwargs.get("region") or runtime_paths.env_value(region_env)
-    missing = []
-    if not project_id:
-        missing.append(project_env)
-    if not region:
-        missing.append(region_env)
+    # Build the client settings exactly as model loading does, so the probe reaches the same endpoint.
+    try:
+        populate_vertexai_claude_runtime_kwargs(extra_kwargs, runtime_paths)
+    except PermanentStartupError as exc:
+        return False, str(exc)
+    missing = [VERTEXAI_CLAUDE_ENV_BY_KEY[key] for key in ("project_id", "region") if not extra_kwargs.get(key)]
     if missing:
         return None, f"missing {', '.join(missing)}"
-
-    client_params = dict(extra_kwargs.get("client_params") or {})
-    google_application_credentials = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-    if "credentials" not in client_params and google_application_credentials is not None:
-        from mindroom.google_adc import load_google_application_credentials  # noqa: PLC0415
-
-        try:
-            client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
-        except PermanentStartupError as exc:
-            return False, str(exc)
-    if client_params:
-        extra_kwargs["client_params"] = client_params
-
-    extra_kwargs.setdefault("project_id", project_id)
-    extra_kwargs.setdefault("region", region)
     extra_kwargs.setdefault("timeout", 10)
 
     from agno.models.vertexai.claude import Claude as VertexAIClaude  # noqa: PLC0415
@@ -536,23 +520,25 @@ def _check_api_key_provider(
     A model with its own key never uses the shared key. Doctor reports where that key
     comes from but never sends it, so it cannot reach an endpoint the model would not call.
     """
+    # google and gemini share GOOGLE_API_KEY, so decide once for every model behind this env key.
+    if env_key in validated_keys:
+        return 0, 0, 0
+    validated_keys.add(env_key)
+
     shared_key_models: list[ModelConfig] = []
     for model_name, model_config in sorted(config.models.items()):
-        if model_config.provider != provider:
+        if env_key_for_provider(model_config.provider) != env_key:
             continue
         model_api_key = get_model_api_key(model_name, model_config, runtime_paths)
         if model_api_key is None:
             shared_key_models.append(model_config)
         else:
             console.print(
-                f"[dim]-[/dim] {provider}: model {model_name} uses its own API key from {model_api_key.source}"
-                " (not validated)",
+                f"[dim]-[/dim] {model_config.provider}: model {model_name} uses its own API key"
+                f" from {model_api_key.source} (not validated)",
             )
-
-    # google and gemini share GOOGLE_API_KEY — validate once
-    if not shared_key_models or env_key in validated_keys:
+    if not shared_key_models:
         return 0, 0, 0
-    validated_keys.add(env_key)
 
     api_key = get_api_key_for_provider(provider, runtime_paths=runtime_paths)
     if not api_key:
@@ -652,8 +638,8 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     # Mem0 resolves its endpoint from its own config and process env, which MindRoom does not
     # share, so doctor reports the key source instead of guessing where Mem0 would send it.
     source = "its own API key" if api_key.source == "config" else f"the shared {llm_provider} key"
-    console.print(f"[green]✓[/green] Memory LLM: {llm_provider}/{llm_model} uses {source} (not validated)")
-    return 1, 0, 0
+    console.print(f"[dim]-[/dim] Memory LLM: {llm_provider}/{llm_model} uses {source} (not validated)")
+    return 0, 0, 0
 
 
 def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:

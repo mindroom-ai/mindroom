@@ -638,9 +638,6 @@ def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
-    # Validation errors must never echo the API keys this model can carry.
-    model_config = ConfigDict(hide_input_in_errors=True)
-
     provider: str = Field(
         description="Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
     )
@@ -753,6 +750,11 @@ class ModelConfig(BaseModel):
             msg = "Model api is only supported for provider: openai"
             raise ValueError(msg)
         return self
+
+    def configured_api_key(self) -> str | None:
+        """Return the key set in config through ``api_key`` or ``extra_kwargs.api_key``, if any."""
+        # Validation normalizes both fields to a trimmed string or absence.
+        return self.api_key or (self.extra_kwargs or {}).get("api_key")
 
     @model_validator(mode="after")
     def _validate_single_api_key(self) -> Self:

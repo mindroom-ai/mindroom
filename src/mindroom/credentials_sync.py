@@ -439,8 +439,7 @@ def get_model_api_key(
     stored_api_key = get_api_key_for_service(f"model:{model_name}", runtime_paths)
     if stored_api_key:
         return _ResolvedApiKey(stored_api_key, "dashboard")
-    # ModelConfig normalizes both fields to a trimmed string or absence.
-    configured_api_key = model_config.api_key or (model_config.extra_kwargs or {}).get("api_key")
+    configured_api_key = model_config.configured_api_key()
     return None if configured_api_key is None else _ResolvedApiKey(configured_api_key, "config")
 
 
