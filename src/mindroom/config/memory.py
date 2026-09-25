@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from mindroom.config.models import EmbedderConfig
+from mindroom.config.models import EmbedderConfig, normalize_api_key_setting
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.path_globs import validate_safe_relative_pattern
 
@@ -79,6 +79,12 @@ class _MemoryLLMConfig(BaseModel):
         description="Provider-specific LLM config; may include credentials",
         json_schema_extra=dashboard_hint(secret=True),
     )
+
+    @field_validator("config")
+    @classmethod
+    def _normalize_api_key(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Keep an explicit key a trimmed string so a mistyped one is rejected instead of replaced."""
+        return normalize_api_key_setting(value, "memory.llm.config.api_key")
 
 
 class _MemoryFileConfig(BaseModel):

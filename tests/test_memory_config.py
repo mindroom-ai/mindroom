@@ -119,6 +119,12 @@ class TestMemoryConfig:
         assert result["llm"]["config"]["model"] == OPENAI_GPT_LUNA
         assert result["llm"]["config"]["api_key"] == "test-key"
 
+    @pytest.mark.parametrize("api_key", [12345, ["sk-a"], {"key": "sk-a"}])
+    def test_memory_llm_rejects_non_string_api_key(self, api_key: object) -> None:
+        """A mistyped explicit key must fail validation instead of silently yielding to the shared key."""
+        with pytest.raises(ValueError, match=r"memory\.llm\.config\.api_key must be a string"):
+            _MemoryLLMConfig(provider="openai", config={"model": OPENAI_GPT_LUNA, "api_key": api_key})
+
     @pytest.mark.parametrize(
         ("configured_api_key", "expected_api_key"),
         [

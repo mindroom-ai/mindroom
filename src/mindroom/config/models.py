@@ -618,6 +618,23 @@ class EmbedderConfig(BaseModel):
         return None if value is None else validate_service_name(value)
 
 
+def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict[str, Any]:
+    """Return settings whose api_key is a trimmed string or absent; reject a non-string key.
+
+    Blank or null keys are dropped, so the provider's shared key still applies.
+    """
+    if "api_key" not in settings:
+        return settings
+    api_key = settings["api_key"]
+    if api_key is not None and not isinstance(api_key, str):
+        msg = f"{field_name} must be a string"
+        raise ValueError(msg)
+    normalized = {key: item for key, item in settings.items() if key != "api_key"}
+    if api_key is not None and api_key.strip():
+        normalized["api_key"] = api_key.strip()
+    return normalized
+
+
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
@@ -683,17 +700,8 @@ class ModelConfig(BaseModel):
     @field_validator("extra_kwargs")
     @classmethod
     def _normalize_extra_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Normalize extra_kwargs.api_key exactly like the api_key field: a trimmed string, blank meaning unset."""
-        if value is None or "api_key" not in value:
-            return value
-        api_key = value["api_key"]
-        if api_key is not None and not isinstance(api_key, str):
-            msg = "extra_kwargs.api_key must be a string"
-            raise ValueError(msg)
-        normalized = {key: item for key, item in value.items() if key != "api_key"}
-        if api_key is not None and api_key.strip():
-            normalized["api_key"] = api_key.strip()
-        return normalized
+        """Normalize extra_kwargs.api_key exactly like the api_key field."""
+        return None if value is None else normalize_api_key_setting(value, "extra_kwargs.api_key")
 
     @field_validator("icon")
     @classmethod

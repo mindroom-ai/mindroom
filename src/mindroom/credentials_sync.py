@@ -451,11 +451,11 @@ def get_memory_llm_api_key(
 ) -> _ResolvedApiKey | None:
     """Return the key the Mem0 LLM uses: an explicit ``memory.llm.config.api_key``, else the provider's shared key.
 
-    Blank explicit keys count as unset. Only ``openai`` and ``anthropic`` fall back to a shared key.
+    Only ``openai`` and ``anthropic`` fall back to a shared key.
     """
-    explicit_api_key = llm_settings.get("api_key")
-    if isinstance(explicit_api_key, str) and explicit_api_key.strip():
-        return _ResolvedApiKey(explicit_api_key.strip(), "config")
+    # The memory LLM config model normalizes api_key to a trimmed string or absence.
+    if explicit_api_key := llm_settings.get("api_key"):
+        return _ResolvedApiKey(explicit_api_key, "config")
     if provider in {"openai", "anthropic"} and (
         shared_api_key := get_api_key_for_provider(provider, runtime_paths=runtime_paths)
     ):
