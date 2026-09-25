@@ -819,7 +819,9 @@ def test_static_runner_credentials_encryption_key_is_removed_from_proc_environ(t
         capture_output=True,
     )
 
-    assert result.stdout.splitlines() == [encryption_key, "False", "False"]
+    # Loading the config logs through the unconfigured structlog default, which
+    # prints to stdout ahead of the three values the script prints last.
+    assert result.stdout.splitlines()[-3:] == [encryption_key, "False", "False"]
 
 
 def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
@@ -969,7 +971,9 @@ def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_enviro
         capture_output=True,
     )
 
-    assert result.stdout.splitlines() == [encryption_key, "False", "False"]
+    # Loading the config logs through the unconfigured structlog default, which
+    # prints to stdout ahead of the three values the script prints last.
+    assert result.stdout.splitlines()[-3:] == [encryption_key, "False", "False"]
 
 
 @pytest.mark.asyncio

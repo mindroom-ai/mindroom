@@ -5,11 +5,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import tempfile
 import threading
 import time
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
+from functools import cache
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import TYPE_CHECKING, Self
@@ -725,6 +727,12 @@ def test_script_recovery_resources_track_only_the_selected_profile() -> None:
     assert backend.script_resource_recovery_authority("standard") != initial
 
 
+@cache
+def _default_storage_root() -> Path:
+    """Share one storage root across default backends, as their contract hashes expect, outside the checkout."""
+    return Path(tempfile.mkdtemp())
+
+
 def _backend(
     *,
     idle_timeout_seconds: float = 60.0,
@@ -793,7 +801,7 @@ def _backend(
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
-        storage_path=Path("mindroom-test-storage").resolve(),
+        storage_path=_default_storage_root(),
     )
     if config_snapshot is None:
         try:
