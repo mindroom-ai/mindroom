@@ -274,6 +274,10 @@ class DesktopShell:
                 except TimeoutError:
                     self._signal_group(signal.SIGKILL)
             _, (stdout, stdout_truncated), (stderr, stderr_truncated) = await asyncio.shield(complete)
+            # Background children with redirected output can outlive a successful shell.
+            # Stop the rest of its process group before settling the result.
+            if not (timed_out or cancelled) and self._group_exists():
+                await self._terminate_process()
             return {
                 "exit_code": process.returncode,
                 "stdout": stdout.decode("utf-8", errors="replace"),

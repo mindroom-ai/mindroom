@@ -142,6 +142,24 @@ async def test_revoke_kills_term_resistant_child_after_parent_exits(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_successful_parent_exit_stops_background_group_before_result(tmp_path: Path) -> None:
+    """A successful command keeps its result but cannot leave an ordinary background child running."""
+    shell = DesktopShell()
+    shell.grant(60)
+    command = "printf done; (sleep 1; printf survived > marker) >/dev/null 2>&1 &"
+    result = await shell.execute(request(command, tmp_path))
+    assert (result["exit_code"], result["stdout"], result["timed_out"], result["cancelled"]) == (
+        0,
+        "done",
+        False,
+        False,
+    )
+    await asyncio.sleep(1.2)
+    assert not (tmp_path / "marker").exists()
+    await shell.close()
+
+
+@pytest.mark.asyncio
 async def test_timeout_and_output_caps(tmp_path: Path) -> None:
     """Timeouts settle and both streams drain beyond capped replies."""
     shell = DesktopShell()
