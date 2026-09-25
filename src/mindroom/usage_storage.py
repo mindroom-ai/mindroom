@@ -93,7 +93,7 @@ def project_usage(run: Mapping[str, object]) -> dict[str, object]:
 
 
 def _project_requests(messages: object) -> list[dict[str, object]] | None:
-    """Project only current assistant counters and timestamps, with no model guesses."""
+    """Project current assistant counters, timestamps and recorded model attribution."""
     if not isinstance(messages, list):
         return None
     requests: list[dict[str, object]] = []
@@ -116,12 +116,16 @@ def _project_requests(messages: object) -> list[dict[str, object]] | None:
         request_metrics = _project_metrics(cast("dict[str, object]", message_metrics))
         if request_metrics:
             created_at = message.get("created_at")
-            requests.append(
-                {
-                    "created_at": created_at if isinstance(created_at, (int, float)) else None,
-                    "metrics": request_metrics,
-                },
-            )
+            request: dict[str, object] = {
+                "created_at": created_at if isinstance(created_at, (int, float)) else None,
+                "metrics": request_metrics,
+            }
+            if isinstance(provider_data, dict) and "mindroom_model" in provider_data:
+                model = cast("dict[str, object]", provider_data)["mindroom_model"]
+                for source, target in (("id", "model"), ("provider", "model_provider")):
+                    value = cast("dict[str, object]", model).get(source) if isinstance(model, dict) else None
+                    request[target] = value if isinstance(value, str) else False
+            requests.append(request)
     return requests
 
 

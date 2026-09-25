@@ -7259,7 +7259,7 @@ visibility = ["mindroom.agent_storage", "mindroom.agno_compat_openai_responses",
 [[modules]]
 path = "mindroom.legacy_usage_storage"
 depends_on = ["mindroom.background_tasks", "mindroom.constants", "mindroom.legacy_session_storage", "mindroom.usage_storage"]
-visibility = ["mindroom.agent_storage", "mindroom.orchestrator", "mindroom.api.main"]
+visibility = ["mindroom.agent_storage", "mindroom.orchestrator", "mindroom.api.main", "mindroom.usage_stats"]
 
 # Shared judgment leaves; no dependency on the response pipeline.
 [[modules]]

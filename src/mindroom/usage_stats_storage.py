@@ -81,10 +81,12 @@ class UsageModelMetrics:
 
 @dataclass(frozen=True, slots=True)
 class UsageRequestMetrics:
-    """Content-free counters and timestamp for one provider request."""
+    """Content-free counters, timestamp and optional model for one provider request."""
 
     created_at: int | float
     metrics: Mapping[str, _MetricValue]
+    model_provider: str | None = None
+    model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -658,7 +660,16 @@ def _extract_request_metrics(requests: object) -> tuple[UsageRequestMetrics, ...
                 or not isinstance(metrics, dict)
             ):
                 return None
-            selected.append(UsageRequestMetrics(created_at, _select_metrics(cast("dict[str, object]", metrics))))
+            if any(key in request and not _optional_string(request[key]) for key in ("model_provider", "model")):
+                return None
+            selected.append(
+                UsageRequestMetrics(
+                    created_at,
+                    _select_metrics(cast("dict[str, object]", metrics)),
+                    model_provider=_optional_string(request.get("model_provider")),
+                    model=_optional_string(request.get("model")),
+                ),
+            )
     except (TypeError, ValueError):
         return None
     return tuple(selected)

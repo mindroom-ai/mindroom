@@ -581,13 +581,16 @@ def test_codex_tool_search_items_round_trip_through_streaming_history() -> None:
         _output_item_done_event(_TOOL_SEARCH_CALL_ITEM, 0).item.model_dump(exclude_none=True),
         _output_item_done_event(_TOOL_SEARCH_OUTPUT_ITEM, 1).item.model_dump(exclude_none=True),
     ]
-    assert messages[1].provider_data == {
+    expected_provider_data = {
         "mindroom_native_compaction": None,
         "tool_search_items": expected_items,
         "response_id": "resp_1",
         "mindroom_response_stored": False,
         "mindroom_portable_replay": False,
     }
+    assert messages[1].provider_data is not None
+    for key, value in expected_provider_data.items():
+        assert messages[1].provider_data[key] == value
     assert client.responses.captured_kwargs[1]["input"] == [
         {"role": "user", "content": "What is the weather?"},
         *expected_items,

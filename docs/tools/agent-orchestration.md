@@ -151,8 +151,10 @@ All three functions accept an optional `include_daily` boolean, which defaults t
 
 Call `get_my_usage(include_daily=True)`, `get_my_private_usage(include_daily=True)`, or `get_all_usage(include_daily=True)` to include token usage per day.
 The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, `run_count`, and a `model_breakdown` grouped by provider and model.
-Dates use individual request timestamps when all counters reconcile to the recorded run and one model; older or unreconciled details fall back to run creation time.
+Dates use individual request timestamps when all counters reconcile to the recorded run and its per-model totals; older or unreconciled details fall back to run creation time.
+New requests retain their own model attribution; older requests can inherit a single known run model, but ambiguous mixed-model history cannot be split.
 Each top-level run counts once on its first request date, so tokens on later days or from saved team members do not add extra replies.
+Each model counts that run once on the first date it was used.
 Dates are sorted oldest first and omit days without usable retained usage.
 The daily breakdown follows the same requester and administrator access rules as the rest of the report.
 Each day's combined totals and each model's totals separately include `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`, alongside total, reasoning, and audio tokens.
