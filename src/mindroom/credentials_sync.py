@@ -17,13 +17,16 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
 from mindroom.credential_policy import is_oauth_token_service
 from mindroom.credentials import get_runtime_shared_credentials_manager, validate_service_name
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import CREDENTIAL_SEEDS_FILE_ENV, CREDENTIAL_SEEDS_JSON_ENV
+
+if TYPE_CHECKING:
+    from mindroom.config.models import ModelConfig
 
 logger = get_logger(__name__)
 
@@ -39,6 +42,14 @@ _EMBEDDER_CREDENTIAL_SERVICE = "embedder"
 # construction without a key, keyless local endpoints ignore the header, and
 # keyed endpoints answer HTTP 401 through the classified failure path.
 _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY = "mindroom-keyless-placeholder"
+
+
+@dataclass(frozen=True)
+class _ModelApiKey:
+    """One model-specific API key and where it was set."""
+
+    value: str
+    source: Literal["dashboard", "config"]
 
 
 @dataclass(frozen=True)
@@ -413,6 +424,21 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
 def get_api_key_for_service(service: str, runtime_paths: RuntimePaths) -> str | None:
     """Get an API key from one explicitly named shared credential service."""
     return get_runtime_shared_credentials_manager(runtime_paths).get_api_key(service)
+
+
+def get_model_api_key(model_name: str, model_config: ModelConfig, runtime_paths: RuntimePaths) -> _ModelApiKey | None:
+    """Return the key set for one model, which replaces the provider's shared key.
+
+    A key saved for the model in the dashboard wins over ``api_key`` or
+    ``extra_kwargs.api_key`` in config; ``None`` means the provider's shared key applies.
+    """
+    stored_api_key = get_api_key_for_service(f"model:{model_name}", runtime_paths)
+    if stored_api_key:
+        return _ModelApiKey(stored_api_key, "dashboard")
+    configured_api_key = model_config.api_key or (model_config.extra_kwargs or {}).get("api_key")
+    if isinstance(configured_api_key, str):
+        return _ModelApiKey(configured_api_key, "config")
+    return None
 
 
 def get_embedder_api_key(

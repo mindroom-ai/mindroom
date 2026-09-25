@@ -148,10 +148,23 @@ def _runtime_paths_with_synced_env(tmp_path: Path, env: dict[str, str]) -> Runti
     [
         ({}, None, "sk-env"),
         ({"api_key": "sk-configured"}, None, "sk-configured"),
+        ({"api_key": " sk-configured "}, None, "sk-configured"),
         ({"extra_kwargs": {"api_key": "sk-configured"}}, None, "sk-configured"),
         ({"api_key": "sk-configured"}, "sk-stored-model", "sk-stored-model"),
+        ({"api_key": "  "}, None, "sk-env"),
+        ({"extra_kwargs": {"api_key": ""}}, None, "sk-env"),
+        ({"api_key": " ", "extra_kwargs": {"api_key": "sk-configured"}}, None, "sk-configured"),
     ],
-    ids=["env-fallback", "api-key", "extra-kwargs-api-key", "stored-model-credential"],
+    ids=[
+        "env-fallback",
+        "api-key",
+        "api-key-trimmed",
+        "extra-kwargs-api-key",
+        "stored-model-credential",
+        "blank-api-key",
+        "blank-extra-kwargs-api-key",
+        "blank-api-key-beside-extra-kwargs",
+    ],
 )
 def test_model_api_key_precedence(
     tmp_path: Path,
@@ -198,6 +211,39 @@ def test_configured_api_key_reaches_provider_with_its_own_key_handling(
     model = get_model_instance(config, runtime_paths, "target")
 
     assert model.api_key == "sk-configured"
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id", "extra_kwargs"),
+    [
+        ("codex", "gpt-6-astra", {}),
+        ("kimi", "k3", {}),
+        (
+            "bedrock_claude",
+            "anthropic.claude-sonnet-5",
+            {"aws_region": "us-east-1", "aws_access_key": "dummy-access", "aws_secret_key": "dummy-secret"},
+        ),
+        ("vertexai_claude", "claude-sonnet-5", {"project_id": "dummy-project", "region": "us-east1"}),
+        ("synthetic", "lorem-ipsum", {}),
+    ],
+)
+def test_keyless_providers_never_carry_a_configured_api_key(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+    extra_kwargs: dict[str, object],
+) -> None:
+    """Providers that authenticate without API keys drop a configured key instead of holding it."""
+    runtime_paths = _runtime_paths_with_synced_env(tmp_path, {})
+    config = Config(
+        models={
+            "target": ModelConfig(provider=provider, id=model_id, api_key="sk-configured", extra_kwargs=extra_kwargs),
+        },
+    )
+
+    model = get_model_instance(config, runtime_paths, "target")
+
+    assert "sk-configured" not in repr(vars(model))
 
 
 def test_model_config_rejects_api_key_in_both_fields() -> None:

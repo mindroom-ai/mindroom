@@ -6,8 +6,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
-from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host, get_secret_from_env
+from mindroom.credentials_sync import get_api_key_for_provider, get_model_api_key, get_ollama_host, get_secret_from_env
 from mindroom.google_adc import load_google_application_credentials
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
@@ -189,6 +188,8 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             extra_kwargs["api_key"] = api_key
 
     if canonical_provider_key == "vertexai_claude":
+        # Vertex authenticates with Google credentials and never sends an API key.
+        extra_kwargs.pop("api_key", None)
         if "project_id" not in extra_kwargs:
             project_id = runtime_paths.env_value(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"])
             if project_id:
@@ -381,15 +382,9 @@ def get_model_instance(
     model_id = model_config.id
 
     extra_kwargs = dict(model_config.extra_kwargs or {})
-    if model_config.api_key:
-        extra_kwargs["api_key"] = model_config.api_key
-
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
-    model_creds = creds_manager.load_credentials(f"model:{model_name}")
-    model_api_key = model_creds.get("api_key") if model_creds else None
-
-    if model_api_key:
-        extra_kwargs["api_key"] = model_api_key
+    model_api_key = get_model_api_key(model_name, model_config, runtime_paths)
+    if model_api_key is not None:
+        extra_kwargs["api_key"] = model_api_key.value
 
     if canonical_provider(provider) in {"codex", "openai_codex"}:
         extra_kwargs.setdefault("default_instructions", config.get_prompt("CODEX_DEFAULT_INSTRUCTIONS"))

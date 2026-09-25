@@ -621,6 +621,9 @@ class EmbedderConfig(BaseModel):
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
 
+    # Validation errors must never echo the API keys this model can carry.
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     provider: str = Field(
         description="Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
     )
@@ -668,6 +671,25 @@ class ModelConfig(BaseModel):
         if value is None:
             return None
         return value.strip() or None
+
+    @field_validator("api_key")
+    @classmethod
+    def _normalize_api_key(cls, value: str | None) -> str | None:
+        """Trim the key and treat blank input as unset, so the provider's shared key still applies."""
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("extra_kwargs")
+    @classmethod
+    def _drop_blank_extra_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Treat a blank extra_kwargs.api_key as unset, matching the api_key field."""
+        if value is None or "api_key" not in value:
+            return value
+        api_key = value["api_key"]
+        if api_key is None or (isinstance(api_key, str) and not api_key.strip()):
+            return {key: item for key, item in value.items() if key != "api_key"}
+        return value
 
     @field_validator("icon")
     @classmethod
@@ -722,7 +744,7 @@ class ModelConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_single_api_key(self) -> Self:
-        if self.api_key and self.extra_kwargs and "api_key" in self.extra_kwargs:
+        if self.api_key is not None and self.extra_kwargs is not None and "api_key" in self.extra_kwargs:
             msg = "Set the model API key in either api_key or extra_kwargs.api_key, not both"
             raise ValueError(msg)
         return self
