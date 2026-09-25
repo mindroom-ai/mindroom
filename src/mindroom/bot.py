@@ -2367,13 +2367,13 @@ class AgentBot:
                 _ProcessShutdownMatrixClient,  # noqa: TC006 - runtime reference proves the private protocol is live
                 self.client,
             ).begin_process_shutdown_transport_fence()
-        await self._personal_room_lifecycle.cancel_reconciliation()
-        if self.agent_name == ROUTER_AGENT_NAME:
-            await self._cancel_deferred_overdue_task_drain()
         shutdown_budget = self._sync_shutdown_budget
         if shutdown_budget is None:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
             self._sync_shutdown_budget = shutdown_budget
+        await self._personal_room_lifecycle.cancel_reconciliation(timeout_seconds=shutdown_budget.remaining_seconds())
+        if self.agent_name == ROUTER_AGENT_NAME:
+            await self._cancel_deferred_overdue_task_drain()
         background_tasks_completed = await wait_for_background_tasks(
             timeout=shutdown_budget.remaining_seconds(),
             owner=self._runtime_view,

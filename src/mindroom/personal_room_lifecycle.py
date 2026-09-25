@@ -93,20 +93,26 @@ class PersonalRoomLifecycle:
 
     async def _run_reconciliation(self) -> None:
         revision = self._config_revision
+        cancelled = False
         try:
             await self._reconcile()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
-            if revision == self._config_revision:
+            if not cancelled and revision == self._config_revision:
                 self._next_reconciliation_at = monotonic() + _RECONCILIATION_RETRY_SECONDS
             self._reconciliation_task = None
 
-    async def cancel_reconciliation(self) -> None:
-        """Drain maintenance before its Matrix clients or ingestion sessions close."""
+    async def cancel_reconciliation(self, *, timeout_seconds: float) -> None:
+        """Cancel within the shutdown budget, retaining ownership of unfinished work."""
         task = self._reconciliation_task
         if task is not None:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            self._reconciliation_task = None
+            done, _ = await asyncio.wait((task,), timeout=timeout_seconds)
+            if task in done:
+                await asyncio.gather(task, return_exceptions=True)
+                self._reconciliation_task = None
         self._next_reconciliation_at = 0.0
 
     async def _onboard(

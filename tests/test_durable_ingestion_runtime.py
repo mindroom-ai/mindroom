@@ -17,7 +17,7 @@ import pytest
 from nio.durable import DurableSyncConfig, RecordKind, SyncBatch, SyncRecord
 from nio.durable.transport import HttpError
 
-from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.background_tasks import run_coroutine_until_complete, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_room_lifecycle import BotRoomLifecycle
 from mindroom.config.access import ResponderAccessConfig
@@ -31,6 +31,7 @@ from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.personal_room_lifecycle import PersonalRoomTarget
+from mindroom.runtime_shutdown import ShutdownBudget
 from tests.bot_helpers import make_matrix_client_mock
 from tests.test_bot_ready_hook import _agent_bot
 from tests.test_durable_ingestion_admission import ROOM, Session
@@ -46,7 +47,11 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
-async def test_personal_room_reconciliation_does_not_delay_sync_ack(tmp_path: Path) -> None:
+@pytest.mark.parametrize("resists_cancellation", [False, True])
+async def test_personal_room_reconciliation_does_not_delay_sync_ack(
+    tmp_path: Path,
+    resists_cancellation: bool,
+) -> None:
     """Slow personal-room maintenance must not hold the durable ingestion checkpoint."""
     bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
     bot.config.personal_rooms = PersonalRoomsConfig(agent="code", onboarding_rooms=[ROOM], backfill=True)
@@ -62,7 +67,10 @@ async def test_personal_room_reconciliation_does_not_delay_sync_ack(tmp_path: Pa
     async def ensure(*_args: object, **_kwargs: object) -> None:
         entered.set()
         try:
-            await release.wait()
+            if resists_cancellation:
+                await run_coroutine_until_complete(release.wait())
+            else:
+                await release.wait()
         finally:
             stopped.set()
 
@@ -74,6 +82,7 @@ async def test_personal_room_reconciliation_does_not_delay_sync_ack(tmp_path: Pa
     consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
     await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=batch.stream_id)
     session = Session(batch)
+    preparation = None
     try:
         async with asyncio.timeout(2):
             await consume_one_ingestion_batch(
@@ -85,12 +94,17 @@ async def test_personal_room_reconciliation_does_not_delay_sync_ack(tmp_path: Pa
             await entered.wait()
         assert session.acked == [batch]
         assert not release.is_set()
-        async with asyncio.timeout(2):
-            await bot.prepare_for_sync_shutdown()
-        assert stopped.is_set()
+        bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
+        preparation = asyncio.create_task(bot.prepare_for_sync_shutdown())
+        done, _ = await asyncio.wait((preparation,), timeout=2)
+        assert preparation in done, "maintenance cancellation exceeded the shutdown budget"
+        await preparation
+        assert stopped.is_set() is not resists_cancellation
         assert not release.is_set()
     finally:
         release.set()
+        if preparation is not None:
+            await preparation
         await wait_for_background_tasks(timeout=2, owner=bot._runtime_view)
 
 

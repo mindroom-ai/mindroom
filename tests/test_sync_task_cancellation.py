@@ -70,7 +70,6 @@ from mindroom.orchestrator import (
     _MultiAgentOrchestrator,
     _run_shutdown_step,
 )
-from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.response_runner import ResponseRunner, ResponseShutdownTimeoutError, _InboxResponseOwnership
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
@@ -89,6 +88,7 @@ if TYPE_CHECKING:
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_personal_room_shutdown_mock,
     install_runtime_journal_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
@@ -668,7 +668,7 @@ async def test_process_shutdown_signals_responses_before_coalescing_drain() -> N
         return drain_result
 
     bot = object.__new__(AgentBot)
-    bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
+    install_personal_room_shutdown_mock(bot)
     bot._journal_dispatcher = MagicMock(
         spec=JournalDispatcher,
         wait_stopped=AsyncMock(return_value=True),
@@ -742,7 +742,7 @@ async def test_process_shutdown_fences_matrix_transport_before_response_drain() 
         return drain_result
 
     bot = object.__new__(AgentBot)
-    bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
+    install_personal_room_shutdown_mock(bot)
     bot._journal_dispatcher = MagicMock(
         spec=JournalDispatcher,
         wait_stopped=AsyncMock(return_value=True),
@@ -812,7 +812,7 @@ async def test_process_shutdown_preparation_does_not_wait_for_transport_close() 
         return drain_result
 
     bot = object.__new__(AgentBot)
-    bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
+    install_personal_room_shutdown_mock(bot)
     bot._journal_dispatcher = MagicMock(
         spec=JournalDispatcher,
         wait_stopped=AsyncMock(return_value=True),
@@ -878,7 +878,7 @@ async def test_router_process_shutdown_fences_transport_before_first_await() -> 
         await release_router_cleanup.wait()
 
     bot = object.__new__(AgentBot)
-    bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
+    install_personal_room_shutdown_mock(bot)
     bot._journal_dispatcher = MagicMock(
         spec=JournalDispatcher,
         wait_stopped=AsyncMock(return_value=True),
@@ -2014,7 +2014,7 @@ async def test_prepare_then_stop_reuses_one_total_shutdown_budget() -> None:
         return False
 
     bot = object.__new__(AgentBot)
-    bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
+    install_personal_room_shutdown_mock(bot)
     bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
     bot.agent_user = AgentMatrixUser(
         agent_name="budget",

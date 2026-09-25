@@ -259,7 +259,7 @@ async def test_scheduled_reconciliation_is_single_flight_and_cancellable(coordin
         await asyncio.wait_for(entered.wait(), timeout=2)
         for _ in range(10):
             lifecycle.schedule_reconciliation()
-        await lifecycle.cancel_reconciliation()
+        await lifecycle.cancel_reconciliation(timeout_seconds=2)
         assert cancelled.is_set()
         assert attempts == [1]
         coordination.owner.ensure.side_effect = None
@@ -267,7 +267,7 @@ async def test_scheduled_reconciliation_is_single_flight_and_cancellable(coordin
         assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
         assert coordination.owner.ensure.await_count == 2
     finally:
-        await lifecycle.cancel_reconciliation()
+        await lifecycle.cancel_reconciliation(timeout_seconds=2)
 
 
 @pytest.mark.asyncio
@@ -376,7 +376,7 @@ async def test_reload_during_provisioning_does_not_cache_stale_success(coordinat
         assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
         assert coordination.owner.ensure.await_count == 2
     finally:
-        await lifecycle.cancel_reconciliation()
+        await lifecycle.cancel_reconciliation(timeout_seconds=2)
 
 
 @pytest.mark.asyncio
