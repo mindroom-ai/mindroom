@@ -219,6 +219,17 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
     # listing endpoint, so a URL probe would misreport valid keys as broken.
 }
 
+# Env variables that move a probed provider off its default endpoint, as read by the installed
+# provider SDKs (and by model loading for OPENAI_BASE_URL). OpenRouter and DeepSeek clients
+# always receive an explicit base_url, so no env variable moves them.
+_PROVIDER_ENDPOINT_ENV_VARS: dict[str, tuple[str, ...]] = {
+    "anthropic": ("ANTHROPIC_BASE_URL",),
+    "openai": ("OPENAI_BASE_URL",),
+    "google": ("GOOGLE_GEMINI_BASE_URL", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_ENTERPRISE"),
+    "cerebras": ("CEREBRAS_BASE_URL",),
+    "groq": ("GROQ_BASE_URL",),
+}
+
 
 def _http_check(
     url: str,
@@ -275,12 +286,14 @@ def _with_local_network_hint(detail: str, base_url: str | None) -> str:
     )
 
 
-def _validate_provider_key(
-    provider: str,
-    api_key: str,
-    base_url: str | None = None,
-) -> tuple[bool | None, str]:
-    """Validate an API key with a lightweight models-list request.
+def _sets_custom_endpoint(model_config: ModelConfig) -> bool:
+    """Return whether a model's extra_kwargs may move it off the provider's default endpoint."""
+    extra_kwargs = model_config.extra_kwargs or {}
+    return any(extra_kwargs.get(name) for name in ("base_url", "client_params", "vertexai"))
+
+
+def _validate_provider_key(provider: str, api_key: str) -> tuple[bool | None, str]:
+    """Validate an API key with a lightweight models-list request to the provider's default endpoint.
 
     Returns (True, "") if valid, (False, reason) if invalid,
     (None, reason) if inconclusive (e.g. connection error).
@@ -288,12 +301,9 @@ def _validate_provider_key(
     # Normalize aliases so we look up a single URL and auth style
     canonical = "google" if provider == "gemini" else provider
 
-    if base_url:
-        url = base_url.rstrip("/") + "/models"
-    elif canonical in _PROVIDER_VALIDATE_URLS:
-        url = _PROVIDER_VALIDATE_URLS[canonical]
-    else:
+    if canonical not in _PROVIDER_VALIDATE_URLS:
         return None, "unknown provider"
+    url = _PROVIDER_VALIDATE_URLS[canonical]
 
     headers: dict[str, str] = {}
     if canonical == "anthropic":
@@ -549,24 +559,13 @@ def _check_api_key_provider(
         console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
         return 0, 0, 1
 
-    # Send the key only where model loading would: an OpenAI endpoint through the helper model
-    # loading uses, else the provider's default endpoint. Other providers' custom base_url
-    # handling lives in each model class, so doctor reports those instead of probing them.
-    if provider == "openai":
-        base_url = next(
-            (
-                url
-                for model in shared_key_models
-                if (url := constants.runtime_openai_base_url(runtime_paths, model.extra_kwargs))
-            ),
-            None,
-        )
-    elif all((model.extra_kwargs or {}).get("base_url") for model in shared_key_models):
-        console.print(f"[dim]-[/dim] {provider}: shared API key not validated (its models set a custom base_url)")
+    # Probe only the provider's default endpoint, and only when some shared-key model calls it.
+    canonical = "google" if provider == "gemini" else provider
+    env_override = any(runtime_paths.env_value(name) for name in _PROVIDER_ENDPOINT_ENV_VARS.get(canonical, ()))
+    if env_override or all(_sets_custom_endpoint(model) for model in shared_key_models):
+        console.print(f"[dim]-[/dim] {provider}: shared API key not validated (custom endpoint)")
         return 0, 0, 0
-    else:
-        base_url = None
-    valid, detail = _validate_provider_key(provider, api_key, base_url)
+    valid, detail = _validate_provider_key(provider, api_key)
     return _print_validation(
         valid,
         detail,

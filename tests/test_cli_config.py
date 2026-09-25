@@ -1780,6 +1780,29 @@ class TestConfigValidate:
         assert result.exit_code == 0
         assert "Missing environment variables" not in result.output
 
+    def test_validate_skips_shared_key_warning_for_models_with_their_own_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A provider env key is only reported missing when some model would fall back to it."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-own\n"
+            "  fast:\n    provider: anthropic\n    id: claude-haiku-4-5\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        for name in ("OPENAI_API_KEY", "OPENAI_API_KEY_FILE", "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_FILE"):
+            monkeypatch.delenv(name, raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "anthropic: Set ANTHROPIC_API_KEY" in result.output
+        assert "OPENAI_API_KEY" not in result.output
+
     def test_validate_warns_for_missing_vertexai_claude_env(
         self,
         tmp_path: Path,
@@ -2912,31 +2935,6 @@ class TestDoctor:
         assert "model saved uses its own API key from dashboard (not validated)" in result.output
         assert "model proxy uses its own API key from config (not validated)" in result.output
 
-    def test_doctor_probes_the_shared_key_at_openai_base_url(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The shared key goes where the runtime sends it, and a model's own key goes nowhere."""
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n"
-            "  default:\n    provider: openai\n    id: gpt-6-astra\n"
-            "  local:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-local-proxy\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n",
-        )
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
-        monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:9292/v1")
-        probes = self._record_provider_probes(monkeypatch)
-
-        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
-
-        assert result.exit_code == 0
-        assert ("http://localhost:9292/v1/models", "Bearer sk-env") in probes
-        assert all("sk-local-proxy" not in authorization for _url, authorization in probes)
-        assert all(url.startswith("http://localhost:9292/v1") for url, _authorization in probes)
-
     @pytest.mark.parametrize(
         ("memory_api_key", "expected_source"),
         [("sk-memory", "its own API key"), ("'   '", "the shared openai key")],
@@ -2980,32 +2978,77 @@ class TestDoctor:
         assert "OPENAI_API_KEY not set" not in result.output
         assert probes == [("https://api.anthropic.com/v1/models", "")]
 
-    @pytest.mark.parametrize("provider", ["anthropic", "google"])
-    def test_doctor_never_sends_a_shared_key_to_an_unsupported_base_url(
+    @pytest.mark.parametrize(
+        ("provider", "extra_kwargs_yaml", "env"),
+        [
+            ("anthropic", "      base_url: https://gateway.example/v1\n", {}),
+            ("anthropic", "      client_params:\n        base_url: https://gateway.example/anthropic\n", {}),
+            ("anthropic", "", {"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"}),
+            (
+                "google",
+                "      client_params:\n        http_options:\n          base_url: https://gateway.example\n",
+                {},
+            ),
+            ("google", "      vertexai: true\n", {}),
+            ("google", "", {"GOOGLE_GEMINI_BASE_URL": "https://gateway.example"}),
+            ("openai", "      base_url: https://gateway.example/v1\n", {}),
+            ("openai", "", {"OPENAI_BASE_URL": "https://gateway.example/v1"}),
+            ("groq", "", {"GROQ_BASE_URL": "https://gateway.example"}),
+            ("cerebras", "", {"CEREBRAS_BASE_URL": "https://gateway.example"}),
+        ],
+        ids=[
+            "anthropic-base-url",
+            "anthropic-client-params",
+            "anthropic-env",
+            "gemini-http-options",
+            "gemini-vertexai",
+            "gemini-env",
+            "openai-base-url",
+            "openai-env",
+            "groq-env",
+            "cerebras-env",
+        ],
+    )
+    def test_doctor_never_probes_a_shared_key_behind_a_custom_endpoint(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         provider: str,
+        extra_kwargs_yaml: str,
+        env: dict[str, str],
     ) -> None:
-        """Only model loading decides whether a provider honours base_url, so doctor does not probe it."""
+        """A shared key is probed only at the default endpoint, and only when no endpoint override applies."""
         cfg = tmp_path / "config.yaml"
+        extra_kwargs_block = f"    extra_kwargs:\n{extra_kwargs_yaml}" if extra_kwargs_yaml else ""
         cfg.write_text(
             "models:\n"
-            f"  default:\n    provider: {provider}\n    id: some-model\n"
-            "    extra_kwargs:\n      base_url: https://attacker.example/v1\n"
+            f"  default:\n    provider: {provider}\n    id: some-model\n{extra_kwargs_block}"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n",
+            "router:\n  model: default\n"
+            "memory:\n  backend: none\n",
         )
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anthropic")
-        monkeypatch.setenv("GOOGLE_API_KEY", "sk-google")
-        requested_urls: list[str] = []
+        for name in (
+            "OPENAI_BASE_URL",
+            "ANTHROPIC_BASE_URL",
+            "GOOGLE_GEMINI_BASE_URL",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_GENAI_USE_ENTERPRISE",
+            "GROQ_BASE_URL",
+            "CEREBRAS_BASE_URL",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY"):
+            monkeypatch.setenv(name, "sk-gateway-key")
+        requested: list[tuple[str, str]] = []
         monkeypatch.setattr(
             "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
             lambda *_args, **_kwargs: "http://localhost:8008",
         )
 
-        def _mock_get(url: str, **_kw: object) -> httpx.Response:
-            requested_urls.append(str(url))
+        def _mock_get(url: str, headers: dict[str, str] | None = None, **_kw: object) -> httpx.Response:
+            requested.append((str(url), repr(headers)))
             return httpx.Response(200, json={"versions": ["v1.1"], "data": []})
 
         monkeypatch.setattr("mindroom.cli.doctor.httpx.get", _mock_get)
@@ -3013,9 +3056,8 @@ class TestDoctor:
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
 
         assert result.exit_code == 0
-        assert f"{provider}: shared API key not validated (its models set a custom base_url)" in result.output
-        assert not any("attacker.example" in url for url in requested_urls)
-        assert not any("sk-anthropic" in url or "sk-google" in url for url in requested_urls)
+        assert f"{provider}: shared API key not validated (custom endpoint)" in result.output
+        assert not any("sk-gateway-key" in url or "sk-gateway-key" in headers for url, headers in requested)
 
     def test_doctor_never_sends_generic_embedder_keys_to_the_configured_host(
         self,
@@ -3368,8 +3410,8 @@ class TestDoctor:
         assert "vertexai_claude connection failed for claude-sonnet-5" in result.output
         assert "HTTP 403" in result.output
 
-    def test_custom_base_url_validation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Doctor validates against custom base_url when configured."""
+    def test_custom_base_url_is_not_validated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor never sends the shared key to a custom base_url or to a default host the model does not call."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n"
@@ -3400,9 +3442,8 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "API key valid" in result.output
-        # Should validate against the custom base_url, not api.openai.com
-        assert any("localhost:9292" in u for u in called_urls)
+        assert "openai: shared API key not validated (custom endpoint)" in result.output
+        assert not any("localhost:9292" in u or "api.openai.com" in u for u in called_urls)
 
     def test_memory_ollama_embedder_checks_reachability(
         self,

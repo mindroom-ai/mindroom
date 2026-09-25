@@ -767,9 +767,15 @@ def _find_missing_env_keys(
     runtime_paths: RuntimePaths,
 ) -> list[tuple[str, str]]:
     """Return (provider, env_key) pairs for configured providers missing env vars."""
-    from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
+    from mindroom.credentials_sync import get_model_api_key, get_secret_from_env  # noqa: PLC0415
 
     providers_used: set[str] = {model.provider for model in config.models.values()}
+    # A model with its own key never needs the provider's shared key.
+    shared_key_providers = {
+        model.provider
+        for model_name, model in config.models.items()
+        if get_model_api_key(model_name, model, runtime_paths) is None
+    }
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
         if provider == "bedrock_claude":
@@ -789,9 +795,12 @@ def _find_missing_env_keys(
                 missing.append((provider, AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"]))
             continue
         if provider == "azure":
+            azure_env_keys = [AZURE_OPENAI_ENV_BY_KEY["endpoint"]]
+            if provider in shared_key_providers:
+                azure_env_keys.insert(0, AZURE_OPENAI_ENV_BY_KEY["api_key"])
             missing.extend(
                 (provider, env_key)
-                for env_key in (AZURE_OPENAI_ENV_BY_KEY["api_key"], AZURE_OPENAI_ENV_BY_KEY["endpoint"])
+                for env_key in azure_env_keys
                 if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
             )
             continue
@@ -803,7 +812,11 @@ def _find_missing_env_keys(
             )
             continue
         env_key = constants.env_key_for_provider(provider)
-        if env_key and not get_secret_from_env(env_key, runtime_paths=runtime_paths):
+        if (
+            env_key
+            and provider in shared_key_providers
+            and not get_secret_from_env(env_key, runtime_paths=runtime_paths)
+        ):
             missing.append((provider, env_key))
     return missing
 

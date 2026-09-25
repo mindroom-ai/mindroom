@@ -47,10 +47,11 @@ MindRoom trims both fields, and a blank value counts as unset, so the provider's
 `extra_kwargs.api_key` must be a string.
 `ollama` and `llama_cpp` models skip the shared provider key step.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and drop any configured key.
-The dashboard's **Models** editor shows whether a model uses its saved key, its config key, or the provider key, except for `ollama` models.
-`mindroom doctor` checks a provider's shared key only when some model uses it, and only against an endpoint that model loading would call.
-That is the provider's default endpoint, or for `openai` the `extra_kwargs.base_url` or `OPENAI_BASE_URL` endpoint; other providers' custom `base_url` values are reported, not probed.
-Doctor lists models that have their own key without sending that key anywhere.
+The dashboard's **Models** editor shows whether a model uses its saved key, its config key, or the provider key, except for `ollama` models and the providers above that drop keys.
+`mindroom doctor` never sends a model's own key; it lists those models and where each key comes from.
+Doctor sends a provider's shared key only to that provider's default endpoint, and only when at least one model that relies on the shared key has no `extra_kwargs.base_url`, `extra_kwargs.client_params`, or `extra_kwargs.vertexai`.
+Doctor also skips the probe when the provider SDK's base-URL environment variable is set: `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GROQ_BASE_URL`, `CEREBRAS_BASE_URL`, or, for Gemini, `GOOGLE_GEMINI_BASE_URL`, `GOOGLE_GENAI_USE_VERTEXAI`, or `GOOGLE_GENAI_USE_ENTERPRISE`.
+In those cases it prints that the shared key was not validated because of a custom endpoint.
 
 Presentation metadata is optional:
 
