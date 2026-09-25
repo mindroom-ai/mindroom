@@ -385,6 +385,37 @@ class _PausingBackend:
 
 
 @dataclass(slots=True)
+class _WritesAfterTheFirstWait:
+    """A real backend that starts each write after its first only once `gate` returns.
+
+    An operation that commits in several transactions lets a racer be ordered
+    between two of its commits, or after all of them if the racer loses the
+    released row to the operation's next claim. Holding the later writes makes
+    the first ordering the only one, instead of leaving it to whichever
+    connection PostgreSQL grants the row first.
+    """
+
+    inner: Backend
+    gate: Callable[[], Awaitable[object]]
+    writes: int = 0
+
+    async def write[T](self, operation: Operation[T]) -> T:
+        """Run one write, behind the gate unless it is the first."""
+        self.writes += 1
+        if self.writes > 1:
+            await self.gate()
+        return await self.inner.write(operation)
+
+    async def read[T](self, operation: Operation[T]) -> T:
+        """Run one read, ungated."""
+        return await self.inner.read(operation)
+
+    async def close(self) -> None:
+        """Close the wrapped backend."""
+        await self.inner.close()
+
+
+@dataclass(slots=True)
 class _HydrationWriteShape:
     """The hydration work one real backend transaction was asked to commit."""
 
@@ -5015,6 +5046,12 @@ class TestAFenceCannotBeSteppedOverByAConcurrentWalk:
         window is opened by pausing the walk after its first statement -- the
         real transaction, the real SQL, only held open -- and the fence is a
         real membership batch admission on the second store.
+
+        The walk commits its chunk and its final marker in separate
+        transactions, and the marker waits for the fence to commit. Otherwise
+        the queued fence and the marker's own claim race for the row the chunk
+        releases, and a marker that wins publishes first and is erased by the
+        fence after it: a correct ordering, but not the one under test.
         """
         principal_id = "agent@alice"
         reader = rival_stores.first.principal(principal_id)
@@ -5031,8 +5068,15 @@ class TestAFenceCannotBeSteppedOverByAConcurrentWalk:
                 fence_finished,
             )
 
+        async def after_the_fence() -> None:
+            committed = await asyncio.to_thread(fence_finished.wait, _WORKER_WAIT_SECONDS)
+            assert committed, "the fence never committed"
+
         hydrating = EventJournalStore(
-            backend=_PausingBackend(rival_stores.first.backend, hold_the_walk_open),
+            backend=_WritesAfterTheFirstWait(
+                _PausingBackend(rival_stores.first.backend, hold_the_walk_open),
+                after_the_fence,
+            ),
         ).principal(principal_id)
         epoch = await reader.membership_epoch(ROOM)
 
