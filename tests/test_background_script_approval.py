@@ -33,6 +33,10 @@ if TYPE_CHECKING:
 
     from mindroom.event_journal.store import PrincipalStore
 
+# A background approval waiter rereads its durable decision once a second, so a
+# settlement can take a whole poll interval to reach it.
+_SETTLED_DECISION_WAIT_SECONDS = 5.0
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("worker_tools", [[], None], ids=["explicit-local", "missing-static-proxy"])
@@ -379,9 +383,7 @@ async def test_cancelled_background_call_is_denied_retired_and_pruned_with_run(t
             _origin(),
             reason="Background script ownership was cancelled.",
         )
-        # The waiter rereads the durable decision once a second, so it can take a
-        # whole poll interval to see the settlement.
-        decision = await asyncio.wait_for(decision_task, timeout=5.0)
+        decision = await asyncio.wait_for(decision_task, timeout=_SETTLED_DECISION_WAIT_SECONDS)
 
         assert settled is True
         assert decision.status == "denied"
@@ -482,7 +484,7 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
             "run-1",
             reason="Background script ownership was cancelled.",
         )
-        decision = await asyncio.wait_for(pending_run_task, timeout=1.0)
+        decision = await asyncio.wait_for(pending_run_task, timeout=_SETTLED_DECISION_WAIT_SECONDS)
 
         assert settled == 1
         assert decision.status == "denied"
