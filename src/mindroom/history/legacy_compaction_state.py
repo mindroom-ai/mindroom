@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 # tombstones and ``last_compacted_at``/``last_summary_model``/``last_compacted_run_count``
 # audit fields, and a replayed ``session.summary``, written when compaction deleted the runs it
 # summarized.
-# Last legacy release: v2026.9.310; replacement: the next release archives compacted runs
+# Last legacy release: v2026.9.313; replacement: the next release archives compacted runs
 # in ``<session_table>_compactions`` and ``<session_table>_compacted_runs``.
 # Handling: ``migrate_compaction_database`` runs once per conversation database when storage
 # opens, before any response uses it, and is detected by the archive tables' absence. It records

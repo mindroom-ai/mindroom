@@ -109,7 +109,7 @@ def archive_runs(
 # Legacy format: A scope whose runs the destructive compactor deleted, leaving only a
 # ``session.summary``, tombstoned run ids, and preserved Matrix seen ids (see
 # ``history/legacy_compaction_state.py`` for provenance and the one-time migration).
-# Last legacy release: v2026.9.310; replacement: the next release archives compacted runs.
+# Last legacy release: v2026.9.313; replacement: the next release archives compacted runs.
 # Handling: The migration records a ``legacy`` generation holding that summary, the seen ids it
 # may contain, and ``run_data``-free tombstone rows. ``has_legacy_summary``, ``legacy_event_ids``,
 # ``clear_to_legacy``, and ``retire_summaries`` let redaction retire it as a whole, because it
@@ -312,8 +312,8 @@ def roll_back_to(
 def _keep_scope_generation(connection: Connection, db: SqliteDb, *, session_id: str, scope_key: str) -> None:
     """Leave an empty generation when a rollback removed the scope's last one.
 
-    Its ``NULL`` summary keeps the scope archive-managed: a stale ``session.summary``
-    written back later is cleared instead of being adopted as legacy history.
+    Its ``NULL`` summary keeps the scope archive-managed, so the next reconcile clears
+    a stale ``session.summary`` written back later instead of replaying it.
     """
     compactions, _ = _table_names(db)
     connection.exec_driver_sql(

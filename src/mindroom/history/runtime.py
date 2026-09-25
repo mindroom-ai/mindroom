@@ -337,7 +337,7 @@ async def prepare_scope_history(
             execution_plan=execution_plan,
         ),
     )
-    # The native route names the summary generation, which reconciliation may have repaired.
+    # The native route names the summary generation, which reconciliation may have refreshed.
     native_model = configure_native(session=session)
     if state.force_compact_before_next_run and native_model is not None:
         native_model.configure_native_compaction(threshold=None)

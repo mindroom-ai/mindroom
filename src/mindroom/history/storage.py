@@ -159,8 +159,7 @@ def _write_scope_state(
 ) -> None:
     """Persist one scope's compaction control state back into session metadata.
 
-    Other scopes' stored mappings are kept verbatim, so state this release does
-    not model survives until that scope's own reconciliation adopts it.
+    Other scopes' stored mappings are kept verbatim.
     """
     raw_states = _read_raw_scope_states(session)
     if _state_is_empty(state):
@@ -415,7 +414,7 @@ def remove_redacted_event_from_compaction(
 # LEGACY_COMPAT: Redaction of history compacted before the archive existed.
 # Legacy format: A legacy generation (see ``history/legacy_compaction_state.py``) whose summary
 # still replays and whose provenance is only the preserved seen ids the migration captured.
-# Last legacy release: v2026.9.310; replacement: the next release records exact per-run provenance.
+# Last legacy release: v2026.9.313; replacement: the next release records exact per-run provenance.
 # Handling: That summary cannot be split by run, and every later summary includes it. An event it
 # may contain (its captured seen ids or retained source ownership) clears it together with every
 # later generation and live run, which may repeat its content. A live run removed for any other
