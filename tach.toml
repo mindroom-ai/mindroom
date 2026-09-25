@@ -6614,7 +6614,7 @@ visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.agn
 [[modules]]
 path = "mindroom.provider_tool_policy"
 depends_on = []
-visibility = ["mindroom.judgment.llm", "mindroom.agno_participation", "mindroom.claude_prompt_cache", "mindroom.openai_models", "mindroom.google_gemini", "mindroom.groq_model", "mindroom.cerebras_model", "mindroom.ollama_model", "mindroom.skill_learning.reviewer"]
+visibility = ["mindroom.judgment.llm", "mindroom.agno_participation", "mindroom.claude_prompt_cache", "mindroom.openai_models", "mindroom.google_gemini", "mindroom.groq_model", "mindroom.cerebras_model", "mindroom.ollama_model"]
 
 [[modules]]
 path = "mindroom.groq_model"
@@ -7406,7 +7406,6 @@ depends_on = [
     "mindroom.agent_storage",
     "mindroom.helper_usage",
     "mindroom.model_loading",
-    "mindroom.provider_tool_policy",
     "mindroom.skill_learning.library",
     "mindroom.skill_learning.transcript",
     "mindroom.tool_call_budget",

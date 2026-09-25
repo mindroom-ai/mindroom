@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import json
 import os
 import signal
 import sys
@@ -80,6 +81,7 @@ from mindroom.runtime_state import (
     set_api_server_address,
     set_runtime_ready,
 )
+from mindroom.skill_learning.queue import queue_skill_review
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
@@ -5231,8 +5233,11 @@ async def test_background_workers_follow_config_across_reloads(tmp_path: Path) -
     first = orchestrator._skill_learning._task
     await orchestrator._sync_background_workers()
     assert orchestrator._skill_learning._task is first
+    queue_skill_review(config, paths, agent_name="general", session_id="s", execution_identity=None, run_id="r1")
     config.agents["general"].skill_learning.enabled = False
     await orchestrator._sync_background_workers()
     assert first is not None
     assert first.done()
     assert not orchestrator._skill_learning.running
+    # Entries kept through the pause would count every run made while learning was off.
+    assert json.loads((tmp_path / "skill_learning_state.json").read_text())["entries"] == {}

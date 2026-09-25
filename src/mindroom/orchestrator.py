@@ -97,7 +97,7 @@ from mindroom.runtime_state import (
     set_runtime_starting,
 )
 from mindroom.scheduling_executor import set_scheduling_hook_registry
-from mindroom.skill_learning.queue import skill_learning_enabled
+from mindroom.skill_learning.queue import drop_retired_reviews, skill_learning_enabled
 from mindroom.skill_learning.worker import SkillLearningWorker
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
@@ -581,8 +581,12 @@ class _MultiAgentOrchestrator:
                 config_provider=lambda: self.config,
             ),
         )
+        learning = config is not None and skill_learning_enabled(config)
+        if config is not None and not learning:
+            # Conversations kept while no agent learns would count the whole pause once learning returns.
+            await asyncio.to_thread(drop_retired_reviews, config, self.runtime_paths, now=time.time())
         await self._skill_learning.sync(
-            enabled=config is not None and skill_learning_enabled(config),
+            enabled=learning,
             factory=lambda: SkillLearningWorker(
                 runtime_paths=self.runtime_paths,
                 config_provider=lambda: self.config,
