@@ -16560,11 +16560,26 @@ MindRoom writes `repo_url` into the checkout's `origin` remote, so a network for
 
 Refused, with an error naming the reason: relative and home-relative paths (`./repo.git`, `../repo.git`, `~/repo.git`, `repo.git`), URLs with an empty authority (`https:///org/repo.git`), URLs whose separator is percent-encoded or written as a lookalike codepoint, and anything embedding a second URL.
 
-**Do not embed credentials in `repo_url`.** A password in a well-formed URL is stripped before the remote is written, so it never reaches `.git/config` — but it is still in your config file, and still handed to Git for every command.
+**Do not embed credentials in `repo_url`.** A password in a well-formed URL is stripped before the remote is written, so it never reaches the repository config — but it is still in your config file, and still handed to Git for every command.
 A password MindRoom cannot strip with confidence is refused outright rather than written: that covers forms where the scheme has been dropped, such as `oauth2:TOKEN@gitlab.com:org/repo.git` or `x-access-token:TOKEN@github.com/org/repo.git`.
 Use `credentials_service` instead: those credentials are passed to Git for the duration of one command and are never written to disk.
 
 If a checkout already holds a credential-bearing remote from before this check existed, the refusal cannot clean it — delete the checkout directory so the next sync clones afresh.
+
+#### Checkout layout
+
+The knowledge folder holds the checked-out files only.
+Its Git directory lives at `<storage>/knowledge_git/<folder>_<path digest>`, outside every state root a worker mounts, and every knowledge Git command names it explicitly, so a `.git` written into the folder is never read, followed, or indexed.
+Git runs programs that repository metadata names (`core.fsmonitor`, hooks, filters, credential helpers), and a Git-backed base may live where agent tools and worker containers can write every file.
+Knowledge Git commands also disable those programs, read no system or global Git configuration, and receive a minimal environment without MindRoom secrets; configure proxies, CA bundles and SSH through environment variables or `~/.ssh/config`, and credentials through `credentials_service`.
+
+Bases that share a folder share one Git directory, keyed by the resolved folder path.
+Changing a base's `path` starts a new repository in the new folder, which must be empty; delete the old directory under `<storage>/knowledge_git/` to reclaim its space.
+Deleting only the knowledge folder restores its files from the Git directory on the next sync; delete both to clone afresh.
+
+A checkout created by an earlier release has its `.git` inside the knowledge folder.
+The first sync after upgrading moves that directory aside and hard-links its objects, refs, index, and LFS files into a Git directory created fresh, with a new config that keeps only the repository format, so nothing is copied, fetched, or re-embedded and nothing else from the old `.git`, such as hooks and `info/`, carries over.
+The sync fails with an error instead when that `.git` is a link or a `gitdir:` file, or when it is on a different filesystem or mount from `<storage>`; follow the error to move it, or delete the folder so the next sync clones afresh.
 
 ### Sync Behavior
 
@@ -16572,7 +16587,7 @@ If a checkout already holds a credential-bearing remote from before this check e
 - Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
 - Explicit dashboard/API reindex or sync runs Git sync first for Git-backed bases.
 - Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
-- MindRoom disables implicit LFS smudge during clone, checkout, and reset for every Git-backed knowledge base.
+- MindRoom disables implicit LFS smudge during checkout and reset for every Git-backed knowledge base.
 - When `lfs: true`, MindRoom explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - When sync realigns the checkout to a different fetched revision, it forcibly checks out and resets tracked files, discarding tracked edits and restoring tracked deletions.
 - If local HEAD already equals the fetched revision, sync skips that reset, so ordinary tracked edits or deletions can remain; LFS hydration is a separate step.
@@ -16676,7 +16691,7 @@ MindRoom reads the key when needed and mints a repository-scoped installation to
 The control-plane runtime caches that token until shortly before GitHub's reported expiry.
 Scheduled refresh children receive the cached token and expiry only through their stdin request pipe, then pass the token only to Git.
 The handoff includes the non-secret App, installation, repository, and key-path identity, and a child ignores the token if its current credentials no longer match.
-MindRoom never copies the token into the checkout config, credential store, refresh-child launch environment, metadata, or logs.
+MindRoom never copies the token into the repository config, credential store, refresh-child launch environment, metadata, or logs.
 
 ## Embedder Configuration
 
@@ -20710,6 +20725,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
 | S21 | Isolated | [`legacy_attachments.py`][legacy-attachments] adopts in-place attachment records into verified retained copies; [`attachments.py`][attachments] keeps copying, record publication, and retention cleanup. |
 | S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] pokes a todo item without `requester_id` as the assignee's own internal turn under its unchanged dedup key, and [`custom_tools/todo.py`][todo-tool] records the current requester on the item's next write. |
+| S23 | Isolated | [`knowledge/legacy_git_checkout.py`][knowledge-legacy-git] moves a checkout's in-tree `.git` aside and hard-links only its repository files into a fresh MindRoom-owned Git directory under a new config; [`knowledge/git_source.py`][knowledge-git-source] keeps initialization, sync, and the current layout. |
 
 ## Configuration and credentials
 
@@ -20828,8 +20844,10 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [journal-open]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal_open.py
 [journal-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_schema.py
 [knowledge-collections]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/collections.py
+[knowledge-git-source]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/git_source.py
 [knowledge-index]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/index_metadata.py
 [knowledge-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_metadata.py
+[knowledge-legacy-git]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_git_checkout.py
 [knowledge-settings]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/indexing_config.py
 [kubernetes-worker-backend]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes.py
 [kubernetes-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_kubernetes_worker_backend.py

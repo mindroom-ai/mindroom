@@ -157,6 +157,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
 | S21 | Isolated | [`legacy_attachments.py`][legacy-attachments] adopts in-place attachment records into verified retained copies; [`attachments.py`][attachments] keeps copying, record publication, and retention cleanup. |
 | S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] pokes a todo item without `requester_id` as the assignee's own internal turn under its unchanged dedup key, and [`custom_tools/todo.py`][todo-tool] records the current requester on the item's next write. |
+| S23 | Isolated | [`knowledge/legacy_git_checkout.py`][knowledge-legacy-git] moves a checkout's in-tree `.git` aside and hard-links only its repository files into a fresh MindRoom-owned Git directory under a new config; [`knowledge/git_source.py`][knowledge-git-source] keeps initialization, sync, and the current layout. |
 
 ## Configuration and credentials
 
@@ -275,8 +276,10 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [journal-open]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal_open.py
 [journal-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_schema.py
 [knowledge-collections]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/collections.py
+[knowledge-git-source]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/git_source.py
 [knowledge-index]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/index_metadata.py
 [knowledge-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_metadata.py
+[knowledge-legacy-git]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_git_checkout.py
 [knowledge-settings]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/indexing_config.py
 [kubernetes-worker-backend]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes.py
 [kubernetes-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_kubernetes_worker_backend.py
