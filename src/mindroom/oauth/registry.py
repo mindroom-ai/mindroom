@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.config.main import Config
 from mindroom.logging_config import get_logger
 from mindroom.mcp.oauth import mcp_oauth_providers_for_config
+from mindroom.oauth.atlassian import atlassian_oauth_provider
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_docs import google_docs_oauth_provider
@@ -47,6 +48,7 @@ def clear_oauth_provider_cache() -> None:
 
 def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
     return (
+        atlassian_oauth_provider(),
         github_oauth_provider(),
         google_calendar_oauth_provider(),
         google_docs_oauth_provider(),

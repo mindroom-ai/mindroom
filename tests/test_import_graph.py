@@ -356,6 +356,14 @@ def test_builtin_tool_manifest_does_not_import_runtime_catalog() -> None:
     )
 
 
+def test_atlassian_connection_plugins_do_not_load_the_toolkit() -> None:
+    """Declaring extra Atlassian connections in a plugin must not load the HTTP client or its log filter."""
+    _assert_probe_clean(
+        "mindroom.tool_system.atlassian_connections",
+        ("mindroom.custom_tools.atlassian", "mindroom.custom_tools.atlassian_client"),
+    )
+
+
 def test_knowledge_read_worker_does_not_boot_application_services() -> None:
     """A short-lived read must not pay for refresh scheduling or agent configuration."""
     _assert_probe_clean(
