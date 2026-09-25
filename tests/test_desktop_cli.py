@@ -21,7 +21,7 @@ from mindroom.cli.desktop import desktop_app
 from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE
 from mindroom.desktop.provider import DesktopProviderError
-from mindroom.desktop.session import DesktopMatrixSession
+from mindroom.desktop.session import DesktopMatrixSession, save_desktop_session
 
 runner = CliRunner()
 
@@ -269,9 +269,16 @@ def test_desktop_setup_logs_in_only_when_needed(
     runtime_paths = SimpleNamespace(storage_root=tmp_path)
     session_path = tmp_path / "desktop_bridge" / "matrix_session.json"
     if session_exists:
-        session_path.parent.mkdir(parents=True)
-        session_path.touch()
-    login = MagicMock()
+        save_desktop_session(
+            session_path,
+            DesktopMatrixSession("https://matrix.example.org/", "@alice:example.org", "DESKTOP", "saved-token"),
+        )
+    login = MagicMock(
+        side_effect=lambda **_: save_desktop_session(
+            session_path,
+            DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "saved-token"),
+        ),
+    )
     pair = MagicMock()
     monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
     monkeypatch.setattr(desktop_cli, "desktop_login", login)
@@ -281,6 +288,8 @@ def test_desktop_setup_logs_in_only_when_needed(
         desktop_app,
         [
             "setup",
+            "--allow-agent",
+            "computer",
             "--user-id",
             "@alice:example.org",
             "--homeserver",
@@ -299,6 +308,123 @@ def test_desktop_setup_logs_in_only_when_needed(
     assert result.exit_code == 0, result.output
     assert login.called is not session_exists
     assert pair.call_args.kwargs["code"] == "short-code"
+
+
+@pytest.mark.parametrize(
+    ("saved_homeserver", "saved_user_id"),
+    [
+        ("https://staging.example.org", "@alice:example.org"),
+        ("https://matrix.example.org", "@other:example.org"),
+    ],
+)
+def test_desktop_setup_rejects_saved_session_for_another_account(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    saved_homeserver: str,
+    saved_user_id: str,
+) -> None:
+    """A saved session for another homeserver or user cannot silently receive this pairing."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    session_path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    save_desktop_session(
+        session_path,
+        DesktopMatrixSession(saved_homeserver, saved_user_id, "DESKTOP", "saved-token"),
+    )
+    login = MagicMock()
+    pair = MagicMock()
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr(desktop_cli, "desktop_login", login)
+    monkeypatch.setattr(desktop_cli, "desktop_pair", pair)
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "setup",
+            "--allow-agent",
+            "computer",
+            "--user-id",
+            "@alice:example.org",
+            "--homeserver",
+            "https://matrix.example.org",
+            "--code",
+            "short-code",
+            "--controller-user-id",
+            "@computer:example.org",
+            "--controller-device-id",
+            "CLOUD",
+            "--controller-ed25519",
+            "cloud-fingerprint",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "--storage-path" in result.output
+    assert saved_homeserver in result.output
+    assert not login.called
+    assert not pair.called
+
+
+def test_desktop_setup_compares_saved_session_with_default_homeserver(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Without --homeserver, setup compares the saved session with the homeserver login would use."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    save_desktop_session(
+        tmp_path / "desktop_bridge" / "matrix_session.json",
+        DesktopMatrixSession("https://staging.example.org", "@alice:example.org", "DESKTOP", "saved-token"),
+    )
+    pair = MagicMock()
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr(
+        "mindroom.constants.runtime_matrix_homeserver",
+        lambda _runtime_paths: "https://matrix.example.org",
+    )
+    monkeypatch.setattr(desktop_cli, "desktop_pair", pair)
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "setup",
+            "--allow-agent",
+            "computer",
+            "--code",
+            "short-code",
+            "--controller-user-id",
+            "@computer:example.org",
+            "--controller-device-id",
+            "CLOUD",
+            "--controller-ed25519",
+            "cloud-fingerprint",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "https://staging.example.org" in result.output
+    assert not pair.called
+
+
+@pytest.mark.parametrize("inside_tmux", [False, True])
+def test_missing_macos_permission_says_to_restart_the_terminal_app(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    inside_tmux: bool,
+) -> None:
+    """A granted but not yet applied permission is the common case, so the restart comes first."""
+    monkeypatch.setattr("mindroom.desktop.provider.request_macos_desktop_permissions", lambda: ("Accessibility",))
+    if inside_tmux:
+        monkeypatch.setenv("TMUX", "/private/tmp/tmux-501/default,1,0")
+    else:
+        monkeypatch.delenv("TMUX", raising=False)
+
+    with pytest.raises(DesktopProviderError) as raised:
+        desktop_cli._request_required_desktop_permissions()
+
+    message = str(raised.value)
+    assert message.startswith("macOS has not applied Accessibility permission")
+    assert "already listed and enabled" in message
+    assert "Cmd-Q" in message
+    assert ("tmux kill-server" in message) is inside_tmux
 
 
 def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

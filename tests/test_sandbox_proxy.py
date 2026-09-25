@@ -476,6 +476,31 @@ def _recording_client_class(
     return _FakeClient
 
 
+def _runner_routes_responder(runner_runtime_paths: RuntimePaths) -> Callable[[str, dict[str, Any]], object]:
+    """Serve proxy lease and execute calls the way the runner routes do, with a subprocess child."""
+
+    def responder(url: str, payload: dict[str, Any]) -> object:
+        if url.endswith("/leases"):
+            lease = sandbox_runner_module.sandbox_worker_prep.create_credential_lease(**payload)
+            return {"lease_id": lease.lease_id, "expires_at": lease.expires_at, "max_uses": lease.uses_remaining}
+        request = sandbox_runner_module.SandboxRunnerExecuteRequest.model_validate(payload)
+        if request.lease_id is not None:
+            request.credential_overrides = sandbox_runner_module.sandbox_worker_prep.consume_credential_lease(
+                request.lease_id,
+                tool_name=request.tool_name,
+                function_name=request.function_name,
+            )
+        response = sandbox_runner_module._execute_request_subprocess_sync(
+            request,
+            runner_runtime_paths,
+            sandbox_runner_module._runtime_config_or_empty(runner_runtime_paths),
+            runner_token=_TEST_AUTH_TOKEN,
+        )
+        return response.model_dump(mode="json")
+
+    return responder
+
+
 def test_worker_proxy_client_records_worker_success() -> None:
     """Worker proxy HTTP details should live behind one focused client seam."""
     captured: dict[str, Any] = {}
@@ -498,6 +523,7 @@ def test_worker_proxy_client_records_worker_success() -> None:
             proxy_timeout_seconds=7.0,
             credential_lease_ttl_seconds=60,
             credential_policy={},
+            lease_tool_credentials=False,
         ),
         payload={"tool_name": "shell", "function_name": "run_shell_command"},
         credentials_manager=None,
@@ -555,6 +581,7 @@ def _run_worker_proxy_request_with_exception(
                 proxy_timeout_seconds=7.0,
                 credential_lease_ttl_seconds=60,
                 credential_policy={},
+                lease_tool_credentials=False,
             ),
             payload={"tool_name": "shell", "function_name": "run_shell_command"},
             credentials_manager=None,
@@ -1248,6 +1275,117 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
     execute_url, execute_payload = captured_calls[1]
     assert execute_url.endswith("/api/sandbox-runner/execute")
     assert execute_payload["lease_id"] == "lease-123"
+
+
+@pytest.mark.parametrize(
+    ("credential_policy", "expected_overrides"),
+    [
+        (None, {"api_key": "saved-key", "region": "eu"}),
+        ({"calculator.add": ("openai",)}, {"api_key": "policy-key", "region": "eu"}),
+    ],
+)
+def test_static_runner_proxy_leases_the_tool_own_saved_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    credential_policy: dict[str, tuple[str, ...]] | None,
+    expected_overrides: dict[str, str],
+) -> None:
+    """The shared runner has no credential store, so the primary leases the tool's saved settings per call."""
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+    fake_credentials = FakeCredentialsManager(
+        {
+            "calculator": {"api_key": "saved-key", "region": "eu", "_source": "ui"},
+            "openai": {"api_key": "policy-key", "_source": "ui"},
+        },
+    )
+    monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        execution_mode="all",
+        credential_policy=credential_policy,
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(
+            captured_calls=captured_calls,
+            responder=lambda url, _json: (
+                {"lease_id": "lease-123", "expires_at": 123.0, "max_uses": 1}
+                if url.endswith("/leases")
+                else {"ok": True, "result": "proxied"}
+            ),
+        ),
+    )
+
+    tool = get_tool_by_name("calculator", runtime_paths, credentials_manager=fake_credentials, worker_target=None)
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
+
+    assert entrypoint(1, 2) == "proxied"
+    assert [url.rsplit("/", 1)[-1] for url, _payload in captured_calls] == ["leases", "execute"]
+    assert captured_calls[0][1]["credential_overrides"] == expected_overrides
+    assert captured_calls[1][1]["lease_id"] == "lease-123"
+
+
+@pytest.mark.parametrize(
+    ("worker_backend", "expected"),
+    [(None, True), ("static_runner", True), ("docker", False), ("kubernetes", False)],
+)
+def test_only_the_static_runner_leases_tool_own_saved_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_backend: str | None,
+    expected: bool,
+) -> None:
+    """Dedicated workers keep reading their own credential stores instead of receiving the primary's."""
+    if worker_backend is None:
+        monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("MINDROOM_WORKER_BACKEND", worker_backend)
+    runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url="http://sandbox-runner:8765")
+
+    config = sandbox_proxy_module._worker_proxy_client_config(
+        sandbox_proxy_module.sandbox_proxy_config(runtime_paths),
+        runtime_paths,
+    )
+
+    assert config.lease_tool_credentials is expected
+
+
+def test_worker_proxy_client_skips_tool_own_lease_when_not_requested() -> None:
+    """Without the static-runner flag or a matching policy, saved settings stay out of the request."""
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+    handle = WorkerHandle(
+        worker_id="worker-1",
+        worker_key="agent:test",
+        endpoint="http://worker/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="ready",
+        backend_name="kubernetes",
+        last_used_at=0.0,
+        created_at=0.0,
+    )
+
+    result = execute_worker_proxy_request(
+        config=WorkerProxyClientConfig(
+            proxy_url=None,
+            proxy_token=None,
+            proxy_timeout_seconds=7.0,
+            credential_lease_ttl_seconds=60,
+            credential_policy={},
+            lease_tool_credentials=False,
+        ),
+        payload={"tool_name": "calculator", "function_name": "add"},
+        credentials_manager=FakeCredentialsManager({"calculator": {"api_key": "saved-key"}}),
+        tool_name="calculator",
+        function_name="add",
+        worker_target=None,
+        worker_handle=handle,
+        worker_manager=_TrackingWorkerManager(),
+        client_factory=_recording_client_class(captured_calls=captured_calls),
+    )
+
+    assert result == "sandbox-result"
+    assert [url for url, _payload in captured_calls] == ["http://worker/api/sandbox-runner/execute"]
+    assert "lease_id" not in captured_calls[0][1]
 
 
 def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
@@ -2429,9 +2567,18 @@ async def test_proxy_forwards_configured_shell_execution_env_only_for_execution_
         execution_mode="all",
         credential_policy={},
     )
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
-        _recording_client_class(captured=captured),
+        _recording_client_class(
+            captured=captured,
+            captured_calls=captured_calls,
+            responder=lambda url, _json: (
+                {"lease_id": "lease-123", "expires_at": 123.0, "max_uses": 1}
+                if url.endswith("/leases")
+                else {"ok": True, "result": "sandbox-result"}
+            ),
+        ),
     )
     monkeypatch.setenv("GITEA_TOKEN", "visible-gitea-token")
     config_path = tmp_path / "config.yaml"
@@ -2462,6 +2609,11 @@ async def test_proxy_forwards_configured_shell_execution_env_only_for_execution_
     result = await shell_entrypoint(["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""])
 
     assert result == "sandbox-result"
+    assert captured_calls[0][1]["credential_overrides"] == {
+        "extra_env_passthrough": "GITEA_*",
+        "shell_path_prepend": "/opt/custom/bin",
+    }
+    assert captured["json"]["lease_id"] == "lease-123"
     assert captured["json"]["extra_env_passthrough"] == "GITEA_*"
     assert captured["json"]["tool_init_overrides"]["shell_path_prepend"] == "/opt/custom/bin"
     assert "TEST_EXECUTION_ENV" not in captured["json"]["execution_env"]
@@ -2511,18 +2663,15 @@ async def test_proxy_shell_extra_env_passthrough_survives_sandbox_runner_rebuild
         worker_target=None,
     )
 
-    def responder(_url: str, payload: dict[str, Any]) -> dict[str, object]:
-        response = sandbox_runner_module._execute_request_subprocess_sync(
-            sandbox_runner_module.SandboxRunnerExecuteRequest.model_validate(payload),
-            runtime_paths,
-            sandbox_runner_module._runtime_config_or_empty(runtime_paths),
-            runner_token=_TEST_AUTH_TOKEN,
-        )
-        return response.model_dump(mode="json")
-
+    # The runner has its own storage, so saved settings can reach it only through the primary's lease.
+    runner_runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "runner-storage",
+        process_env=dict(os.environ),
+    )
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
-        _recording_client_class(responder=responder),
+        _recording_client_class(responder=_runner_routes_responder(runner_runtime_paths)),
     )
 
     shell_tool = get_tool_by_name("shell", runtime_paths, worker_target=None)
@@ -2572,18 +2721,15 @@ async def test_proxy_shell_path_prepend_survives_sandbox_runner_rebuild(
         worker_target=None,
     )
 
-    def responder(_url: str, payload: dict[str, Any]) -> dict[str, object]:
-        response = sandbox_runner_module._execute_request_subprocess_sync(
-            sandbox_runner_module.SandboxRunnerExecuteRequest.model_validate(payload),
-            runtime_paths,
-            sandbox_runner_module._runtime_config_or_empty(runtime_paths),
-            runner_token=_TEST_AUTH_TOKEN,
-        )
-        return response.model_dump(mode="json")
-
+    # The runner has its own storage, so saved settings can reach it only through the primary's lease.
+    runner_runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "runner-storage",
+        process_env=dict(os.environ),
+    )
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
-        _recording_client_class(responder=responder),
+        _recording_client_class(responder=_runner_routes_responder(runner_runtime_paths)),
     )
 
     shell_tool = get_tool_by_name("shell", runtime_paths, worker_target=None)
@@ -2601,10 +2747,7 @@ async def test_proxy_shell_path_prepend_survives_sandbox_runner_rebuild(
     assert result.endswith("/usr/local/bin:/usr/bin:/bin")
 
 
-def test_dedicated_worker_runtime_config_resolves_include_tags(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_dedicated_worker_runtime_config_resolves_include_tags(tmp_path: Path) -> None:
     """Dedicated workers must load configs split across !include files."""
     (tmp_path / "models.yaml").write_text(
         "default:\n  provider: openai\n  id: gpt-6-astra\n",
@@ -2620,13 +2763,10 @@ def test_dedicated_worker_runtime_config_resolves_include_tags(
         storage_path=config_path.parent / "storage",
         process_env={},
     )
-    monkeypatch.setattr(
-        sandbox_runner_module,
-        "_upstream_tool_validation_snapshot",
-        lambda _runtime_paths: {"shell": object()},
+    config = sandbox_runner_module._dedicated_worker_runtime_config_or_empty(
+        runtime_paths,
+        {"shell": ToolValidationInfo(name="shell")},
     )
-
-    config = sandbox_runner_module._dedicated_worker_runtime_config_or_empty(runtime_paths)
 
     assert config.models["default"].id == "gpt-6-astra"
 
@@ -6514,6 +6654,7 @@ def test_worker_client_returns_raw_browser_envelopes(tool_name: str) -> None:
             proxy_timeout_seconds=7.0,
             credential_lease_ttl_seconds=60,
             credential_policy={},
+            lease_tool_credentials=False,
         ),
         payload={"tool_name": tool_name, "function_name": "browser_take_screenshot"},
         credentials_manager=None,

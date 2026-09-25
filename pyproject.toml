@@ -43,7 +43,7 @@ dependencies = [
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
   # Owned to-device transport requires the durable NIO API.
-  "mindroom-nio[e2e]==1.1.1",
+  "mindroom-nio[e2e]==1.1.2",
   "openai",
   "packaging>=24",
   "pillow>=10.2",
@@ -55,6 +55,8 @@ dependencies = [
   "pyyaml>=6",
   "referencing>=0.37",
   "rich",
+  # Agno's SQLite storage imports SQLAlchemy's asyncio layer, which needs greenlet.
+  "sqlalchemy[asyncio]>=2",
   "starlette>=1.3.1",
   "structlog>=24.1",
   "tenacity>=9.1.2",
@@ -83,6 +85,7 @@ arxiv = [
   "arxiv",
   "pypdf",
 ]
+atlassian = []
 attachments = []
 aws_lambda = [
   "boto3>=1.40.8",
@@ -469,6 +472,7 @@ dev = [
   "pytest-asyncio>=1.1",
   "pytest-cov>=6.2.1",
   "pytest-mock>=3.14.1",
+  "pytest-shm>=0.1",
   "pytest-timeout>=2.4",
   "pytest-xdist>=3.8",
   "requests>=2.32.4",
@@ -621,6 +625,8 @@ markers = [
   "slow: marks tests as slow",
   "ledger_loads_from_disk: the test warms its own handled-turn ledger and needs the real database read",
 ]
+# A full run peaks at about 3 GiB of temporary files on /dev/shm, mostly worker virtualenvs.
+shm_min_free_gib = 4
 
 [tool.coverage.report]
 exclude_lines = [

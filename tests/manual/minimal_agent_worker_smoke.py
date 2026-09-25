@@ -32,6 +32,7 @@ import yaml
 
 from mindroom import ai
 from mindroom.agent_cli.session import TurnToolRegistry
+from mindroom.agent_cli.worker_protocol import CLI_PRIVATE_ROOT_PATH
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_storage import create_session_storage
 from mindroom.api.agent_cli import bind_agent_cli_registry
@@ -326,7 +327,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             worker.reload()
             assert all(secret not in json.dumps(worker.attrs) for secret in secret_values)
             assert all(
-                not Path("/app/.mindroom-agent-cli").is_relative_to(Path(mount["Destination"]))
+                not Path(CLI_PRIVATE_ROOT_PATH).is_relative_to(Path(mount["Destination"]))
                 for mount in worker.attrs["Mounts"]
             )
             scan = await asyncio.to_thread(
@@ -338,7 +339,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
                 ],
             )
             assert not any(secret.encode() in scan.output for secret in secret_values)
-            token_result = await asyncio.to_thread(worker.exec_run, ["cat", "/app/.mindroom-agent-cli/capability"])
+            token_result = await asyncio.to_thread(worker.exec_run, ["cat", f"{CLI_PRIVATE_ROOT_PATH}/capability"])
             assert token_result.exit_code == 0
             token = token_result.output.decode().strip()
             assert token
@@ -435,7 +436,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
                 "mindroom-agent tools list",
                 "mindroom-agent tools describe parity integration",
                 'test -r "$MINDROOM_AGENT_CLI_TOKEN_PATH"',
-                'case "$MINDROOM_AGENT_CLI_TOKEN_PATH" in /app/.mindroom-agent-cli/*) ;; *) exit 31;; esac',
+                f'case "$MINDROOM_AGENT_CLI_TOKEN_PATH" in {CLI_PRIVATE_ROOT_PATH}/*) ;; *) exit 31;; esac',
                 'test -z "${OPENAI_API_KEY:-}${MINDROOM_API_KEY:-}${MINDROOM_SANDBOX_PROXY_TOKEN:-}"',
                 _call("parity", "integration", {"digest": hashlib.sha256(provider_key.encode()).hexdigest()}),
                 _call("parity", "approved", {"value": "exact value"}),

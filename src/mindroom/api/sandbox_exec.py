@@ -304,6 +304,7 @@ def worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")
     env["UV_CACHE_DIR"] = str(paths.cache_dir / "uv")
     env["PYTHONPYCACHEPREFIX"] = str(paths.cache_dir / "pycache")
+    env["TMPDIR"] = str(paths.tmp_dir)
     env["VIRTUAL_ENV"] = str(paths.venv_dir)
 
     env["PATH"] = constants.subprocess_path_with_prepends(
@@ -354,8 +355,11 @@ def subprocess_worker_command(
     *,
     python_executable: str | None = None,
 ) -> list[str]:
-    """Build the sandbox subprocess worker command line."""
-    return [python_executable or sys.executable, "-m", "mindroom.api.sandbox_runner", subprocess_worker_arg]
+    """Build the sandbox subprocess worker command line.
+
+    `-P -s`: a workspace cwd or `HOME` must not shadow MindRoom modules or inject site code.
+    """
+    return [python_executable or sys.executable, "-P", "-s", "-m", "mindroom.api.sandbox_runner", subprocess_worker_arg]
 
 
 class WorkspaceEnvHookError(RuntimeError):

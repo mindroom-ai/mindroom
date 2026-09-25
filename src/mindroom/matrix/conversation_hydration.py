@@ -128,6 +128,12 @@ _MAX_MESSAGES_REQUESTS = 400
 # better served by an error than by a page it cannot vouch for.
 _HYDRATION_EPOCH_ATTEMPTS = 3
 
+# How a homeserver refuses a thread root this account may not see. History
+# visibility is judged at the event, so an agent invited after a thread began
+# is refused its root on every request: Tuwunel and Synapse answer 404
+# ``M_NOT_FOUND``, and ``M_FORBIDDEN`` is the other answer the spec allows.
+_HIDDEN_EVENT_ERRCODES = frozenset({"M_NOT_FOUND", "M_FORBIDDEN"})
+
 
 class _HydrationError(RuntimeError):
     """A conversation could not be built from the server."""
@@ -855,12 +861,20 @@ class ConversationHydrator:
         events, not pages, so there is nothing here to count.
         """
         root = await self._client().room_get_event(room_id, thread_id)
-        if not isinstance(root, nio.RoomGetEventResponse):
-            msg = f"Could not fetch thread root {thread_id!r}: {root}"
-            raise _HydrationError(msg)
         events: list[ProjectedEvent] = []
         unreadable = _UnreadableHistory()
-        readable_root = _readable_event(self._client(), root.event, unreadable)
+        if isinstance(root, nio.RoomGetEventResponse):
+            readable_root = _readable_event(self._client(), root.event, unreadable)
+        elif isinstance(root, nio.RoomGetEventError) and root.status_code in _HIDDEN_EVENT_ERRCODES:
+            # A root hidden from this account stays hidden, so failing here
+            # fails every message in the thread forever. The replies it may
+            # see are still the thread, missing its root like an undecryptable
+            # one is.
+            logger.info("conversation_thread_root_hidden", room_id=room_id, thread_id=thread_id)
+            readable_root = None
+        else:
+            msg = f"Could not fetch thread root {thread_id!r}: {root}"
+            raise _HydrationError(msg)
         root_projected = (
             None
             if readable_root is None

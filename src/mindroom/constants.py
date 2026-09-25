@@ -65,6 +65,7 @@ WORKER_RUNTIME_PATH_ENV_NAMES = frozenset(
         "PIP_CACHE_DIR",
         "UV_CACHE_DIR",
         "PYTHONPYCACHEPREFIX",
+        "TMPDIR",
         "VIRTUAL_ENV",
     },
 )

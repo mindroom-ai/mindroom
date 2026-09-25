@@ -403,6 +403,42 @@ async def test_process_deadline_kills_descendant_after_leader_exits(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_script_shim_puts_workspace_modules_after_installed_ones(tmp_path: Path) -> None:
+    """A workspace file named like a standard-library module must not shadow it in the script."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # `colorsys` is not imported before the script runs, unlike `json`, so its origin shows the search order.
+    (workspace / "colorsys.py").write_text("raise RuntimeError('workspace module shadowed the standard library')\n")
+    (workspace / "helper.py").write_text("VALUE = 'helper-value'\n")
+    source_path = workspace / "source.py"
+    source_path.write_text(
+        "import colorsys\nimport helper\nprint(helper.VALUE, colorsys.__name__, flush=True)\n",
+        encoding="utf-8",
+    )
+    token_path = workspace / "capability"
+    token_path.write_text("raw-secret", encoding="utf-8")
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
+    }
+    registry: dict[str, ProcessRecord] = {}
+
+    result = await run_command(
+        registry,
+        namespace="script:test",
+        argv=[sys.executable, "-P", "-s", "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message == "helper-value colorsys"
+
+
+@pytest.mark.asyncio
 async def test_script_shim_scrubs_control_state_and_removes_capability_file(tmp_path: Path) -> None:
     """The private shim must narrow the child environment and clean its raw token."""
     workspace = tmp_path / "workspace"

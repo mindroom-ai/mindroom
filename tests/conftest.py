@@ -44,6 +44,7 @@ from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
 import mindroom.approval_manager as approval_manager_module
 import mindroom.bot  # noqa: F401
+import mindroom.custom_tools.todo as todo_tool_module
 import mindroom.handled_turns as handled_turns_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
@@ -118,6 +119,7 @@ from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix_delivery import TurnHandoff
 from mindroom.message_target import MessageTarget
+from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.provider_media_fallback import reset_model_media_capability_cache
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
@@ -428,6 +430,7 @@ __all__ = [
     "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
+    "install_personal_room_shutdown_mock",
     "install_runtime_journal_support",
     "install_send_response_mock",
     "install_shutdown_drain_mocks",
@@ -825,9 +828,15 @@ def _postgres_container_name(run_id: str, prefix: str) -> str:
     return f"{prefix}{run_id}"
 
 
+# The controller creates the pipe and every worker mounts it, so they must agree
+# on its directory. Captured at import, before pytest-shm points each process's
+# temp root into that process's own pytest base directory at session start.
+_OWNER_PIPE_ROOT = Path(tempfile.gettempdir())
+
+
 def _owner_pipe_dir(run_id: str) -> Path:
     """Return the host directory holding one run's owner pipe."""
-    return Path(tempfile.gettempdir()) / f"mindroom-pytest-owner-{run_id}"
+    return _OWNER_PIPE_ROOT / f"mindroom-pytest-owner-{run_id}"
 
 
 def _hold_owner_pipe(run_id: str) -> None:
@@ -2619,6 +2628,11 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
         yield
 
 
+def install_personal_room_shutdown_mock(bot: AgentBot) -> None:
+    """Install lifecycle cancellation for partial shutdown fixtures through one seam."""
+    bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
+
+
 def install_shutdown_drain_mocks(
     bot: RuntimeBot,
     *,
@@ -2993,6 +3007,10 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
                 )
                 stack.enter_context(
                     patch("mindroom.delegation.lifecycle.is_sender_allowed_for_responder", new=allow_sender),
+                )
+                # The module is imported at collection, so it binds the real check before this bypass starts.
+                stack.enter_context(
+                    patch.object(todo_tool_module, "is_sender_allowed_for_responder", new=allow_sender),
                 )
             yield
 

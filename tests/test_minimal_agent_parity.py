@@ -26,7 +26,7 @@ from agno.skills import LocalSkills, Skills
 from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 
-from mindroom import agents, ai, minimal_agent
+from mindroom import agents, ai, minimal_agent, provider_stream_retry
 from mindroom.agent_cli.protocol import (
     ContextReadOperation,
     ToolCallOperation,
@@ -552,6 +552,7 @@ async def test_actual_fallback_request_keeps_only_bash(response_harness, monkeyp
     original = ai.create_agent
     failed_requests = []
     send = h.provider.send
+    monkeypatch.setattr(provider_stream_retry, "_RETRY_BASE_DELAY_SECONDS", 0.0)
 
     async def failing_primary(**request):
         if request["model"] == "test-model":

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.run.agent import RunOutput
 
 import mindroom.routing
 from mindroom.commands.handler import CommandHandlerContext, handle_command
@@ -370,7 +371,7 @@ async def test_runtime_room_override_selects_router_model(tmp_path: Path) -> Non
         return MagicMock(id=f"{model_name}-model")
 
     router = AsyncMock()
-    router.arun.return_value = SimpleNamespace(
+    router.arun.return_value = RunOutput(
         content={"entity_name": "assistant", "reasoning": "Only candidate"},
     )
     with (

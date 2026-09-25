@@ -33,6 +33,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_run_context import prepend_knowledge_availability_notice
 from mindroom.ai import AIStreamChunk, ResponseTurnContext, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
+from mindroom.api.open_access import open_access_rejection
 from mindroom.api.openai_request_parsing import (
     AUTO_MODEL_NAME,
     RESERVED_MODEL_NAMES,
@@ -282,6 +283,7 @@ class _ModelListResponse(BaseModel):
 
 
 def _authenticate_request(
+    request: Request,
     authorization: str | None,
     runtime_paths: RuntimePaths,
 ) -> JSONResponse | str | None:
@@ -294,6 +296,10 @@ def _authenticate_request(
     )
     if not keys_env.strip():
         if allow_unauthenticated:
+            # A completion runs an agent with its tools, so a rebound or cross-site page must not trigger one.
+            rejection = open_access_rejection(request.headers, request.method, runtime_paths)
+            if rejection is not None:
+                return _error_response(rejection.status_code, rejection.detail, code="permission_denied")
             return None
         return _error_response(
             401,
@@ -460,7 +466,7 @@ async def list_models(
 ) -> JSONResponse:
     """List available models (agents) in OpenAI format."""
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
-    auth_error = _authenticate_request(authorization, runtime_paths)
+    auth_error = _authenticate_request(request, authorization, runtime_paths)
     if isinstance(auth_error, JSONResponse):
         return auth_error
 
@@ -527,7 +533,7 @@ async def chat_completions(
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
-    auth_error = _authenticate_request(authorization, runtime_paths)
+    auth_error = _authenticate_request(request, authorization, runtime_paths)
     if isinstance(auth_error, JSONResponse):
         return auth_error
 

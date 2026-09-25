@@ -11,7 +11,7 @@ import textwrap
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
@@ -20,6 +20,7 @@ import httpx
 import pytest
 import yaml
 
+from mindroom.agent_cli.worker_protocol import CLI_PRIVATE_ROOT_PATH
 from mindroom.agents import _load_context_files
 from mindroom.config.main import load_config
 from mindroom.constants import (
@@ -229,6 +230,7 @@ class _FakeContainersApi:
             "CapAdd": None,
             "CapDrop": list(kwargs.get("cap_drop", [])),
             "SecurityOpt": list(kwargs.get("security_opt", [])),
+            "ReadonlyRootfs": bool(kwargs.get("read_only", False)),
         }
         if isinstance(volumes, list):
             container.attrs["Mounts"] = [
@@ -1593,7 +1595,79 @@ def test_docker_backend_writes_authoritative_worker_validation_snapshot(
     assert env["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"] == "/app/worker/.runtime/startup_manifest.json"
 
 
-def test_docker_backend_removes_stale_validation_manifest_for_snapshotless_worker(
+def test_docker_workers_run_with_read_only_root_filesystem(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Tool code must not rewrite the image's /app tree, which the runner imports from and keeps across restarts."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    run_call = fake_client.containers.run_calls[0]
+    assert run_call["read_only"] is True
+    assert run_call["tmpfs"] == {"/tmp": "rw,nosuid,nodev,mode=1777,size=1g"}  # noqa: S108
+    writable_container = fake_client.containers.by_name[handle.worker_id]
+    writable_container.attrs["HostConfig"]["ReadonlyRootfs"] = False
+    writable_container.stop()
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert writable_container.removed == 1
+    assert writable_container.started == 0
+    assert fake_client.containers.run_calls[1]["read_only"] is True
+
+
+def test_docker_cli_worker_private_root_is_on_the_writable_tmpfs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The CLI capability directory must live on the private tmpfs, since the rest of the root is read-only."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    backend.config = replace(backend.config, extra_env={})
+    base = "v1:default:user_agent:alice:code"
+
+    backend.ensure_worker(
+        WorkerSpec(
+            process_worker_key(base, purpose="agent-turn", process_id=UUID(int=1)),
+            private_agent_names=frozenset(),
+            mirrored_credential_services=frozenset(),
+            state_scope_worker_key=base,
+        ),
+    )
+
+    run_call = fake_client.containers.run_calls[0]
+    assert run_call["read_only"] is True
+    assert any(PurePosixPath(CLI_PRIVATE_ROOT_PATH).is_relative_to(path) for path in run_call["tmpfs"])
+
+
+def test_docker_workers_mount_the_startup_manifest_directory_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Tool code must not rewrite the manifest the runner boots from, so `.runtime` is a read-only bind."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    worker_root = handle.debug_metadata["state_root"]
+    run_call = fake_client.containers.run_calls[0]
+    assert f"{worker_root}/.runtime:/app/worker/.runtime:ro" in run_call["volumes"]
+    assert run_call["environment"]["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"] == (
+        "/app/worker/.runtime/startup_manifest.json"
+    )
+    container = fake_client.containers.by_name[handle.worker_id]
+    runtime_mount = next(mount for mount in container.attrs["Mounts"] if mount["Destination"] == "/app/worker/.runtime")
+    runtime_mount["Mode"] = "rw"
+    runtime_mount["RW"] = True
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert container.removed == 1
+    assert f"{worker_root}/.runtime:/app/worker/.runtime:ro" in fake_client.containers.run_calls[1]["volumes"]
+
+
+def test_docker_backend_replaces_stale_validation_manifest_for_snapshotless_worker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1623,11 +1697,8 @@ def test_docker_backend_removes_stale_validation_manifest_for_snapshotless_worke
 
     snapshotless_backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
-    assert not manifest_path.exists()
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["tool_validation_snapshot"] == {}
     assert first_container.removed == 1
-    env = fake_client.containers.run_calls[-1]["environment"]
-    assert isinstance(env, dict)
-    assert "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH" not in env
 
 
 def test_docker_script_worker_profile_mirrors_no_global_credentials(
@@ -4676,12 +4747,21 @@ models:
     projection_root = _projection_root(volumes)
     projected_config_data = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
 
-    assert volumes[str((tmp_path / "agents").resolve())]["bind"] == "/app/worker/agents"
+    agent_binds = {source: spec["bind"] for source, spec in volumes.items() if "/agents" in spec["bind"]}
+    assert agent_binds == {str((tmp_path / "agents" / "alpha").resolve()): "/app/worker/agents/alpha"}
+    assert volumes[str((tmp_path / "agents" / "alpha").resolve())]["mode"] == "rw"
     assert set(projected_config_data["agents"]) == {"alpha", "delta"}
     assert set(projected_config_data["knowledge_bases"]) == {"a", "d"}
     assert projected_config_data["agents"]["alpha"]["context_files"] == ["alpha.md"]
     assert (tmp_path / "agents/alpha/workspace/alpha.md").read_text(encoding="utf-8") == "# Alpha\n"
-    assert projected_config_data["agents"]["delta"]["context_files"] == ["delta.md"]
+    # Private agents keep requester state under private_instances/, so their shared
+    # agents/<name> root is not mounted and context files are projected read-only.
+    assert projected_config_data["agents"]["delta"]["context_files"] == [
+        "./.mindroom-worker-assets/agents/delta/context_files/00-delta.md",
+    ]
+    assert (
+        projection_root / ".mindroom-worker-assets" / "agents" / "delta" / "context_files" / "00-delta.md"
+    ).read_text(encoding="utf-8") == "# Delta\n"
     assert (tmp_path / "agents/delta/workspace/delta.md").read_text(encoding="utf-8") == "# Delta\n"
     assert not (
         projection_root / ".mindroom-worker-assets" / "agents" / "beta" / "context_files" / "00-beta.md"
@@ -5327,14 +5407,15 @@ def test_cli_workers_have_private_control_auth_and_only_canonical_state(
     assert handles[0].auth_token != handles[1].auth_token
     assert all(handle.auth_token != _TEST_AUTH_TOKEN for handle in handles)
     calls = client.containers.run_calls
-    # Each process owns its worker root and that root's read-only credential mirror;
-    # every canonical state mount after those two is shared.
+    # Each process owns its worker root and that root's read-only credential mirror
+    # and manifest directory; every canonical state mount after those three is shared.
     for call, handle in zip(calls, handles, strict=True):
         worker_root = handle.debug_metadata["state_root"]
         assert call["volumes"][1] == (
             f"{worker_root}/.shared_credentials:{backend.config.storage_mount_path}/.shared_credentials:ro"
         )
-    assert calls[0]["volumes"][2:] == calls[1]["volumes"][2:]
+        assert call["volumes"][2] == f"{worker_root}/.runtime:{backend.config.storage_mount_path}/.runtime:ro"
+    assert calls[0]["volumes"][3:] == calls[1]["volumes"][3:]
     for call, handle in zip(calls, handles, strict=True):
         assert _TEST_AUTH_TOKEN not in json.dumps(call)
         for secret in ("seeded-primary-admin", "seeded-provider-key", _TEST_AUTH_TOKEN):
@@ -5397,7 +5478,7 @@ def test_cli_worker_inspection_rejects_authority_and_mount_drift(
     with pytest.raises(WorkerBackendError, match="environment"):
         backend.inspect_cli_worker(handle)
     container.attrs["Config"]["Env"].pop()
-    container.attrs["Mounts"].append({"Destination": "/app/.mindroom-agent-cli", "Type": "bind"})
+    container.attrs["Mounts"].append({"Destination": CLI_PRIVATE_ROOT_PATH, "Type": "bind"})
     with pytest.raises(WorkerBackendError, match="capability"):
         backend.inspect_cli_worker(handle)
 
@@ -5584,7 +5665,13 @@ def test_docker_ordinary_workers_preserve_pre_computer_identity(
     metadata["launch_config_hash"] = expected_hash
     metadata_path.write_text(json.dumps(metadata))
     container.attrs["Config"]["Labels"]["mindroom.ai/launch-config-hash"] = expected_hash
-    container.attrs["HostConfig"] = {"Privileged": False, "CapAdd": None, "CapDrop": None, "SecurityOpt": None}
+    container.attrs["HostConfig"] = {
+        "Privileged": False,
+        "CapAdd": None,
+        "CapDrop": None,
+        "SecurityOpt": None,
+        "ReadonlyRootfs": True,
+    }
 
     second = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
 

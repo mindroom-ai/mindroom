@@ -196,6 +196,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `tool_system/workspace_skills.py` | No-follow workspace skill discovery, reads, and usage telemetry |
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
+| `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
 | `scheduling.py` | Cron and natural-language task scheduling |
 | `scheduling_executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
 | `scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |
@@ -259,6 +260,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `attachment_media.py` | Convert attachment records to Agno media objects |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
+| `api/open_access.py` | Host allow-list and browser-origin guard for requests served without a credential (open dashboard auth, unauthenticated `/v1`) |
 | `api/usage_export.py` | Application-scoped usage-export preparation: one background scan, a bounded cache for daily/request-detail variants, committed-generation validation, and non-blocking shutdown cleanup |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
+from mindroom import pending_event_worker
 from mindroom.coalescing import CoalescingGate
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, SOURCE_KIND_KEY
@@ -43,6 +44,12 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.journal_dispatch import JournalDispatcher
     from tests.test_turn_controller_focused import _Harness
+
+
+@pytest.fixture(autouse=True)
+def _short_room_retry_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep each room retry's cooldown and ordering without sleeping a real second per failure."""
+    monkeypatch.setattr(pending_event_worker, "_INITIAL_RETRY_DELAY_SECONDS", 0.01)
 
 
 def _wire_dispatcher(harness: _Harness, room: nio.MatrixRoom, tmp_path: Path) -> JournalDispatcher:

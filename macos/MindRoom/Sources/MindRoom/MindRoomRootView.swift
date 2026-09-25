@@ -4,6 +4,7 @@ struct MindRoomRootView: View {
     @ObservedObject var navigation: AppNavigation
     @ObservedObject var runner: MindRoomCommandRunner
     @ObservedObject var desktop: DesktopControlStore
+    @FocusState private var focusedSection: AppSection?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -19,8 +20,8 @@ struct MindRoomRootView: View {
                             case .localAgents:
                                 LocalAgentsView(runner: runner)
                             case .computerAccess:
-                                DesktopControlView(store: desktop) { section in
-                                    withAnimation { proxy.scrollTo(section, anchor: .top) }
+                                DesktopControlView(store: desktop) {
+                                    withAnimation { proxy.scrollTo(AppSection.computerAccess, anchor: .top) }
                                 }.id(AppSection.computerAccess)
                             case .settings:
                                 AppSettingsView(runner: runner)
@@ -94,11 +95,18 @@ struct MindRoomRootView: View {
         .frame(width: 195)
         .frame(maxHeight: .infinity)
         .background(.regularMaterial)
+        .onAppear { focusedSection = navigation.section }
+        .onChange(of: navigation.section) { _, section in
+            if focusedSection != nil {
+                focusedSection = section
+            }
+        }
     }
 
     private func navigationButton(_ section: AppSection) -> some View {
         Button {
             navigation.section = section
+            focusedSection = section
         } label: {
             Label(section.rawValue, systemImage: section.symbol)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -107,6 +115,7 @@ struct MindRoomRootView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
+        .focused($focusedSection, equals: section)
         .accessibilityAddTraits(navigation.section == section ? .isSelected : [])
     }
 
@@ -134,10 +143,10 @@ struct MindRoomRootView: View {
                 }
             }
             AppSectionCard {
-                sectionHeading("Computer access", status: desktop.desktopStatusLabel)
+                sectionHeading("Computer access", status: desktop.connectionStatusLabel)
                 Text("Let agents running elsewhere see and use selected apps on this Mac.")
                     .foregroundStyle(.secondary)
-                Button(desktop.status.config.state == "ready" ? "Manage Access" : "Set Up Computer Access") {
+                Button(desktop.status.hasSavedConnection && !desktop.needsPairing ? "Manage Access" : "Set Up Computer Access") {
                     navigation.section = .computerAccess
                 }
             }

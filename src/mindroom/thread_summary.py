@@ -22,6 +22,7 @@ from mindroom.authorization import (
     is_sender_allowed_for_responder,
 )
 from mindroom.entity_resolution import current_internal_sender_ids, resolve_room_scoped_model_override
+from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history, with_delivered_response
@@ -636,6 +637,7 @@ async def _generate_summary(
         run_input=prompt,
         session_id=f"thread_summary_{session_hash}",
     )
+    await record_system_usage(response, runtime_paths=runtime_paths, kind="thread_summary")
     content = response.content
     if tag_vocabulary is not None:
         if not isinstance(content, _ThreadEnrichment):

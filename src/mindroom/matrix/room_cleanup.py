@@ -13,31 +13,18 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.matrix.state import matrix_state_for_runtime
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
-
-
-def _get_all_known_bot_user_ids(config: Config, runtime_paths: RuntimePaths) -> set[str]:
-    """Get all current persisted bot Matrix user IDs from matrix_state.yaml."""
-    domain = config.get_domain(runtime_paths)
-    state = matrix_state_for_runtime(runtime_paths)
-    return {
-        MatrixID.from_username(account.username, account.domain or domain).full_id
-        for key, account in state.accounts.items()
-        if key.startswith("agent_")
-        if key != INTERNAL_USER_ACCOUNT_KEY
-    }
 
 
 async def _cleanup_orphaned_bots_in_room(
@@ -77,7 +64,7 @@ async def _cleanup_orphaned_bots_in_room(
         logger.warning("orphaned_bot_cleanup_members_unavailable", room_id=room_id)
         return []
 
-    known_bot_user_ids = _get_all_known_bot_user_ids(config, runtime_paths)
+    known_bot_user_ids = persisted_bot_user_ids(runtime_paths)
     registry = entity_identity_registry(config, runtime_paths)
 
     removed_bots = []

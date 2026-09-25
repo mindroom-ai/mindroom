@@ -1,23 +1,30 @@
 """CLI for the lightweight Matrix-attached desktop bridge."""
 
+# NativeConfigError takes a stable wire code before its user-facing message.
+# ruff: noqa: EM101
+
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
 
+from mindroom.desktop.command_journal import DesktopCommandJournalError, check_controller_binding
 from mindroom.desktop.login_method import DesktopLoginMethod
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mindroom.constants import RuntimePaths
+    from mindroom.desktop.native_config import NativeDesktopConfig
     from mindroom.desktop.session import DesktopMatrixSession
 
 _console = Console()
@@ -102,10 +109,16 @@ def _request_required_desktop_permissions() -> None:
     permission_names = " and ".join(missing_permissions)
     permission_label = "permission" if len(missing_permissions) == 1 else "permissions"
     msg = (
-        f"macOS requested {permission_names} {permission_label}. Grant the requested access to the terminal app "
-        "running this command in System Settings > Privacy & Security, fully quit and reopen that app, then run "
-        "`mindroom desktop run` again."
+        f"macOS has not applied {permission_names} {permission_label} to the terminal app running this command. "
+        "macOS applies a grant only after that app restarts, even if it is already listed and enabled in "
+        "System Settings > Privacy & Security. Enable it there if needed, quit the terminal app completely "
+        "(Cmd-Q; closing its windows is not enough), reopen it, then run `mindroom desktop run` again."
     )
+    if os.environ.get("TMUX"):
+        msg += (
+            " This command runs inside tmux, whose existing server does not pick up the new grant: after reopening "
+            "the terminal app, also run `tmux kill-server`, or start the bridge outside tmux."
+        )
     raise DesktopProviderError(msg)
 
 
@@ -375,6 +388,16 @@ def desktop_setup(
     controller_user_id: str = typer.Option(..., "--controller-user-id", help="Pinned cloud controller Matrix user."),
     controller_device_id: str = typer.Option(..., "--controller-device-id", help="Pinned cloud controller device."),
     controller_ed25519: str = typer.Option(..., "--controller-ed25519", help="Pinned controller fingerprint."),
+    allow_agent: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--allow-agent",
+        help="Agent name from the setup message; prompts if omitted. Repeat as needed.",
+    ),
+    allow_app: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--allow-app",
+        help="Save allowed app IDs, or choose apps later in the macOS app.",
+    ),
     user_id: str | None = typer.Option(
         None,
         "--user-id",
@@ -410,11 +433,38 @@ def desktop_setup(
         help="Desktop bridge state directory.",
     ),
 ) -> None:
-    """Log in when needed, then claim one requester-agent pairing."""
-    from mindroom.desktop.session import desktop_session_path  # noqa: PLC0415
+    """Pair and save the connection shared with the macOS app."""
+    from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
 
+    # Native configuration uses Unix file locks; CLI help must remain portable.
+    from mindroom.desktop.native_config import (  # noqa: PLC0415
+        NativeBrowserConfig,
+        NativeCaptureConfig,
+        NativeConfigError,
+        NativeDesktopConfig,
+        load_native_config,
+        native_config_path,
+        save_native_config,
+    )
+    from mindroom.desktop.session import (  # noqa: PLC0415
+        DesktopSessionError,
+        desktop_session_path,
+        load_desktop_session,
+        save_desktop_session,
+    )
+    from mindroom.matrix.olm_to_device import PinnedMatrixDevice  # noqa: PLC0415
+
+    if allow_agent is None:
+        allow_agent = [typer.prompt("Agent name from the setup message").strip()]
     runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
-    if not desktop_session_path(runtime_paths).exists():
+    session_path = desktop_session_path(runtime_paths)
+    if session_path.exists():
+        _require_saved_session_matches(
+            session_path,
+            user_id=user_id,
+            homeserver=homeserver or runtime_matrix_homeserver(runtime_paths),
+        )
+    else:
         desktop_login(
             user_id=user_id,
             homeserver=homeserver,
@@ -427,16 +477,78 @@ def desktop_setup(
             config_path=config_path,
             storage_path=storage_path,
         )
-    desktop_pair(
-        code=code,
-        controller_user_id=controller_user_id,
-        controller_device_id=controller_device_id,
-        controller_ed25519=controller_ed25519,
-        cloudflare_access=cloudflare_access,
-        matrix_http_headers_file=matrix_http_headers_file,
-        config_path=config_path,
-        storage_path=storage_path,
-    )
+    try:
+        path = native_config_path(runtime_paths.storage_root)
+        try:
+            previous = load_native_config(path)
+        except NativeConfigError as exc:
+            if exc.code != "configuration_missing":
+                raise
+            previous = None
+        controller = PinnedMatrixDevice(controller_user_id, controller_device_id, controller_ed25519)
+        check_controller_binding(
+            runtime_paths.storage_root / "desktop_bridge" / "commands.sqlite3",
+            json.dumps([controller.user_id, controller.device_id, controller.ed25519]),
+        )
+        session = load_desktop_session(session_path)
+        matching = previous if previous is not None and previous.controller == controller else None
+        config = NativeDesktopConfig(
+            revision=previous.revision if previous else 0,
+            enabled=True,
+            controller=controller,
+            allowed_requester_ids=(session.user_id,),
+            allowed_agent_names=tuple(allow_agent),
+            allowed_app_ids=tuple(allow_app)
+            if allow_app is not None
+            else (matching.allowed_app_ids if matching else ()),
+            capture=matching.capture if matching else NativeCaptureConfig(),
+            browser=matching.browser if matching else NativeBrowserConfig(),
+        )
+        config = NativeDesktopConfig.from_payload(config.to_payload(), validate_browser_paths=False)
+        desktop_pair(
+            code=code,
+            controller_user_id=controller_user_id,
+            controller_device_id=controller_device_id,
+            controller_ed25519=controller_ed25519,
+            cloudflare_access=cloudflare_access,
+            matrix_http_headers_file=matrix_http_headers_file,
+            config_path=config_path,
+            storage_path=storage_path,
+        )
+        save_desktop_session(
+            session_path,
+            replace(session, cloudflare_access=cloudflare_access or session.cloudflare_access),
+            expected_session=session,
+        )
+        save_native_config(path, config, expected_revision=config.revision)
+    except (DesktopCommandJournalError, DesktopSessionError, ValueError) as exc:
+        _error_console.print(f"[red]Desktop setup failed:[/red] {exc}")
+        raise typer.Exit(1) from None
+    _console.print("Setup saved for both the terminal and MindRoom app.")
+    if not config.allowed_app_ids:
+        _console.print("In MindRoom, open Computer access, choose apps, and save app access.")
+    _console.print("After confirming in chat, start observation in the app or run `mindroom desktop run`.")
+
+
+def _require_saved_session_matches(session_path: Path, *, user_id: str | None, homeserver: str) -> None:
+    """Refuse to pair a saved session that belongs to another homeserver or user."""
+    from mindroom.desktop.session import DesktopSessionError, load_desktop_session  # noqa: PLC0415
+
+    try:
+        session = load_desktop_session(session_path)
+    except DesktopSessionError as exc:
+        _error_console.print(f"[red]Desktop setup failed:[/red] {exc}")
+        raise typer.Exit(1) from None
+    homeserver_differs = homeserver.rstrip("/") != session.homeserver.rstrip("/")
+    user_differs = user_id is not None and user_id != session.user_id
+    if homeserver_differs or user_differs:
+        _error_console.print(
+            f"[red]Desktop setup failed:[/red] The saved session at {session_path} belongs to "
+            f"{session.user_id} on {session.homeserver}, not {user_id or session.user_id} on "
+            f"{homeserver}. Pass --storage-path for a separate setup, or run "
+            "'mindroom desktop login --replace' to replace the saved session.",
+        )
+        raise typer.Exit(1)
 
 
 async def _pair_desktop(
@@ -471,21 +583,29 @@ async def _pair_desktop(
 
 @desktop_app.command("run")
 def desktop_run(
-    controller_user_id: str = typer.Option(..., "--controller-user-id", help="Pinned cloud controller Matrix user."),
-    controller_device_id: str = typer.Option(..., "--controller-device-id", help="Pinned cloud controller device."),
-    controller_ed25519: str = typer.Option(..., "--controller-ed25519", help="Pinned controller fingerprint."),
-    allow_requester: list[str] = typer.Option(  # noqa: B008
-        ...,
+    controller_user_id: str | None = typer.Option(
+        None,
+        "--controller-user-id",
+        help="Pinned cloud controller Matrix user.",
+    ),
+    controller_device_id: str | None = typer.Option(
+        None,
+        "--controller-device-id",
+        help="Pinned cloud controller device.",
+    ),
+    controller_ed25519: str | None = typer.Option(None, "--controller-ed25519", help="Pinned controller fingerprint."),
+    allow_requester: list[str] | None = typer.Option(  # noqa: B008
+        None,
         "--allow-requester",
         help="Human Matrix requester allowed to operate this desktop; repeat as needed.",
     ),
-    allow_agent: list[str] = typer.Option(  # noqa: B008
-        ...,
+    allow_agent: list[str] | None = typer.Option(  # noqa: B008
+        None,
         "--allow-agent",
         help="MindRoom agent name allowed to operate this desktop; repeat as needed.",
     ),
-    allow_app: list[str] = typer.Option(  # noqa: B008
-        ...,
+    allow_app: list[str] | None = typer.Option(  # noqa: B008
+        None,
         "--allow-app",
         help="Exact local application ID exposed to the agent; repeat as needed.",
     ),
@@ -495,11 +615,11 @@ def desktop_run(
         help="Enable semantic and fallback input for a short local lease. Default is observe-only.",
     ),
     lease_minutes: int = typer.Option(15, "--lease-minutes", min=1, max=60, help="Local control lease duration."),
-    max_screenshot_width: int = typer.Option(1600, "--max-screenshot-width", min=320, max=3840),
-    jpeg_quality: int = typer.Option(80, "--jpeg-quality", min=40, max=95),
-    browser_extension: bool = typer.Option(
-        False,
-        "--browser-extension",
+    max_screenshot_width: int | None = typer.Option(None, "--max-screenshot-width", min=320, max=3840),
+    jpeg_quality: int | None = typer.Option(None, "--jpeg-quality", min=40, max=95),
+    browser_extension: bool | None = typer.Option(
+        None,
+        "--browser-extension/--no-browser-extension",
         help="Expose Playwright MCP control of an existing browser profile when its extension is installed.",
     ),
     browser_executable: Path | None = typer.Option(  # noqa: B008
@@ -512,8 +632,8 @@ def desktop_run(
         "--browser-user-data-dir",
         help="Existing browser user-data root containing the profile where the extension is installed.",
     ),
-    browser_timeout_seconds: int = typer.Option(
-        90,
+    browser_timeout_seconds: int | None = typer.Option(
+        None,
         "--browser-timeout-seconds",
         min=1,
         max=120,
@@ -545,12 +665,11 @@ def desktop_run(
         help="Desktop bridge state directory.",
     ),
 ) -> None:
-    """Run the outbound-only Matrix sync loop and execute locally authorized commands."""
+    """Observe using saved app/terminal setup; flags override this run only."""
     from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
         CloudflareAccessError,
         cloudflare_access_headers,
     )
-    from mindroom.desktop.command_journal import DesktopCommandJournalError  # noqa: PLC0415
     from mindroom.desktop.provider import DesktopProviderError  # noqa: PLC0415
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
@@ -561,14 +680,27 @@ def desktop_run(
     from mindroom.logging_config import setup_logging  # noqa: PLC0415
     from mindroom.matrix.olm_to_device import OlmToDeviceError  # noqa: PLC0415
 
-    _validate_browser_options(
-        enabled=browser_extension,
-        executable_path=browser_executable,
-        user_data_dir=browser_user_data_dir,
-    )
     runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
     setup_logging(level=log_level.upper(), runtime_paths=runtime_paths)
     try:
+        config = _resolve_run_config(
+            runtime_paths.storage_root,
+            controller_fields=(controller_user_id, controller_device_id, controller_ed25519),
+            allow_requester=allow_requester,
+            allow_agent=allow_agent,
+            allow_app=allow_app,
+            max_screenshot_width=max_screenshot_width,
+            jpeg_quality=jpeg_quality,
+            browser_extension=browser_extension,
+            browser_executable=browser_executable,
+            browser_user_data_dir=browser_user_data_dir,
+            browser_timeout_seconds=browser_timeout_seconds,
+        )
+        _validate_browser_options(
+            enabled=config.browser.enabled,
+            executable_path=config.browser.executable_path if config.browser.enabled else browser_executable,
+            user_data_dir=config.browser.user_data_dir if config.browser.enabled else browser_user_data_dir,
+        )
         http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)
         session = load_desktop_session(desktop_session_path(runtime_paths))
         if cloudflare_access or session.cloudflare_access:
@@ -578,20 +710,20 @@ def desktop_run(
             _run_bridge(
                 runtime_paths=runtime_paths,
                 session=session,
-                controller_user_id=controller_user_id,
-                controller_device_id=controller_device_id,
-                controller_ed25519=controller_ed25519,
-                allow_requester=frozenset(allow_requester),
-                allow_agent=frozenset(allow_agent),
-                allow_app=frozenset(allow_app),
+                controller_user_id=config.controller.user_id,
+                controller_device_id=config.controller.device_id,
+                controller_ed25519=config.controller.ed25519,
+                allow_requester=frozenset(config.allowed_requester_ids),
+                allow_agent=frozenset(config.allowed_agent_names),
+                allow_app=frozenset(config.allowed_app_ids),
                 allow_control=allow_control,
                 lease_minutes=lease_minutes,
-                max_screenshot_width=max_screenshot_width,
-                jpeg_quality=jpeg_quality,
-                browser_extension=browser_extension,
-                browser_executable=browser_executable,
-                browser_user_data_dir=browser_user_data_dir,
-                browser_timeout_seconds=browser_timeout_seconds,
+                max_screenshot_width=config.capture.max_screenshot_width,
+                jpeg_quality=config.capture.jpeg_quality,
+                browser_extension=config.browser.enabled,
+                browser_executable=config.browser.executable_path,
+                browser_user_data_dir=config.browser.user_data_dir,
+                browser_timeout_seconds=config.browser.timeout_seconds,
                 http_headers=http_headers,
             ),
         )
@@ -601,11 +733,102 @@ def desktop_run(
         CloudflareAccessError,
         DesktopCommandJournalError,
         DesktopProviderError,
+        ValueError,
         DesktopSessionError,
         OlmToDeviceError,
     ) as exc:
         _error_console.print(f"[red]Desktop bridge failed:[/red] {exc}")
         raise typer.Exit(1) from None
+
+
+def _resolve_run_config(
+    storage_root: Path,
+    *,
+    controller_fields: tuple[str | None, str | None, str | None],
+    allow_requester: list[str] | None,
+    allow_agent: list[str] | None,
+    allow_app: list[str] | None,
+    max_screenshot_width: int | None,
+    jpeg_quality: int | None,
+    browser_extension: bool | None,
+    browser_executable: Path | None,
+    browser_user_data_dir: Path | None,
+    browser_timeout_seconds: int | None,
+) -> NativeDesktopConfig:
+    """Resolve one run without combining a new controller with saved authority."""
+    # Native configuration uses Unix file locks; CLI help must remain portable.
+    from mindroom.desktop.native_config import (  # noqa: PLC0415
+        NativeBrowserConfig,
+        NativeCaptureConfig,
+        NativeConfigError,
+        NativeDesktopConfig,
+        load_native_config,
+        native_config_path,
+    )
+    from mindroom.matrix.olm_to_device import PinnedMatrixDevice  # noqa: PLC0415
+
+    try:
+        config = load_native_config(native_config_path(storage_root))
+    except NativeConfigError as exc:
+        if exc.code != "configuration_missing":
+            raise
+        config = None
+    if any(field is not None for field in controller_fields):
+        user_id, device_id, fingerprint = controller_fields
+        if user_id is None or device_id is None or fingerprint is None:
+            msg = "Provide all three --controller options together, or omit them to use saved setup."
+            raise NativeConfigError("invalid_request", msg)
+        controller = PinnedMatrixDevice(user_id, device_id, fingerprint)
+        if config is None or config.controller != controller:
+            if not allow_requester or not allow_agent or not allow_app:
+                msg = "A new controller requires --allow-requester, --allow-agent, and --allow-app."
+                raise NativeConfigError("invalid_request", msg)
+            config = NativeDesktopConfig(
+                revision=0,
+                enabled=True,
+                controller=controller,
+                allowed_requester_ids=tuple(allow_requester),
+                allowed_agent_names=tuple(allow_agent),
+                allowed_app_ids=tuple(allow_app),
+                capture=NativeCaptureConfig(),
+                browser=NativeBrowserConfig(),
+            )
+    if config is None:
+        msg = "Complete setup in the MindRoom app or run the `mindroom desktop setup` command from your agent chat."
+        raise NativeConfigError("configuration_missing", msg)
+    if not config.enabled:
+        msg = "Desktop access is disabled in the saved setup. Enable it in the MindRoom app before starting."
+        raise NativeConfigError("configuration_missing", msg)
+    config = replace(
+        config,
+        allowed_requester_ids=tuple(allow_requester) if allow_requester is not None else config.allowed_requester_ids,
+        allowed_agent_names=tuple(allow_agent) if allow_agent is not None else config.allowed_agent_names,
+        allowed_app_ids=tuple(allow_app) if allow_app is not None else config.allowed_app_ids,
+        capture=replace(
+            config.capture,
+            max_screenshot_width=max_screenshot_width
+            if max_screenshot_width is not None
+            else config.capture.max_screenshot_width,
+            jpeg_quality=jpeg_quality if jpeg_quality is not None else config.capture.jpeg_quality,
+        ),
+        browser=replace(
+            config.browser,
+            enabled=browser_extension if browser_extension is not None else config.browser.enabled,
+            executable_path=browser_executable.expanduser().resolve()
+            if browser_executable is not None
+            else config.browser.executable_path,
+            user_data_dir=browser_user_data_dir.expanduser().resolve()
+            if browser_user_data_dir is not None
+            else config.browser.user_data_dir,
+            timeout_seconds=browser_timeout_seconds
+            if browser_timeout_seconds is not None
+            else config.browser.timeout_seconds,
+        ),
+    )
+    if not config.allowed_app_ids:
+        msg = "Choose and save apps in MindRoom > Computer access, or pass --allow-app APPLICATION_ID for this run."
+        raise NativeConfigError("configuration_missing", msg)
+    return NativeDesktopConfig.from_payload(config.to_payload(), validate_browser_paths=False)
 
 
 def _validate_browser_options(

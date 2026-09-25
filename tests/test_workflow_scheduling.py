@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
+from agno.run.agent import RunOutput
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -42,6 +43,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.scheduling_helpers import serve_task_state_events
 
 
 def _mid(name: str) -> MatrixID:
@@ -264,7 +266,7 @@ class TestParseWorkflowSchedule:
         """Test parsing research + email workflow."""
         # Setup mock agent response
         mock_agent = AsyncMock()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = ScheduledWorkflow(
             schedule_type="cron",
             cron_schedule=CronSchedule(minute="0", hour="9", weekday="1"),
@@ -298,7 +300,7 @@ class TestParseWorkflowSchedule:
     ) -> None:
         """Test parsing simple reminder without agents."""
         mock_agent = AsyncMock()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC) + timedelta(minutes=5),
@@ -324,7 +326,7 @@ class TestParseWorkflowSchedule:
     async def test_parse_daily_task(self, mock_agent_class: Mock, mock_get_model: Mock, mock_config: MagicMock) -> None:  # noqa: ARG002
         """Test parsing daily recurring task."""
         mock_agent = AsyncMock()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = ScheduledWorkflow(
             schedule_type="cron",
             cron_schedule=CronSchedule(minute="0", hour="9"),
@@ -357,7 +359,7 @@ class TestParseWorkflowSchedule:
         """The parse prompt must carry the user's timezone and local wall-clock time."""
         mock_config.timezone = "America/Los_Angeles"
         mock_agent = AsyncMock()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime(2026, 7, 4, 6, 45, tzinfo=UTC),
@@ -390,7 +392,7 @@ class TestParseWorkflowSchedule:
     ) -> None:
         """The parse prompt must teach the model when to set the per-schedule history limit."""
         mock_agent = AsyncMock()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = ScheduledWorkflow(
             schedule_type="cron",
             cron_schedule=CronSchedule(minute="*/25"),
@@ -427,7 +429,7 @@ class TestParseWorkflowSchedule:
     ) -> None:
         """A one-time parse without execute_at must fail instead of silently defaulting."""
         mock_agent = AsyncMock()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = ScheduledWorkflow(
             schedule_type="once",
             message="Check deployment",
@@ -456,7 +458,7 @@ class TestParseWorkflowSchedule:
     ) -> None:
         """A recurring parse without cron_schedule must fail instead of silently defaulting."""
         mock_agent = AsyncMock()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = ScheduledWorkflow(
             schedule_type="cron",
             message="Market analysis",
@@ -527,7 +529,7 @@ class TestParseWorkflowSchedule:
     ) -> None:
         """Available-agent prompt rendering should never produce @@ mentions."""
         mock_agent = AsyncMock()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC) + timedelta(minutes=5),
@@ -564,7 +566,7 @@ class TestParseWorkflowSchedule:
     ) -> None:
         """Conditional schedules should accept numeric five-field crons because they recur."""
         mock_agent = AsyncMock()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = ScheduledWorkflow(
             schedule_type="cron",
             is_conditional=True,
@@ -1040,7 +1042,7 @@ class TestIntegrationWithScheduling:
         client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
 
         mock_agent = AsyncMock()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC) + timedelta(hours=6),
@@ -1104,6 +1106,10 @@ class TestIntegrationWithScheduling:
             state_key="task123",
             room_id="!room:server",
         )
+        serve_task_state_events(
+            client,
+            sender=entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id,
+        )
 
         task_id, message = await schedule_task(
             runtime=make_test_scheduling_runtime(
@@ -1146,7 +1152,7 @@ class TestIntegrationWithScheduling:
         client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
 
         mock_agent = AsyncMock()
-        mock_response = MagicMock()
+        mock_response = RunOutput()
         mock_response.content = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC) + timedelta(hours=6),
@@ -1210,6 +1216,10 @@ class TestIntegrationWithScheduling:
             event_type="com.mindroom.scheduled.task",
             state_key="task123",
             room_id="!room:server",
+        )
+        serve_task_state_events(
+            client,
+            sender=entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id,
         )
 
         task_id, message = await schedule_task(

@@ -20,7 +20,13 @@ from mindroom.private_instance_identity import PrivateInstanceIdentityError, loa
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.worker_routing import build_tool_execution_identity, worker_dir_name
-from mindroom.usage_storage import TOKEN_FIELDS, quote_identifier
+from mindroom.usage_storage import (
+    SYSTEM_USAGE_ENTITY,
+    SYSTEM_USAGE_RELATIVE_PATH,
+    SYSTEM_USAGE_SESSION_TABLE,
+    TOKEN_FIELDS,
+    quote_identifier,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -43,7 +49,7 @@ __all__ = [
     "iter_usage_storage_rows",
 ]
 
-type _UsageStorageScope = Literal["shared_agent", "private_agent", "team"]
+type _UsageStorageScope = Literal["shared_agent", "private_agent", "team", "system"]
 type _UsageReadMode = Literal["runs", "both"]
 type _MetricValue = int | float | str | None
 
@@ -81,10 +87,12 @@ class UsageModelMetrics:
 
 @dataclass(frozen=True, slots=True)
 class UsageRequestMetrics:
-    """Content-free counters and timestamp for one provider request."""
+    """Content-free counters, timestamp and optional model for one provider request."""
 
     created_at: int | float
     metrics: Mapping[str, _MetricValue]
+    model_provider: str | None = None
+    model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +263,19 @@ def discover_admin_usage_sources(
     sources = _shared_agent_sources(root, config)
     sources.extend(_private_agent_sources(root, config, runtime_paths.storage_root))
     sources.extend(_team_sources(root, config))
+    system_path = _safe_candidate(root, Path(SYSTEM_USAGE_RELATIVE_PATH))
+    if system_path is not None and system_path.is_file():
+        sources.append(
+            _source(
+                path=system_path,
+                root=root,
+                scope="system",
+                table=SYSTEM_USAGE_SESSION_TABLE,
+                agent_name=None,
+                config=config,
+                requester_isolated=False,
+            ),
+        )
     return tuple(sorted(sources, key=lambda item: item.path_label))
 
 
@@ -508,6 +529,8 @@ def _extract_row(
     if entity_kind not in {"agent", "team"}:
         raise ValueError
     entity_id = row["agent_id"] if entity_kind == "agent" else row["team_id"]
+    if source.scope == "system" and (entity_kind != "agent" or entity_id != SYSTEM_USAGE_ENTITY):
+        raise ValueError
     row_key = row["session_id"]
     row_requester = _optional_string(row["user_id"])
     if not isinstance(entity_id, str) or not entity_id or not isinstance(row_key, str) or not row_key:
@@ -587,6 +610,12 @@ def _extract_run(
         "dynamic_workflow",
         "live_voice",
         "skill_learning",
+        "routing",
+        "room_topic",
+        "schedule_parse",
+        "thread_summary",
+        "voice_normalization",
+        "voice_transcription",
     }:
         raise ValueError
     parent_run_id = run.get("parent_run_id")
@@ -665,7 +694,16 @@ def _extract_request_metrics(requests: object) -> tuple[UsageRequestMetrics, ...
                 or not isinstance(metrics, dict)
             ):
                 return None
-            selected.append(UsageRequestMetrics(created_at, _select_metrics(cast("dict[str, object]", metrics))))
+            if any(key in request and not _optional_string(request[key]) for key in ("model_provider", "model")):
+                return None
+            selected.append(
+                UsageRequestMetrics(
+                    created_at,
+                    _select_metrics(cast("dict[str, object]", metrics)),
+                    model_provider=_optional_string(request.get("model_provider")),
+                    model=_optional_string(request.get("model")),
+                ),
+            )
     except (TypeError, ValueError):
         return None
     return tuple(selected)

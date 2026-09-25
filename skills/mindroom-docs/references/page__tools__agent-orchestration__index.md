@@ -147,8 +147,10 @@ All three functions accept an optional `include_daily` boolean, which defaults t
 
 Call `get_my_usage(include_daily=True)`, `get_my_private_usage(include_daily=True)`, or `get_all_usage(include_daily=True)` to include token usage per day.
 The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, `run_count`, and a `model_breakdown` grouped by provider and model.
-Dates use individual request timestamps when all counters reconcile to the recorded run and one model; older or unreconciled details fall back to run creation time.
+Dates use individual request timestamps when all counters reconcile to the recorded run and its per-model totals; older or unreconciled details fall back to run creation time.
+New requests retain their own model attribution; older requests can inherit a single known run model, but ambiguous mixed-model history cannot be split.
 Each top-level run counts once on its first request date, so tokens on later days or from saved team members do not add extra replies.
+Each model counts that run once on the first date it was used.
 Dates are sorted oldest first and omit days without usable retained usage.
 The daily breakdown follows the same requester and administrator access rules as the rest of the report.
 Each day's combined totals and each model's totals separately include `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`, alongside total, reasoning, and audio tokens.
@@ -196,6 +198,10 @@ Duplicate entries for the same provider and model within one session are combine
 The details must reconcile every token counter to the session total; absent, malformed, negative, or inconsistent details preserve the full session under `unknown` and mark cumulative model coverage incomplete.
 Session aggregates do not retain dates or requester attribution for these counters, and deleted sessions remain unavailable.
 Shared-agent self reports omit the cumulative fields because their totals are requester-filtered retained runs rather than whole session aggregates.
+
+`get_all_usage()` also includes recorded internal AI work under `system:internal`, including routing, room topics, schedule interpretation, thread summaries, voice normalization, and provider-reported transcription tokens.
+This overhead contributes tokens but adds no conversations or top-level replies, and no human requester is inferred for it.
+It is excluded from personal and private-agent usage reports. Historical internal calls and transcription tokens not reported by the provider remain unavailable.
 
 ### Private-Agent Accounting
 

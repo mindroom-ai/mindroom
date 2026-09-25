@@ -12,6 +12,7 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.scheduling import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow, _run_cron_task
 from tests.conftest import test_runtime_paths as runtime_paths
+from tests.scheduling_helpers import joined_member_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -23,9 +24,11 @@ async def test_cancel_mid_wait_cron_task(tmp_path: Path) -> None:
     client = AsyncMock()
     client.homeserver = "https://example.org"
     client.user_id = "@router:example.org"
+    client.room_get_state_event.side_effect = joined_member_state
     config = Config()
 
     workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="cron",
         cron_schedule=CronSchedule(minute="*", hour="*", day="*", month="*", weekday="*"),
         message="Msg",

@@ -5,6 +5,10 @@ _.validate_template  # Pydantic field validator (src/mindroom/config/personal_ro
 _.validate_commands  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
 _.unique_services  # Pydantic field validator (src/mindroom/tool_system/google_workspaces.py)
 _.normalize_domains  # Pydantic field validator (src/mindroom/tool_system/google_workspaces.py)
+_.canonical_site_url  # Pydantic field validator (src/mindroom/tool_system/atlassian_connections.py)
+_.canonical_cloud_id  # Pydantic field validator (src/mindroom/tool_system/atlassian_connections.py)
+_.unique_products  # Pydantic field validator (src/mindroom/tool_system/atlassian_connections.py)
+_.pinned_site  # Pydantic model validator (src/mindroom/tool_system/atlassian_connections.py)
 desktop_native_app  # Typer dispatches the native desktop helper command (src/mindroom/cli/desktop.py)
 _.fetch_response  # Trafilatura spider download binding replaced by the server-fetch guard (src/mindroom/tools/agno_compat_trafilatura.py)
 # Regenerate with:

@@ -441,6 +441,8 @@ def test_install_command_for_current_python_prefers_current_python_uv_module(
 
     assert install_command_for_current_python() == [
         sys.executable,
+        "-P",
+        "-s",
         "-m",
         "uv",
         "pip",
@@ -461,6 +463,8 @@ def test_install_command_for_current_python_uses_pip_user_outside_virtualenv(
 
     assert install_command_for_current_python() == [
         sys.executable,
+        "-P",
+        "-s",
         "-m",
         "pip",
         "install",

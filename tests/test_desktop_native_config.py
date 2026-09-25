@@ -7,6 +7,9 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -56,6 +59,37 @@ def test_native_config_compare_and_swap_rejects_stale_writer(tmp_path: Path) -> 
     with pytest.raises(NativeConfigError, match="changed") as caught:
         save_native_config(path, NativeDesktopConfig.from_payload(_payload()), expected_revision=0)
     assert caught.value.code == "revision_conflict"
+
+
+def test_simultaneous_app_and_terminal_saves_have_one_winner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A concurrent edit cannot silently overwrite another writer with the same revision."""
+    from mindroom.desktop import native_config  # noqa: PLC0415
+
+    path = native_config_path(tmp_path)
+    original_write = native_config.write_json_file_durable
+    ready = threading.Barrier(2)
+
+    def slow_write(*args: object, **kwargs: object) -> None:
+        time.sleep(0.05)
+        original_write(*args, **kwargs)
+
+    monkeypatch.setattr(native_config, "write_json_file_durable", slow_write)
+
+    def save(app: str) -> str:
+        ready.wait(timeout=5)
+        try:
+            config = NativeDesktopConfig.from_payload(_payload(allowed_app_ids=[app]))
+            save_native_config(path, config, expected_revision=0)
+        except NativeConfigError as exc:
+            return exc.code
+        return app
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(save, ["com.example.First", "com.example.Second"]))
+    assert results.count("revision_conflict") == 1
+    assert load_native_config(path).allowed_app_ids == tuple(
+        result for result in results if result != "revision_conflict"
+    )
 
 
 @pytest.mark.parametrize(
@@ -186,9 +220,12 @@ def test_unsupported_config_path_cannot_be_repaired(
         if kind == "foreign_owner":
             patch.setattr(os, "getuid", lambda: before.st_uid + 1)
         if kind == "unreadable":
+            original_open = os.open
 
-            def denied(*_args: object, **_kwargs: object) -> None:
-                raise PermissionError
+            def denied(file: Path, flags: int) -> int:
+                if file == path:
+                    raise PermissionError
+                return original_open(file, flags)
 
             patch.setattr(os, "open", denied)
         with pytest.raises(NativeConfigError) as caught:

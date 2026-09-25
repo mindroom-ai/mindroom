@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
-from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
+from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index, user_scope_shared_agent_names
 from mindroom.constants import RuntimePaths, deserialize_runtime_paths, serialize_public_runtime_paths
 from mindroom.private_storage_paths import private_scope_alias_paths
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV, SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
@@ -263,6 +263,7 @@ def plan_scoped_visible_state_roots(
         )
 
     effective_private_agent_names = private_agent_names or frozenset()
+    user_scope_agent_names = user_scope_shared_agent_names(resolved_agent_policies or {})
     agent_name = worker_key_agent_name(worker_key)
     if scope == "user_agent" and agent_name is not None and agent_name in effective_private_agent_names:
         worker_visible_roots = (private_instance_scope_root_path(worker_visible_shared_storage_root, worker_key),)
@@ -272,11 +273,13 @@ def plan_scoped_visible_state_roots(
             worker_visible_shared_storage_root,
             worker_key,
             private_agent_names=effective_private_agent_names,
+            user_scope_agent_names=user_scope_agent_names,
         )
         local_roots = visible_state_roots_for_worker_key(
             local_shared_storage_root,
             worker_key,
             private_agent_names=effective_private_agent_names,
+            user_scope_agent_names=user_scope_agent_names,
         )
     if not worker_visible_roots or len(worker_visible_roots) != len(local_roots):
         msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"

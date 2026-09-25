@@ -414,6 +414,7 @@ def test_setup_command_uses_public_homeserver_and_access_flag(
     assert setup_command.startswith(
         "mindroom desktop setup --user-id @alice:example.org --homeserver http://localhost:8008 --code ",
     )
+    assert "--allow-agent computer" in setup_command
     assert "--controller-user-id @computer:example.org" in setup_command
     assert "--cloudflare-access" not in setup_command
 

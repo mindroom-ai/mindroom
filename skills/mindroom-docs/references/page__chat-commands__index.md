@@ -196,6 +196,7 @@ Run these commands in a private Matrix room containing only the requester and on
 `!desktop setup` returns a local `mindroom desktop setup` command and a short-lived pairing code.
 The local pairing command presents that code through an authenticated encrypted Matrix device event.
 It then prints an exact chat confirmation command with a verification value derived from the authenticated local device key.
+Successful terminal setup also saves the connection for the macOS app; choose and save allowed apps in **Computer access**, then start observation there or with `mindroom desktop run`.
 Only the same Matrix requester in the same agent scope can confirm the matching claim.
 `!desktop rotate` starts the same flow while leaving the current target active until confirmation.
 The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
