@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +20,7 @@ from mindroom.custom_tools.excel_workbooks import (
     apply_edits,
     cells_equal,
     changed_cell_count,
+    excel_would_convert,
     parse_edits,
     parse_sheet_range,
     read_range,
@@ -55,12 +57,12 @@ def _run[T](coroutine: Callable[[], Awaitable[T]]) -> T:
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("Sheet1!B4", SheetRange("Sheet1", "B4", 1, 1)),
-        ("Sheet1!b4:c9", SheetRange("Sheet1", "B4:C9", 6, 2)),
-        ("Sheet1!$B$4:$B$8", SheetRange("Sheet1", "B4:B8", 5, 1)),
-        ("'Summary Sheet'!A1:B2", SheetRange("Summary Sheet", "A1:B2", 2, 2)),
-        ("'O''Brien'!A1", SheetRange("O'Brien", "A1", 1, 1)),
-        ("  Data!XFD1048576  ", SheetRange("Data", "XFD1048576", 1, 1)),
+        ("Sheet1!B4", SheetRange("Sheet1", "B4", 4, 2, 1, 1)),
+        ("Sheet1!b4:c9", SheetRange("Sheet1", "B4:C9", 4, 2, 6, 2)),
+        ("Sheet1!$B$4:$B$8", SheetRange("Sheet1", "B4:B8", 4, 2, 5, 1)),
+        ("'Summary Sheet'!A1:B2", SheetRange("Summary Sheet", "A1:B2", 1, 1, 2, 2)),
+        ("'O''Brien'!A1", SheetRange("O'Brien", "A1", 1, 1, 1, 1)),
+        ("  Data!XFD1048576  ", SheetRange("Data", "XFD1048576", 1_048_576, 16_384, 1, 1)),
     ],
 )
 def test_parse_sheet_range_canonicalizes_a1_ranges(value: str, expected: SheetRange) -> None:
@@ -103,11 +105,44 @@ def test_sheet_range_label_quotes_names_excel_would_quote() -> None:
 
 
 def test_validate_grid_requires_the_range_shape_and_scalar_cells() -> None:
-    """Grids must match the range; null becomes empty and non-finite or nested cells are rejected."""
-    assert validate_grid([[1, None], ["x", True]], rows=2, columns=2, field_name="after") == [[1, ""], ["x", True]]
-    for bad in ([[1]], [[1, 2]], [[1, 2], [3]], "x", [[1, [2]], [3, 4]], [[math.nan, 1], [1, 1]]):
+    """Grids must match the range; null (which Graph skips) and non-finite or nested cells are rejected."""
+    assert validate_grid([[1, ""], ["x", True]], rows=2, columns=2, field_name="after") == [[1, ""], ["x", True]]
+    for bad in ([[1]], [[1, 2]], [[1, 2], [3]], "x", [[1, [2]], [3, 4]], [[math.nan, 1], [1, 1]], [[None, 1], [1, 1]]):
         with pytest.raises(WorkbookArgumentError):
             validate_grid(bad, rows=2, columns=2, field_name="after")
+
+
+@pytest.mark.parametrize(
+    ("value", "converted"),
+    [
+        ("0042", True),
+        ("12%", True),
+        ("$1,200.50", True),
+        ("(15)", True),
+        ("1e3", True),
+        ("2026-09-25", True),
+        ("9/25/2026", True),
+        ("1/2", True),
+        ("Jan-15-2016", True),
+        ("15 Sep", True),
+        ("10:30 PM", True),
+        ("1 1/2", True),
+        ("TRUE", True),
+        ("- bullet", True),
+        ("+44 20 7946 0000", True),
+        ("@mention", True),
+        ("=SUM(A1:A3)", False),
+        ("Revenue grows 12% YoY.", False),
+        ("555-1234", False),
+        ("v1.2", False),
+        ("-", False),
+        ("", False),
+        (12, False),
+    ],
+)
+def test_excel_would_convert_flags_text_excel_parses_as_something_else(value: object, converted: bool) -> None:
+    """Numbers, percentages, dates, times, booleans, and formula-like text are flagged; prose and formulas are not."""
+    assert excel_would_convert(value) is converted
 
 
 def test_cells_equal_compares_numbers_numerically_and_keeps_types_apart() -> None:
@@ -130,8 +165,18 @@ def test_parse_edits_bounds_count_cells_and_duplicates() -> None:
         parse_edits([])
     with pytest.raises(WorkbookArgumentError, match="at most"):
         parse_edits([{**edit, "range": f"Assumptions!A{row}"} for row in range(1, MAX_EDITS + 2)])
-    with pytest.raises(WorkbookArgumentError, match="repeats"):
+    with pytest.raises(WorkbookArgumentError, match="overlaps"):
         parse_edits([edit, {**edit, "range": "assumptions!$B$4"}])
+    square = {"range": "Assumptions!A1:B2", "before": [[1, 1], [1, 1]], "after": [[2, 2], [2, 2]]}
+    with pytest.raises(WorkbookArgumentError, match="overlaps"):
+        parse_edits([square, {**square, "range": "Assumptions!B2:C3"}])
+    assert (
+        len(parse_edits([square, {**square, "range": "Summary!B2:C3"}, {**square, "range": "Assumptions!C1:D2"}])) == 3
+    )
+    with pytest.raises(WorkbookArgumentError, match="Excel would convert"):
+        parse_edits([{**edit, "after": [["0042"]]}])
+    [text_plan] = parse_edits([{**edit, "after": [["0042"]], "number_format": [["@"]]}])
+    assert text_plan.number_format == [["@"]]
     wide = {"range": f"Assumptions!A1:A{MAX_EDIT_CELLS + 1}"}
     rows = [[0]] * (MAX_EDIT_CELLS + 1)
     with pytest.raises(WorkbookArgumentError, match=f"at most {MAX_EDIT_CELLS} cells"):
@@ -286,7 +331,7 @@ def test_apply_edits_writes_verifies_and_counts_changed_cells(monkeypatch: pytes
     workbook = graph.workbooks[(DRIVE_ID, ITEM_ID)]
     assert workbook.sheet("Assumptions").formulas[(4, 2)] == 0.12
     assert workbook.sheet("Summary Sheet").formats[(2, 2)] == "@"
-    assert len(graph.paths("PATCH")) == 2
+    assert len(graph.paths("PATCH")) == 3  # the number format goes first, in its own write
 
 
 def test_apply_edits_aborts_on_any_conflict_without_writing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -342,15 +387,64 @@ def test_apply_edits_stops_at_the_first_failed_write(monkeypatch: pytest.MonkeyP
         "graph_code": "resourceLocked",
         "graph_message": "The resource is locked.",
     }
+    assert receipt.edits[0].current == [[0.08]]
     assert receipt.edits[1].outcome == "not_attempted"
+
+
+def test_apply_edits_treats_a_write_that_landed_despite_an_error_as_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timed-out write is read back, and content equal to after counts as applied."""
+    graph = FakeGraph.with_forecast().install(monkeypatch)
+    path = (
+        f"/drives/{DRIVE_ID}/items/{ITEM_ID}/workbook/worksheets/{{00000000-0001-0000-0000-000000000000}}"
+        "/range(address='B4')"
+    )
+
+    def lands_then_fails(request: httpx.Request) -> httpx.Response:
+        response = graph._route(request, path)
+        return graph_error(504, "gatewayTimeout", "Timed out.") if request.method == "PATCH" else response
+
+    graph.overrides[("GET", path)] = lands_then_fails
+    graph.overrides[("PATCH", path)] = lands_then_fails
+    receipt = _run(lambda: apply_edits(ALICE_TOKEN, REF, parse_edits([_growth_edit()]), skip_conflicts=False))
+    assert receipt.status == "applied"
+    assert receipt.edits[0].verified
+    assert receipt.edits[0].error is not None
+
+
+def test_apply_edits_replay_counts_already_written_ranges_as_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replaying an approved call after a crash does not write twice or report a false conflict."""
+    graph = FakeGraph.with_forecast().install(monkeypatch)
+    graph.workbooks[(DRIVE_ID, ITEM_ID)].sheet("Assumptions").set("B4", [[0.12]])
+    receipt = _run(lambda: apply_edits(ALICE_TOKEN, REF, parse_edits([_growth_edit()]), skip_conflicts=False))
+    assert receipt.status == "applied"
+    assert receipt.edits[0].as_dict() == {
+        "range": "Assumptions!B4",
+        "outcome": "applied",
+        "cells_changed": 0,
+        "already_applied": True,
+        "verified": True,
+    }
+    assert graph.paths("PATCH") == []
+
+
+def test_apply_edits_writes_number_formats_before_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Text formats land first so text such as leading zeros survives."""
+    graph = FakeGraph.with_forecast().install(monkeypatch)
+    plans = parse_edits(
+        [{"range": "Assumptions!C5", "before": [["HR plan"]], "after": [["0042"]], "number_format": [["@"]]}],
+    )
+    receipt = _run(lambda: apply_edits(ALICE_TOKEN, REF, plans, skip_conflicts=False))
+    assert receipt.status == "applied"
+    bodies = [json.loads(request.content) for request in graph.requests if request.method == "PATCH"]
+    assert bodies == [{"numberFormat": [["@"]]}, {"formulas": [["0042"]]}]
 
 
 def test_apply_edits_reports_writes_excel_changed(monkeypatch: pytest.MonkeyPatch) -> None:
     """When Excel stores something other than what was sent, the edit is applied but unverified."""
     graph = FakeGraph.with_forecast().install(monkeypatch)
-    graph.patch_transform = lambda rows: [[0.12 if cell == "12%" else cell for cell in row] for row in rows]
+    graph.patch_transform = lambda rows: [[0.12 if cell == "twelve" else cell for cell in row] for row in rows]
     receipt = _run(
-        lambda: apply_edits(ALICE_TOKEN, REF, parse_edits([_growth_edit(after="12%")]), skip_conflicts=False),
+        lambda: apply_edits(ALICE_TOKEN, REF, parse_edits([_growth_edit(after="twelve")]), skip_conflicts=False),
     )
     assert receipt.status == "applied"
     assert not receipt.verified

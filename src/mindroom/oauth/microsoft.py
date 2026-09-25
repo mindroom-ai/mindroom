@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 from typing import TYPE_CHECKING, Any
 
-from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.providers import (
     OAuthProvider,
     OAuthProviderError,
@@ -22,8 +20,10 @@ if TYPE_CHECKING:
 
 MICROSOFT_365_PROVIDER_ID = "microsoft_365"
 MICROSOFT_365_CLIENT_CONFIG_SERVICE = "microsoft_365_oauth_client"
+MICROSOFT_365_TENANT_ENV = "MICROSOFT_365_TENANT_ID"
 _AUTHORITY = "https://login.microsoftonline.com"
-# Workbook sessions and several workbook features support only work or school accounts.
+# The Excel REST API supports only work or school (business) storage, not consumer OneDrive.
+# `organizations` needs a multi-tenant app registration; single-tenant apps set the tenant.
 _DEFAULT_TENANT = "organizations"
 # Files.ReadWrite reaches only the user's own files; the .All scope also reaches files
 # shared with the user and SharePoint document libraries the user can open.
@@ -32,17 +32,17 @@ _GRAPH_SCOPE_PREFIX = "https://graph.microsoft.com/"
 _TENANT_PATTERN = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     r"|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+"
-    r"|organizations|common",
+    r"|organizations",
 )
 
 
 def normalize_tenant_id(value: str) -> str:
-    """Return a tenant GUID, verified domain, ``organizations``, or ``common``, lowercased."""
+    """Return a tenant GUID, verified domain, or ``organizations``, lowercased."""
     tenant = value.strip().lower()
     if not _TENANT_PATTERN.fullmatch(tenant):
         msg = (
-            "Microsoft 365 tenant_id must be a tenant GUID, a verified domain such as contoso.onmicrosoft.com, "
-            "'organizations', or 'common'."
+            f"{MICROSOFT_365_TENANT_ENV} must be a tenant GUID, a verified domain such as contoso.onmicrosoft.com, "
+            "or 'organizations'."
         )
         raise OAuthProviderError(msg)
     return tenant
@@ -56,20 +56,14 @@ def _endpoints(tenant: str) -> OAuthRuntimeEndpoints:
 
 
 def _configured_tenant(runtime_paths: RuntimePaths) -> str:
-    """Read the optional tenant from the stored app registration, defaulting to work or school accounts."""
-    credentials = get_runtime_credentials_manager(runtime_paths).load_credentials(MICROSOFT_365_CLIENT_CONFIG_SERVICE)
-    tenant = (credentials or {}).get("tenant_id")
-    if tenant is None or (isinstance(tenant, str) and not tenant.strip()):
-        return _DEFAULT_TENANT
-    if not isinstance(tenant, str):
-        msg = "Microsoft 365 tenant_id must be a string."
-        raise OAuthProviderError(msg)
-    return normalize_tenant_id(tenant)
+    """Read the optional tenant from the runtime environment, defaulting to any work or school tenant."""
+    tenant = (runtime_paths.env_value(MICROSOFT_365_TENANT_ENV) or "").strip()
+    return normalize_tenant_id(tenant) if tenant else _DEFAULT_TENANT
 
 
 async def _tenant_endpoints(_provider: OAuthProvider, runtime_paths: RuntimePaths) -> OAuthRuntimeEndpoints:
     """Resolve the configured tenant's endpoints; this bootstrapper registers no client."""
-    return _endpoints(await asyncio.to_thread(_configured_tenant, runtime_paths))
+    return _endpoints(_configured_tenant(runtime_paths))
 
 
 def _canonical_scope(scope: str) -> str:

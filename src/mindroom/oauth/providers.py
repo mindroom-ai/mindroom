@@ -188,7 +188,18 @@ class _OAuthProviderNotConfiguredError(OAuthProviderError):
     """Raised when a provider has no usable OAuth client configuration."""
 
 
-_TERMINAL_REFRESH_ERROR_CODES = frozenset({"bad_refresh_token", "invalid_grant", "invalid_refresh_token"})
+# OpenID Connect's interaction codes mean only a new browser sign-in helps, for example after
+# Microsoft Entra Conditional Access requires fresh multi-factor authentication.
+_TERMINAL_REFRESH_ERROR_CODES = frozenset(
+    {
+        "bad_refresh_token",
+        "consent_required",
+        "interaction_required",
+        "invalid_grant",
+        "invalid_refresh_token",
+        "login_required",
+    },
+)
 
 
 def is_terminal_oauth_refresh_error_code(value: object) -> bool:

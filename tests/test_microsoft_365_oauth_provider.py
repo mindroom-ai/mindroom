@@ -42,23 +42,25 @@ def test_builtin_registry_exposes_the_provider(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("stored_tenant", "expected_tenant"),
+    ("configured_tenant", "expected_tenant"),
     [
         (None, "organizations"),
-        ("", "organizations"),
+        ("  ", "organizations"),
         ("Contoso.onmicrosoft.com", "contoso.onmicrosoft.com"),
         ("00000000-0000-4000-8000-00000000abcd", "00000000-0000-4000-8000-00000000abcd"),
-        ("common", "common"),
     ],
 )
 def test_authorization_url_uses_the_configured_tenant(
     tmp_path: Path,
-    stored_tenant: str | None,
+    configured_tenant: str | None,
     expected_tenant: str,
 ) -> None:
-    """The stored app registration's tenant selects the v2 authorize and token endpoints."""
-    paths = runtime_paths(tmp_path)
-    save_client_config(paths, **({"tenant_id": stored_tenant} if stored_tenant is not None else {}))
+    """MICROSOFT_365_TENANT_ID selects the v2 authorize and token endpoints."""
+    paths = runtime_paths(
+        tmp_path,
+        {"MICROSOFT_365_TENANT_ID": configured_tenant} if configured_tenant is not None else None,
+    )
+    save_client_config(paths)
     provider = microsoft_365_oauth_provider()
 
     url = asyncio.run(provider.authorization_uri_async(paths, state="opaque-state"))
@@ -75,12 +77,15 @@ def test_authorization_url_uses_the_configured_tenant(
     assert query["state"] == ["opaque-state"]
 
 
-@pytest.mark.parametrize("tenant", ["consumers", "../evil", "a b", "contoso", "x.-bad.com", "http://x.com"])
+@pytest.mark.parametrize(
+    "tenant",
+    ["common", "consumers", "../evil", "a b", "contoso", "x.-bad.com", "http://x.com"],
+)
 def test_invalid_tenants_are_rejected(tmp_path: Path, tenant: str) -> None:
     """Personal-account and malformed tenants never reach an endpoint URL."""
-    paths = runtime_paths(tmp_path)
-    save_client_config(paths, tenant_id=tenant)
-    with pytest.raises(OAuthProviderError, match="tenant_id"):
+    paths = runtime_paths(tmp_path, {"MICROSOFT_365_TENANT_ID": tenant})
+    save_client_config(paths)
+    with pytest.raises(OAuthProviderError, match="MICROSOFT_365_TENANT_ID"):
         asyncio.run(microsoft_365_oauth_provider().runtime_endpoints(paths))
     with pytest.raises(OAuthProviderError):
         normalize_tenant_id(tenant)

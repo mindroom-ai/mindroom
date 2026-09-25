@@ -12,7 +12,7 @@ from urllib.parse import quote
 from mindroom.custom_tools.microsoft_graph_client import GraphError, graph_json
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Sequence
 
     from mindroom.custom_tools.microsoft_graph_client import DocumentRef
 
@@ -23,6 +23,9 @@ type EditOutcomeName = Literal["applied", "conflict", "failed", "not_attempted"]
 MAX_READ_CELLS = 2_000
 MAX_EDITS = 25
 MAX_EDIT_CELLS = 500
+# Keeps the approval card's full arguments far below the approval payload limit.
+MAX_EDIT_TEXT_CHARS = 200_000
+TEXT_NUMBER_FORMAT = "@"
 _MAX_COLUMNS = 16_384
 _MAX_ROWS = 1_048_576
 _MAX_CELL_TEXT_CHARS = 32_767
@@ -30,9 +33,20 @@ _MAX_OUTLINE_SHEETS = 100
 _MAX_USED_RANGE_SHEETS = 20
 _MAX_OUTLINE_TABLES = 20
 _MAX_OUTLINE_NAMES = 100
-_OUTLINE_CONCURRENCY = 4
 _CELL_PATTERN = re.compile(r"\$?([A-Za-z]{1,3})\$?([0-9]{1,7})")
 _SHEET_NAME_FORBIDDEN = frozenset("[]:*?/\\")
+_MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
+_COERCED_TEXT_PATTERNS = (
+    re.compile(r"\d{1,4}\s*[-/.]\s*\d{1,2}(?:\s*[-/.]\s*\d{1,4})?"),
+    re.compile(rf"(?:\d{{1,2}}[-\s])?{_MONTH}(?:[-\s,]+\d{{1,4}}){{0,2}}", re.IGNORECASE),
+    re.compile(r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[ap]\.?m\.?)?", re.IGNORECASE),
+    re.compile(r"\d+\s+\d+/\d+"),
+    re.compile(r"true|false", re.IGNORECASE),
+)
+# Excel reads input starting with these characters as a formula or signed number.
+_FORMULA_PREFIXES = ("+", "-", "@")
+# Microsoft recommends one request at a time per workbook; this serializes edits within this process.
+_DOCUMENT_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 class WorkbookArgumentError(GraphError):
@@ -48,6 +62,8 @@ class SheetRange:
 
     sheet: str
     address: str
+    first_row: int
+    first_column: int
     rows: int
     columns: int
 
@@ -62,6 +78,16 @@ class SheetRange:
         needs_quotes = not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", self.sheet)
         sheet = "'" + self.sheet.replace("'", "''") + "'" if needs_quotes else self.sheet
         return f"{sheet}!{self.address}"
+
+    def overlaps(self, other: SheetRange) -> bool:
+        """Return whether both ranges share at least one cell of the same sheet."""
+        return (
+            self.sheet.casefold() == other.sheet.casefold()
+            and self.first_row < other.first_row + other.rows
+            and other.first_row < self.first_row + self.rows
+            and self.first_column < other.first_column + other.columns
+            and other.first_column < self.first_column + self.columns
+        )
 
 
 def _column_number(letters: str) -> int:
@@ -139,6 +165,8 @@ def parse_sheet_range(value: object) -> SheetRange:
     return SheetRange(
         sheet=sheet,
         address=start if start == end else f"{start}:{end}",
+        first_row=start_row,
+        first_column=start_column,
         rows=end_row - start_row + 1,
         columns=end_column - start_column + 1,
     )
@@ -146,7 +174,9 @@ def parse_sheet_range(value: object) -> SheetRange:
 
 def _cell(value: object, field_name: str) -> CellValue:
     if value is None:
-        return ""
+        # Graph skips null cells instead of clearing them, so an empty string is the only way to clear.
+        msg = f'{field_name} cells must not be null; use "" for an empty cell.'
+        raise WorkbookArgumentError(msg)
     if isinstance(value, bool | int | str):
         if isinstance(value, str) and len(value) > _MAX_CELL_TEXT_CHARS:
             msg = f"{field_name} contains a cell longer than {_MAX_CELL_TEXT_CHARS} characters."
@@ -154,12 +184,12 @@ def _cell(value: object, field_name: str) -> CellValue:
         return value
     if isinstance(value, float) and math.isfinite(value):
         return value
-    msg = f"{field_name} cells must be strings, finite numbers, booleans, or null."
+    msg = f"{field_name} cells must be strings, finite numbers, or booleans."
     raise WorkbookArgumentError(msg)
 
 
 def validate_grid(value: object, *, rows: int, columns: int, field_name: str) -> CellGrid:
-    """Return a rectangular cell grid matching the range, with null cells as empty strings."""
+    """Return a rectangular grid of scalar cells matching the range."""
     grid = cast("list[object]", value) if isinstance(value, list) else None
     if grid is None or len(grid) != rows:
         msg = f"{field_name} must be a list of {rows} row(s), each a list of {columns} cell(s)."
@@ -172,6 +202,38 @@ def validate_grid(value: object, *, rows: int, columns: int, field_name: str) ->
             raise WorkbookArgumentError(msg)
         validated.append([_cell(cell, field_name) for cell in cells])
     return validated
+
+
+def _looks_numeric(text: str) -> bool:
+    """Return whether Excel would read the text as a number, percentage, or currency amount."""
+    stripped = text.strip()
+    if stripped.startswith("(") and stripped.endswith(")"):
+        stripped = stripped[1:-1].strip()
+    stripped = stripped.strip("$€£¥").strip().removesuffix("%").strip().strip("$€£¥").strip()
+    stripped = stripped.replace(",", "")
+    if not any(char.isdigit() for char in stripped):
+        return False
+    try:
+        float(stripped)
+    except ValueError:
+        return False
+    return True
+
+
+def excel_would_convert(value: CellValue) -> bool:
+    """Return whether Excel would store this text as something else, such as a number, date, or formula.
+
+    Graph parses written cells as if typed, so text like ``0042`` loses its zeros and ``1/2``
+    becomes a date. This is a conservative approximation of Excel's parser.
+    """
+    if not isinstance(value, str) or not value.strip() or value.startswith("="):
+        return False
+    text = value.strip()
+    return (
+        _looks_numeric(text)
+        or any(pattern.fullmatch(text) for pattern in _COERCED_TEXT_PATTERNS)
+        or (len(text) > 1 and text.startswith(_FORMULA_PREFIXES))
+    )
 
 
 def cells_equal(left: object, right: object) -> bool:
@@ -225,86 +287,90 @@ async def _worksheets(token: str, ref: DocumentRef) -> list[dict[str, object]]:
     return [item for item in _items(payload) if isinstance(item.get("id"), str) and isinstance(item.get("name"), str)]
 
 
-async def _worksheet_id(token: str, ref: DocumentRef, sheet: str) -> str:
-    worksheets = await _worksheets(token, ref)
-    for worksheet in worksheets:
-        if cast("str", worksheet["name"]).casefold() == sheet.casefold():
-            return cast("str", worksheet["id"])
-    raise GraphError(
+def _sheet_not_found(sheet: str, worksheets: list[dict[str, object]]) -> GraphError:
+    return GraphError(
         code="sheet_not_found",
         message=f"The workbook has no worksheet named '{sheet}'.",
         available_sheets=[worksheet["name"] for worksheet in worksheets[:_MAX_OUTLINE_SHEETS]],
     )
 
 
+async def _worksheet_ids(token: str, ref: DocumentRef, sheets: Sequence[str]) -> dict[str, str]:
+    """Map each requested sheet name, case-insensitively, to its worksheet ID."""
+    worksheets = await _worksheets(token, ref)
+    by_name = {cast("str", worksheet["name"]).casefold(): cast("str", worksheet["id"]) for worksheet in worksheets}
+    for sheet in sheets:
+        if sheet.casefold() not in by_name:
+            raise _sheet_not_found(sheet, worksheets)
+    return {sheet: by_name[sheet.casefold()] for sheet in sheets}
+
+
+def _worksheet_path(ref: DocumentRef, worksheet_id: str, *rest: str) -> str:
+    return ref.path("workbook", "worksheets", quote(worksheet_id, safe=""), *rest)
+
+
 def _range_path(ref: DocumentRef, worksheet_id: str, address: str) -> str:
     # The address is canonical A1 text, so it cannot close the quoted function argument.
-    return ref.path("workbook", "worksheets", quote(worksheet_id, safe=""), f"range(address='{address}')")
-
-
-async def _bounded_gather[T](calls: Sequence[Callable[[], Awaitable[T]]]) -> list[T]:
-    semaphore = asyncio.Semaphore(_OUTLINE_CONCURRENCY)
-
-    async def run(call: Callable[[], Awaitable[T]]) -> T:
-        async with semaphore:
-            return await call()
-
-    return list(await asyncio.gather(*(run(call) for call in calls)))
+    return _worksheet_path(ref, worksheet_id, f"range(address='{address}')")
 
 
 async def workbook_outline(token: str, ref: DocumentRef) -> dict[str, object]:
-    """Return worksheet names with used ranges, tables with their ranges, and workbook names."""
+    """Return worksheet names with used ranges, tables with their ranges, and visible workbook names.
+
+    Calls run one at a time, as Microsoft recommends for requests to one workbook.
+    """
     worksheets = await _worksheets(token, ref)
     listed = worksheets[:_MAX_OUTLINE_SHEETS]
     detailed = [sheet for sheet in listed if sheet.get("visibility") in (None, "Visible")][:_MAX_USED_RANGE_SHEETS]
-
-    def used_range(sheet: dict[str, object]) -> Callable[[], Awaitable[object]]:
-        path = ref.path(
-            "workbook",
-            "worksheets",
-            quote(cast("str", sheet["id"]), safe=""),
-            "usedRange(valuesOnly=true)",
+    used_ranges: dict[str, dict[str, object]] = {}
+    for sheet in detailed:
+        sheet_id = cast("str", sheet["id"])
+        used_ranges[sheet_id] = _mapping(
+            await graph_json(
+                token,
+                "GET",
+                _worksheet_path(ref, sheet_id, "usedRange(valuesOnly=true)"),
+                params={"$select": "address,rowCount,columnCount"},
+            ),
         )
-        return lambda: graph_json(token, "GET", path, params={"$select": "address,rowCount,columnCount"})
-
-    used_ranges = dict(
-        zip(
-            (cast("str", sheet["id"]) for sheet in detailed),
-            await _bounded_gather([used_range(sheet) for sheet in detailed]),
-            strict=True,
-        ),
-    )
-    tables_payload, names_payload = await asyncio.gather(
-        graph_json(token, "GET", ref.path("workbook", "tables"), params={"$select": "id,name"}),
-        graph_json(token, "GET", ref.path("workbook", "names"), params={"$select": "name,value,visible"}),
-    )
-    tables = [table for table in _items(tables_payload) if isinstance(table.get("id"), str)]
-
-    def table_range(table: dict[str, object]) -> Callable[[], Awaitable[object]]:
-        path = ref.path("workbook", "tables", quote(cast("str", table["id"]), safe=""), "range")
-        return lambda: graph_json(token, "GET", path, params={"$select": "address"})
-
-    table_ranges = await _bounded_gather([table_range(table) for table in tables[:_MAX_OUTLINE_TABLES]])
-    names = [name for name in _items(names_payload) if name.get("visible") is not False]
-    outline_sheets: list[dict[str, object]] = []
-    for sheet in listed:
-        used = _mapping(used_ranges.get(cast("str", sheet["id"])))
-        outline_sheets.append(
+    tables = [
+        table
+        for table in _items(
+            await graph_json(token, "GET", ref.path("workbook", "tables"), params={"$select": "id,name"}),
+        )
+        if isinstance(table.get("id"), str)
+    ]
+    outline_tables: list[dict[str, object]] = []
+    for table in tables[:_MAX_OUTLINE_TABLES]:
+        table_range = _mapping(
+            await graph_json(
+                token,
+                "GET",
+                ref.path("workbook", "tables", quote(cast("str", table["id"]), safe=""), "range"),
+                params={"$select": "address"},
+            ),
+        )
+        outline_tables.append({"name": table.get("name"), "range": table_range.get("address")})
+    names = [
+        name
+        for name in _items(
+            await graph_json(token, "GET", ref.path("workbook", "names"), params={"$select": "name,value,visible"}),
+        )
+        if name.get("visible") is not False
+    ]
+    return {
+        "worksheets": [
             {
                 "name": sheet["name"],
                 "visibility": sheet.get("visibility"),
-                "used_range": used.get("address"),
-                "rows": used.get("rowCount"),
-                "columns": used.get("columnCount"),
-            },
-        )
-    return {
-        "worksheets": outline_sheets,
-        "worksheets_truncated": len(worksheets) > len(listed),
-        "tables": [
-            {"name": table.get("name"), "range": _mapping(table_range_payload).get("address")}
-            for table, table_range_payload in zip(tables, table_ranges, strict=False)
+                "used_range": used_ranges.get(cast("str", sheet["id"]), {}).get("address"),
+                "rows": used_ranges.get(cast("str", sheet["id"]), {}).get("rowCount"),
+                "columns": used_ranges.get(cast("str", sheet["id"]), {}).get("columnCount"),
+            }
+            for sheet in listed
         ],
+        "worksheets_truncated": len(worksheets) > len(listed),
+        "tables": outline_tables,
         "tables_truncated": len(tables) > _MAX_OUTLINE_TABLES,
         "names": [{"name": name.get("name"), "value": name.get("value")} for name in names[:_MAX_OUTLINE_NAMES]],
         "names_truncated": len(names) > _MAX_OUTLINE_NAMES,
@@ -316,7 +382,7 @@ async def read_range(token: str, ref: DocumentRef, target: SheetRange) -> dict[s
     if target.cells > MAX_READ_CELLS:
         msg = f"Read at most {MAX_READ_CELLS} cells at a time; {target.label} has {target.cells}."
         raise WorkbookArgumentError(msg)
-    worksheet_id = await _worksheet_id(token, ref, target.sheet)
+    worksheet_id = (await _worksheet_ids(token, ref, [target.sheet]))[target.sheet]
     payload = _mapping(
         await graph_json(
             token,
@@ -352,6 +418,7 @@ class EditOutcome:
     outcome: EditOutcomeName
     cells_changed: int = 0
     verified: bool | None = None
+    already_applied: bool = False
     current: list[list[object]] | None = None
     written: list[list[object]] | None = None
     error: dict[str, object] | None = None
@@ -359,6 +426,8 @@ class EditOutcome:
     def as_dict(self) -> dict[str, object]:
         """Return the outcome without empty fields."""
         fields: dict[str, object] = {"range": self.range, "outcome": self.outcome, "cells_changed": self.cells_changed}
+        if self.already_applied:
+            fields["already_applied"] = True
         for name in ("verified", "current", "written", "error"):
             value = getattr(self, name)
             if value is not None:
@@ -371,6 +440,11 @@ class EditReceipt:
     """The outcome of one approved edit call."""
 
     edits: list[EditOutcome] = field(default_factory=list)
+
+    @property
+    def applied(self) -> bool:
+        """Return whether any edit applied."""
+        return any(edit.outcome == "applied" for edit in self.edits)
 
     @property
     def cells_changed(self) -> int:
@@ -393,8 +467,36 @@ class EditReceipt:
         return "failed" if "failed" in outcomes else "conflict"
 
 
+def _validated_number_format(raw: object, target: SheetRange) -> list[list[str]] | None:
+    if raw is None:
+        return None
+    grid = validate_grid(raw, rows=target.rows, columns=target.columns, field_name="number_format")
+    if not all(isinstance(cell, str) and cell for row in grid for cell in row):
+        msg = "number_format cells must be non-empty Excel number format strings such as '0.0%' or '@'."
+        raise WorkbookArgumentError(msg)
+    return cast("list[list[str]]", grid)
+
+
+def _reject_converted_text(target: SheetRange, after: CellGrid, number_format: list[list[str]] | None) -> None:
+    for row_index, row in enumerate(after):
+        for column_index, value in enumerate(row):
+            text_format = number_format is not None and number_format[row_index][column_index] == TEXT_NUMBER_FORMAT
+            if not text_format and excel_would_convert(value):
+                cell = f"{_column_letters(target.first_column + column_index)}{target.first_row + row_index}"
+                msg = (
+                    f"after for {target.label} cell {cell} is text Excel would convert ({value!r}). "
+                    "Write numbers as JSON numbers, dates as serial numbers with a date number_format, "
+                    f"or set number_format '{TEXT_NUMBER_FORMAT}' for that cell to keep it as text."
+                )
+                raise WorkbookArgumentError(msg)
+
+
+def _text_chars(grid: CellGrid) -> int:
+    return sum(len(cell) for row in grid for cell in row if isinstance(cell, str))
+
+
 def parse_edits(edits: object) -> list[EditPlan]:
-    """Validate model-supplied edits before approval execution touches the workbook."""
+    """Validate model-supplied edits before execution touches the workbook."""
     items = cast("list[object]", edits) if isinstance(edits, list) else None
     if not items:
         msg = "edits must be a non-empty list of {range, before, after} objects."
@@ -403,29 +505,23 @@ def parse_edits(edits: object) -> list[EditPlan]:
         msg = f"Apply at most {MAX_EDITS} edits per call."
         raise WorkbookArgumentError(msg)
     plans: list[EditPlan] = []
-    seen: set[tuple[str, str]] = set()
     for index, item in enumerate(items):
         edit = _mapping(item)
         target = parse_sheet_range(edit.get("range"))
-        key = (target.sheet.casefold(), target.address)
-        if key in seen:
-            msg = f"edits[{index}] repeats range {target.label}; combine edits to one range into one entry."
+        if overlapping := next((plan.target for plan in plans if plan.target.overlaps(target)), None):
+            msg = f"edits[{index}] range {target.label} overlaps {overlapping.label}; edits must not share cells."
             raise WorkbookArgumentError(msg)
-        seen.add(key)
         before = validate_grid(edit.get("before"), rows=target.rows, columns=target.columns, field_name="before")
         after = validate_grid(edit.get("after"), rows=target.rows, columns=target.columns, field_name="after")
-        raw_format = edit.get("number_format")
-        number_format = None
-        if raw_format is not None:
-            grid = validate_grid(raw_format, rows=target.rows, columns=target.columns, field_name="number_format")
-            if not all(isinstance(cell, str) for row in grid for cell in row):
-                msg = "number_format cells must be Excel number format strings such as '0.0%'."
-                raise WorkbookArgumentError(msg)
-            number_format = cast("list[list[str]]", grid)
+        number_format = _validated_number_format(edit.get("number_format"), target)
+        _reject_converted_text(target, after, number_format)
         plans.append(EditPlan(target=target, before=before, after=after, number_format=number_format))
     total_cells = sum(plan.target.cells for plan in plans)
     if total_cells > MAX_EDIT_CELLS:
         msg = f"Edit at most {MAX_EDIT_CELLS} cells per call; these edits cover {total_cells}."
+        raise WorkbookArgumentError(msg)
+    if sum(_text_chars(plan.before) + _text_chars(plan.after) for plan in plans) > MAX_EDIT_TEXT_CHARS:
+        msg = f"Edits may carry at most {MAX_EDIT_TEXT_CHARS} characters of cell text per call; split them."
         raise WorkbookArgumentError(msg)
     return plans
 
@@ -434,57 +530,74 @@ def _error_fields(exc: GraphError) -> dict[str, object]:
     return {"code": exc.code, "message": exc.message, **exc.details}
 
 
+async def _current_formulas(token: str, path: str) -> list[list[object]]:
+    return _grid(_mapping(await graph_json(token, "GET", path, params={"$select": "formulas"})).get("formulas"))
+
+
+async def _write(token: str, path: str, plan: EditPlan, outcome: EditOutcome) -> bool:
+    """Write one edit and record its outcome; return False when later edits must not run."""
+    try:
+        if plan.number_format is not None:
+            # Formats go first so text-formatted cells keep text such as leading zeros.
+            await graph_json(token, "PATCH", path, json_body={"numberFormat": plan.number_format})
+        written = _mapping(await graph_json(token, "PATCH", path, json_body={"formulas": plan.after}))
+    except GraphError as exc:
+        outcome.error = _error_fields(exc)
+        # A timeout or server error can hide a write that landed, so read the range back.
+        try:
+            current = await _current_formulas(token, path)
+        except GraphError:
+            outcome.outcome = "failed"
+            outcome.error["outcome_unknown"] = True
+            return False
+        if grids_equal(current, plan.after):
+            outcome.outcome = "applied"
+            outcome.cells_changed = changed_cell_count(plan.before, plan.after)
+            outcome.verified = plan.number_format is None
+            return False
+        outcome.outcome = "failed"
+        outcome.current = current
+        return False
+    written_formulas = _grid(written.get("formulas"))
+    formats_match = plan.number_format is None or grids_equal(_grid(written.get("numberFormat")), plan.number_format)
+    outcome.outcome = "applied"
+    outcome.cells_changed = changed_cell_count(plan.before, plan.after)
+    outcome.verified = grids_equal(written_formulas, plan.after) and formats_match
+    if not outcome.verified:
+        outcome.written = written_formulas
+    return True
+
+
 async def apply_edits(token: str, ref: DocumentRef, plans: Sequence[EditPlan], *, skip_conflicts: bool) -> EditReceipt:
     """Write every edit whose range still holds its ``before`` formulas, verifying each write.
 
-    All ranges are checked before any write. A conflict aborts the call unless ``skip_conflicts``.
-    Writes run in order and stop at the first failure; Graph has no conditional range write,
+    All ranges are checked before any write. A range already holding ``after`` counts as applied,
+    so a replayed approval does not write twice. A conflict aborts the call unless ``skip_conflicts``.
+    Writes run one at a time and stop at the first failure. Graph has no conditional range write,
     so the check narrows but cannot close the window for a concurrent edit.
     """
-    worksheet_ids = {worksheet["name"]: worksheet["id"] for worksheet in await _worksheets(token, ref)}
-    folded_ids = {cast("str", name).casefold(): cast("str", sheet_id) for name, sheet_id in worksheet_ids.items()}
-    missing = sorted({plan.target.sheet for plan in plans if plan.target.sheet.casefold() not in folded_ids})
-    if missing:
-        raise GraphError(
-            code="sheet_not_found",
-            message=f"The workbook has no worksheet named '{missing[0]}'.",
-            available_sheets=list(worksheet_ids)[:_MAX_OUTLINE_SHEETS],
-        )
-    paths = [_range_path(ref, folded_ids[plan.target.sheet.casefold()], plan.target.address) for plan in plans]
-    current_payloads = await _bounded_gather(
-        [lambda path=path: graph_json(token, "GET", path, params={"$select": "formulas"}) for path in paths],
-    )
-    receipt = EditReceipt()
-    writable: list[tuple[EditPlan, str, EditOutcome]] = []
-    for plan, path, payload in zip(plans, paths, current_payloads, strict=True):
-        current = _grid(_mapping(payload).get("formulas"))
-        outcome = EditOutcome(range=plan.target.label, outcome="not_attempted")
-        receipt.edits.append(outcome)
-        if grids_equal(current, plan.before):
-            writable.append((plan, path, outcome))
-        else:
-            outcome.outcome = "conflict"
-            outcome.current = current
-    if not skip_conflicts and any(edit.outcome == "conflict" for edit in receipt.edits):
+    lock = _DOCUMENT_LOCKS.setdefault(ref.document_id, asyncio.Lock())
+    async with lock:
+        worksheet_ids = await _worksheet_ids(token, ref, [plan.target.sheet for plan in plans])
+        receipt = EditReceipt()
+        writable: list[tuple[EditPlan, str, EditOutcome]] = []
+        for plan in plans:
+            path = _range_path(ref, worksheet_ids[plan.target.sheet], plan.target.address)
+            current = await _current_formulas(token, path)
+            outcome = EditOutcome(range=plan.target.label, outcome="not_attempted")
+            receipt.edits.append(outcome)
+            if grids_equal(current, plan.before):
+                writable.append((plan, path, outcome))
+            elif grids_equal(current, plan.after):
+                outcome.outcome = "applied"
+                outcome.already_applied = True
+                outcome.verified = True
+            else:
+                outcome.outcome = "conflict"
+                outcome.current = current
+        if not skip_conflicts and any(edit.outcome == "conflict" for edit in receipt.edits):
+            return receipt
+        for plan, path, outcome in writable:
+            if not await _write(token, path, plan, outcome):
+                break
         return receipt
-    for plan, path, outcome in writable:
-        body: dict[str, object] = {"formulas": plan.after}
-        if plan.number_format is not None:
-            body["numberFormat"] = plan.number_format
-        try:
-            written = _mapping(await graph_json(token, "PATCH", path, json_body=body))
-        except GraphError as exc:
-            outcome.outcome = "failed"
-            outcome.error = _error_fields(exc)
-            break
-        written_formulas = _grid(written.get("formulas"))
-        outcome.outcome = "applied"
-        outcome.cells_changed = changed_cell_count(plan.before, plan.after)
-        formats_match = plan.number_format is None or grids_equal(
-            _grid(written.get("numberFormat")),
-            plan.number_format,
-        )
-        outcome.verified = grids_equal(written_formulas, plan.after) and formats_match
-        if not outcome.verified:
-            outcome.written = written_formulas
-    return receipt

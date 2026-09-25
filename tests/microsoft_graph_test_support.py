@@ -173,6 +173,7 @@ def drive_item(
         "id": item_id,
         "name": name,
         "webUrl": WEB_URL,
+        "webDavUrl": f"https://contoso.sharepoint.com/sites/finance/Shared%20Documents/FY27/{name}",
         "eTag": etag,
         "size": 2048,
         "file": {"mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
@@ -180,6 +181,11 @@ def drive_item(
         "lastModifiedBy": {"user": {"displayName": "Sam Kim"}},
         "parentReference": {"driveId": drive_id, "path": f"/drives/{drive_id}/root:/FY27"},
     }
+
+
+def folder_item(item_id: str, *, drive_id: str = DRIVE_ID) -> dict[str, Any]:
+    """Return a folder driveItem."""
+    return {"id": item_id, "name": item_id, "folder": {"childCount": 0}, "parentReference": {"driveId": drive_id}}
 
 
 type Handler = Callable[[httpx.Request], httpx.Response]
@@ -193,6 +199,7 @@ class FakeGraph:
     items: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     workbooks: dict[tuple[str, str], FakeWorkbook] = field(default_factory=dict)
     shares: dict[str, tuple[str, str]] = field(default_factory=dict)
+    me_folders: dict[str, dict[str, Any]] = field(default_factory=dict)
     folder_children: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     overrides: dict[tuple[str, str], Handler] = field(default_factory=dict)
     before_patch: Callable[[FakeSheet, str], None] | None = None
@@ -240,21 +247,23 @@ class FakeGraph:
             if workbook is None:
                 return graph_error(404, "itemNotFound", "Not found")
             return self._workbook(request, workbook, match.group(3))
-        if match := re.fullmatch(r"/me/drive/root:/(.+):/content", path) or re.fullmatch(
-            r"/drives/([^/]+)/items/([^/]+):/(.+):/content",
-            path,
-        ):
-            return self._upload(request, path, match)
-        if match := re.fullmatch(r"/me/drive/root:/(.+)", path):
-            folder, _, name = match.group(1).rpartition("/")
-            existing = self.folder_children.get(folder, {}).get(name)
-            return httpx.Response(200, json=existing) if existing else graph_error(404, "itemNotFound", "Not found")
-        if match := re.fullmatch(r"/drives/([^/]+)/items/([^/]+):/([^/]+)", path):
+        if match := re.fullmatch(r"/drives/([^/]+)/items/([^/:]+):/(.+):/content", path):
+            return self._upload(request, match.group(1), match.group(2), match.group(3))
+        if match := re.fullmatch(r"/drives/([^/]+)/items/([^/:]+):/([^/]+)", path):
             existing = self.folder_children.get(match.group(2), {}).get(match.group(3))
             return httpx.Response(200, json=existing) if existing else graph_error(404, "itemNotFound", "Not found")
+        if match := re.fullmatch(r"/me/drive/root:/([^/]+)", path):
+            folder = self.me_folders.get(match.group(1))
+            return httpx.Response(200, json=folder) if folder else graph_error(404, "itemNotFound", "Not found")
+        if path == "/me/drive/root/children" and request.method == "POST":
+            body = json.loads(request.content)
+            if body["name"] in self.me_folders:
+                return graph_error(409, "nameAlreadyExists", "The specified item name already exists.")
+            self.me_folders[body["name"]] = folder_item(f"FOLDER-{body['name']}")
+            return httpx.Response(201, json=self.me_folders[body["name"]])
         return graph_error(404, "invalidRequest", f"no fake route for {request.method} {path}")
 
-    def _workbook(self, request: httpx.Request, workbook: FakeWorkbook, rest: str) -> httpx.Response:  # noqa: C901, PLR0911
+    def _workbook(self, request: httpx.Request, workbook: FakeWorkbook, rest: str) -> httpx.Response:  # noqa: C901, PLR0911, PLR0912
         if rest == "worksheets":
             return httpx.Response(
                 200,
@@ -284,8 +293,9 @@ class FakeGraph:
                 body = json.loads(request.content)
                 if self.before_patch is not None:
                     self.before_patch(sheet, address)
-                formulas = body["formulas"]
-                sheet.set(address, self.patch_transform(formulas) if self.patch_transform else formulas)
+                if "formulas" in body:
+                    formulas = body["formulas"]
+                    sheet.set(address, self.patch_transform(formulas) if self.patch_transform else formulas)
                 if "numberFormat" in body:
                     top, left, _bottom, _right = _bounds(address)
                     for row_offset, row in enumerate(body["numberFormat"]):
@@ -302,15 +312,13 @@ class FakeGraph:
             )
         return graph_error(404, "invalidRequest", f"no fake workbook route for {rest}")
 
-    def _upload(self, request: httpx.Request, path: str, match: re.Match[str]) -> httpx.Response:
-        if path.startswith("/me/"):
-            folder, _, name = match.group(1).rpartition("/")
-            drive_id = DRIVE_ID
-        else:
-            drive_id, folder, name = match.group(1), match.group(2), match.group(3)
-        children = self.folder_children.setdefault(folder, {})
-        if name in children and request.url.params.get("@microsoft.graph.conflictBehavior") == "fail":
-            return graph_error(409, "nameAlreadyExists", "The specified item name already exists.")
+    def _upload(self, request: httpx.Request, drive_id: str, folder_id: str, name: str) -> httpx.Response:
+        children = self.folder_children.setdefault(folder_id, {})
+        if name in children:
+            if request.url.params.get("@microsoft.graph.conflictBehavior") != "rename":
+                return graph_error(409, "nameAlreadyExists", "The specified item name already exists.")
+            stem, _, suffix = name.rpartition(".")
+            name = f"{stem} 1.{suffix}"
         item_id = f"01NEW{len(self.items)}"
         item = drive_item(item_id, name=name, drive_id=drive_id)
         item["size"] = len(request.content)
@@ -348,12 +356,12 @@ def runtime_paths(tmp_path: Path, extra_env: dict[str, str] | None = None) -> Ru
     )
 
 
-def save_client_config(paths: RuntimePaths, **extra: str) -> CredentialsManager:
+def save_client_config(paths: RuntimePaths) -> CredentialsManager:
     """Store one Entra app's client credentials."""
     manager = get_runtime_credentials_manager(paths)
     manager.save_credentials(
         "microsoft_365_oauth_client",
-        {"client_id": "entra-client", "client_secret": "entra-secret", **extra},
+        {"client_id": "entra-client", "client_secret": "entra-secret"},
     )
     return manager
 
