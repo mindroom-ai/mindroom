@@ -277,7 +277,7 @@ def authed_client(test_config: Config) -> Iterator[TestClient]:
 
     with (
         patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-        TestClient(app, base_url="http://localhost") as client,
+        TestClient(app) as client,
     ):
         yield client
 
@@ -407,7 +407,7 @@ def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: C
     with (
         patch("mindroom.api.openai_compat._authenticate_request", side_effect=_authenticate_and_swap),
         patch("mindroom.api.openai_compat._load_config", side_effect=_capture_load_config),
-        TestClient(app, base_url="http://localhost") as client,
+        TestClient(app) as client,
     ):
         response = client.get("/v1/models", headers={"authorization": "Bearer old-key"})
 
@@ -674,7 +674,7 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
             "mindroom.api.openai_compat._non_stream_completion",
             new=AsyncMock(return_value=openai_compat._OpenAIJSONResponse({"ok": True})),
         ),
-        TestClient(app, base_url="http://localhost") as client,
+        TestClient(app) as client,
     ):
         response = client.post(
             "/v1/chat/completions",
@@ -2056,7 +2056,7 @@ class TestAuthentication:
         initialize_api_app(app, runtime_paths)
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app, base_url="http://localhost") as client,
+            TestClient(app) as client,
         ):
             response = client.get("/v1/models")
         assert response.status_code == 401
@@ -2075,7 +2075,7 @@ class TestAuthentication:
 
         with (
             patch("mindroom.api.openai_compat._load_config", side_effect=RuntimeError("should not load config")),
-            TestClient(app, base_url="http://localhost") as client,
+            TestClient(app) as client,
         ):
             response = client.get("/v1/models")
 

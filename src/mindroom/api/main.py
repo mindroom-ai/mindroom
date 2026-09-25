@@ -37,7 +37,6 @@ from mindroom.api.knowledge import router as knowledge_router
 from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.mcp_gateway import gateway_cors_origins, gateway_lifespan, install_gateway_routes
 from mindroom.api.oauth import router as oauth_router
-from mindroom.api.open_access import OpenAccessGuard
 from mindroom.api.openai_compat import router as openai_compat_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
 from mindroom.api.response_activity import router as response_activity_router
@@ -687,8 +686,6 @@ app = FastAPI(
 )
 initialize_api_app(app, _runtime_paths)
 _add_dashboard_cors_middleware(app, _runtime_paths)
-# Outermost, so a foreign origin's CORS preflight is refused as well.
-app.add_middleware(OpenAccessGuard)
 
 
 def _sanitize_entity_payload(entity_data: dict[str, Any]) -> dict[str, Any]:

@@ -375,7 +375,7 @@ def _trigger_api_context(
     monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
 
     try:
-        with TestClient(api_main.app, base_url="http://localhost") as client:
+        with TestClient(api_main.app) as client:
             yield TriggerApiContext(
                 client=client,
                 private_key=private_key,
@@ -693,7 +693,7 @@ def test_policy_caps_apply_at_request_time(
     monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
 
     try:
-        with TestClient(api_main.app, base_url="http://localhost") as client:
+        with TestClient(api_main.app) as client:
             body = _body(message="x" * 2000)
             response = client.post(
                 "/api/triggers/campground",
@@ -764,7 +764,7 @@ async def test_trigger_waiting_for_reload_rebinds_and_rechecks_current_authoriza
     try:
         async with AsyncClient(
             transport=ASGITransport(app=api_main.app),
-            base_url="http://localhost",
+            base_url="http://testserver",
         ) as client:
             request_task = asyncio.create_task(
                 client.post(
@@ -835,7 +835,7 @@ async def test_membership_authorized_trigger_waits_for_reload_snapshot(
     try:
         async with AsyncClient(
             transport=ASGITransport(app=api_main.app),
-            base_url="http://localhost",
+            base_url="http://testserver",
         ) as client:
             request_task = asyncio.create_task(
                 client.post(

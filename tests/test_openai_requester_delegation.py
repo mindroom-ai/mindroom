@@ -84,10 +84,7 @@ def api(tmp_path: Path) -> Iterator[_ApiHarness]:
     app.include_router(openai_compat.router)
     initialize_api_app(app, runtime_paths)
     config_lifecycle.require_api_state(app).snapshot.runtime_config = config
-    with (
-        patch.object(openai_compat, "_load_config", return_value=(config, runtime_paths)),
-        TestClient(app, base_url="http://localhost") as client,
-    ):
+    with patch.object(openai_compat, "_load_config", return_value=(config, runtime_paths)), TestClient(app) as client:
         yield _ApiHarness(client, config, runtime_paths)
 
 

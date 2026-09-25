@@ -21,6 +21,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
+from mindroom.api.open_access import open_access_rejection
 from mindroom.authorization import is_platform_administrator
 from mindroom.matrix.identity import (
     matrix_user_id_from_email,
@@ -215,11 +216,6 @@ def _app_auth_state(api_app: FastAPI) -> ApiAuthState:
     """Return the committed auth state for one API app instance."""
     app_state = config_lifecycle.app_state(api_app)
     api_state = config_lifecycle.require_api_state(api_app)
-    # Snapshots are published whole, so a cached state is read without contending with config writers.
-    snapshot = api_state.snapshot
-    state = cast("ApiAuthState | None", snapshot.auth_state)
-    if state is not None and state.runtime_paths == snapshot.runtime_paths:
-        return state
     with api_state.config_lock:
         snapshot = api_state.snapshot
         state = cast("ApiAuthState | None", snapshot.auth_state)
@@ -717,7 +713,8 @@ async def request_has_frontend_access(request: Request) -> bool:
     try:
         auth_user = await authenticate_user(request, authorization, allow_public_paths=False)
     except HTTPException as exc:
-        if exc.status_code >= 500:
+        # Only a missing or invalid credential falls through to the login page.
+        if exc.status_code not in {401, 403}:
             raise
         return False
     if auth_state.settings.trusted_upstream.enabled:
@@ -1034,19 +1031,6 @@ def _require_browser_mutation_origin(
     require_same_origin(request, origin)
 
 
-def unauthenticated_dashboard_runtime(api_app: FastAPI) -> RuntimePaths | None:
-    """Return the runtime when its dashboard serves every request as the administrator without a credential."""
-    auth_state = _app_auth_state(api_app)
-    # These are the credentials `authenticate_user` checks before its credential-free branch.
-    if (
-        auth_state.settings.trusted_upstream.enabled
-        or auth_state.supabase_auth is not None
-        or auth_state.settings.mindroom_api_key
-    ):
-        return None
-    return auth_state.runtime_paths
-
-
 async def authenticate_user(
     request: Request,
     authorization: str | None = Header(None),
@@ -1080,6 +1064,11 @@ async def authenticate_user(
             if not secrets.compare_digest(token, mindroom_api_key):
                 raise HTTPException(status_code=401, detail="Invalid API key")
             _require_browser_mutation_origin(request, auth_state.settings, authorization)
+        else:
+            # Without a credential, only where the request comes from authorizes it.
+            rejection = open_access_rejection(request.headers, request.method, snapshot.runtime_paths)
+            if rejection is not None:
+                raise HTTPException(rejection.status_code, rejection.detail)
         auth_user = {"user_id": "standalone", "email": None}
         request.scope["auth_user"] = auth_user
         return auth_user

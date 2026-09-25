@@ -503,7 +503,7 @@ def test_api_lifespan_syncs_env_credentials_on_startup(
     )
     monkeypatch.setattr(main, "_watch_config", _fake_watch_config)
 
-    with TestClient(main.app, base_url="http://localhost") as client:
+    with TestClient(main.app) as client:
         assert client.get("/api/health").status_code == 200
 
     assert len(sync_calls) == 1
@@ -3629,10 +3629,7 @@ def test_exported_app_cors_uses_reinitialized_runtime(tmp_path: Path) -> None:
     """The exported API app should derive CORS from its current runtime paths."""
     runtime_paths = _runtime_paths(
         tmp_path,
-        process_env={
-            "MINDROOM_API_KEY": "test-key",
-            "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS": "https://dashboard.example.test",
-        },
+        process_env={"MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS": "https://dashboard.example.test"},
     )
     main.initialize_api_app(main.app, runtime_paths)
 
@@ -4579,7 +4576,7 @@ def test_trusted_upstream_headers_ignored_when_disabled(tmp_path: Path) -> None:
     """Trusted identity headers must do nothing unless explicitly enabled."""
     api_app = _trusted_auth_test_app(_runtime_paths(tmp_path))
 
-    with TestClient(api_app) as client:
+    with TestClient(api_app, base_url="http://localhost") as client:
         response = client.get(
             "/whoami",
             headers={

@@ -155,10 +155,10 @@ Dashboard configuration access follows deployment authentication.
 Standalone deployments check `MINDROOM_API_KEY` when configured; Supabase deployments validate the user's token and enforce the instance account ID when configured.
 Without an API key, standalone dashboard and configuration API access is unauthenticated.
 Set `MINDROOM_API_KEY` before exposing a standalone instance outside a trusted local environment.
-An unauthenticated dashboard only answers requests addressed to `localhost`, a `*.localhost` name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_URL`, and `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`, so a DNS-rebinding page cannot reach it through the browser.
+An unauthenticated dashboard only serves its pages and dashboard API to requests addressed to `localhost`, a `*.localhost` name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_BASE_URL`, `MINDROOM_URL`, and `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`, so a DNS-rebinding page cannot reach it through the browser.
 It also refuses browser requests whose `Origin` is not the requested host, a loopback page, or an allowed host name, and refuses changes marked `Sec-Fetch-Site: cross-site`.
-Reaching an unauthenticated dashboard by any other host name, such as a Docker service name or `host.docker.internal`, requires adding that name to `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
-Requests authenticated by an API key, a platform session, or trusted upstream auth are not restricted by host or origin.
+Opening an unauthenticated dashboard by any other host name, such as `myserver.local`, requires adding that name to `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
+Requests authenticated by an API key, a platform session, or trusted upstream auth are not restricted by host or origin, and neither are routes with their own authorization, such as health probes, webhooks, computer sessions, and `/v1` with `OPENAI_COMPAT_API_KEYS`.
 These operator authentication checks are independent of the Matrix `administrators` list.
 
 With trusted upstream auth and no `MINDROOM_CONNECTIONS_AGENT`, every gateway-authenticated user can read and change dashboard configuration, regardless of `administrators`.
