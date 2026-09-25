@@ -287,6 +287,7 @@ Each user then runs `!desktop setup` in a private Matrix room containing only th
 The short-lived pairing code is a bearer secret, so MindRoom rejects `!desktop` when any other room member is present.
 The serving bot returns one full `mindroom desktop setup` command containing the configured homeserver, a short-lived code, and the exact pinned cloud controller identity.
 Run it once; it reuses an existing local Desktop Matrix session or completes login before claiming the pairing.
+If the saved session belongs to a different homeserver or Matrix user than the command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace` to replace the saved session.
 Then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
 The claim travels as an authenticated Olm-encrypted to-device event, and confirmation stores the local device identity only in that requester's agent-scoped credential store.

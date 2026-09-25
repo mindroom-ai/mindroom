@@ -355,6 +355,44 @@ def test_desktop_setup_rejects_saved_session_for_another_account(
     assert not pair.called
 
 
+def test_desktop_setup_compares_saved_session_with_default_homeserver(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Without --homeserver, setup compares the saved session with the homeserver login would use."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    save_desktop_session(
+        tmp_path / "desktop_bridge" / "matrix_session.json",
+        DesktopMatrixSession("https://staging.example.org", "@alice:example.org", "DESKTOP", "saved-token"),
+    )
+    pair = MagicMock()
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr(
+        "mindroom.constants.runtime_matrix_homeserver",
+        lambda _runtime_paths: "https://matrix.example.org",
+    )
+    monkeypatch.setattr(desktop_cli, "desktop_pair", pair)
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "setup",
+            "--code",
+            "short-code",
+            "--controller-user-id",
+            "@computer:example.org",
+            "--controller-device-id",
+            "CLOUD",
+            "--controller-ed25519",
+            "cloud-fingerprint",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "https://staging.example.org" in result.output
+    assert not pair.called
+
+
 def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Long-running sync receives the same proxy headers as one-time login."""
     runtime_paths = SimpleNamespace(storage_root=tmp_path)
