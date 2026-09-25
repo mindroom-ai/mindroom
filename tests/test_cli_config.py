@@ -30,6 +30,7 @@ from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
 from mindroom.cli.main import _load_active_config_or_exit, _threads_export, app
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.matrix.state import MatrixAccount, MatrixState
 from mindroom.model_defaults import (
@@ -2854,6 +2855,99 @@ class TestDoctor:
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 1
         assert "API key invalid" in result.output
+
+    def test_doctor_validates_the_key_each_model_uses(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Model-specific keys are validated in place of the shared key, in the runtime's precedence order."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-config\n"
+            "  saved:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-config-shadowed\n"
+            "  proxy:\n    provider: openai\n    id: gpt-6-astra\n"
+            "    extra_kwargs:\n      api_key: sk-proxy\n      base_url: https://proxy.example/v1\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        runtime_paths = constants_module.resolve_runtime_paths(config_path=cfg, storage_path=storage)
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+            "model:saved",
+            {"api_key": "sk-dashboard"},
+        )
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+            lambda *_args, **_kwargs: "http://localhost:8008",
+        )
+        provider_requests: list[tuple[str, str]] = []
+
+        def _mock_get(url: str, headers: dict[str, str] | None = None, **_kw: object) -> httpx.Response:
+            if "/_matrix/" in str(url):
+                return httpx.Response(200, json={"versions": ["v1.1"]})
+            if str(url).endswith("/models"):
+                provider_requests.append((str(url), (headers or {}).get("Authorization", "")))
+            return httpx.Response(200, json={"data": []})
+
+        monkeypatch.setattr("mindroom.cli.doctor.httpx.get", _mock_get)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        assert result.exit_code == 0
+        assert "OPENAI_API_KEY not set" not in result.output
+        assert sorted(provider_requests) == [
+            ("https://api.openai.com/v1/models", "Bearer sk-config"),
+            ("https://api.openai.com/v1/models", "Bearer sk-dashboard"),
+            ("https://proxy.example/v1/models", "Bearer sk-proxy"),
+        ]
+        assert "openai API key for model default (from config) valid" in result.output
+        assert "openai API key for model saved (from dashboard) valid" in result.output
+        assert "openai API key for model proxy (from config) valid" in result.output
+
+    def test_memory_llm_explicit_key_is_validated(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An explicit memory.llm.config.api_key is the key doctor validates."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n"
+            "  llm:\n"
+            "    provider: openai\n"
+            "    config:\n"
+            "      model: gpt-5.6-luna\n"
+            "      api_key: sk-memory\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+            lambda *_args, **_kwargs: "http://localhost:8008",
+        )
+        openai_keys: list[str] = []
+
+        def _mock_get(url: str, headers: dict[str, str] | None = None, **_kw: object) -> httpx.Response:
+            if "/_matrix/" in str(url):
+                return httpx.Response(200, json={"versions": ["v1.1"]})
+            if "openai.com" in str(url):
+                openai_keys.append((headers or {}).get("Authorization", ""))
+            return httpx.Response(200, json={"data": []})
+
+        monkeypatch.setattr("mindroom.cli.doctor.httpx.get", _mock_get)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        assert result.exit_code == 0
+        assert "OPENAI_API_KEY not set" not in result.output
+        assert openai_keys == ["Bearer sk-memory"]
 
     def test_provider_summary_multiple_providers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor shows provider summary with correct model counts."""

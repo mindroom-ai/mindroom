@@ -14,7 +14,7 @@ import typer
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
-from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.credentials_sync import get_api_key_for_provider, get_model_api_key, sync_env_to_credentials
 from mindroom.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embedding_errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings import create_sentence_transformers_embedder
@@ -215,14 +215,9 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
 }
 
 
-def _get_custom_base_url(config: Config, provider: str) -> str | None:
-    """Get custom base_url for a provider from model extra_kwargs, if any."""
-    for model in config.models.values():
-        if model.provider == provider and model.extra_kwargs:
-            base_url = model.extra_kwargs.get("base_url")
-            if base_url:
-                return base_url
-    return None
+def _model_base_url(model_config: ModelConfig) -> str | None:
+    """Return one model's custom base_url from extra_kwargs, if any."""
+    return (model_config.extra_kwargs or {}).get("base_url") or None
 
 
 def _http_check(
@@ -445,7 +440,7 @@ def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, 
     passed = 0
     failed = 0
     warnings = 0
-    validated_keys: set[str] = set()
+    validated_keys: set[tuple[str, ...]] = set()
 
     for provider in sorted(provider_models):
         p, f, w = _check_single_provider(provider, config, validated_keys, runtime_paths)
@@ -477,7 +472,7 @@ def _print_validation(
 def _check_single_provider(
     provider: str,
     config: Config,
-    validated_keys: set[str],
+    validated_keys: set[tuple[str, ...]],
     runtime_paths: RuntimePaths,
 ) -> tuple[int, int, int]:
     """Validate a single provider. Returns (passed, failed, warnings)."""
@@ -516,26 +511,59 @@ def _check_single_provider(
     env_key = env_key_for_provider(provider)
     if not env_key:
         return 0, 0, 0
+    return _check_api_key_provider(provider, env_key, config, validated_keys, runtime_paths)
+
+
+def _check_api_key_provider(
+    provider: str,
+    env_key: str,
+    config: Config,
+    validated_keys: set[tuple[str, ...]],
+    runtime_paths: RuntimePaths,
+) -> tuple[int, int, int]:
+    """Validate the key each model of one API-key provider will send. Returns (passed, failed, warnings)."""
+    # A model's own key replaces the provider's shared key, matching model loading.
+    passed = failed = warnings = 0
+    shared_key_models: list[ModelConfig] = []
+    for model_name, model_config in sorted(config.models.items()):
+        if model_config.provider != provider:
+            continue
+        model_api_key = get_model_api_key(model_name, model_config, runtime_paths)
+        if model_api_key is None:
+            shared_key_models.append(model_config)
+            continue
+        base_url = _model_base_url(model_config)
+        check = ("model", provider, base_url or "", model_api_key.value)
+        if check in validated_keys:
+            continue
+        validated_keys.add(check)
+        label = f"{provider} API key for model {model_name} (from {model_api_key.source})"
+        valid, detail = _validate_provider_key(provider, model_api_key.value, base_url)
+        p, f, w = _print_validation(valid, detail, f"{label} valid", f"{label} invalid", f"{label}: could not validate")
+        passed += p
+        failed += f
+        warnings += w
 
     # google and gemini share GOOGLE_API_KEY — validate once
-    if env_key in validated_keys:
-        return 0, 0, 0
-    validated_keys.add(env_key)
+    if not shared_key_models or ("shared", env_key) in validated_keys:
+        return passed, failed, warnings
+    validated_keys.add(("shared", env_key))
 
-    api_key = runtime_paths.env_value(env_key)
+    api_key = get_api_key_for_provider(provider, runtime_paths=runtime_paths)
     if not api_key:
         console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
-        return 0, 0, 1
+        return passed, failed, warnings + 1
 
-    base_url = _get_custom_base_url(config, provider)
+    base_url = next((url for model in shared_key_models if (url := _model_base_url(model))), None)
     valid, detail = _validate_provider_key(provider, api_key, base_url)
-    return _print_validation(
+    p, f, w = _print_validation(
         valid,
         detail,
         f"{provider} API key valid",
         f"{provider} API key invalid",
         f"{provider}: could not validate key",
     )
+    return passed + p, failed + f, warnings + w
 
 
 def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
@@ -606,7 +634,7 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
 
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
-    api_key = runtime_paths.env_value(env_key) if env_key else None
+    api_key = config.memory.llm.config.get("api_key") or (runtime_paths.env_value(env_key) if env_key else None)
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
