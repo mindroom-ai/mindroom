@@ -35,7 +35,10 @@ def _provider_tool_call_id(value: object) -> str | None:
 
 
 def _decision_config(config: object, *, vertexai: bool) -> GenerateContentConfig:
-    """Keep function schemas for the shared prefix, remove native tools, and request the decision's JSON."""
+    """Build a decision request that keeps function schemas for the shared prefix and drops native tools.
+
+    JSON output matching the caller's schema is requested wherever the endpoint is known to accept it.
+    """
     generation_config = GenerateContentConfig.model_validate(config).model_copy(deep=True)
     if generation_config.cached_content:
         # Cached content may contain native tools that this request cannot inspect.

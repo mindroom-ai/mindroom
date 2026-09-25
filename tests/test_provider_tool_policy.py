@@ -184,20 +184,25 @@ def test_gemini_removes_native_tools_without_mutating_authored_config(source: st
 def test_gemini_decision_schema_replaces_authored_output_schema() -> None:
     """A decision answers in its caller's JSON shape, never in the reply's structured output shape."""
     decision_schema = {"type": "object", "properties": {"decision": {"type": "boolean"}}, "required": ["decision"]}
-    config = GenerateContentConfig(response_mime_type="application/json", response_schema={"type": "STRING"})
-    model = MindRoomGoogleGemini(api_key="test-key", request_params={"config": config})
+    authored = GenerateContentConfig(response_mime_type="application/json", response_schema={"type": "STRING"})
+    model = MindRoomGoogleGemini(api_key="test-key", generation_config=authored)
 
     with without_provider_tools(response_schema=decision_schema):
         decision = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
     with without_provider_tools():
         schemaless = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
+    regular = model.get_request_params(tools=[_function_tool()], tool_choice="auto")["config"]
 
+    for config in (decision, schemaless):
+        assert config.tools[0].function_declarations[0].name == "read_status"
+        assert config.tool_config.function_calling_config.mode == "NONE"
+        assert config.response_mime_type == "application/json"
+        assert config.response_schema is None
     assert decision.response_json_schema == decision_schema
-    assert decision.response_schema is None
-    assert schemaless.response_mime_type == "application/json"
     assert schemaless.response_json_schema is None
-    assert schemaless.response_schema is None
-    assert config.response_schema is not None
+    assert regular.response_schema is not None
+    assert regular.tool_config.function_calling_config.mode == "AUTO"
+    assert authored.response_schema is not None
 
 
 @pytest.mark.asyncio

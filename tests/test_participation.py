@@ -236,6 +236,7 @@ async def test_gemini_decision_requests_reason_first_json_while_keeping_declarat
     assert decision["generationConfig"]["responseMimeType"] == "application/json"
     # Constrained decoding that commits to the action first biased small Gemini models toward silence.
     assert list(output_schema["properties"]) == ["reason", "action"]
+    assert output_schema["propertyOrdering"] == ["reason", "action"]
     assert output_schema["properties"]["action"]["enum"] == ["respond", "stay_silent"]
     assert "responseMimeType" not in primary.get("generationConfig", {})
     assert "responseJsonSchema" not in primary.get("generationConfig", {})
