@@ -50,6 +50,7 @@ from mindroom.constants import (
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_embedder_api_key
 from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
+from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
 from mindroom.knowledge.collections import build_vector_db, candidate_collection_name
@@ -61,7 +62,7 @@ from mindroom.knowledge.file_listing import (
 )
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
-from mindroom.knowledge.indexing_config import IndexingSettings
+from mindroom.knowledge.indexing_config import IndexingSettings, knowledge_git_dir
 from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature
 from mindroom.knowledge.redaction import (
     credential_free_repo_url,
@@ -860,11 +861,13 @@ def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) ->
         git_configs={"docs": git_config},
         modes={"docs": "files"},
     )
+    git_dir = knowledge_git_dir(runtime_paths_for(config).storage_root, docs_path)
 
     before = _knowledge_source_signature(
         config,
         "docs",
         docs_path,
+        git_dir=git_dir,
         tracked_relative_paths={"guide.md", "diagram.png"},
     )
     diagram.write_bytes(b"after")
@@ -874,6 +877,7 @@ def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) ->
             config,
             "docs",
             docs_path,
+            git_dir=git_dir,
             tracked_relative_paths={"guide.md", "diagram.png"},
         )
         != before
@@ -1155,7 +1159,7 @@ async def test_config_mode_round_trip_marks_semantic_index_stale_after_file_mode
     ready_lookup = get_published_index("docs", config=semantic_config, runtime_paths=runtime_paths)
     assert ready_lookup.availability is KnowledgeAvailability.READY
 
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
     response = client.put("/api/config/save", json=file_config.authored_model_dump())
     assert response.status_code == 200
     doc.write_text("semantic new", encoding="utf-8")
@@ -1442,7 +1446,7 @@ async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_pa
     scheduler.schedule_refresh = MagicMock()
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     try:
-        response = TestClient(main.app).delete("/api/knowledge/bases/docs/files/guide.md")
+        response = TestClient(main.app, base_url="http://localhost").delete("/api/knowledge/bases/docs/files/guide.md")
     finally:
         config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
     assert response.status_code == 200
@@ -1486,7 +1490,7 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
     scheduler.schedule_refresh = MagicMock()
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     try:
-        response = TestClient(main.app).post(
+        response = TestClient(main.app, base_url="http://localhost").post(
             "/api/knowledge/bases/docs/upload",
             files=[("files", ("guide.md", b"replacement content", "text/markdown"))],
         )
@@ -1550,7 +1554,7 @@ async def test_dashboard_delete_stale_write_failure_keeps_best_effort_source_cha
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     try:
         with pytest.raises(RuntimeError, match="same-source stale write failed"):
-            TestClient(main.app).delete("/api/knowledge/bases/research/files/guide.md")
+            TestClient(main.app, base_url="http://localhost").delete("/api/knowledge/bases/research/files/guide.md")
     finally:
         config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
 
@@ -1712,7 +1716,7 @@ def test_bases_endpoint_counts_files_without_building_the_file_listing(
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
     monkeypatch.setattr(knowledge_api, "_list_file_info", _unexpected_list_file_info)
-    response = TestClient(main.app).get("/api/knowledge/bases")
+    response = TestClient(main.app, base_url="http://localhost").get("/api/knowledge/bases")
 
     assert response.status_code == 200
     entry = next(base for base in response.json()["bases"] if base["name"] == "docs")
@@ -1730,7 +1734,7 @@ def test_base_files_endpoint_still_returns_sizes_and_timestamps(tmp_path: Path) 
 
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
-    response = TestClient(main.app).get("/api/knowledge/bases/docs/files")
+    response = TestClient(main.app, base_url="http://localhost").get("/api/knowledge/bases/docs/files")
 
     assert response.status_code == 200
     payload = response.json()
@@ -1741,37 +1745,42 @@ def test_base_files_endpoint_still_returns_sizes_and_timestamps(tmp_path: Path) 
     assert payload["files"][0]["modified"]
 
 
-def _committed_git_checkout(path: Path) -> None:
+def _committed_git_checkout(path: Path, git_dir: Path) -> None:
+    """Commit ``doc.md`` in a checkout whose Git directory lives apart, as MindRoom keeps one."""
     path.mkdir()
+    git_dir.parent.mkdir(parents=True, exist_ok=True)
     (path / "doc.md").write_text("body", encoding="utf-8")
+    env = {**os.environ, "GIT_DIR": str(git_dir), "GIT_WORK_TREE": str(path)}
     for args in (
         ("init", "-b", "main"),
         ("add", "doc.md"),
         ("-c", "user.email=tests@example.com", "-c", "user.name=MindRoom Tests", "commit", "-m", "doc"),
     ):
-        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True, env=env)
 
 
 def test_dashboard_git_listing_never_runs_checkout_fsmonitor(tmp_path: Path) -> None:
-    """Dashboard reads must not run a program the checkout's own Git config names.
+    """Dashboard reads must not run a program a .git inside the checkout names.
 
     A shared checkout may live in an agent workspace, where agent tools can write
-    ``.git/config``, while the dashboard lists it from the primary process.
+    a ``.git`` beside the knowledge files, while the dashboard lists it from the
+    primary process.
     """
     docs_path = tmp_path / "docs"
-    _committed_git_checkout(docs_path)
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
+    runtime_paths = runtime_paths_for(config)
+    _committed_git_checkout(docs_path, knowledge_git_dir(runtime_paths.storage_root, docs_path))
     marker = tmp_path / "fsmonitor-ran"
     hook = tmp_path / "fsmonitor-hook"
     hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n", encoding="utf-8")
     hook.chmod(0o755)
+    subprocess.run(["git", "init", "--quiet"], cwd=docs_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "core.fsmonitor", str(hook)], cwd=docs_path, check=True, capture_output=True)
-    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")
-    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
-    runtime_paths = runtime_paths_for(config)
 
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
     bases = client.get("/api/knowledge/bases")
     files = client.get("/api/knowledge/bases/docs/files")
     status = client.get("/api/knowledge/bases/docs/status")
@@ -1788,7 +1797,8 @@ def test_git_listing_runs_git_without_caller_environment(
 ) -> None:
     """Listing must not hand the primary process' secrets or relative PATH entries to Git."""
     docs_path = tmp_path / "docs"
-    _committed_git_checkout(docs_path)
+    git_dir = tmp_path / "docs.git"
+    _committed_git_checkout(docs_path, git_dir)
     git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
     monkeypatch.setenv("MINDROOM_API_KEY", "dashboard-secret")
@@ -1802,31 +1812,31 @@ def test_git_listing_runs_git_without_caller_environment(
 
     monkeypatch.setattr(knowledge_file_listing_module.subprocess, "run", _recording_run)
 
-    assert list_git_tracked_knowledge_files(config, "docs", docs_path) == [docs_path.resolve() / "doc.md"]
-    assert len(envs) == 2
-    allowed_names = {
-        "PATH",
-        "GIT_ALLOW_PROTOCOL",
-        "GIT_NO_LAZY_FETCH",
-        *knowledge_file_listing_module._GIT_CONFIG_LOCATION_ENV,
-    }
-    for env in envs:
-        assert set(env) <= allowed_names
-        assert env["GIT_ALLOW_PROTOCOL"] == ""
-        assert all(Path(entry).is_absolute() for entry in env["PATH"].split(os.pathsep))
+    assert list_git_tracked_knowledge_files(config, "docs", docs_path, git_dir) == [docs_path.resolve() / "doc.md"]
+    assert len(envs) == 1
+    env = envs[0]
+    assert "dashboard-secret" not in str(env)
+    assert env["GIT_DIR"] == str(git_dir)
+    assert env["GIT_ALLOW_PROTOCOL"] == ""
+    assert all(Path(entry).is_absolute() for entry in env["PATH"].split(os.pathsep))
 
 
-def test_read_only_git_refuses_transports_that_checkout_config_allows(tmp_path: Path) -> None:
-    """Checkout config re-allowing a protocol must not open a transport during listing."""
+def test_read_only_git_refuses_transports_that_repository_config_allows(tmp_path: Path) -> None:
+    """Repository config re-allowing a protocol must not open a transport for a local command."""
     remote = tmp_path / "remote"
-    _committed_git_checkout(remote)
+    _committed_git_checkout(remote, remote / ".git")
     docs_path = tmp_path / "docs"
-    _committed_git_checkout(docs_path)
-    subprocess.run(["git", "config", "protocol.file.allow", "always"], cwd=docs_path, check=True, capture_output=True)
+    git_dir = tmp_path / "docs.git"
+    _committed_git_checkout(docs_path, git_dir)
+    subprocess.run(["git", f"--git-dir={git_dir}", "config", "protocol.file.allow", "always"], check=True)
 
-    result = knowledge_file_listing_module._run_read_only_git(
-        docs_path,
-        ["ls-remote", remote.resolve().as_uri()],
+    result = subprocess.run(
+        hardened_git_command(["ls-remote", remote.resolve().as_uri()]),
+        cwd=docs_path,
+        env=hardened_git_env(git_dir=git_dir, work_tree=docs_path),
+        check=False,
+        capture_output=True,
+        text=True,
         timeout=10.0,
     )
 
@@ -5416,7 +5426,7 @@ async def test_api_delete_marks_index_stale_and_keeps_last_good_best_effort(tmp_
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
 
     response = client.delete("/api/knowledge/bases/docs/files/guide.md")
     unavailable: dict[str, KnowledgeAvailability] = {}
@@ -5452,7 +5462,7 @@ async def test_api_replacement_upload_marks_index_stale_and_keeps_last_good_best
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
 
     response = client.post(
         "/api/knowledge/bases/docs/upload",
@@ -5494,7 +5504,7 @@ async def test_api_upload_failure_does_not_commit_earlier_staged_writes(
     scheduler.schedule_refresh = MagicMock()
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
     monkeypatch.setattr("mindroom.api.knowledge._MAX_UPLOAD_BYTES", 5)
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
 
     response = client.post(
         "/api/knowledge/bases/docs/upload",
@@ -5553,7 +5563,7 @@ async def test_api_status_reports_direct_refresh_runner_reindex(
     )
     await started.wait()
     try:
-        client = TestClient(main.app)
+        client = TestClient(main.app, base_url="http://localhost")
         response = client.get("/api/knowledge/bases/docs/status")
     finally:
         release.set()
@@ -8226,6 +8236,7 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
         config,
         "docs",
         docs_path,
+        git_dir=knowledge_git_dir(runtime_paths.storage_root, docs_path),
         tracked_relative_paths={"doc.md"},
     )
     assert "ghp_secret" not in metadata_text
@@ -8289,10 +8300,17 @@ def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleT
         base_id: str,
         knowledge_root: Path,
         *,
+        git_dir: Path,
         tracked_relative_paths: Iterable[str] | None = None,
     ) -> str:
         counter.calls += 1
-        return original_signature(config, base_id, knowledge_root, tracked_relative_paths=tracked_relative_paths)
+        return original_signature(
+            config,
+            base_id,
+            knowledge_root,
+            git_dir=git_dir,
+            tracked_relative_paths=tracked_relative_paths,
+        )
 
     monkeypatch.setattr(module, "_knowledge_source_signature", _counting_signature)
     return counter
@@ -8614,6 +8632,7 @@ async def test_git_publish_records_verified_revision_before_later_rollback(
         config,
         "docs",
         docs_path,
+        git_dir=knowledge_git_dir(runtime_paths.storage_root, docs_path),
         tracked_relative_paths={"doc.md"},
     )
     assert result.index_published is True
@@ -9275,8 +9294,12 @@ async def test_git_pull_that_changes_one_file_only_reindexes_that_file(
 
 
 @pytest.mark.asyncio
-async def test_git_worktree_checkout_file_is_detected_for_sync_listing_and_api_status(tmp_path: Path) -> None:
-    """Git worktree checkouts use a .git file and must still count as present repositories."""
+async def test_linked_worktree_checkout_is_refused_and_not_listed(tmp_path: Path) -> None:
+    """A .git pointer file is never followed: its target could be any repository.
+
+    Earlier releases ran Git in such a checkout, which let whoever could write
+    the pointer choose the repository whose config and hooks Git executed.
+    """
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
 
@@ -9328,19 +9351,22 @@ async def test_git_worktree_checkout_file_is_detected_for_sync_listing_and_api_s
     resolved_git_config = manager.git_source._git_config()
     assert resolved_git_config is not None
 
-    cloned = await manager.git_source._ensure_repository(resolved_git_config)
+    with pytest.raises(RuntimeError, match="is a link or a file, not a Git directory"):
+        await manager.git_source._ensure_repository(resolved_git_config)
+    git_dir = manager.git_source.git_dir
 
-    assert cloned is False
-    assert git_checkout_present(docs_path)
-    assert list_git_tracked_knowledge_files(config, "docs", docs_path) == [docs_path.resolve() / "doc.md"]
+    assert (docs_path / ".git").is_file()
+    assert (docs_path / "doc.md").read_text(encoding="utf-8") == "worktree checkout content"
+    assert not git_checkout_present(docs_path, git_dir)
+    assert list_git_tracked_knowledge_files(config, "docs", docs_path, git_dir) == []
 
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, config)
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="http://localhost")
     response = client.get("/api/knowledge/bases/docs/status")
 
     assert response.status_code == 200
-    assert response.json()["git"]["repo_present"] is True
+    assert response.json()["git"]["repo_present"] is False
 
 
 @pytest.mark.asyncio

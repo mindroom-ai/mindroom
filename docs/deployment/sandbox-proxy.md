@@ -591,6 +591,8 @@ If you don't want a value to reach tools, don't export it.
 - Hook failures do not poison the worker; only the requesting tool call fails.
 
 This hook works identically for static sidecar, dedicated Docker, and dedicated Kubernetes worker backends because it runs inside the sandbox runner per request.
+The runner starts its own Python processes (tool children, the forkserver template, background-script shims, supervised process wrappers, and package installs) with `python -P -s`.
+That keeps the workspace working directory off `sys.path` and skips user site-packages under a workspace `HOME`, so a workspace file named like a MindRoom or installed module cannot replace it inside those processes.
 It is not a true container startup hook — it does not change pod templates, recreate Deployments, or alter Helm values.
 For an example, see `docs/tools/execution-and-coding.md`.
 
@@ -623,7 +625,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their prior launch settings and compatible identities.
 - With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
-- With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
+- With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode mounts the directories of every non-private `worker_scope: user` agent plus the user's own private-instance namespace, since it shares one runtime across those agents, and never mounts agents on other scopes.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
 ### Sandbox-runner API endpoints

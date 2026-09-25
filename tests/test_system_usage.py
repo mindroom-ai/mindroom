@@ -33,7 +33,9 @@ async def test_system_usage_is_content_free_idempotent_and_does_not_create_conve
     """Count one metered system request while preserving ordinary conversation counts."""
     config = Config(agents={"code": AgentConfig(display_name="Code")})
     paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage", process_env={},
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
     )
     before = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True, include_requests=True)
     assert before.coverage.scanned_sources == 1  # the configured agent is checked even before its DB exists
@@ -147,7 +149,11 @@ async def test_system_usage_storage_failure_logs_without_content_but_cancellatio
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Storage failure is diagnostic only; task cancellation retains normal async behavior."""
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage", process_env={})
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
     response = RunOutput(run_id="paid", content="PRIVATE RESULT", metrics=RunMetrics(total_tokens=1))
     logged: list[tuple[str, dict[str, object]]] = []
 

@@ -88,6 +88,7 @@ from mindroom.knowledge.indexing_config import (
     IndexingSettings,
     chroma_collection_exists,
     indexing_settings_key,
+    knowledge_git_dir,
     storage_key_for_base,
 )
 from mindroom.knowledge.redaction import redact_credentials_in_text
@@ -407,6 +408,7 @@ def _knowledge_source_signature(
     base_id: str,
     knowledge_root: Path,
     *,
+    git_dir: Path,
     tracked_relative_paths: Iterable[str] | None = None,
 ) -> str:
     """Return a robust signature for the currently managed local file corpus."""
@@ -419,7 +421,7 @@ def _knowledge_source_signature(
         tracked_paths = (
             set(tracked_relative_paths)
             if tracked_relative_paths is not None
-            else git_tracked_relative_paths_from_checkout(config, base_id, root)
+            else git_tracked_relative_paths_from_checkout(config, base_id, root, git_dir)
         )
         files = knowledge_files_from_relative_paths(config, base_id, root, tracked_paths)
     files_with_relative_paths = ((path.relative_to(root).as_posix(), path) for path in files)
@@ -525,6 +527,10 @@ class KnowledgeManager:
             config=self.config,
             runtime_paths=self.runtime_paths,
             source_path=self.knowledge_path,
+            # Not ``self.storage_path``: a private base stores its index under a
+            # state root that its worker container mounts read-write, and the
+            # Git directory decides which commands Git runs here.
+            git_dir=knowledge_git_dir(self.runtime_paths.storage_root, self.knowledge_path),
             lfs_hydrated_head_path=self._base_storage_path / "git_lfs_hydrated_head.txt",
         )
         self._collections = CollectionSpace(
@@ -634,6 +640,7 @@ class KnowledgeManager:
             self.config,
             self.base_id,
             self._knowledge_source_path(),
+            git_dir=self.git_source.git_dir,
             tracked_relative_paths=self.git_source.cached_tracked_relative_paths(),
         )
 

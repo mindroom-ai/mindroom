@@ -12,7 +12,7 @@ import secrets
 import subprocess
 import sys
 from collections.abc import Mapping
-from contextlib import redirect_stderr, redirect_stdout, suppress
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -1476,6 +1476,9 @@ def _run_subprocess_worker_payload(payload: str) -> tuple[int, str, str]:
     # interfere with the protocol marker in the returned response text.
     captured_out = io.StringIO()
     captured_err = io.StringIO()
+    if request.tool_name == "python":
+        # Children start with `-P`; python-tool code may still import workspace modules, after installed ones.
+        sys.path.append(str(Path.cwd()))
     with redirect_stdout(captured_out), redirect_stderr(captured_err):
         response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config))
 
@@ -1509,11 +1512,6 @@ def _run_forkserver_template() -> int:
     _ = mcp_registry, tool_system_plugins
     import mindroom.tools  # noqa: F401, PLC0415
 
-    # `python -m` prepended the runner's cwd to sys.path at template startup;
-    # fork children prepend their own request cwd instead, matching what a
-    # spawn-per-call child started in that cwd would see.
-    with suppress(ValueError):
-        sys.path.remove(str(Path.cwd()))
     return sandbox_forkserver.serve_template(socket_path, _run_subprocess_worker_payload)
 
 
@@ -1722,6 +1720,7 @@ async def view_file_in_worker(
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
                 private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
+                user_scope_agent_names=config.get_user_scope_shared_agent_names(),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
@@ -1942,6 +1941,7 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
                 private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
+                user_scope_agent_names=config.get_user_scope_shared_agent_names(),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:

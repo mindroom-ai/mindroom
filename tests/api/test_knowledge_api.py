@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import time
 from contextlib import suppress
@@ -24,6 +25,7 @@ from mindroom.api import knowledge as knowledge_api
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.indexing_config import knowledge_git_dir
 from mindroom.knowledge.registry import (
     load_published_index_state,
     published_index_metadata_path,
@@ -126,17 +128,26 @@ def _assert_file_mode_metadata_blocks_old_semantic_index(
     assert semantic_status.availability is KnowledgeAvailability.CONFIG_MISMATCH
 
 
-def _init_git_checkout(path: Path, *tracked_paths: str) -> None:
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+def _checkout_git_dir(tmp_path: Path, path: Path) -> Path:
+    """Return the MindRoom-owned Git directory the API resolves for one checkout."""
+    return knowledge_git_dir(_runtime_paths(tmp_path).storage_root, path)
+
+
+def _init_git_checkout(tmp_path: Path, path: Path, *tracked_paths: str) -> None:
+    """Create a checkout laid out as MindRoom keeps one: its Git directory under the storage root."""
+    git_dir = _checkout_git_dir(tmp_path, path)
+    git_dir.parent.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "GIT_DIR": str(git_dir), "GIT_WORK_TREE": str(path)}
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True, env=env)
     if tracked_paths:
-        subprocess.run(["git", "add", *tracked_paths], cwd=path, check=True, capture_output=True)
+        subprocess.run(["git", "add", *tracked_paths], cwd=path, check=True, capture_output=True, env=env)
 
 
 def _test_client(tmp_path: Path) -> TestClient:
     runtime_paths = _runtime_paths(tmp_path)
     main.initialize_api_app(main.app, runtime_paths)
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
-    return TestClient(main.app)
+    return TestClient(main.app, base_url="http://localhost")
 
 
 class _RecordingRefreshScheduler:
@@ -436,6 +447,7 @@ def test_knowledge_files_use_managed_file_filters(tmp_path: Path) -> None:
     (docs / ".hidden" / "note.md").write_text("hidden", encoding="utf-8")
     (docs / "outside.md").write_text("outside include pattern", encoding="utf-8")
     _init_git_checkout(
+        tmp_path,
         docs,
         "content/guide.md",
         "content/raw.txt",
@@ -499,7 +511,7 @@ def test_git_backed_file_counts_use_tracked_semantic_files(tmp_path: Path) -> No
     docs.mkdir()
     (docs / "tracked.md").write_text("tracked", encoding="utf-8")
     (docs / "untracked.md").write_text("untracked", encoding="utf-8")
-    _init_git_checkout(docs, "tracked.md")
+    _init_git_checkout(tmp_path, docs, "tracked.md")
     config = _knowledge_config(docs, git=True)
     _publish_committed_runtime_config(client.app, config)
 
@@ -550,7 +562,7 @@ def test_git_status_reads_disk_and_index_metadata(tmp_path: Path) -> None:
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
     docs.mkdir()
-    _init_git_checkout(docs)
+    _init_git_checkout(tmp_path, docs)
     config = _knowledge_config(docs, git=True)
     _publish_committed_runtime_config(client.app, config)
     _write_index_metadata(

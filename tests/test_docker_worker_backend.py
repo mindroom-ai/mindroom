@@ -4676,12 +4676,21 @@ models:
     projection_root = _projection_root(volumes)
     projected_config_data = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
 
-    assert volumes[str((tmp_path / "agents").resolve())]["bind"] == "/app/worker/agents"
+    agent_binds = {source: spec["bind"] for source, spec in volumes.items() if "/agents" in spec["bind"]}
+    assert agent_binds == {str((tmp_path / "agents" / "alpha").resolve()): "/app/worker/agents/alpha"}
+    assert volumes[str((tmp_path / "agents" / "alpha").resolve())]["mode"] == "rw"
     assert set(projected_config_data["agents"]) == {"alpha", "delta"}
     assert set(projected_config_data["knowledge_bases"]) == {"a", "d"}
     assert projected_config_data["agents"]["alpha"]["context_files"] == ["alpha.md"]
     assert (tmp_path / "agents/alpha/workspace/alpha.md").read_text(encoding="utf-8") == "# Alpha\n"
-    assert projected_config_data["agents"]["delta"]["context_files"] == ["delta.md"]
+    # Private agents keep requester state under private_instances/, so their shared
+    # agents/<name> root is not mounted and context files are projected read-only.
+    assert projected_config_data["agents"]["delta"]["context_files"] == [
+        "./.mindroom-worker-assets/agents/delta/context_files/00-delta.md",
+    ]
+    assert (
+        projection_root / ".mindroom-worker-assets" / "agents" / "delta" / "context_files" / "00-delta.md"
+    ).read_text(encoding="utf-8") == "# Delta\n"
     assert (tmp_path / "agents/delta/workspace/delta.md").read_text(encoding="utf-8") == "# Delta\n"
     assert not (
         projection_root / ".mindroom-worker-assets" / "agents" / "beta" / "context_files" / "00-beta.md"
