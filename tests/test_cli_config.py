@@ -3244,12 +3244,23 @@ class TestDoctor:
             (
                 "groq",
                 {".env": "GROQ_API_KEY=sk-groq"},
-                "! Memory LLM (groq): GROQ_API_KEY not set in the process environment (Mem0 reads it directly; "
-                ".env is not exported)",
+                "! Memory LLM (groq): GROQ_API_KEY not set in the process environment (Mem0 reads only that "
+                "variable there, not .env or a _FILE secret)",
+            ),
+            (
+                "groq",
+                {"GROQ_API_KEY_FILE": "secret-file"},
+                "! Memory LLM (groq): GROQ_API_KEY not set in the process environment (Mem0 reads only that "
+                "variable there, not .env or a _FILE secret)",
             ),
             ("litellm", {}, "- Memory LLM: litellm/some-model not validated"),
+            (
+                "openai",
+                {"OPENAI_API_KEY": "sk-openai", "OPENROUTER_API_KEY": "sk-openrouter"},
+                "- Memory LLM: openai/some-model uses OPENROUTER_API_KEY through OpenRouter (not validated)",
+            ),
         ],
-        ids=["env-key-set", "env-key-missing", "env-file-only", "no-env-key"],
+        ids=["env-key-set", "env-key-missing", "env-file-only", "file-secret-only", "no-env-key", "openrouter-switch"],
     )
     def test_memory_llm_check_reports_mem0_env_keys(
         self,
@@ -3268,10 +3279,14 @@ class TestDoctor:
             f"memory:\n  llm:\n    provider: {provider}\n    config:\n      model: some-model\n",
         )
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        for name in ("GROQ_API_KEY", "GROQ_API_KEY_FILE", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
         for name, value in env.items():
             if name == ".env":
                 (tmp_path / ".env").write_text(f"{value}\n", encoding="utf-8")
+            elif name.endswith("_FILE"):
+                (tmp_path / value).write_text("sk-from-file\n", encoding="utf-8")
+                monkeypatch.setenv(name, str(tmp_path / value))
             else:
                 monkeypatch.setenv(name, value)
         self._record_provider_probes(monkeypatch)

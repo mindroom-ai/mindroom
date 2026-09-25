@@ -657,13 +657,20 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     )
     # Mem0 resolves its endpoint from its own config and process env, which MindRoom does not
     # share, so doctor reports the key source instead of guessing where Mem0 would send it.
-    if api_key is not None:
+    if llm_provider == "openai" and runtime_paths.process_env.get("OPENROUTER_API_KEY"):
+        # Mem0's OpenAI client switches to OpenRouter's key and endpoint whenever this variable is set.
+        source = "OPENROUTER_API_KEY through OpenRouter"
+    elif api_key is not None:
         source = "its own API key" if api_key.source == "config" else f"the shared {llm_provider} key"
     elif env_key and runtime_paths.process_env.get(env_key):
         # Mem0's other clients (groq, gemini, deepseek, ...) read this key from the process env themselves.
         source = env_key
     elif env_key:
-        where = " in the process environment (Mem0 reads it directly; .env is not exported)" if env_api_key else ""
+        where = (
+            " in the process environment (Mem0 reads only that variable there, not .env or a _FILE secret)"
+            if env_api_key
+            else ""
+        )
         console.print(f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set{where}")
         return 0, 0, 1
     else:
