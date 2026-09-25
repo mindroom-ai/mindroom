@@ -5996,7 +5996,8 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     config.knowledge_bases["docs"].chunk_size = 1234
     runtime_paths = runtime_paths_for(config)
-    path_overrides = ({}, {"PATH": str(runtime_bin)})[explicit_runtime_path]
+    runtime_overrides = {"PATH": str(runtime_bin), "TMPDIR": str(tmp_path / "runtime-tmp")}
+    path_overrides = ({}, runtime_overrides)[explicit_runtime_path]
     runtime_paths = replace(
         runtime_paths,
         process_env={**runtime_paths.process_env, **path_overrides},

@@ -10,8 +10,12 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from xdist.workermanage import WorkerController
 
 # Rich resolves color support once, when a `Console` is constructed, and the CLI builds
 # its consoles at import time (`mindroom.cli.config`, `.desktop`, `.service`), so no
@@ -32,7 +36,7 @@ os.environ["TERM"] = "dumb"
 # ledgers and atomic JSON stores make every commit durable, and the tests that walk
 # their bounds commit thousands of times. tmpfs completes fsync without touching a
 # device: summed test time on a 32-worker NVMe machine fell from 5236 s to 1426 s,
-# and the GitHub Actions job from 16.5 to 12 minutes.
+# and the GitHub Actions test step from about 16 to 12-15 minutes.
 #
 # No test can observe the difference. Durability tests simulate a crashed process,
 # and a crashed process never needed its writes to leave the page cache.
@@ -44,11 +48,12 @@ os.environ["TERM"] = "dumb"
 _TMPFS = Path("/dev/shm")  # noqa: S108
 _TMPFS_MIN_FREE_BYTES = 4 << 30
 _TMPFS_BASETEMP = pytest.StashKey[Path]()
+_OWNS_BASETEMP_WORKERINPUT_KEY = "mindroom_owns_basetemp"
 if (
     not any(name in os.environ for name in ("TMPDIR", "TEMP", "TMP"))
     and sys.platform == "linux"
     and _TMPFS.is_dir()
-    and os.access(_TMPFS, os.W_OK)
+    and os.access(_TMPFS, os.W_OK | os.X_OK)
     and not os.statvfs(_TMPFS).f_flag & os.ST_NOEXEC
     and shutil.disk_usage(_TMPFS).free >= _TMPFS_MIN_FREE_BYTES
 ):
@@ -80,9 +85,12 @@ def _contain_temporary_files_on_tmpfs(
         yield
         return
     basetemp = tmp_path_factory.getbasetemp()
-    # xdist hands every worker its directory as `--basetemp`, so where it lives is
-    # the only sign that it is pytest's own tree on tmpfs rather than a disk path.
-    if basetemp.is_relative_to(_TMPFS):
+    owns_basetemp = (
+        pytestconfig.workerinput[_OWNS_BASETEMP_WORKERINPUT_KEY]
+        if hasattr(pytestconfig, "workerinput")
+        else pytestconfig.option.basetemp is None
+    )
+    if owns_basetemp and basetemp.is_relative_to(_TMPFS):
         pytestconfig.stash[_TMPFS_BASETEMP] = basetemp
     contained = basetemp / "tmp"
     contained.mkdir()
@@ -91,6 +99,15 @@ def _contain_temporary_files_on_tmpfs(
     yield
     os.environ["TMPDIR"] = str(_TMPFS)
     tempfile.tempdir = None
+
+
+def pytest_configure_node(node: "WorkerController") -> None:
+    """Tell each xdist worker whether its base directory is pytest's own or the caller's.
+
+    xdist hands every worker its directory as `--basetemp`, so only the controller
+    still knows whether the caller chose one, which must outlive a passing run.
+    """
+    node.workerinput[_OWNS_BASETEMP_WORKERINPUT_KEY] = node.config.option.basetemp is None
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
