@@ -35,15 +35,18 @@ Each model configuration supports the following fields:
 | `icon` | No | `null` | Image path relative to the config file's directory, or a Matrix `mxc://` URI |
 | `api` | No | `null` | For `openai`, force `responses` or `chat_completions`; unset keeps automatic selection |
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
-| `api_key` | No | `null` | Model-specific API key; equivalent to `extra_kwargs.api_key`, and setting both is a validation error |
+| `api_key` | No | `null` | Model-specific API key used instead of the provider's shared key; you can set `extra_kwargs.api_key` instead, but not both |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
 | `context_window` | No | `null` | Actual provider context window size in tokens; MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction sets a smaller `replay_window_tokens`; an explicit `compaction.model` or `compaction.fallback_model` needs its own `context_window` for summary generation; on `vertexai_claude` it also enables request-time fitting |
 
 For Azure OpenAI, `id` is the Azure deployment name, not the underlying base-model name.
 Provider credentials come from supported environment variables, stored credentials, CLI authentication, or a model-specific key.
 MindRoom resolves a model's API key in this order: the key saved for that model in the dashboard's **Models** editor, then `api_key` or `extra_kwargs.api_key` from the model config, then the provider's shared key from the environment or credential store.
+Setting both `api_key` and `extra_kwargs.api_key` on one model is a validation error.
+MindRoom trims `api_key`, and a blank value in either field counts as unset, so the provider's shared key still applies.
 `ollama` and `llama_cpp` models skip the shared provider key step.
-`codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore any configured key.
+`codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and drop any configured key.
+The dashboard's **Models** editor shows which of these keys each model uses, and `mindroom doctor` validates that key.
 
 Presentation metadata is optional:
 
