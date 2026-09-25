@@ -9856,7 +9856,7 @@ async def test_only_a_completed_response_makes_its_skill_review_conversation_due
 
 @pytest.mark.asyncio
 async def test_a_response_registers_its_skill_review_conversation_before_it_runs(tmp_path: Path) -> None:
-    """A response that pauses for approval never reaches post-response effects, so it registers before running."""
+    """A response that pauses for approval never reaches post-response effects, so it registers as it starts."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert bot.client is not None
@@ -9874,6 +9874,7 @@ async def test_a_response_registers_its_skill_review_conversation_before_it_runs
     real_ainvoke = model.ainvoke
 
     async def ainvoke(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        await wait_for_background_tasks(owner=coordinator)
         entries = json.loads(state_path.read_text())["entries"].values()
         seen_while_running.append([entry["has_new_runs"] for entry in entries])
         return await real_ainvoke(*args, **kwargs)

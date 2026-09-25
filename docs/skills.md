@@ -201,7 +201,7 @@ Shutdown interrupts a running review, which runs again after the next start unle
 
 The reviewer is a separate model run that can only call `skills_list`, `skill_view`, and `skill_manage`.
 It receives the persisted conversation as evidence it must not obey: the newest 24 messages verbatim, including tool calls and results, and each older message shortened to a digest line, with credential-like values redacted.
-Older tool results are left out, and a very long message keeps its start and end; every message is redacted whole before it is shortened, and a single line too long to redact is replaced.
+Older tool results are left out, and a very long message keeps its start and end; every message is redacted whole before it is shortened, and a line that cannot be redacted safely, one too long to scan or one that may hold the value of a secret-named key ending the line before, is replaced.
 Hermes replays the full conversation when the review uses the agent's own model and shortens older turns only for a different model, to limit the cost of a review without a warm prompt cache; MindRoom reviews later from stored history, so every review is such a review and always shortens older turns.
 Runs that model history hides, such as errored, cancelled, or paused runs, are left out.
 When compaction has replaced older turns with a summary, the review evidence starts with that summary, as a Hermes review sees the compressed conversation.
