@@ -31,7 +31,8 @@ os.environ["TERM"] = "dumb"
 # Most of this suite's time on a real disk is spent in fsync. Event journals, turn
 # ledgers and atomic JSON stores make every commit durable, and the tests that walk
 # their bounds commit thousands of times. tmpfs completes fsync without touching a
-# device: on a 32-worker run, summed test time fell from 6531 s to 1763 s.
+# device: summed test time on a 32-worker NVMe machine fell from 5236 s to 1426 s,
+# and the GitHub Actions job from 16.5 to 12 minutes.
 #
 # No test can observe the difference. Durability tests simulate a crashed process,
 # and a crashed process never needed its writes to leave the page cache.
