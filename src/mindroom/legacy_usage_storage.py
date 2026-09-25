@@ -1,4 +1,4 @@
-"""One-time import of retained conversation facts into independent usage storage."""
+"""Import retained conversation usage and interpret older usage snapshots."""
 
 from __future__ import annotations
 
@@ -12,10 +12,22 @@ from mindroom.legacy_session_storage import decode_persisted_session_json
 from mindroom.usage_storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+
+
+# LEGACY_COMPAT: Request snapshots omit their provider and model.
+# Legacy format: Requests contain only created_at and metrics.
+# Last legacy release: v2026.9.297; replacement request model attribution is unreleased.
+# Current producer: save_compaction_usage also emits one untagged, single-model request.
+# Handling: Inherit only a single run model; the caller must reconcile every counter.
+# Coverage: tests/test_request_usage.py::test_request_export_keeps_short_calls_distinct_and_preserves_all_counters;
+# tests/test_request_usage.py::test_unreconciled_request_details_preserve_aggregates_and_mark_coverage.
+def legacy_request_model(models: Mapping[tuple[str, str], object]) -> tuple[str, str] | None:
+    """Return unambiguous run attribution for requests written without a model."""
+    return next(iter(models)) if len(models) == 1 else None
 
 
 # LEGACY_COMPAT: Usage derived from disposable conversation rows and session blobs.

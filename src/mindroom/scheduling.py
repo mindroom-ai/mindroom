@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from mindroom import model_loading, scheduling_executor
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
+from mindroom.helper_usage import record_system_usage
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.conversation_reads import complete_thread_history
@@ -1156,6 +1157,7 @@ async def _parse_workflow_schedule(
 
     try:
         response = await agent.arun(prompt, session_id=f"workflow_parse_{uuid.uuid4()}")
+        await record_system_usage(response, runtime_paths=runtime_paths, kind="schedule_parse")
         result = response.content
 
         if isinstance(result, ScheduledWorkflow):

@@ -943,6 +943,13 @@ Team member tokens contribute to model, requester, daily, and request detail wit
 Requester totals sum to the entity's `retained_run_totals`, which can differ from its cumulative `totals`.
 The report-level `model_coverage` and `user_coverage` also apply to entity retained detail.
 
+Organization reports include internal AI work under the `system:internal` entity: routing, room topics, schedule interpretation, thread summaries, voice normalization, and provider-reported transcription tokens.
+These counters contribute to model, daily, and request totals without increasing conversation or AI reply counts.
+System overhead has no assumed human requester and is excluded from personal and private-agent reports.
+Request `kind` identifies the operation as `routing`, `room_topic`, `schedule_parse`, `thread_summary`, `voice_normalization`, or `voice_transcription`.
+Only newly recorded provider counters are available; historical internal calls are not reconstructed, and transcription duration is not converted into estimated tokens.
+A usage storage failure is logged without discarding a successful internal response.
+
 `cumulative_model_breakdown` uses per-model details stored with session aggregates and includes compacted usage still present in retained sessions.
 The same rows appear within each entity in `breakdown`.
 Each row contains all token counters and `session_count`; one multi-model session counts once for every model it used, and duplicate entries for the same provider and model are combined first.
@@ -955,8 +962,9 @@ Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and 
 With `include_daily=true`, each entry in `user_breakdown` also includes its own `daily_breakdown` with that same row structure.
 This also applies to requesters inside each entity's `user_breakdown`.
 User aliases are combined before daily grouping, and the `user_id: null` entry includes daily unattributed usage.
-Daily rows are sorted oldest first and use individual request timestamps when every counter reconciles to the recorded run and one model.
+Daily rows are sorted oldest first and use individual request timestamps when every counter reconciles to the recorded run and its per-model totals.
 Each run counts once on its earliest request date, so a later day can contain tokens with `run_count: 0`.
+Each model counts that run once on the first date it was used.
 Older or unreconciled request details fall back to the run creation date, which can shift usage across days and is not an exact provider billing date.
 When neither request details nor the run creation timestamp can date the usage, daily rows omit it and daily coverage is incomplete.
 Users with only undated retained runs have an empty `daily_breakdown`; their all-time totals still include those runs.
@@ -969,8 +977,10 @@ This option defaults to `false` and is available only on these organization HTTP
 Each flat request row contains `entity`, canonical `user_id` (or `null`), `provider`, `model`, `kind`, an epoch-seconds `created_at`, and all nine token counters in `totals`.
 Rows preserve individual provider calls, including cache counters, so a consumer can apply context-length pricing without treating a multi-call run as one large request.
 No prices, provider thresholds, prompts, responses, session IDs, or run IDs are exported.
-Requests receive model attribution only when their counters reconcile exactly with the validated run totals and one known model bucket.
-Missing, malformed, mixed-model, or inconsistent request detail is excluded and marks `request_coverage` incomplete while aggregate totals remain available.
+New request records include the provider and model used for that call, including runs resumed with a different model.
+Requests are exported only when every counter reconciles exactly with both the run total and its per-model totals.
+Older request records without model attribution can inherit a single known run model; ambiguous mixed-model history is excluded.
+Missing, malformed, or inconsistent request detail also marks `request_coverage` incomplete while aggregate totals remain available.
 Existing usage ledgers are not backfilled; initial migration can import request counters still present in retained messages, but missing history cannot be reconstructed.
 Request rows are sorted by timestamp, and both request fields are omitted unless `include_requests=true`.
 Daily and request options are independent; all four combinations have separate cached reports and share one concurrent scan limit.
@@ -12044,8 +12054,10 @@ All three functions accept an optional `include_daily` boolean, which defaults t
 
 Call `get_my_usage(include_daily=True)`, `get_my_private_usage(include_daily=True)`, or `get_all_usage(include_daily=True)` to include token usage per day.
 The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, `run_count`, and a `model_breakdown` grouped by provider and model.
-Dates use individual request timestamps when all counters reconcile to the recorded run and one model; older or unreconciled details fall back to run creation time.
+Dates use individual request timestamps when all counters reconcile to the recorded run and its per-model totals; older or unreconciled details fall back to run creation time.
+New requests retain their own model attribution; older requests can inherit a single known run model, but ambiguous mixed-model history cannot be split.
 Each top-level run counts once on its first request date, so tokens on later days or from saved team members do not add extra replies.
+Each model counts that run once on the first date it was used.
 Dates are sorted oldest first and omit days without usable retained usage.
 The daily breakdown follows the same requester and administrator access rules as the rest of the report.
 Each day's combined totals and each model's totals separately include `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`, alongside total, reasoning, and audio tokens.
@@ -12093,6 +12105,10 @@ Duplicate entries for the same provider and model within one session are combine
 The details must reconcile every token counter to the session total; absent, malformed, negative, or inconsistent details preserve the full session under `unknown` and mark cumulative model coverage incomplete.
 Session aggregates do not retain dates or requester attribution for these counters, and deleted sessions remain unavailable.
 Shared-agent self reports omit the cumulative fields because their totals are requester-filtered retained runs rather than whole session aggregates.
+
+`get_all_usage()` also includes recorded internal AI work under `system:internal`, including routing, room topics, schedule interpretation, thread summaries, voice normalization, and provider-reported transcription tokens.
+This overhead contributes tokens but adds no conversations or top-level replies, and no human requester is inferred for it.
+It is excluded from personal and private-agent usage reports. Historical internal calls and transcription tokens not reported by the provider remain unavailable.
 
 ### Private-Agent Accounting
 
@@ -20613,6 +20629,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | --- | --- | --- |
 | [`src/mindroom/mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | `GatewayOAuthStore` calls `migrate_schema` when opening SQLite. | The store retains its writer transaction, base DDL, and live processing; ordered expiry, accounting, lifecycle, account, and token-cutoff upgrades stay together. |
 | `src/mindroom/legacy_usage_storage.py` | Startup or direct storage opening finds a session database without an independent usage table. | Import only retained facts, publishing the table and seed atomically; current reporting never reads old run representations. |
+| `src/mindroom/legacy_usage_storage.py` | A retained request snapshot has no model or provider fields; current single-model compaction snapshots also use this shape. | Inherit a single known run model only when every request counter reconciles with the run and per-model totals; ambiguous mixed-model history remains unavailable. |
 | [`src/mindroom/legacy_session_storage.py`][legacy-session] | Run deletion or initial usage migration encounters an Agno 2 `runs` blob. | Current rows win by `run_id`; descendant deletion, transaction ownership, and diagnostics remain with current owners. |
 | [`src/mindroom/legacy_openai_tool_replay.py`][legacy-openai] | OpenAI-family adapters encounter missing tool arguments, sparse placeholders, or Agno-only Responses spans without reusable ordered output. | Request-only repairs preserve call/result links while supplying empty arguments, removing placeholder pairs, and dropping unverifiable reasoning tails and provider item IDs; canonical content rendering stays in `openai_response_replay.py`. |
 | [`src/mindroom/legacy_handled_turns.py`][legacy-handled] | `HandledTurnLedger` finds `tracking/<agent>_responded.json`. | Insert-only adoption protects newer rows, fills absent indexes, retries interrupted work, and renames only after adoption. |
@@ -21034,6 +21051,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Unsuccessful Responses streams discard received usage, and successful retries replace earlier attempt counters. | Preserve reported terminal usage through failure cleanup and across retries without counting clean completions twice; tracked locally in [issue #1952](https://github.com/mindroom-ai/mindroom/issues/1952), with no matching upstream issue or PR identified. | `agno_compat_openai_responses.py`; real SDK, Agent, durable-usage, and export regressions in `tests/test_openai_responses_stream.py`. Combined retry counters stay aggregate-only in request exports. |
 | Terminal error and cancellation cleanup keep stale checkpoint or continuation messages. | Refresh the saved message list from current in-flight messages while retaining cancellation cleanup; no matching upstream tracking identified. | `agno_compat_run_messages.py`; Agent/Team snapshots and resumed-run export coverage in `tests/test_agno_compat_run_messages.py`. |
 | Interrupted model streams accumulate usage before retaining the assistant message. | Preserve the metered message before terminal persistence; [issue #9489](https://github.com/agno-agi/agno/issues/9489) identifies the same lost-message boundary, but does not separately track request-detail preservation. | `agno_compat_run_messages.py`; real SDK stream failures and task cancellation in `tests/test_openai_responses_stream.py`. |
+| Assistant request messages omit their model, although a resumed run can contain usage from multiple models. | Tracking gap: persist the model ID and provider with each request's counters; no matching upstream issue or PR identified. | `agno_compat_run_messages.py` records attribution at message population and stream entry, including metered failures; `tests/test_request_usage.py` and `tests/test_openai_responses_stream.py` cover mixed-model request exports and daily dates after conversation cleanup. |
 | Stopping an async run between chunks abandons its suspended model stream until garbage collection, after the run is persisted without the usage that stream already received. | Close in-flight model streams innermost first before terminal cancellation or error persistence; [issue #9489](https://github.com/agno-agi/agno/issues/9489) covers related abandoned-generation bookkeeping, not usage settlement. | `agno_compat_run_messages.py` settles the abandoned request once from received stream data; consumer closure and failure, cancellation-request, and retried-attempt regressions in `tests/test_openai_responses_stream.py`. |
 | OpenAI usage parsing omits cache-write input tokens. | Preserve the SDK counter for Responses and Chat Completions, including older payloads where the field is absent. | `agno_compat_openai_responses.py`, `agno_compat_openai_chat.py`. |
 | Responses guesses inline-file MIME from opaque storage paths before original filenames. | Infer missing MIME from the original filename without mutating attachment metadata; retain binary MIME for compressed attachments stored under opaque paths. No matching upstream issue or PR identified. | `agno_compat_openai_responses.py`; synthetic attachment-to-request regression coverage in `tests/test_openai_models.py`. |
@@ -21073,7 +21091,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store and exact-run cancellation drainage. | `agent_storage.py` and storage lifecycle callers; `ai.py` retains canonical history ownership. |
 | `agno_compat_sqlite.py` | Private pragma listener removal, monotonic run insertion with atomic usage snapshots, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy. |
 | `agno_compat_session_metrics.py` | Version-guarded Agent/Team accumulator repair, scoped to owned storage. | Loaded run metrics seed transient accounting snapshots; repeated saves add only changed contributions while preserving existing cumulative history. |
-| `agno_compat_run_messages.py` | Version-guarded Agent/Team terminal snapshots, retention of metered messages from interrupted model streams, and one-time settlement of abandoned async model streams. | `agent_storage.py` installs the patch; provider adapters own reported counters, and `usage_storage.py` retains content-free projection and retry exclusions. Aggregate accounting remains with Agno and the session-metrics repair. |
+| `agno_compat_run_messages.py` | Version-guarded Agent/Team terminal snapshots, retention and model attribution of metered request messages, and one-time settlement of abandoned async model streams. | `agent_storage.py` installs the patch; provider adapters own reported counters, and `usage_storage.py` retains content-free projection and retry exclusions. Aggregate accounting remains with Agno and the session-metrics repair. |
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
