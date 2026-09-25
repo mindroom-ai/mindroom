@@ -35,7 +35,6 @@ from mindroom.runtime_env_policy import (
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
-    SANDBOX_STARTUP_MANIFEST_SHA256_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
     VENDOR_TELEMETRY_ENV_VALUES,
     WORKER_EGRESS_PROXY_ENV_BY_KEY,
@@ -66,7 +65,6 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     AGENT_VAULT_BOOTSTRAP_VOLUME_NAME,
     AGENT_VAULT_CA_VOLUME_NAME,
     AGENT_VAULT_MINT_CONTAINER_NAME,
-    AGENT_VAULT_MINT_TMP_VOLUME_NAME,
     AGENT_VAULT_TOKEN_VOLUME_NAME,
     SANDBOX_RUNNER_CONTAINER_NAME,
     WORKER_CONFIG_VOLUME_NAME,
@@ -126,9 +124,10 @@ _WORKER_EGRESS_PROXY_URL_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["proxy_url"]
 _WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
 _WORKER_EGRESS_PROXY_VAULT_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["vault"]
 _WORKER_EGRESS_PROXY_CA_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
-# HOME is kept on the init container's own /tmp emptyDir (not the shared token
-# volume) so the owner CLI session never lands on a volume the agent-executing
-# container can read. Only the minted proxy token is written to the shared volume.
+# HOME is kept on the init container's own ephemeral filesystem (not the shared
+# token volume) so the owner CLI session never lands on a volume the
+# agent-executing container can read. Only the minted proxy token is written to
+# the shared volume.
 _AGENT_VAULT_MINT_SCRIPT = """\
 set -eu
 export HOME=/tmp/agent-vault-mint-home
@@ -164,7 +163,6 @@ test -s "{token_path}"
 
 _CONTAINER_NAME = SANDBOX_RUNNER_CONTAINER_NAME
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
-_DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
 _CREDENTIALS_ENCRYPTION_KEY_SECRET_SUFFIX = "credentials-encryption-key"  # noqa: S105
 
@@ -1024,13 +1022,8 @@ class KubernetesResourceManager:
                     "mountPath": _AGENT_VAULT_BOOTSTRAP_MOUNT_PATH,
                     "readOnly": True,
                 },
-                {"name": AGENT_VAULT_MINT_TMP_VOLUME_NAME, "mountPath": "/tmp"},  # noqa: S108
             ],
-            "securityContext": {
-                "allowPrivilegeEscalation": False,
-                "readOnlyRootFilesystem": True,
-                "capabilities": {"drop": ["ALL"]},
-            },
+            "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
         }
 
     def _agent_vault_main_env(self, *, worker_key: str) -> list[dict[str, object]]:
@@ -1057,7 +1050,6 @@ class KubernetesResourceManager:
         return [
             {"name": AGENT_VAULT_TOKEN_VOLUME_NAME, "emptyDir": {}},
             {"name": AGENT_VAULT_BOOTSTRAP_VOLUME_NAME, "secret": {"secretName": cfg.bootstrap_secret_name}},
-            {"name": AGENT_VAULT_MINT_TMP_VOLUME_NAME, "emptyDir": {}},
         ]
 
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
@@ -1379,7 +1371,6 @@ class KubernetesResourceManager:
                         worker_id=worker_id,
                         state_subpath=state_subpath,
                         startup_manifest_path=startup_manifest_path,
-                        startup_manifest_hash=startup_manifest_hash,
                         include_agent_vault=include_agent_vault,
                     ),
                     "volumeMounts": self._volume_mounts(
@@ -1518,11 +1509,12 @@ class KubernetesResourceManager:
         worker_id: str,
         state_subpath: str,
         startup_manifest_path: str,
-        startup_manifest_hash: str,
         include_agent_vault: bool,
     ) -> list[dict[str, object]]:
         dedicated_root = f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")
-        venv_path = f"{dedicated_root}/venv"
+        # No PATH or VIRTUAL_ENV here: the long-lived runner resolves uv, node,
+        # chromium, and Xvnc from the image, never from the worker-writable venv.
+        # Tool subprocesses get the worker venv from worker_subprocess_env.
         env: list[dict[str, object]] = [
             {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"], "value": "true"},
             {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], "value": "forkserver"},
@@ -1531,17 +1523,8 @@ class KubernetesResourceManager:
                 "name": SANDBOX_STARTUP_MANIFEST_PATH_ENV,
                 "value": startup_manifest_path,
             },
-            # The manifest sits in the worker's read-write subPath, so the runner
-            # only trusts it against this digest, which lives in the pod spec and
-            # is therefore out of reach of tool code inside the worker.
-            {
-                "name": SANDBOX_STARTUP_MANIFEST_SHA256_ENV,
-                "value": startup_manifest_hash,
-            },
             {"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path},
             {"name": "MINDROOM_STORAGE_PATH", "value": dedicated_root},
-            {"name": "VIRTUAL_ENV", "value": venv_path},
-            {"name": "PATH", "value": f"{venv_path}/bin:{_DEFAULT_CONTAINER_PATH}"},
             {
                 "name": SHARED_CREDENTIALS_PATH_ENV,
                 "value": f"{dedicated_root}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
@@ -1890,18 +1873,21 @@ class KubernetesResourceManager:
             },
         )
         # The worker root is writable so tools can persist state, but the primary keeps
-        # mirroring credentials into `.shared_credentials` on every ensure. Mounting that
-        # directory read-only stops worker code from deleting it or replacing it with a
-        # link into the deployment-wide credential store.
-        mirror_subpath = f"{state_subpath}/{WORKER_SHARED_CREDENTIALS_DIRNAME}"
-        mounts.append(
-            {
+        # mirroring credentials into `.shared_credentials` on every ensure and writes the
+        # startup manifest the runner boots from into `.runtime`. Mounting those
+        # directories read-only stops worker code from rewriting them or replacing them
+        # with links elsewhere.
+        for read_only_subpath in (
+            f"{state_subpath}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
+            str(constants.sandbox_startup_manifest_path(Path(state_subpath)).parent),
+        ):
+            read_only_mount: dict[str, object] = {
                 "name": WORKER_STORAGE_VOLUME_NAME,
-                "mountPath": f"{self.config.storage_mount_path}/{mirror_subpath}",
-                "subPath": mirror_subpath,
+                "mountPath": f"{self.config.storage_mount_path}/{read_only_subpath}",
+                "subPath": read_only_subpath,
                 "readOnly": True,
-            },
-        )
+            }
+            mounts.append(read_only_mount)
         validate_unique_worker_visible_paths(
             (str(mount["mountPath"]) for mount in mounts),
             worker_key=worker_key,

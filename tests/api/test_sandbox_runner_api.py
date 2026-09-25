@@ -22,7 +22,6 @@ import pytest
 from agno.tools import Toolkit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from structlog.testing import capture_logs
 
 import mindroom.api.sandbox_env_assembly as sandbox_env_assembly_module
 import mindroom.api.sandbox_exec as sandbox_exec_module
@@ -184,10 +183,6 @@ def _set_startup_manifest(
     manifest_path: Path,
 ) -> None:
     monkeypatch.setenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", str(manifest_path))
-    monkeypatch.setenv(
-        "MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256",
-        hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-    )
 
 
 def test_worker_tool_validation_snapshot_reads_from_startup_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -421,43 +416,15 @@ def _dedicated_worker_manifest_runtime(tmp_path: Path) -> RuntimePaths:
     )
 
 
-def _point_manifest_at_worker_config(manifest_path: Path, tmp_path: Path) -> None:
-    """Rewrite the manifest the way tool code inside the worker can, to load a config it controls."""
-    worker_config = tmp_path / "worker" / "evil" / "config.yaml"
-    worker_config.parent.mkdir(parents=True, exist_ok=True)
-    worker_config.write_text("agents: {}\nplugins:\n  - ./evil-plugin\n", encoding="utf-8")
+def _rewrite_manifest_config(manifest_path: Path, tmp_path: Path) -> None:
+    """Rewrite the manifest with values that would change the runner if it read the file again."""
+    other_config = tmp_path / "other" / "config.yaml"
+    other_config.parent.mkdir(parents=True, exist_ok=True)
+    other_config.write_text("agents: {}\nplugins:\n  - ./missing-plugin\n", encoding="utf-8")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["runtime_paths"]["config_path"] = str(worker_config)
+    manifest["runtime_paths"]["config_path"] = str(other_config)
     manifest["runtime_paths"]["process_env"]["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] = "inprocess"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-
-def test_startup_manifest_tampered_before_restart_refuses_to_start(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A restarted runner must not boot from a manifest tool code rewrote after the primary pinned its digest."""
-    manifest_path = _write_startup_manifest(runtime_paths=_dedicated_worker_manifest_runtime(tmp_path))
-    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
-    _point_manifest_at_worker_config(manifest_path, tmp_path)
-
-    with pytest.raises(RuntimeError, match="does not match MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256"):
-        sandbox_runner_module.load_config_from_startup_runtime()
-
-
-def test_startup_manifest_matching_pinned_digest_starts(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """The primary's own manifest boots the runner with exactly the values it wrote."""
-    payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
-    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
-    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
-
-    runtime_paths, _config = sandbox_runner_module.load_config_from_startup_runtime()
-
-    assert runtime_paths.config_path == payload_runtime.config_path
-    assert sandbox_exec_module.runner_uses_subprocess(runtime_paths)
 
 
 def test_startup_manifest_rewritten_after_startup_changes_nothing(
@@ -466,8 +433,7 @@ def test_startup_manifest_rewritten_after_startup_changes_nothing(
 ) -> None:
     """Only startup reads the manifest, so a later rewrite neither reroutes the runner nor fails its requests.
 
-    Tool code can rewrite the file at any time, and a Kubernetes primary rewrites it for a replacement
-    pod before the old pod stops serving.
+    A Kubernetes primary rewrites the manifest for a replacement pod before the old pod stops serving.
     """
     payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
     manifest_path = _write_startup_manifest(runtime_paths=payload_runtime, public_runtime=True)
@@ -477,7 +443,7 @@ def test_startup_manifest_rewritten_after_startup_changes_nothing(
     with TestClient(app):
         startup_config = sandbox_runner_module.app_runtime_config(app)
 
-    _point_manifest_at_worker_config(manifest_path, tmp_path)
+    _rewrite_manifest_config(manifest_path, tmp_path)
     runtime_paths = sandbox_runner_module.app_runtime_paths(app)
     response = asyncio.run(
         sandbox_runner_module._execute_request_inprocess(
@@ -498,25 +464,6 @@ def test_startup_manifest_rewritten_after_startup_changes_nothing(
     assert runtime_paths.config_path == payload_runtime.config_path
     assert sandbox_exec_module.runner_uses_subprocess(runtime_paths)
     assert sandbox_runner_module.app_runtime_config(app) is startup_config
-
-
-def test_startup_manifest_without_pinned_digest_starts_unverified(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A container created by a primary that predates the digest still starts, with a warning."""
-    payload_runtime = _dedicated_worker_manifest_runtime(tmp_path)
-    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
-    monkeypatch.setenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", str(manifest_path))
-    monkeypatch.delenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256", raising=False)
-
-    with capture_logs() as logs:
-        runtime_paths, _config = sandbox_runner_module.load_config_from_startup_runtime()
-
-    assert runtime_paths.config_path == payload_runtime.config_path
-    assert [log["event"] for log in logs if log["log_level"] == "warning"] == [
-        "sandbox_startup_manifest_digest_missing",
-    ]
 
 
 def test_startup_runtime_accepts_runtime_paths_json_without_manifest(
@@ -852,9 +799,6 @@ def test_static_runner_credentials_encryption_key_is_removed_from_proc_environ(t
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     env = os.environ.copy()
     env[runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(manifest_path)
-    env[runtime_env_policy.SANDBOX_STARTUP_MANIFEST_SHA256_ENV] = hashlib.sha256(
-        manifest_path.read_bytes(),
-    ).hexdigest()
     env[runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV] = encryption_key
     script = (
         "import os\n"
@@ -1005,9 +949,6 @@ def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_enviro
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     env = os.environ.copy()
     env[runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(manifest_path)
-    env[runtime_env_policy.SANDBOX_STARTUP_MANIFEST_SHA256_ENV] = hashlib.sha256(
-        manifest_path.read_bytes(),
-    ).hexdigest()
     env[runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV] = encryption_key
     script = (
         "import os\n"

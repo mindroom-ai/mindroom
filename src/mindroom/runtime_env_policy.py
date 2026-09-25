@@ -25,7 +25,6 @@ __all__ = [
     "MATRIX_MANAGED_ACCOUNT_AUTH_ENV",
     "SANDBOX_RUNTIME_ENV_BY_KEY",
     "SANDBOX_STARTUP_MANIFEST_PATH_ENV",
-    "SANDBOX_STARTUP_MANIFEST_SHA256_ENV",
     "SESSION_STORAGE_PATH_ENV",
     "SHARED_CREDENTIALS_PATH_ENV",
     "VENDOR_TELEMETRY_ENV_VALUES",
@@ -55,11 +54,6 @@ __all__ = [
 ]
 
 SANDBOX_STARTUP_MANIFEST_PATH_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"
-# The startup manifest lives in the worker's read-write state root, so tool code
-# running inside a worker can rewrite it. The primary pins its digest in the
-# container or pod spec, which tool code cannot change, and the runner refuses to
-# boot from a manifest that does not match it.
-SANDBOX_STARTUP_MANIFEST_SHA256_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256"
 CREDENTIAL_SEEDS_JSON_ENV = "MINDROOM_CREDENTIAL_SEEDS_JSON"
 CREDENTIAL_SEEDS_FILE_ENV = "MINDROOM_CREDENTIAL_SEEDS_FILE"
 CREDENTIALS_ENCRYPTION_KEY_ENV = "MINDROOM_CREDENTIALS_ENCRYPTION_KEY"
@@ -320,7 +314,6 @@ _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
         MATRIX_MANAGED_ACCOUNT_AUTH_ENV,
         SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
         SANDBOX_STARTUP_MANIFEST_PATH_ENV,
-        SANDBOX_STARTUP_MANIFEST_SHA256_ENV,
     },
 )
 # Shared secret stems (api_key/password/secret/token) plus the env-only `_API_KEYS`.

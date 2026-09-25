@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
-import hashlib
 import inspect
 import io
 import json
@@ -44,7 +43,6 @@ from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
-    SANDBOX_STARTUP_MANIFEST_SHA256_ENV,
     sandbox_runner_startup_process_env,
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -115,29 +113,7 @@ def _startup_manifest_path_from_env() -> Path:
 
 
 def _startup_manifest_from_env() -> dict[str, object]:
-    """Read the startup manifest and check it against the digest pinned in the container spec."""
-    manifest_path = _startup_manifest_path_from_env()
-    raw_manifest = manifest_path.read_bytes()
-    expected_digest = os.environ.get(SANDBOX_STARTUP_MANIFEST_SHA256_ENV, "").strip().lower()
-    if expected_digest:
-        if hashlib.sha256(raw_manifest).hexdigest() != expected_digest:
-            msg = (
-                f"Sandbox startup manifest at {manifest_path} does not match {SANDBOX_STARTUP_MANIFEST_SHA256_ENV}; "
-                "refusing to start from a manifest the worker could have rewritten."
-            )
-            raise RuntimeError(msg)
-    else:
-        # LEGACY_COMPAT: Startup manifest published without a pinned digest.
-        # Legacy format: the container or pod spec sets MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH but not
-        # MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256.
-        # Last legacy release: v2026.9.289; replacement: the next release pins the digest beside the path.
-        # Handling: start from the unverified manifest with a warning. The primary sets both variables in the
-        # container spec, which tool code cannot edit, so only a container created by an older primary lands
-        # here, and a current primary recreates it on its next ensure because the spec lacks the digest.
-        # Coverage: tests/api/test_sandbox_runner_api.py::test_startup_manifest_without_pinned_digest_starts_unverified,
-        # tests/test_docker_worker_backend.py::test_docker_backend_recreates_stopped_container_created_without_manifest_digest.
-        logger.warning("sandbox_startup_manifest_digest_missing", manifest_path=str(manifest_path))
-    payload = json.loads(raw_manifest)
+    payload = json.loads(_startup_manifest_path_from_env().read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         msg = f"{SANDBOX_STARTUP_MANIFEST_PATH_ENV} must point to a JSON object."
         raise TypeError(msg)
@@ -326,8 +302,8 @@ def load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
     """Read the sandbox runner runtime context from explicit startup payload.
 
     This is the only read of the startup manifest. The runner keeps the result in
-    memory for its lifetime, so later rewrites of the worker-writable file, by tool
-    code or by the primary publishing a replacement pod's manifest, change nothing.
+    memory for its lifetime, so the primary rewriting the manifest for a replacement
+    pod changes nothing in a runner that is still serving.
     """
     startup_runtime_paths, tool_validation_snapshot = _startup_runtime_payload_from_env()
     runtime_paths = _committed_startup_runtime_paths(startup_runtime_paths)

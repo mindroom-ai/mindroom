@@ -169,11 +169,9 @@ Untrusted code-execution tools may still share the runner container's process na
 For dedicated Kubernetes workers, the exposed environment contains only that worker's derived runner token, not the shared control-plane token.
 This leaves same-worker token exposure as a local containment risk, while per-worker credentials and NetworkPolicy limit cross-worker blast radius.
 
-Tool code can write the sandbox-runner startup manifest, because it lives in the worker's read-write state root.
-The primary therefore pins the manifest's SHA-256 as `MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256` in the container or pod spec, which tool code cannot change.
-The runner reads and verifies the manifest once at startup, refuses to start when it does not match, and keeps the verified values in memory, so later rewrites of the file never change a running worker.
-A tampered manifest keeps the worker down until the primary republishes it, which the Docker backend does before every container start and the Kubernetes backend does whenever it applies the worker Deployment.
-A worker whose container spec predates the digest starts with a warning, and the next ensure from a current primary recreates it with the digest pinned.
+The sandbox-runner startup manifest lives in `.runtime` inside the worker's state root, which dedicated workers mount read-only on both backends, like `.shared_credentials`, so tool code cannot rewrite it before the runner restarts.
+The runner reads the manifest once at startup and keeps it in memory, so the primary rewriting it for a replacement Kubernetes pod never changes a runner that is still serving.
+Docker workers are recreated whenever their launch configuration, mounts, or environment change, including any change to the tool validation snapshot such as a tool or plugin config edit, and Kubernetes worker pods roll on the same changes; either ends the worker's tmux sessions, background shells, and computer sessions.
 
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](kubernetes.md).
 
@@ -578,10 +576,9 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
 
   Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
 - Credential leases are single-use by default and expire after 60 seconds.
-- Dedicated Docker and Kubernetes worker containers mount the root filesystem read-only, with a private writable `/tmp`.
+- Dedicated Docker and Kubernetes worker containers mount the root filesystem read-only, with a private writable `/tmp` (a 1 GiB tmpfs on Docker, an `emptyDir` on Kubernetes).
   The image keeps `/app` writable by the runtime user so trusted primaries can install tool extras, but in a worker that would let tool code replace runner code or dependencies that the runner imports later or boots from after a restart.
   Worker tools install their extras into the worker's own virtualenv on the state mount instead.
-  The Kubernetes Agent Vault mint init container also runs read-only, with its own `/tmp` volume that the runner container never mounts; operator-supplied extra containers keep the security context they are configured with.
   Shared sandbox runners, such as the `static_runner` sidecar and the Compose sandbox service, are not dedicated workers and are unchanged.
 - Kubernetes worker containers drop all capabilities, disable privilege escalation, and inherit the pod's
   `RuntimeDefault` seccomp policy. The optional main-container Localhost profile needed by runtimes that block

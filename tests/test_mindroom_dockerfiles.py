@@ -104,10 +104,7 @@ def test_sandbox_runner_script_imports_existing_public_runtime_serializer() -> N
     """The sandbox sidecar startup script should import the actual constants helper."""
     text = _SANDBOX_RUNNER_SCRIPT.read_text(encoding="utf-8")
 
-    assert (
-        "from mindroom.constants import resolve_primary_runtime_paths, startup_manifest_sha256, write_startup_manifest"
-        in text
-    )
+    assert "from mindroom.constants import resolve_primary_runtime_paths, write_startup_manifest" in text
 
 
 def test_sandbox_runner_script_writes_startup_manifest_expected_by_app() -> None:
@@ -115,25 +112,10 @@ def test_sandbox_runner_script_writes_startup_manifest_expected_by_app() -> None
     text = _SANDBOX_RUNNER_SCRIPT.read_text(encoding="utf-8")
 
     assert "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH" in text
-    assert 'startup_manifest_state="$(' in text
-    assert "export MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH" in text
+    assert 'startup_manifest_path="$(' in text
+    assert 'export MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH="${startup_manifest_path}"' in text
     assert 'export MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH="$(' not in text
     assert "MINDROOM_RUNTIME_PATHS_JSON" not in text
-
-
-def test_sandbox_runner_script_does_not_resolve_its_interpreter_through_path() -> None:
-    """Dedicated workers put a worker-writable venv first on PATH, so PID 1 must not look up bash there."""
-    text = _SANDBOX_RUNNER_SCRIPT.read_text(encoding="utf-8")
-
-    assert text.startswith("#!/bin/bash\n")
-
-
-def test_sandbox_runner_script_publishes_startup_manifest_digest() -> None:
-    """A self-derived manifest must ship the digest the runner verifies it against."""
-    text = _SANDBOX_RUNNER_SCRIPT.read_text(encoding="utf-8")
-
-    assert "startup_manifest_sha256(runtime_paths, public_runtime=True)" in text
-    assert "export MINDROOM_SANDBOX_STARTUP_MANIFEST_SHA256" in text
 
 
 def test_platform_backend_kubectl_matches_target_architecture() -> None:
