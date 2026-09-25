@@ -17,7 +17,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.custom_tools.excel_workbooks import parse_edits
-from mindroom.custom_tools.microsoft_365 import DOCUMENT_CONTENT_KEY, Microsoft365Tools
+from mindroom.custom_tools.microsoft_365 import _DOCUMENT_CONTENT_KEY, Microsoft365Tools
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.microsoft import microsoft_365_oauth_provider
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -149,7 +149,7 @@ async def build_microsoft_365_contract(tmp_path: Path) -> dict[str, object]:
             msg = f"Microsoft 365 contract case {case_id!r} did not post a card: {result!r}"
             raise RuntimeError(msg)
         content = context.client.room_send.await_args.kwargs["content"]
-        if DOCUMENT_CONTENT_KEY not in content:
+        if _DOCUMENT_CONTENT_KEY not in content:
             msg = f"Microsoft 365 contract case {case_id!r} posted a card without document metadata"
             raise RuntimeError(msg)
         exported.append(

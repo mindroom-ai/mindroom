@@ -59,6 +59,8 @@ Each edit names a sheet-qualified range, the `before` formulas the agent read, t
 Formulas are Graph's input representation: constants appear as themselves and formulas start with `=`, so comparing them detects human edits even when recalculation changes displayed values.
 One call accepts at most 25 non-overlapping edits, 500 cells, and 200,000 characters of cell text.
 Cells must not be null, because Graph skips null cells instead of clearing them; `""` clears a cell.
+In `number_format`, `null` keeps a cell's format, and integers beyond 2^53 are rejected because Excel stores doubles.
+Numbers compare exactly apart from last-digit double rounding, and formulas compare without regard to case outside string literals.
 
 Graph parses written cells as if typed, so text such as `0042`, `12%`, `1/2`, or `TRUE` would silently become a number, date, or boolean.
 Such text in `after` is rejected unless that cell's `number_format` is `@`, and numbers must be written as JSON numbers.
@@ -90,7 +92,8 @@ Undo is another `edit_office_document` call with `before` and `after` swapped an
 ### Saving new workbooks
 
 `save_office_document` uploads to the user's OneDrive `MindRoom` folder, or to a folder resolved from `folder_url`.
-It checks for the first free name among `Name.xlsx`, `Name (2).xlsx`, and so on, then uploads with `@microsoft.graph.conflictBehavior=rename`, so a concurrent upload of the same name gets renamed instead of replacing a file.
+It checks for the first free name among `Name.xlsx`, `Name (2).xlsx`, and so on, then uploads through a Graph upload session whose documented `fail` conflict behavior refuses a name taken in the meantime, so an existing file is never replaced.
+The preauthenticated session URL never receives the bearer token.
 Uploads are limited to 25 MB and to `.xlsx` in phase 1.
 
 ## Document cards
@@ -117,7 +120,8 @@ Document cards are Matrix `m.notice` events in the current thread carrying `io.m
 
 `event` is `connected`, `saved`, or `edited`.
 `web_url` is Graph's browser editor link, and `file_url` is the WebDAV path Office desktop apps open.
-An `edited` card adds `change` with the summary, per-edit outcomes, the changed cell count, and whether every applied edit verified.
+An `edited` card adds `change` with the summary, per-edit ranges and outcomes, the changed cell count, and whether every applied edit verified; cell contents stay in the agent's result.
+When the workbook changed but the follow-up metadata read fails, the agent still receives the full receipt and no card is posted.
 Cards never contain access tokens or Graph preview URLs, because those act with the viewer's own permissions.
 The web URL reveals a file's name and location to room members, which is inherent in connecting a document in a shared room; access still requires SharePoint permission.
 

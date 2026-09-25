@@ -18,9 +18,9 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.providers import OAuthClientConfig, OAuthTokenResult
 
-MICROSOFT_365_PROVIDER_ID = "microsoft_365"
-MICROSOFT_365_CLIENT_CONFIG_SERVICE = "microsoft_365_oauth_client"
-MICROSOFT_365_TENANT_ENV = "MICROSOFT_365_TENANT_ID"
+_MICROSOFT_365_PROVIDER_ID = "microsoft_365"
+_MICROSOFT_365_CLIENT_CONFIG_SERVICE = "microsoft_365_oauth_client"
+_MICROSOFT_365_TENANT_ENV = "MICROSOFT_365_TENANT_ID"
 _AUTHORITY = "https://login.microsoftonline.com"
 # The Excel REST API supports only work or school (business) storage, not consumer OneDrive.
 # `organizations` needs a multi-tenant app registration; single-tenant apps set the tenant.
@@ -36,12 +36,12 @@ _TENANT_PATTERN = re.compile(
 )
 
 
-def normalize_tenant_id(value: str) -> str:
+def _normalize_tenant_id(value: str) -> str:
     """Return a tenant GUID, verified domain, or ``organizations``, lowercased."""
     tenant = value.strip().lower()
     if not _TENANT_PATTERN.fullmatch(tenant):
         msg = (
-            f"{MICROSOFT_365_TENANT_ENV} must be a tenant GUID, a verified domain such as contoso.onmicrosoft.com, "
+            f"{_MICROSOFT_365_TENANT_ENV} must be a tenant GUID, a verified domain such as contoso.onmicrosoft.com, "
             "or 'organizations'."
         )
         raise OAuthProviderError(msg)
@@ -57,8 +57,8 @@ def _endpoints(tenant: str) -> OAuthRuntimeEndpoints:
 
 def _configured_tenant(runtime_paths: RuntimePaths) -> str:
     """Read the optional tenant from the runtime environment, defaulting to any work or school tenant."""
-    tenant = (runtime_paths.env_value(MICROSOFT_365_TENANT_ENV) or "").strip()
-    return normalize_tenant_id(tenant) if tenant else _DEFAULT_TENANT
+    tenant = (runtime_paths.env_value(_MICROSOFT_365_TENANT_ENV) or "").strip()
+    return _normalize_tenant_id(tenant) if tenant else _DEFAULT_TENANT
 
 
 async def _tenant_endpoints(_provider: OAuthProvider, runtime_paths: RuntimePaths) -> OAuthRuntimeEndpoints:
@@ -90,14 +90,14 @@ def microsoft_365_oauth_provider() -> OAuthProvider:
     """Return the Microsoft 365 provider; tokens always belong to the requesting user."""
     default_endpoints = _endpoints(_DEFAULT_TENANT)
     return OAuthProvider(
-        id=MICROSOFT_365_PROVIDER_ID,
+        id=_MICROSOFT_365_PROVIDER_ID,
         display_name="Microsoft 365",
         authorization_url=default_endpoints.authorization_url,
         token_url=default_endpoints.token_url,
         scopes=_SCOPES,
-        credential_service=f"{MICROSOFT_365_PROVIDER_ID}_oauth",
-        tool_config_service=MICROSOFT_365_PROVIDER_ID,
-        client_config_services=(MICROSOFT_365_CLIENT_CONFIG_SERVICE,),
+        credential_service=f"{_MICROSOFT_365_PROVIDER_ID}_oauth",
+        tool_config_service=_MICROSOFT_365_PROVIDER_ID,
+        client_config_services=(_MICROSOFT_365_CLIENT_CONFIG_SERVICE,),
         requester_scoped_credentials=True,
         status_capabilities=("OneDrive and SharePoint Excel workbooks",),
         token_parser=_microsoft_token_parser,

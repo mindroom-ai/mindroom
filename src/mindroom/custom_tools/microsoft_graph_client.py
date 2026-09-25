@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -21,8 +22,7 @@ from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-GRAPH_ORIGIN = "https://graph.microsoft.com"
-_GRAPH_ROOT = f"{GRAPH_ORIGIN}/v1.0"
+_GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
 _REQUEST_TIMEOUT_SECONDS = 20.0
 _REQUEST_DEADLINE_SECONDS = 60.0
 _UPLOAD_DEADLINE_SECONDS = 180.0
@@ -30,7 +30,8 @@ _MAX_JSON_RESPONSE_BYTES = 32 * 1024 * 1024
 _MAX_SHARE_URL_CHARS = 2048
 _MAX_ERROR_MESSAGE_CHARS = 300
 _URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
-_ID_PART_PATTERN = re.compile(r"[A-Za-z0-9!_.-]{1,256}")
+# A leading dot is refused so no part can be a "." or ".." path segment.
+_ID_PART_PATTERN = re.compile(r"[A-Za-z0-9!_-][A-Za-z0-9!_.-]{0,255}")
 _GRAPH_CODE_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,100}")
 _STATUS_ERROR_CODES = {
     400: "invalid_request",
@@ -58,9 +59,21 @@ class GraphAccessRejectedError(GraphError):
     """Microsoft Graph rejected the access token, so the requester must reconnect."""
 
 
+class InvalidArgumentError(GraphError):
+    """A model-supplied argument was rejected before any network access."""
+
+    def __init__(self, message: str, **details: object) -> None:
+        super().__init__(code="invalid_argument", message=message, **details)
+
+
+def graph_object(value: object) -> dict[str, Any]:
+    """Return a decoded Graph JSON object, or an empty one for anything else."""
+    return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+
+
 @dataclass(frozen=True, slots=True)
 class DocumentRef:
-    """One OneDrive or SharePoint file, identified by its Graph drive and item IDs."""
+    """One OneDrive or SharePoint drive item, identified by its Graph drive and item IDs."""
 
     drive_id: str
     item_id: str
@@ -81,6 +94,22 @@ class DocumentRef:
             raise GraphError(code="invalid_document_id", message=msg)
         return cls(drive_id=drive_id, item_id=item_id)
 
+    @classmethod
+    def from_item(cls, item: dict[str, Any]) -> DocumentRef:
+        """Return the reference for a driveItem, or raise when Graph omitted its identity."""
+        invalid = GraphError(
+            code="invalid_response",
+            message="Microsoft Graph returned an item without a usable drive and item ID.",
+        )
+        drive_id = graph_object(item.get("parentReference")).get("driveId")
+        item_id = item.get("id")
+        if not isinstance(drive_id, str) or not isinstance(item_id, str):
+            raise invalid
+        try:
+            return cls(drive_id=drive_id, item_id=item_id)
+        except GraphError:
+            raise invalid from None
+
     @property
     def document_id(self) -> str:
         """Return the stable ID agents pass back to later calls."""
@@ -96,26 +125,26 @@ def graph_path(*segments: str) -> str:
     return "/" + "/".join(quote(segment, safe="!") for segment in segments)
 
 
-def share_id(url: object) -> str:
-    """Encode a OneDrive or SharePoint link as a Graph share ID, rejecting anything but a plain HTTPS URL."""
-    text = url.strip() if isinstance(url, str) else ""
+def _plain_https_url(text: str) -> bool:
     try:
         parts = urlsplit(text)
         port = parts.port
     except ValueError:
-        parts = None
-        port = None
-    if (
-        parts is None
-        or not text
-        or len(text) > _MAX_SHARE_URL_CHARS
-        or parts.scheme.lower() != "https"
-        or not parts.hostname
-        or parts.username is not None
-        or parts.password is not None
-        or port not in (None, 443)
-        or any(not char.isprintable() or char.isspace() for char in text)
-    ):
+        return False
+    return (
+        parts.scheme.lower() == "https"
+        and bool(parts.hostname)
+        and parts.username is None
+        and parts.password is None
+        and port in (None, 443)
+        and not any(not char.isprintable() or char.isspace() for char in text)
+    )
+
+
+def share_id(url: object) -> str:
+    """Encode a OneDrive or SharePoint link as a Graph share ID, rejecting anything but a plain HTTPS URL."""
+    text = url.strip() if isinstance(url, str) else ""
+    if not text or len(text) > _MAX_SHARE_URL_CHARS or not _plain_https_url(text):
         msg = "url must be an https:// OneDrive or SharePoint link without credentials."
         raise GraphError(code="invalid_url", message=msg)
     encoded = base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
@@ -138,7 +167,7 @@ def _graph_error_fields(content: bytes | None) -> dict[str, object]:
         payload = json.loads(content) if content else None
     except ValueError:
         return {}
-    error = payload.get("error") if isinstance(payload, dict) else None
+    error = graph_object(payload).get("error")
     if not isinstance(error, dict):
         return {}
     fields: dict[str, object] = {}
@@ -209,25 +238,22 @@ def _decoded_json(status_code: int, content: bytes | None, headers: httpx.Header
 
 async def _send(
     method: str,
-    path: str,
-    access_token: str,
+    url: str,
     *,
-    params: Mapping[str, str] | None,
-    json_body: object,
-    content: bytes | None,
-    deadline_seconds: float,
+    headers: dict[str, str],
+    params: Mapping[str, str] | None = None,
+    json_body: object = None,
+    content: bytes | None = None,
+    deadline_seconds: float = _REQUEST_DEADLINE_SECONDS,
 ) -> object:
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
-    if content is not None:
-        headers["Content-Type"] = "application/octet-stream"
     try:
         async with (
             asyncio.timeout(deadline_seconds),
             _new_http_client() as client,
             client.stream(
                 method,
-                f"{_GRAPH_ROOT}{path}",
-                headers=headers,
+                url,
+                headers={"Accept": "application/json", **headers},
                 params=dict(params) if params else None,
                 json=json_body,
                 content=content,
@@ -261,29 +287,41 @@ async def graph_json(
     """Send one bearer request to a Graph v1.0 path and return its decoded JSON."""
     return await _send(
         method,
-        path,
-        access_token,
+        f"{_GRAPH_ROOT}{path}",
+        headers={"Authorization": f"Bearer {access_token}"},
         params=params,
         json_body=json_body,
-        content=None,
-        deadline_seconds=_REQUEST_DEADLINE_SECONDS,
     )
 
 
-async def graph_upload(
-    access_token: str,
-    path: str,
-    content: bytes,
-    *,
-    params: Mapping[str, str] | None = None,
-) -> object:
-    """PUT one file body to a Graph v1.0 content path and return the resulting driveItem."""
-    return await _send(
-        "PUT",
-        path,
-        access_token,
-        params=params,
-        json_body=None,
-        content=content,
-        deadline_seconds=_UPLOAD_DEADLINE_SECONDS,
+async def graph_upload_new(access_token: str, folder: DocumentRef, name: str, content: bytes) -> object:
+    """Upload a new file into a folder through an upload session, failing with ``conflict`` if the name exists.
+
+    Upload sessions document ``@microsoft.graph.conflictBehavior``, so ``fail`` guarantees an existing
+    file is never replaced. The session URL is preauthenticated and never receives the bearer token.
+    """
+    session = graph_object(
+        await graph_json(
+            access_token,
+            "POST",
+            f"{folder.path()}:{graph_path(name)}:/createUploadSession",
+            json_body={"item": {"@microsoft.graph.conflictBehavior": "fail", "name": name}},
+        ),
     )
+    upload_url = session.get("uploadUrl")
+    if not isinstance(upload_url, str) or not _plain_https_url(upload_url):
+        raise GraphError(code="invalid_response", message="Microsoft Graph returned an unusable upload session.")
+    try:
+        return await _send(
+            "PUT",
+            upload_url,
+            headers={"Content-Range": f"bytes 0-{len(content) - 1}/{len(content)}"},
+            content=content,
+            deadline_seconds=_UPLOAD_DEADLINE_SECONDS,
+        )
+    except GraphError as exc:
+        if exc.code == "conflict":
+            # Release the uploaded bytes now instead of when the session expires.
+            with contextlib.suppress(GraphError):
+                await _send("DELETE", upload_url, headers={})
+        raise

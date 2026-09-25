@@ -34,6 +34,8 @@ from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loa
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tools.file import file_tools
+from tests.microsoft_graph_test_support import ALICE_TOKEN, FakeGraph, publish_grant, save_client_config, worker_target
+from tests.microsoft_graph_test_support import runtime_paths as microsoft_runtime_paths
 from tests.test_attachments_tool import _tool_context
 from tests.test_browser_upload_safety import _capture_uploads, _upload, _upload_tool
 from tests.test_e2b_tools import _FakeSandbox
@@ -43,8 +45,6 @@ from tests.test_google_drive_oauth_tool import (
     _runtime_paths_with_google_drive_client,
     _valid_credentials,
 )
-from tests.microsoft_graph_test_support import ALICE_TOKEN, FakeGraph, publish_grant, save_client_config, worker_target
-from tests.microsoft_graph_test_support import runtime_paths as microsoft_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

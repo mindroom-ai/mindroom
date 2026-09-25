@@ -43,6 +43,7 @@ SHARE_URL = "https://contoso.sharepoint.com/:x:/s/finance/EabcDEF?e=xyz"
 WEB_URL = "https://contoso.sharepoint.com/sites/finance/_layouts/15/Doc.aspx?sourcedoc=%7BA1B2%7D&file=Forecast.xlsx&action=default"
 ROOM_ID = "!room:example.org"
 THREAD_ID = "$thread"
+UPLOAD_HOST = "contoso-my.sharepoint.com"
 
 _CELL = re.compile(r"\$?([A-Z]{1,3})\$?([0-9]{1,7})")
 
@@ -202,8 +203,9 @@ class FakeGraph:
     me_folders: dict[str, dict[str, Any]] = field(default_factory=dict)
     folder_children: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     overrides: dict[tuple[str, str], Handler] = field(default_factory=dict)
-    before_patch: Callable[[FakeSheet, str], None] | None = None
+    upload_sessions: dict[str, tuple[str, str, str]] = field(default_factory=dict)
     patch_transform: Callable[[list[list[Any]]], list[list[Any]]] | None = None
+    format_transform: Callable[[str], str] | None = None
     requests: list[httpx.Request] = field(default_factory=list)
 
     @classmethod
@@ -227,6 +229,8 @@ class FakeGraph:
     def handle(self, request: httpx.Request) -> httpx.Response:
         """Record and answer one request."""
         self.requests.append(request)
+        if request.url.host == UPLOAD_HOST:
+            return self._upload_session(request)
         assert request.url.host == "graph.microsoft.com"
         path = unquote(request.url.path.removeprefix("/v1.0"))
         if (override := self.overrides.get((request.method, path))) is not None:
@@ -247,8 +251,10 @@ class FakeGraph:
             if workbook is None:
                 return graph_error(404, "itemNotFound", "Not found")
             return self._workbook(request, workbook, match.group(3))
-        if match := re.fullmatch(r"/drives/([^/]+)/items/([^/:]+):/(.+):/content", path):
-            return self._upload(request, match.group(1), match.group(2), match.group(3))
+        if match := re.fullmatch(r"/drives/([^/]+)/items/([^/:]+):/(.+):/createUploadSession", path):
+            session = f"session-{len(self.upload_sessions)}"
+            self.upload_sessions[session] = (match.group(1), match.group(2), match.group(3))
+            return httpx.Response(200, json={"uploadUrl": f"https://{UPLOAD_HOST}/up/{session}"})
         if match := re.fullmatch(r"/drives/([^/]+)/items/([^/:]+):/([^/]+)", path):
             existing = self.folder_children.get(match.group(2), {}).get(match.group(3))
             return httpx.Response(200, json=existing) if existing else graph_error(404, "itemNotFound", "Not found")
@@ -291,8 +297,6 @@ class FakeGraph:
             address = match.group(2)
             if request.method == "PATCH":
                 body = json.loads(request.content)
-                if self.before_patch is not None:
-                    self.before_patch(sheet, address)
                 if "formulas" in body:
                     formulas = body["formulas"]
                     sheet.set(address, self.patch_transform(formulas) if self.patch_transform else formulas)
@@ -300,7 +304,9 @@ class FakeGraph:
                     top, left, _bottom, _right = _bounds(address)
                     for row_offset, row in enumerate(body["numberFormat"]):
                         for column_offset, value in enumerate(row):
-                            sheet.formats[(top + row_offset, left + column_offset)] = value
+                            if value is not None:
+                                stored = self.format_transform(value) if self.format_transform else value
+                                sheet.formats[(top + row_offset, left + column_offset)] = stored
             return httpx.Response(
                 200,
                 json={
@@ -312,13 +318,18 @@ class FakeGraph:
             )
         return graph_error(404, "invalidRequest", f"no fake workbook route for {rest}")
 
-    def _upload(self, request: httpx.Request, drive_id: str, folder_id: str, name: str) -> httpx.Response:
+    def _upload_session(self, request: httpx.Request) -> httpx.Response:
+        """Answer the preauthenticated upload URL, which must never receive the bearer token."""
+        assert "authorization" not in request.headers
+        session = request.url.path.rsplit("/", 1)[-1]
+        if request.method == "DELETE":
+            self.upload_sessions.pop(session, None)
+            return httpx.Response(204)
+        drive_id, folder_id, name = self.upload_sessions[session]
+        assert request.headers["content-range"] == f"bytes 0-{len(request.content) - 1}/{len(request.content)}"
         children = self.folder_children.setdefault(folder_id, {})
         if name in children:
-            if request.url.params.get("@microsoft.graph.conflictBehavior") != "rename":
-                return graph_error(409, "nameAlreadyExists", "The specified item name already exists.")
-            stem, _, suffix = name.rpartition(".")
-            name = f"{stem} 1.{suffix}"
+            return graph_error(409, "nameAlreadyExists", "Another file exists with the same name.")
         item_id = f"01NEW{len(self.items)}"
         item = drive_item(item_id, name=name, drive_id=drive_id)
         item["size"] = len(request.content)

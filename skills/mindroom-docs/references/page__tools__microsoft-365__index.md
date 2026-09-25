@@ -1,13 +1,9 @@
----
-icon: lucide/sheet
----
-
 # Microsoft 365
 
 The `microsoft_365` tool connects OneDrive and SharePoint Excel workbooks to a conversation and edits them in place.
 Each requester connects their own work or school Microsoft account, so agents see and change only the files that person can open.
 Every edit is reviewed and approved by a human before it is written, and the tool refuses to overwrite cells that changed after the agent read them.
-MindRoom owns the OAuth state, callback, token refresh, and credential storage through its [OAuth framework](../oauth-framework.md).
+MindRoom owns the OAuth state, callback, token refresh, and credential storage through its [OAuth framework](https://docs.mindroom.chat/oauth-framework/).
 
 ## What It Does
 
@@ -78,7 +74,7 @@ Microsoft Graph offers no conditional write for workbook ranges, so conflict det
 ### Saving new workbooks
 
 `save_office_document` uploads a workbook the agent created in its workspace, for example with Python.
-The path follows the agent's [`file_access`](../architecture/security-posture.md) setting.
+The path follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/) setting.
 By default the file lands in a `MindRoom` folder in the requester's OneDrive, created when missing; `folder_url` selects another OneDrive or SharePoint folder.
 An existing file is never replaced: the tool picks the first free name among `Name.xlsx`, `Name (2).xlsx`, and so on, and uploads through a Graph upload session whose `fail` conflict behavior refuses a name taken in the meantime, moving on to the next candidate.
 The upload session URL is preauthenticated by Microsoft and never receives the bearer token.
@@ -98,7 +94,7 @@ For a local installation, the redirect URI is `http://localhost:8765/api/oauth/m
 MindRoom derives callback URLs from `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, so set one of them for a hosted installation.
 
 Store the application (client) ID and secret in the `microsoft_365_oauth_client` credential service through the dashboard credentials page.
-For non-interactive deployments, seed it at startup with a [credential seed](../configuration/index.md#credential-seeds):
+For non-interactive deployments, seed it at startup with a [credential seed](https://docs.mindroom.chat/configuration/#credential-seeds):
 
 ```json
 [

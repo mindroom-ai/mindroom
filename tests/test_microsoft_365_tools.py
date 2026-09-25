@@ -27,11 +27,13 @@ from tests.microsoft_graph_test_support import (
     ROOM_ID,
     SHARE_URL,
     THREAD_ID,
+    UPLOAD_HOST,
     WEB_URL,
     FakeGraph,
     bearer,
     drive_item,
     folder_item,
+    graph_error,
     publish_grant,
     runtime_paths,
     save_client_config,
@@ -41,6 +43,8 @@ from tests.microsoft_graph_test_support import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import httpx
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
@@ -317,9 +321,14 @@ async def test_save_creates_the_mindroom_folder_and_never_replaces_files(
     assert result["status"] == "ok"
     assert result["document"]["name"] == "Forecast (2).xlsx"
     assert graph.folder_children["FOLDER-MindRoom"]["Forecast.xlsx"]["id"] == "01OLD"
+    [session] = [request for request in graph.requests if request.url.path.endswith("createUploadSession")]
+    assert json.loads(session.content) == {
+        "item": {"@microsoft.graph.conflictBehavior": "fail", "name": "Forecast (2).xlsx"},
+    }
     [upload] = [request for request in graph.requests if request.method == "PUT"]
+    assert upload.url.host == UPLOAD_HOST
+    assert "authorization" not in upload.headers
     assert upload.content == b"PK\x03\x04workbook"
-    assert upload.url.params["@microsoft.graph.conflictBehavior"] == "rename"
     [card] = _sent_cards(context)
     assert card["io.mindroom.document"]["event"] == "saved"
 
@@ -367,3 +376,179 @@ async def test_save_refuses_paths_names_and_files_it_must_not_upload(
     assert text["code"] == fake["code"] == big["code"] == unsafe["code"] == "invalid_argument"
     assert "upload limit" in big["message"]
     assert graph.requests == []
+
+
+def _workspace_with(tmp_path: Path, name: str = "Forecast.xlsx") -> Path:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    (workspace / name).write_bytes(b"PK\x03\x04workbook")
+    return workspace
+
+
+@pytest.mark.asyncio
+async def test_save_moves_on_when_a_name_is_taken_between_check_and_upload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent upload of the same name makes the session fail, not replace, and the next name is used."""
+    paths, manager, graph = _setup(tmp_path, monkeypatch)
+    graph.me_folders["MindRoom"] = folder_item("FOLDER-MindRoom")
+    graph.folder_children["FOLDER-MindRoom"] = {"Forecast.xlsx": drive_item("01RACE")}
+    child = f"/drives/{DRIVE_ID}/items/FOLDER-MindRoom:/Forecast.xlsx"
+    graph.overrides[("GET", child)] = lambda _request: graph_error(404, "itemNotFound", "Not found")
+    result = json.loads(
+        await _tool(paths, manager, workspace=_workspace_with(tmp_path)).save_office_document("Forecast.xlsx"),
+    )
+
+    assert result["document"]["name"] == "Forecast (2).xlsx"
+    assert graph.folder_children["FOLDER-MindRoom"]["Forecast.xlsx"]["id"] == "01RACE"
+    assert [request.method for request in graph.requests if request.url.host == UPLOAD_HOST] == ["PUT", "DELETE", "PUT"]
+
+
+@pytest.mark.asyncio
+async def test_save_into_a_linked_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """folder_url resolves a shared folder and uploads there."""
+    paths, manager, graph = _setup(tmp_path, monkeypatch)
+    folder_url = "https://contoso.sharepoint.com/:f:/s/finance/reports"
+    graph.items[(DRIVE_ID, "01REPORTS")] = folder_item("01REPORTS")
+    graph.shares[microsoft_365.share_id(folder_url)] = (DRIVE_ID, "01REPORTS")
+    result = json.loads(
+        await _tool(paths, manager, workspace=_workspace_with(tmp_path)).save_office_document(
+            "Forecast.xlsx",
+            folder_url=folder_url,
+        ),
+    )
+
+    assert result["status"] == "ok"
+    assert "Forecast.xlsx" in graph.folder_children["01REPORTS"]
+    assert graph.me_folders == {}
+
+
+@pytest.mark.asyncio
+async def test_save_reports_when_every_candidate_name_is_taken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """After the numbered candidates run out, nothing is uploaded."""
+    paths, manager, graph = _setup(tmp_path, monkeypatch)
+    graph.me_folders["MindRoom"] = folder_item("FOLDER-MindRoom")
+    graph.folder_children["FOLDER-MindRoom"] = {
+        name: drive_item(f"01T{index}")
+        for index, name in enumerate(["Forecast.xlsx", *(f"Forecast ({n}).xlsx" for n in range(2, 21))])
+    }
+    result = json.loads(
+        await _tool(paths, manager, workspace=_workspace_with(tmp_path)).save_office_document("Forecast.xlsx"),
+    )
+
+    assert result["code"] == "name_unavailable"
+    assert not [request for request in graph.requests if request.url.host == UPLOAD_HOST]
+
+
+@pytest.mark.asyncio
+async def test_save_refuses_a_mindroom_file_in_place_of_the_folder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file named MindRoom is never used as a folder."""
+    paths, manager, graph = _setup(tmp_path, monkeypatch)
+    graph.me_folders["MindRoom"] = drive_item("01FILE", name="MindRoom")
+    result = json.loads(
+        await _tool(paths, manager, workspace=_workspace_with(tmp_path)).save_office_document("Forecast.xlsx"),
+    )
+
+    assert result["code"] == "not_a_folder"
+    assert "pass folder_url" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_save_uses_a_folder_another_request_created_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A folder-creation conflict re-reads the folder created by the other request."""
+    paths, manager, graph = _setup(tmp_path, monkeypatch)
+
+    def created_elsewhere(_request: httpx.Request) -> httpx.Response:
+        graph.me_folders["MindRoom"] = folder_item("FOLDER-MindRoom")
+        return graph_error(409, "nameAlreadyExists", "The specified item name already exists.")
+
+    graph.overrides[("POST", "/me/drive/root/children")] = created_elsewhere
+    result = json.loads(
+        await _tool(paths, manager, workspace=_workspace_with(tmp_path)).save_office_document("Forecast.xlsx"),
+    )
+
+    assert result["status"] == "ok"
+    assert "Forecast.xlsx" in graph.folder_children["FOLDER-MindRoom"]
+
+
+@pytest.mark.asyncio
+async def test_edit_keeps_the_receipt_when_the_follow_up_read_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a write lands, a failed metadata read still returns the receipt instead of a plain error."""
+    paths, manager, graph = _setup(tmp_path, monkeypatch)
+    graph.overrides[("GET", f"/drives/{DRIVE_ID}/items/{ITEM_ID}")] = lambda _request: graph_error(
+        429,
+        "TooManyRequests",
+        "Slow down.",
+    )
+    context = _context(paths)
+    with tool_runtime_context(context):
+        result = json.loads(
+            await _tool(paths, manager).edit_office_document(DOCUMENT_ID, [_growth_edit()], "Raise growth to 12%"),
+        )
+
+    assert result["status"] == "ok"
+    assert result["result"] == "applied"
+    assert result["card_posted"] is False
+    assert result["card_error"]["code"] == "rate_limited"
+    assert graph.workbooks[(DRIVE_ID, ITEM_ID)].sheet("Assumptions").formulas[(4, 2)] == 0.12
+    assert context.client.room_send.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_partial_edit_card_omits_cell_contents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The room card lists outcomes only; conflicting and written grids stay in the agent's receipt."""
+    paths, manager, graph = _setup(tmp_path, monkeypatch)
+    graph.workbooks[(DRIVE_ID, ITEM_ID)].sheet("Assumptions").set("B4", [[0.11]])
+    context = _context(paths)
+    edits = [_growth_edit(), {"range": "Assumptions!B5", "before": [[142]], "after": [[150]]}]
+    with tool_runtime_context(context):
+        result = json.loads(
+            await _tool(paths, manager).edit_office_document(DOCUMENT_ID, edits, "Adjust inputs", skip_conflicts=True),
+        )
+
+    assert result["code"] == "partial"
+    assert result["message"] == "Some edits were applied; check each edit's outcome."
+    assert result["edits"][0]["current"] == [[0.11]]
+    [card] = _sent_cards(context)
+    assert card["io.mindroom.document"]["change"]["edits"] == [
+        {"range": "Assumptions!B4", "outcome": "conflict", "cells_changed": 0},
+        {"range": "Assumptions!B5", "outcome": "applied", "cells_changed": 1, "verified": True},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_edit_explains_later_edits_were_not_attempted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed first write returns the failure message and posts no card."""
+    paths, manager, graph = _setup(tmp_path, monkeypatch)
+    path = (
+        f"/drives/{DRIVE_ID}/items/{ITEM_ID}/workbook/worksheets/{{00000000-0001-0000-0000-000000000000}}"
+        "/range(address='B4')"
+    )
+
+    def locked(request: httpx.Request) -> httpx.Response:
+        if request.method == "PATCH":
+            return graph_error(423, "resourceLocked", "Locked.")
+        return graph._route(request, path)
+
+    graph.overrides[("GET", path)] = locked
+    graph.overrides[("PATCH", path)] = locked
+    context = _context(paths)
+    with tool_runtime_context(context):
+        result = json.loads(await _tool(paths, manager).edit_office_document(DOCUMENT_ID, [_growth_edit()], "x"))
+
+    assert result["code"] == "failed"
+    assert result["message"] == "The first write failed and later edits were not attempted; check each edit's outcome."
+    assert context.client.room_send.await_count == 0

@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.oauth.credential_lifecycle import oauth_credentials_have_required_scopes
-from mindroom.oauth.microsoft import microsoft_365_oauth_provider, normalize_tenant_id
+from mindroom.oauth.microsoft import _normalize_tenant_id, microsoft_365_oauth_provider
 from mindroom.oauth.providers import OAuthClientConfig, OAuthProviderError
 from mindroom.oauth.registry import load_oauth_providers
 from tests.microsoft_graph_test_support import runtime_paths, save_client_config
@@ -88,7 +88,7 @@ def test_invalid_tenants_are_rejected(tmp_path: Path, tenant: str) -> None:
     with pytest.raises(OAuthProviderError, match="MICROSOFT_365_TENANT_ID"):
         asyncio.run(microsoft_365_oauth_provider().runtime_endpoints(paths))
     with pytest.raises(OAuthProviderError):
-        normalize_tenant_id(tenant)
+        _normalize_tenant_id(tenant)
 
 
 @pytest.mark.parametrize(
