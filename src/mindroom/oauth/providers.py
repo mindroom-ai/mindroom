@@ -334,12 +334,13 @@ def _decode_jwt_claims_unverified(token: str) -> dict[str, Any]:
     return claims if isinstance(claims, dict) else {}
 
 
-def _default_token_parser(
+def default_oauth_token_parser(
     provider: OAuthProvider,
     token_response: Mapping[str, Any],
     client_config: OAuthClientConfig,
     runtime_paths: RuntimePaths,
 ) -> OAuthTokenResult:
+    """Normalize a standard OAuth token response; provider parsers may preprocess and delegate here."""
     del runtime_paths
     access_token = token_response.get("access_token")
     if not isinstance(access_token, str) or not access_token:
@@ -838,7 +839,7 @@ class OAuthProvider:
         if not isinstance(token_response, Mapping):
             msg = "OAuth token exchange failed"
             raise OAuthProviderError(msg)
-        parser = self.token_parser or _default_token_parser
+        parser = self.token_parser or default_oauth_token_parser
         token_response = dict(token_response)
         token_response["_mindroom_token_url"] = endpoints.token_url
         result = await asyncio.to_thread(parser, self, token_response, client_config, runtime_paths)
@@ -902,7 +903,7 @@ class OAuthProvider:
             and token_data.get("_oauth_claims_verified") is True
         ):
             refresh_response["_oauth_claims_verified"] = True
-        parser = self.token_parser or _default_token_parser
+        parser = self.token_parser or default_oauth_token_parser
         result = await asyncio.to_thread(parser, self, refresh_response, client_config, runtime_paths)
         verified_claims = refresh_response.get("_oauth_claims")
         if (
