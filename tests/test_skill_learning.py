@@ -33,8 +33,9 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, resolve_runtime_paths
 from mindroom.model_loading import get_model_instance
 from mindroom.provider_tool_policy import provider_tools_disabled
+from mindroom.redaction import REDACTION_FAILED
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.skill_learning import library, queue
+from mindroom.skill_learning import library, queue, transcript
 from mindroom.skill_learning import worker as worker_module
 from mindroom.skill_learning.reviewer import ReviewProgress, review_conversation
 from mindroom.skill_learning.transcript import count_model_replies, render_transcript
@@ -1573,6 +1574,12 @@ def test_evidence_is_redacted_whole_before_any_cut() -> None:
     older = [Message(role="user", content="x " * 139 + "postgresql://app:S3cr3tPassw0rd@db:5432/app and more")]
     recent = [Message(role="user", content="recent")] * 24
     assert "S3cr3" not in render_transcript([*older, *recent], budget_chars=100_000)
+    named = Message(
+        role="assistant",
+        content="",
+        tool_calls=[{"function": {"name": "sk-ABCDEF1234567890abcdef1234", "arguments": "{}"}}],
+    )
+    assert "ABCDEF1234567890" not in render_transcript([named, *recent], budget_chars=100_000)
 
     unredactable = render_transcript(
         [Message(role="tool", content="k" * 70_000, tool_name="shell")],
@@ -1606,3 +1613,21 @@ async def test_a_skills_root_that_cannot_be_fingerprinted_still_settles_the_revi
         await _cycle(config, paths)
     (entry,) = _entries(paths).values()
     assert (entry["failures"], entry["has_new_runs"], _marker_index(entry)) == (0, False, 0)
+
+
+def test_chunked_redaction_keeps_every_line_and_fails_closed_only_where_needed() -> None:
+    """Multi-chunk text comes back line for line; a key ending its line blanks only the line that may hold its value."""
+    plain = "\n".join(f"line {index} " + "x" * 90 for index in range(2_000))
+    assert transcript._redacted(plain) == plain
+    manifest = "\n".join(
+        ["y" * 80] * 1_000 + ["env:", "  - name: DB_PASSWORD", "    valueFrom:", "      secretKeyRef:"],
+    )
+    manifest += "\n        name: db\n        key: password\n" + "\n".join(["z" * 80] * 1_000)
+    redacted = transcript._redacted(manifest).split("\n")
+    assert len(redacted) == manifest.count("\n") + 1
+    assert redacted.count(REDACTION_FAILED) <= 2
+    assert redacted[-1] == "z" * 80
+    token = "Zq8vN3pL7wX2kR9mT4yB6cD1fG5hJ0aa"  # noqa: S105 - synthetic, recognizable only through its prefix
+    for gap in ("\ntoken\n", " " * 300 + "\n", "\n" * 5):
+        pad = "q" * (60_000 - len("Authorization: Bearer") - 1 - len(gap))
+        assert token not in transcript._redacted(f"{pad}\nAuthorization: Bearer{gap}{token}\ndone"), repr(gap[:8])

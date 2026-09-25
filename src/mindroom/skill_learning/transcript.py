@@ -27,7 +27,7 @@ _CLOSING_TAG = re.compile(r"</\s*conversation\s*>", re.IGNORECASE)
 _TAIL_MESSAGES = 24
 _DIGEST_USER_CHARS = 300
 _DIGEST_ASSISTANT_CHARS = 200
-# Redaction handles at most 64 KiB per call, so one rendered message stays below it.
+# One rendered message, a few tool-call steps' worth of evidence.
 _MAX_MESSAGE_CHARS = 60_000
 _MIN_MESSAGE_CHARS = 2_000
 # Room for the omission note inside a clipped message.
@@ -111,7 +111,7 @@ def _digest_line(message: Message) -> str | None:
         return f"USER: {text[:_DIGEST_USER_CHARS]}" if text else None
     parts = []
     if names := _tool_call_names(message):
-        parts.append(f"ASSISTANT[tools: {', '.join(names)}]")
+        parts.append(f"ASSISTANT[tools: {_redacted(', '.join(names))[:_DIGEST_ASSISTANT_CHARS]}]")
     if text:
         parts.append(f"ASSISTANT: {text[:_DIGEST_ASSISTANT_CHARS]}")
     return "\n".join(parts) if parts else None
@@ -139,25 +139,54 @@ def _redacted(text: str) -> str:
     """Redact text of any length before anything cuts it, so no cut can hide a secret's recognizable prefix.
 
     Private keys span lines and go first over the whole text. The other patterns stay within a line, except a
-    prefix such as "Bearer" followed by a line break, so longer text is redacted in line-aligned chunks that each
-    see the end of the preceding non-blank line as context. A single line too long to redact fails closed.
+    prefix such as "Bearer" followed by a line break, so longer text is redacted in line-aligned chunks that each see
+    the preceding non-blank text as context. Redaction fails closed on a secret-named key that ends a line, whose
+    value may follow it, so such a chunk is redone line by line and only the lines that fail are replaced.
     """
     lines = redact_private_keys(text).split("\n")
     redacted: list[str] = []
+    context = ""
     start = 0
     while start < len(lines):
         end, size = start + 1, len(lines[start])
         while end < len(lines) and size + len(lines[end]) + 1 <= _REDACTION_CHUNK_CHARS:
             size += len(lines[end]) + 1
             end += 1
-        context = start - 1
-        while context > 0 and not lines[context].strip():
-            context -= 1
-        before = [lines[context][-_REDACTION_CONTEXT_CHARS:], *lines[context + 1 : start]] if start else []
-        chunk = redact_sensitive_text("\n".join([*before, *lines[start:end]]))
-        redacted.append(chunk if chunk == REDACTION_FAILED else chunk.split("\n", len(before))[-1])
+        chunk = lines[start:end]
+        result = _redact_after(context, "\n".join(chunk))
+        if result is not None:
+            redacted.extend(result.split("\n"))
+            context = _context_after(context, chunk)
+        else:
+            for line in chunk:
+                line_result = _redact_after(context, line)
+                redacted.append(REDACTION_FAILED if line_result is None else line_result)
+                context = _context_after(context, [line])
         start = end
     return "\n".join(redacted)
+
+
+def _redact_after(context: str, text: str) -> str | None:
+    """Redact ``text`` as if it followed ``context``, or return None when redaction fails closed."""
+    result = redact_sensitive_text(f"{context}\n{text}" if context else text)
+    if result == REDACTION_FAILED:
+        return None
+    return result.split("\n", 1)[1] if context else result
+
+
+def _context_after(context: str, lines: Sequence[str]) -> str:
+    """Return the last non-blank text before the next line, whitespace collapsed onto one line."""
+    tail: list[str] = []
+    size = 0
+    for line in reversed(lines):
+        if words := line.split():
+            tail.append(" ".join(words))
+            size += len(tail[-1]) + 1
+            if size >= _REDACTION_CONTEXT_CHARS:
+                break
+    if size < _REDACTION_CONTEXT_CHARS and context:
+        tail.append(context)
+    return " ".join(reversed(tail))[-_REDACTION_CONTEXT_CHARS:]
 
 
 def _leading_lines(text: str, chars: int) -> str:
