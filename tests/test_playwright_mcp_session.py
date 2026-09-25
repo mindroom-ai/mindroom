@@ -284,8 +284,8 @@ async def test_real_stdio_child_tree_is_reaped(
     node = shutil.which("node")
     if node is None or sys.platform != "linux":
         pytest.skip("Linux subreaper and Node fixture required")
-    # The fixture server ignores stdin EOF, so every case ends in SDK termination.
-    # Reach it without first idling through the SDK's two-second graceful wait.
+    # The fixture server ignores stdin EOF, so closing a live one ends in SDK
+    # termination. Reach it without first idling through the two-second grace.
     monkeypatch.setattr("mcp.client.stdio.PROCESS_TERMINATION_TIMEOUT", 0.1)
     script = tmp_path / "server.cjs"
     pidfile = tmp_path / "child.pid"

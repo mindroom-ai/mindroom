@@ -139,9 +139,10 @@ To run serially for debugging, pass `-n0`: `uv run --all-extras pytest tests/ -n
 
 ### Temporary Files
 
-On Linux, the root `conftest.py` points the suite's temp root at the `/dev/shm` tmpfs when `TMPDIR` is unset and at least 1 GiB is free there.
+On Linux, the root `conftest.py` points the suite's temp root at the `/dev/shm` tmpfs when no temp root is exported and `/dev/shm` allows executables and has at least 4 GiB free.
 Most test time on a real disk is fsync from SQLite journals and atomic JSON stores, and tmpfs makes it free.
-Everything written through `tempfile` then lands under pytest's base directory, which pytest prunes to the last three runs.
+Tests' own `tempfile` output then lands under pytest's base directory with their `tmp_path` directories, which peak at about 3 GiB during a full run.
+Each xdist worker deletes its base directory when its tests pass, so only failing workers' files stay in memory for inspection.
 Export `TMPDIR` to run against a real disk instead.
 
 ### Timeouts and Durations

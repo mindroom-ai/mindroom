@@ -332,6 +332,9 @@ async def _refresh_index_in_subprocess(  # noqa: PLR0915 - Keep process and resu
                 env.setdefault("PATH", os.environ.get("PATH") or os.defpath)
                 env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
                 env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
+                # The cross-process refresh lock lives under the temp root, so the
+                # child must resolve the same one even when the runtime env omits it.
+                env["TMPDIR"] = tempfile.gettempdir()
                 process = await asyncio.create_subprocess_exec(
                     sys.executable,
                     "-m",
