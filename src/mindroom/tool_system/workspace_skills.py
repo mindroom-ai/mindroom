@@ -112,12 +112,26 @@ def list_support_files(skill_fd: int, directory: str) -> list[str]:
         return []
 
 
+def _simple_frontmatter(text: str) -> dict[str, Any]:
+    """Parse ``key: value`` lines like Agno's ``LocalSkills`` fallback for frontmatter that is not strict YAML."""
+    fields: dict[str, Any] = {}
+    for line in text.strip().split("\n"):
+        if ":" in line:
+            key, value = line.split(":", 1)
+            fields[key.strip()] = value.strip().strip('"').strip("'")
+    return fields
+
+
 def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
-    """Split SKILL.md into its frontmatter mapping and instruction body."""
+    """Split SKILL.md into its frontmatter mapping and instruction body, parsing frontmatter as Agno does."""
     match = FRONTMATTER_PATTERN.match(content)
     if match is None:
         return {}, content
-    frontmatter = yaml_io.safe_load(match.group(1)) or {}
+    try:
+        frontmatter = yaml_io.safe_load(match.group(1)) or {}
+    except YAMLError:
+        # Skills Agno loads, such as "description: Use when: deploying", must keep loading from workspaces.
+        frontmatter = _simple_frontmatter(match.group(1))
     if not isinstance(frontmatter, dict):
         msg = "Skill frontmatter must be a mapping"
         raise TypeError(msg)
@@ -152,8 +166,9 @@ def parse_skill_metadata(raw: object, *, path: str) -> dict[str, Any] | None:
 # Upstream issue: tracking gap; no Agno issue or PR proposes caller-owned file access for LocalSkills.
 # Upstream PR: none identified; https://github.com/agno-agi/agno/pull/9194 adds a database loader, not confined files.
 # Remove when: LocalSkills accepts a caller-supplied no-follow reader for skill files and support-file discovery.
-# Coverage: tests/test_skills.py::test_workspace_loader_skips_links_and_special_files and
-# tests/test_skills.py::test_workspace_support_reads_refuse_swapped_links.
+# Coverage: tests/test_skills.py::test_workspace_loader_skips_links_and_special_files,
+# tests/test_skills.py::test_workspace_support_reads_refuse_swapped_links, and
+# tests/test_skills.py::test_workspace_skill_with_loose_frontmatter_loads_like_agno.
 def load_workspace_skills(skills_root: Path) -> list[Skill]:
     """Build Agno skills from one workspace skill root, skipping unsafe or unreadable entries."""
     if not skills_root.is_dir():

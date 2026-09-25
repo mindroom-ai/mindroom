@@ -91,6 +91,7 @@ Agent workspace skills are only available to the owning agent or private instanc
 They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
 Workspace skills are read through no-follow descriptors because worker code can share the workspace.
 Links and special files inside `skills/` are skipped, and hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
+The `skills/` directory itself must be a real directory: worker code shares the workspace, so a link in its place is refused and no workspace skills load.
 
 ## Authoring skills as an agent
 

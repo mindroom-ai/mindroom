@@ -602,6 +602,22 @@ def test_a_linked_workspace_skills_root_is_never_followed(tmp_path: Path) -> Non
     assert skills is None
 
 
+def test_workspace_skill_with_loose_frontmatter_loads_like_agno(tmp_path: Path) -> None:
+    """Frontmatter that is not strict YAML falls back to key: value lines, as Agno's LocalSkills does."""
+    storage = tmp_path / "storage"
+    skill_dir = _workspace_skills(storage) / "deploy-checks"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: deploy-checks\ndescription: Use when: deploying the app to staging\n---\nRun the smoke test.\n",
+        encoding="utf-8",
+    )
+    skills = _load(tmp_path, storage)
+    assert _skill_names(skills) == ["deploy-checks"]
+    skill = skills.get_skill("deploy-checks")
+    assert skill is not None
+    assert skill.description == "Use when: deploying the app to staging"
+
+
 def test_workspace_support_reads_refuse_swapped_links(tmp_path: Path) -> None:
     """A reference replaced by a link after loading is refused instead of read through the link."""
     storage = tmp_path / "storage"
