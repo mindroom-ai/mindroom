@@ -96,6 +96,26 @@ spec:
         env:
         - name: SYNAPSE_READY_URL
           value: "http://synapse-{{ .Values.customer }}:8008/_matrix/client/versions"
+      {{- if eq $workerBackend "static_runner" }}
+      # Create the sandbox runner's storage subPaths as the runtime user; kubelet would create missing ones as root.
+      - name: prepare-sandbox-runner-storage
+        image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
+        imagePullPolicy: {{ .Values.mindroom_image_pull_policy | default "Always" }}
+        command:
+        - mkdir
+        - -p
+        - "{{ .Values.storagePath }}/sandbox-runner"
+        - "{{ .Values.storagePath }}/agents"
+        - "{{ .Values.storagePath }}/private_instances"
+        volumeMounts:
+        - name: storage
+          mountPath: {{ .Values.storagePath }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+      {{- end }}
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000
@@ -144,6 +164,14 @@ spec:
             secretKeyRef:
               name: {{ $instanceSecretName }}
               key: credentials_encryption_key
+        {{- if and (eq $workerBackend "static_runner") (not .Values.allowUnauthenticatedPrimary) (not (and .Values.supabaseUrl .Values.supabaseAnonKey)) }}
+        # The sandbox-runner sidecar shares this pod's network, so the otherwise unauthenticated API requires a key.
+        - name: MINDROOM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mindroom-primary-api-key-{{ .Values.customer }}
+              key: MINDROOM_API_KEY
+        {{- end }}
         - name: MINDROOM_SANDBOX_EXECUTION_MODE
           value: "selective"
         - name: MINDROOM_SANDBOX_PROXY_TOOLS

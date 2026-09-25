@@ -4322,6 +4322,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 - [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, or open Members in MindRoom Chat.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
+- [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Explicit memory tools and external memory providers.
 - [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - OAuth connection recovery, Matrix threads, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
@@ -10680,6 +10681,7 @@ Use these tools when you need repository context, issue tracking, documentation 
 
 - [`github`] - GitHub repositories, issues, pull requests, files, branches, code search, and review requests.
 - [`bitbucket`] - Bitbucket workspace and repository inspection for repositories, commits, pull requests, and issues.
+- [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) - Jira and Confluence Cloud as each requester through per-user OAuth, documented on its own page.
 - [`jira`] - Jira issue lookup, creation, JQL search, comments, and worklogs.
 - [`linear`] - Linear GraphQL access for viewer info, teams, issues, and issue updates.
 - [`clickup`] - ClickUp space, list, task, and task-lifecycle operations.
@@ -10694,7 +10696,7 @@ Use these tools when you need repository context, issue tracking, documentation 
 
 The `todo` tool is available without credentials.
 The other tools on this page are registered as `status=requires_config`, so they stay unavailable in the dashboard until their required credentials or connection fields are present.
-GitHub supports requester-scoped OAuth through MindRoom's built-in `github` provider, while the remaining project-management tools use stored tool credentials or environment variables.
+GitHub supports requester-scoped OAuth through MindRoom's built-in `github` provider, and [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) does the same for Jira and Confluence Cloud, while the remaining project-management tools use stored tool credentials or environment variables.
 Password and token fields should be stored through the dashboard or credential store instead of inline YAML.
 Most upstream SDKs also read environment variables, including `GITHUB_ACCESS_TOKEN`, `BITBUCKET_USERNAME`, `BITBUCKET_PASSWORD`, `BITBUCKET_TOKEN`, `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_PASSWORD`, `JIRA_TOKEN`, `LINEAR_API_KEY`, `CLICKUP_API_KEY`, `MASTER_SPACE_ID`, `CONFLUENCE_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_KEY`, `CONFLUENCE_PASSWORD`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`, `TRELLO_API_KEY`, `TRELLO_API_SECRET`, `TRELLO_TOKEN`, `TODOIST_API_TOKEN`, `ZENDESK_USERNAME`, `ZENDESK_PASSWORD`, and `ZENDESK_COMPANY_NAME`.
 Several registry fields on this page are marked optional in metadata even though the upstream tool effectively requires them at runtime, so the notes below call out the practical requirement level for each tool.
@@ -10762,6 +10764,10 @@ get_pull_request("mindroom-ai/mindroom", 123)
 `todo` exposes `plan()`, `add_todo()`, `list_todos()`, `update_todo()`, `apply_template()`, and `list_templates()`.
 Todo items are scoped to the current Matrix room and resolved thread, so separate threads can carry independent plans.
 Each item can have a priority, dependency list, status, and assigned agent name.
+Assigning work to an agent, or changing work assigned to an agent, is refused unless the requester may address that agent in the current room under its `access` policy.
+Each item records the requester who wrote its title, human or agent, and other changes keep that attribution.
+Items written before requesters were recorded have no attribution until their next change, which records the current requester.
+Reassigning an item without rewriting its title also requires that its recorded requester may address the new agent.
 State is stored under `mindroom_data/todo/` and survives restarts.
 Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
 
@@ -10776,6 +10782,9 @@ A failed send is recorded like any other attempt, so the retry waits out the cha
 Future persisted timestamps beyond the relevant cooldown or backstop window are treated as elapsed so clock skew cannot mute valid work indefinitely.
 Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
 Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
+Work written by a human is poked on that human's behalf, with one poke per human, so the assigned agent applies its normal reply access and tool authorization to that human.
+Work written by an agent, team, router, or the internal user, which access policies never restrict, shares one poke with items written before requesters were recorded, and that poke dispatches as the assigned agent's own internal turn as every poke did before.
+Work from a human the assigned agent may not currently reply to in that room, or from any other requester such as a configured bot account, is not poked, and each such item is logged once.
 
 | Environment variable | Default | Behavior |
 | --- | --- | --- |
@@ -11202,6 +11211,301 @@ search_zendesk("Matrix onboarding")
 - [Tools Overview](https://docs.mindroom.chat/tools/)
 - [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
 - [Dashboard](https://docs.mindroom.chat/dashboard/)
+
+# Atlassian Cloud
+
+The `atlassian` tool works with Jira and Confluence Cloud as the person who asked.
+Each requester connects their own Atlassian account through OAuth 2.0 (3LO), so agents see and change only what that person can see and change in Atlassian.
+MindRoom owns the OAuth state, callback, token refresh, and credential storage through its [OAuth framework](https://docs.mindroom.chat/oauth-framework/).
+Additional Atlassian sites can be added as separate, independently connected tools through a small plugin.
+
+## What It Does
+
+| Function | Product | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `jira_search_issues` | Jira | no | Search issues with JQL, with `next_page_token` paging. |
+| `jira_get_issue` | Jira | no | Read one issue's summary fields and description, or the requested `fields`, with the transitions available from its current status. |
+| `jira_create_issue` | Jira | yes | Create an issue from a project key, summary, issue type, optional plain-text description, and optional extra fields. |
+| `jira_update_issue` | Jira | yes | Update the summary, description, or other fields of an issue. |
+| `jira_add_comment` | Jira | yes | Add a plain-text comment to an issue. |
+| `jira_transition_issue` | Jira | yes | Move an issue through its workflow by transition ID, transition name, or target status name. |
+| `confluence_search` | Confluence | no | Search with CQL, with `cursor` paging. |
+| `confluence_get_page` | Confluence | no | Read a page with its storage-format body, space, and current version number. |
+| `confluence_list_attachments` | Confluence | no | List a page's attachments with media type, size, and version, with `cursor` paging. |
+| `confluence_download_attachment` | Confluence | no | Download one page attachment into the conversation as a context attachment. |
+| `confluence_create_page` | Confluence | yes | Create and publish a page in a space, optionally under a parent page. |
+| `confluence_update_page` | Confluence | yes | Replace a page's title and body as a new version. |
+| `confluence_add_comment` | Confluence | yes | Add a footer comment to a page. |
+
+Plain-text Jira descriptions and comments are converted to Atlassian Document Format, with blank lines separating paragraphs.
+`jira_transition_issue` picks an exact transition ID first, then a transition name, then a target status that only one transition leads to, and name and status matches ignore case.
+When several transitions share that name or target status, it returns `transition_ambiguous` with the candidates and changes nothing.
+Confluence bodies use the Confluence storage format, which is XHTML such as `<p>Hello</p>`.
+Every result is a JSON object with `status` set to `ok` or `error`.
+Successful results name the `product` and the `site` that answered.
+
+The existing `jira` and `confluence` tools are separate integrations that use a shared API token or password.
+They are unchanged, and their function names do not collide with the `atlassian` functions, so an agent can have both.
+
+## Set Up The Atlassian App
+
+An administrator creates one Atlassian OAuth 2.0 (3LO) app for the MindRoom installation.
+
+1. Open the [Atlassian developer console](https://developer.atlassian.com/console/myapps/) and create an **OAuth 2.0 integration**.
+2. Under **Authorization**, configure OAuth 2.0 (3LO) with the callback URL `https://mindroom.example.com/api/oauth/atlassian/callback`, replacing the origin with your public MindRoom origin.
+3. Under **Permissions**, add the Jira API and the Confluence API, and enable the scopes listed in [Scopes](#scopes).
+4. Under **Distribution**, enable sharing so that people other than the app owner can connect.
+5. Under **Settings**, copy the client ID and secret.
+
+For a local installation, the callback URL is `http://localhost:8765/api/oauth/atlassian/callback`.
+MindRoom derives callback URLs from `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, so set one of them for a hosted installation.
+The callback URL registered on the app must match exactly.
+
+Store the client ID and secret in the `atlassian_oauth_client` credential service through the dashboard credentials page.
+For non-interactive deployments, seed it at startup with a [credential seed](https://docs.mindroom.chat/configuration/#credential-seeds):
+
+```json
+[
+  {
+    "service": "atlassian_oauth_client",
+    "credentials": {
+      "client_id": {"env": "ATLASSIAN_CLIENT_ID"},
+      "client_secret": {"env": "ATLASSIAN_CLIENT_SECRET"}
+    }
+  }
+]
+```
+
+The client configuration stays in the primary runtime and is never mirrored into worker containers.
+MindRoom ignores any stored `redirect_uri` on this service and always uses each provider's own callback.
+
+## Scopes
+
+MindRoom requests only the scopes that the enabled functions call, plus `offline_access` so that tokens can be refreshed.
+Atlassian recommends classic scopes, and MindRoom uses them for every API that accepts them.
+Confluence page and comment writes exist only in the Confluence v2 API, which accepts granular scopes only, so those three scopes are granular.
+
+| Scope | Type | Used by |
+| --- | --- | --- |
+| `offline_access` | classic | Token refresh |
+| `read:jira-work` | classic | `jira_search_issues`, `jira_get_issue`, `jira_transition_issue` |
+| `write:jira-work` | classic | `jira_create_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
+| `search:confluence` | classic | `confluence_search`, `confluence_get_page`, `confluence_list_attachments` |
+| `read:confluence-content.all` | classic | `confluence_get_page`, `confluence_list_attachments` |
+| `readonly:content.attachment:confluence` | classic | `confluence_download_attachment` |
+| `read:space:confluence` | granular | `confluence_create_page`, to resolve a space key |
+| `write:page:confluence` | granular | `confluence_create_page`, `confluence_update_page` |
+| `write:comment:confluence` | granular | `confluence_add_comment` |
+
+MindRoom treats a stored grant that lacks any requested scope as disconnected, and the tool asks the requester to connect again.
+Changing a connection's products or write access therefore requires every user of that connection to reconnect once.
+
+## Configure The Default Connection
+
+Add the tool to an agent:
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - atlassian:
+          site_url: https://example.atlassian.net
+```
+
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `site_url` | `url` | `null` | Atlassian Cloud site to use, as its `https://<name>.atlassian.net` URL such as `https://example.atlassian.net`; any path such as `/wiki` is ignored. |
+| `cloud_id` | `text` | `null` | Atlassian cloud ID of the site; when `site_url` is also set, both must name the same site. |
+
+Both options are optional and can also be set once for every agent through `defaults.tools` or the tool's dashboard settings.
+When neither is set and the connected account can reach exactly one Jira or Confluence site, the tool uses that site.
+When the account can reach several sites, the tool returns `site_selection_required` with the available sites instead of choosing one.
+When a configured site is not reachable with the connected account, the tool returns `site_not_found` and never falls back to a different site.
+Atlassian reports every site by its `https://<name>.atlassian.net` URL, even when the site is served under a custom domain, so a custom-domain `site_url` never matches.
+Use the site's atlassian.net URL or its `cloud_id` instead.
+The `available_sites` in a `site_not_found` result list the URLs and cloud IDs that Atlassian reports.
+When both `site_url` and `cloud_id` are set, the site must match both, and a mismatch returns `site_not_found`.
+Site URLs must use HTTPS, and cloud IDs must be UUIDs, so a misconfigured value keeps the tool from loading and logs a warning.
+
+## Connect An Account
+
+When a requester has not connected Atlassian yet, every function returns a structured result with `oauth_connection_required: true` and a `connect_url` for that requester.
+The requester opens the link, signs in to Atlassian, approves the requested scopes, and retries the request.
+Users can also connect and disconnect from the dashboard Integrations page.
+
+Tokens are stored per requester in that person's `user` credential scope, like GitHub.
+They are never stored in a shared or global scope, and a call without a concrete requester always asks for a connection instead of using another account.
+Atlassian rotates refresh tokens, and MindRoom stores each new refresh token through its OAuth lifecycle.
+A refresh token that has not been used for 90 days expires, and the requester then reconnects.
+
+## Add More Connections
+
+Use `AtlassianConnectionConfig` to add another Atlassian site, such as a partner's Confluence, next to the default connection.
+Each connection gets its own OAuth provider, stored credentials, site pin, requested scopes, and prefixed function names.
+The default `atlassian` tool and its stored connections are unchanged, and no credential ever crosses connections.
+
+A plugin can use one module for both registrations:
+
+```json
+{
+  "name": "atlassian-sites",
+  "tools_module": "sites.py",
+  "oauth_module": "sites.py"
+}
+```
+
+```python
+# sites.py
+from mindroom.tool_system.atlassian_connections import (
+    AtlassianConnectionConfig,
+    atlassian_connection_oauth_provider,
+    register_atlassian_connection_tools,
+)
+
+CONNECTIONS = (
+    AtlassianConnectionConfig(
+        name="partner",
+        display_name="Partner Confluence",
+        site_url="https://acme.atlassian.net",
+        cloud_id="00000000-0000-0000-0000-000000000000",
+        products=("confluence",),
+    ),
+)
+
+for connection in CONNECTIONS:
+    register_atlassian_connection_tools(connection)
+
+
+def register_oauth_providers(settings, runtime_paths):
+    return [atlassian_connection_oauth_provider(connection) for connection in CONNECTIONS]
+```
+
+Enable the plugin and add the connection's tool to agents:
+
+```yaml
+plugins:
+  - ./plugins/atlassian-sites
+
+agents:
+  assistant:
+    tools:
+      - atlassian
+      - partner_atlassian
+```
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `name` | required | Lowercase letters, digits, and underscores, starting with a letter, at most 16 characters. |
+| `display_name` | required | Name shown on connect links and the Integrations page. |
+| `site_url` | `null` | The site's `https://<name>.atlassian.net` URL, not a custom domain; only its origin is kept. |
+| `cloud_id` | `null` | Cloud ID of the site; when `site_url` is also set, both must name the same site. |
+| `products` | `("jira", "confluence")` | Products whose functions and scopes this connection enables. |
+| `write` | `True` | Set to `False` to register only read functions and request only read scopes. |
+| `client_config_service` | `<name>_atlassian_oauth_client` | Credential service holding the connection's app client ID and secret. |
+
+Every connection requires `site_url` or `cloud_id`, so a named connection always acts on one pinned site.
+The `name` determines every identifier, so keep it stable once users have connected.
+
+| Identifier | Value for `name="partner"` |
+| --- | --- |
+| Tool and provider ID | `partner_atlassian` |
+| Callback URL | `https://mindroom.example.com/api/oauth/partner_atlassian/callback` |
+| Token service | `partner_atlassian_oauth` |
+| App client service | `partner_atlassian_oauth_client` |
+| Function names | `partner_confluence_search`, `partner_confluence_get_page`, and so on |
+
+By default, each connection uses its own Atlassian app, because Atlassian documents one callback URL per app.
+Create an app for the connection as in [Set Up The Atlassian App](#set-up-the-atlassian-app), register the connection's callback URL on it, and store its client ID and secret in the connection's app client service.
+A connection that never received its own client credentials stays unconfigured and never falls back to the default app.
+
+To reuse the default app instead, set `client_config_service="atlassian_oauth_client"` and register the connection's callback URL on that app, if the developer console accepts an additional one.
+A shared app has two side effects.
+Atlassian records consent per user and app, so the default connection can then also reach the other site, and an unpinned `atlassian` tool starts returning `site_selection_required` until it gets a `site_url` or `cloud_id`.
+Revoking the shared app in Atlassian disconnects every connection that uses it.
+
+Each connection has its own card on the Integrations page, and its functions return their own connect link when they need a login.
+
+## Approvals For Writes
+
+Functions that create, update, comment on, or transition Atlassian data are listed as changing data in [What It Does](#what-it-does).
+Use MindRoom's `tool_approval` rules to require a Matrix approval card for them while reads run immediately:
+
+```yaml
+tool_approval:
+  rules:
+    - match: "*jira_create_issue"
+      action: require_approval
+    - match: "*jira_update_issue"
+      action: require_approval
+    - match: "*jira_add_comment"
+      action: require_approval
+    - match: "*jira_transition_issue"
+      action: require_approval
+    - match: "*confluence_create_page"
+      action: require_approval
+    - match: "*confluence_update_page"
+      action: require_approval
+    - match: "*confluence_add_comment"
+      action: require_approval
+```
+
+The leading `*` makes each rule also match the prefixed functions of additional connections, such as `partner_confluence_create_page`.
+To approve reads automatically under a stricter `tool_approval.default: require_approval`, add `auto_approve` rules for `*jira_search_issues`, `*jira_get_issue`, `*confluence_search`, `*confluence_get_page`, `*confluence_list_attachments`, and `*confluence_download_attachment` instead.
+To give an agent read access only, use `exclude_tools` for the write functions, or register a connection with `write=False` so that it never requests write scopes.
+
+## Attachments
+
+`confluence_list_attachments` returns each attachment's ID, such as `att123456`, with its title, media type, size, comment, and version.
+When more results exist, it returns `has_more: true` with a `next_cursor` to pass back unchanged, and a `warning` if Atlassian linked another page without a usable cursor.
+
+`confluence_download_attachment` stores the file in MindRoom's managed attachment storage for the current room and thread and returns a context attachment ID such as `att_0123456789abcdef`.
+The ID is usable in the same turn, for example with `get_attachment(attachment_id)` to inspect the file, `get_attachment(attachment_id, mindroom_output_path=...)` to save it to the workspace, or `matrix_message` to send it.
+In a later turn, download the attachment again.
+Downloads require a conversation with attachment storage and return `attachment_context_unavailable` otherwise.
+A download of an attachment that does not exist, or that the connected account may not view, returns `attachment_unavailable`.
+The display filename comes from the RFC 5987 `filename*` parameter when present, then `filename`, then the optional `filename` argument, and it is stripped of directories and control characters.
+The stored file name is always generated from the attachment ID.
+
+## Security Notes
+
+- The tool always runs in the primary MindRoom runtime, so worker containers never receive OAuth client configuration or user tokens.
+- The tool takes no local file paths and reads or writes no workspace files; downloads go only to MindRoom's managed attachment storage.
+- The bearer goes only to `https://api.atlassian.com/oauth/token/accessible-resources` to find the connected sites and to `https://api.atlassian.com/ex/{product}/{cloud_id}/...` for the pinned site, and cloud IDs from Atlassian are accepted only in UUID form.
+- Page, attachment, issue, and cursor arguments are validated before any authentication or network access, so they cannot change a request path.
+- The OAuth bearer is sent only to the pinned site's gateway path for the product being called, never to the Atlassian media service or any other host.
+- Downloads follow at most three redirects, only over HTTPS on the default port without URL credentials, and only to that gateway path or `api.media.atlassian.com`.
+- A gateway path containing dot segments, encoded or repeatedly encoded slashes, backslashes, or `;` parameters is treated as foreign and rejected.
+- Cookies are cleared before every download hop, so a cookie set by one hop never reaches another.
+- Every download hop asks for `Accept-Encoding: identity`, and content-encoded responses are rejected instead of decoded.
+- Error results carry a code, a fixed message, and a status code, and never a request URL, signed download link, token, or raw response body.
+- HTTP request logs drop the signature query from media service URLs.
+- At debug level, each download hop logs only its host, its path with identifiers masked and without query or parameters, its status, and whether the bearer was sent.
+- Jira and Confluence error messages are kept for failed API requests, with URLs replaced and control characters removed.
+- A gateway 401 whose message reports a scope mismatch returns `scope_mismatch` with Atlassian's message and no reconnect link, because reconnecting grants the same scopes again.
+- Any other gateway 401, for an API call or a download, returns a reconnect link instead of Atlassian's error text.
+
+## Limits
+
+- Search and listing functions return at most 50 results per call.
+- Each Jira or Confluence API call other than an attachment download must finish within 60 seconds and return at most 32 MiB, and a larger response returns `response_too_large`.
+- Attachment downloads are limited to the inline worker transfer size, 16 MiB by default, and many real attachments are larger.
+- A larger attachment returns `attachment_too_large`, whose message names the limit and the `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` setting that raises it.
+- Raising that setting also raises the inline limit for `get_attachment(..., mindroom_output_path=...)`, and MindRoom's fixed 64 MiB limit for [registered files](https://docs.mindroom.chat/attachments/) still applies.
+- A download must finish within 120 seconds, including every redirect.
+- Page reads and attachment listings go through Confluence search, so they see only content that search has indexed.
+- A page or attachment created moments ago can take a short time to appear, so `confluence_get_page` returns `page_not_found` and `confluence_list_attachments` omits the new attachment until the index catches up.
+- Archived and draft pages are not returned.
+- `confluence_get_page` reads pages only, and the ID of a blog post or other content returns `not_a_page` with its `content_type`.
+- Only Atlassian Cloud is supported; Jira and Confluence Data Center use the existing `jira` and `confluence` tools.
+- The tool does not upload attachments, delete content, or manage spaces and projects.
+- `confluence_update_page` replaces the whole body and needs the page's current version number plus one from `confluence_get_page`.
+
+## Related Docs
+
+- [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/)
+- [Project Management](https://docs.mindroom.chat/tools/project-management/)
+- [Plugins](https://docs.mindroom.chat/plugins/)
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/)
 
 # Calendar & Scheduling
 
@@ -13357,7 +13661,7 @@ The tool names in this table are representative highlights rather than an exhaus
 | **Media & Content** | youtube, spotify, giphy, moviepy_video_tools, unsplash, brandfetch | [→ media-and-content](https://docs.mindroom.chat/tools/media-and-content/) |
 | **Matrix & Attachments** | matrix_message, matrix_voice_message, thread_tags, thread_resolution, thread_summary, thread_model, matrix_api, attachments | [→ matrix-and-attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) |
 | **Messaging & Social** | gmail, slack, discord, telegram, whatsapp, email, x, reddit | [→ messaging-and-social](https://docs.mindroom.chat/tools/messaging-and-social/) |
-| **Project Management** | github, jira, linear, clickup, notion, trello, todo, todoist | [→ project-management](https://docs.mindroom.chat/tools/project-management/) |
+| **Project Management** | github, atlassian, jira, linear, clickup, notion, trello, todo, todoist | [→ project-management](https://docs.mindroom.chat/tools/project-management/) |
 | **Calendar & Scheduling** | google_calendar, cal_com, scheduler | [→ calendar-and-scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) |
 | **Memory & Storage** | memory, mem0, zep | [→ memory-and-storage](https://docs.mindroom.chat/tools/memory-and-storage/) |
 | **Agent Orchestration** | oauth_connections, delegate, dynamic_workflow, report_publishing, claude_agent, config_manager, self_config, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
@@ -14532,6 +14836,12 @@ Add more workspace definitions with distinct names and client services as needed
 Supported services are `gmail`, `google_calendar`, `google_drive`, `google_docs`, and `google_sheets`.
 Specify only provisioned services; each needs its corresponding API enabled and its own prefixed callback registered.
 Keep workspace names stable because they identify stored connections.
+
+### Additional Atlassian connections
+
+Use `AtlassianConnectionConfig` the same way to add another Atlassian Cloud site alongside the built-in `atlassian` tool.
+Each connection gets its own OAuth provider, stored connection, site pin, requested scopes, and prefixed function names such as `partner_confluence_search`.
+See [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/#add-more-connections) for the plugin example, fields, and callback setup.
 
 ### Minimal example
 
@@ -15931,6 +16241,8 @@ Providers can enforce allowed email domains, allowed hosted-domain claims, and c
 If a configured restriction cannot be checked from verified provider claims, the callback fails closed and no credential is saved.
 
 The built-in GitHub provider uses the generic framework for GitHub App user tokens, requests no classic OAuth scopes, and requires S256 PKCE.
+The built-in Atlassian provider uses the generic framework for Atlassian Cloud OAuth 2.0 (3LO), stores tokens only in the requester's `user` scope like GitHub, and requests only the scopes its [Jira and Confluence functions](https://docs.mindroom.chat/tools/atlassian/#scopes) call.
+The built-in provider reads its app client from `atlassian_oauth_client`, and each additional site configured through `AtlassianConnectionConfig` gets a separate provider that defaults to its own `<name>_atlassian_oauth_client` service.
 Built-in Google providers use the generic framework for Drive, Docs, Calendar, Sheets, and Gmail.
 Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
 Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service.
@@ -19461,6 +19773,7 @@ MindRoom's architecture consists of several key components working together.
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
 | `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
+| `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle and sync callbacks |
 | `matrix/durable_ingestion.py` | Validates owned batches, invokes journal admission, runs ordered hooks/callbacks, and acknowledges nio |
 | `matrix/journal_ingress.py` | Typed event classification from nio provenance and reconstruction of stored events |
@@ -19637,6 +19950,14 @@ Existing passwords are removed from `matrix_state.yaml` after a successful appli
 Agents can join existing rooms, create new rooms with AI-generated topics, respond to invites automatically, leave unconfigured rooms, and set room avatars.
 
 Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_rooms_exist()` (public). DM rooms can be detected with `async is_dm_room(client, room_id) -> bool`.
+
+Any account on a shared homeserver can publish, repoint, or delete a managed alias such as `#lobby:<server>`, so a resolved alias alone never makes a room managed.
+A room already recorded in `matrix_state.yaml` for its key stays in use, and an alias that now resolves elsewhere only logs `managed_alias_points_elsewhere`.
+When the alias of a recorded room is deleted, the router points it back at that room, and replaces the room with a new aliased one only when the router can no longer read the room or is no longer joined to it.
+An unrecorded key adopts its alias target only when the router created that room, with no additional room version 12 creators, and the router itself set the alias as the room's canonical alias.
+Otherwise the router logs `managed_alias_target_refused`, never joins that room, and creates and records a fresh room without the alias, which later passes keep using.
+If the alias lookup or a state read fails transiently, a recorded room stays in use and an unrecorded key is retried on the next pass.
+A fresh room without the alias that is lost before its record is saved, for example by a crash, stays unrecorded, and the next pass creates another.
 
 ## Threading (MSC3440)
 
@@ -19832,6 +20153,7 @@ matrix_space:
 ```
 
 When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
+The Space alias follows the same adoption rules as managed room aliases, so a Space held by another account is replaced by a fresh Space without the alias.
 The Space name is reconciled on each startup to match the configured value.
 Startup and config updates write child links without automatically granting human users root Space admin power.
 Concrete users from effective managed-room `invite_users` policies are invited to the root Space without receiving Space admin power.
@@ -20325,7 +20647,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] | [Tool metadata tests][tool-metadata-tests] cover the directed `restrict_to_base_dir` rejection for the `file`, `coding`, and `python` tools. |
 | [`legacy_private_storage.py`][private-legacy] and [`legacy_private_storage_aliases.py`][private-legacy-aliases] | [Private-storage tests][private-storage-tests] cover verified owner relocation, content preservation, historical aliases, and tamper rejection. |
 | [`oauth/legacy_credentials.py`][oauth-legacy-credentials] and [`oauth/credential_store.py`][oauth-store] | [OAuth store tests][oauth-store-tests] cover literal SQLite bindings, publication normalization, the removed JSON reader, reconnect disposition, and inert old files. |
-| [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
+| [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], [`custom_tools/todo_poke.py`][todo-poke], [`custom_tools/todo.py`][todo-tool], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], [todo poke][todo-poke-tests], [todo tool][todo-builtin-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
 | [`legacy_streaming.py`][legacy-streaming] and [`execution_preparation.py`][execution-preparation] | [Partial-reply][partial-reply-tests] and [streaming][streaming-tests] tests cover bounded historical suffixes, exact stripping order, current structured-status precedence, and interruption classification. |
 | [`legacy_revision_replay.py`][legacy-revision-replay] | [Revision replay][legacy-revision-replay-tests], [turn-store][turn-store-tests], and [handled-turn][handled-turn-tests] tests cover reconstruction, monotonic preservation, historical and modern selection, and cold-reopen cleanup. |
 | [`session_storage_preflight.py`][session-preflight] | [Session recovery tests][session-recovery-tests] cover schema-based archive, locks, rollback recovery, unrelated tables, current corruption, and byte preservation without inventing one release cutoff. |
@@ -20391,6 +20713,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob scrub and double-JSON decoding; other Agno readers remain dependency-owned. |
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
 | S21 | Isolated | [`legacy_attachments.py`][legacy-attachments] adopts in-place attachment records into verified retained copies; [`attachments.py`][attachments] keeps copying, record publication, and retention cleanup. |
+| S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] pokes a todo item without `requester_id` as the assignee's own internal turn under its unchanged dedup key, and [`custom_tools/todo.py`][todo-tool] records the current requester on the item's next write. |
 
 ## Configuration and credentials
 
@@ -20560,7 +20883,9 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [thread-models]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/thread_models.py
 [thread-tags]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/thread_tags.py
 [turn-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/turn_store.py
+[todo-poke]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/custom_tools/todo_poke.py
 [todo-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/custom_tools/todo_state.py
+[todo-tool]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/custom_tools/todo.py
 [tool-metadata]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/metadata.py
 [tool-legacy-overrides]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/legacy_tool_overrides.py
 [trigger-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/store.py
@@ -20602,6 +20927,8 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [sso-cookie-tests]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/tests/test_sso_cookie_attrs.py
 [streaming-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_streaming_behavior.py
 [sync-continuity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_sync_continuity_store.py
+[todo-builtin-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_todo_builtin.py
+[todo-poke-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_todo_poke.py
 [trigger-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_external_trigger_replay_store.py
 [turn-store-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_turn_store.py
 [usage-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_usage_stats_storage.py
@@ -22670,10 +22997,12 @@ services:
       - ./mindroom_data:/app/mindroom_data
     environment:
       - MINDROOM_WORKER_BACKEND=static_runner
-      - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-runner:8766
+      - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
       - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
+    networks:
+      - mindroom-network
 
   sandbox-runner:
     image: ghcr.io/mindroom-ai/mindroom:latest
@@ -22686,12 +23015,35 @@ services:
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_CONFIG_PATH=/app/config.yaml
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
+    networks:
+      - sandbox-network
+
+  # Forwards only the runner port, so the runner shares no network with MindRoom.
+  sandbox-relay:
+    image: busybox:1.36
+    user: "65534:65534"
+    cap_drop:
+      - ALL
+    sysctls:
+      net.ipv4.ip_forward: 0
+    command: ["tcpsvd", "-c", "256", "-C", "128", "0.0.0.0", "8766", "nc", "sandbox-runner", "8766"]
+    networks:
+      - mindroom-network
+      - sandbox-network
 
 volumes:
   sandbox-workspace:
+
+networks:
+  mindroom-network:
+  sandbox-network:
 ```
 
 Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
+Do not attach the runner to a network shared with MindRoom, its homeserver, or databases, because tool code could then call the MindRoom API or read those services directly.
+Cap connections per address in the relay (`-C`), because tool code can connect to the relay too and could otherwise use up every slot MindRoom needs.
+Disabling IP forwarding in the relay is defense in depth: a non-root runner cannot send raw packets, but a runner started as root could route them through the relay into the MindRoom network.
+Set `MINDROOM_API_KEY` as well, because the runner keeps outbound access and can still reach MindRoom through ports published on the host or its public URL.
 
 > [!IMPORTANT]
 > The `sandbox-workspace` Docker volume is created as root by default.
@@ -22703,6 +23055,7 @@ Do not mount the full `mindroom_data` tree into the runner because it contains c
 
 Key differences from the primary MindRoom runtime:
 - **No `env_file`** — runner has no API keys, no Matrix credentials
+- **Separate network** — only the relay reaches the runner, and the runner shares no Docker network with MindRoom or its datastores
 - **Scratch workspace** — a dedicated volume for worker-local files (caches, virtualenvs)
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the scratch workspace for tool registry and cache files
 
@@ -22721,15 +23074,29 @@ This is the `workerBackend: static_runner` Helm mode.
 See `cluster/k8s/instance/templates/deployment-mindroom.yaml` for the full manifest.
 The sidecar gets:
 
-- An `emptyDir` volume for worker-local scratch files and caches.
-- Access to the same shared storage that holds agent data directories.
+- Its own storage root at the primary's storage path, backed by the storage PVC's `sandbox-runner` directory, for worker-local files, virtualenvs, and caches.
+- The storage PVC's `agents` and `private_instances` directories mounted read-write at their usual paths, so agent workspaces persist and stay shared with the primary runtime.
 - Read-only access to config for plugin tool registration.
-- The configured credentials-encryption key so it can consume encrypted credential leases.
+  With the runtime chart's `config.source: file`, this is the read-only storage subtree holding the config file, the same subtree dedicated Kubernetes workers mount.
+- The sandbox proxy token that authenticates requests from the primary runtime.
+
+The sidecar does not mount the rest of the storage PVC, so tool code cannot read the credential store, Matrix encryption keys and access tokens, or other primary state, and cannot modify the config the primary loads.
+It never receives the credentials-encryption key.
+The primary leases each proxied tool's saved settings to the sidecar per call, as described in [Credential leases](#credential-leases).
+A `prepare-sandbox-runner-storage` init container creates the three storage directories as the runtime user before the containers start.
+The runtime chart rejects a file-sourced config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
+A file-sourced config directly in the storage root is mounted as a single read-only file, so it must exist before the pod starts; otherwise kubelet creates a directory in its place.
+
+Upgrading an existing release keeps agent data in place because the sidecar mounts the same PVC directories.
+Files that earlier sidecar versions wrote elsewhere on the PVC, such as worker virtualenvs under `workers/` and caches in the storage root used as `HOME`, remain on disk but are no longer visible to the sidecar, which recreates worker virtualenvs on first use.
 
 > [!WARNING]
-> The Kubernetes `static_runner` sidecar is not a secrets or filesystem isolation boundary.
-> It can read the full shared storage mount, including persisted credential data, and tools running in the sidecar may access its environment.
-> Use dedicated Kubernetes workers when agent-scoped filesystem and credential isolation are required.
+> The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
+> All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, learning data, and memory.
+> The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication with `requireJwt`.
+> Without Supabase authentication, both charts give the primary a generated `MINDROOM_API_KEY` so tool code cannot use the API over `localhost`.
+> Header-only trusted-upstream authentication is still forgeable from the sidecar.
+> Use dedicated Kubernetes workers when per-agent filesystem and credential isolation are required.
 
 ### Kubernetes dedicated workers (`workerBackend: kubernetes`)
 
@@ -23169,6 +23536,9 @@ A **credential lease** supplies short-lived credential values as constructor con
 Selected services follow the call's scoped credential policy and, where applicable, the worker-grantable shared-service allowlist.
 Only fields declared by the receiving toolkit are applied as constructor configuration; unrelated credential fields are ignored.
 The lease holds its values in memory until consumed or expired, and the proxy requests one use with the configured TTL.
+With the `static_runner` backend, the primary also leases the called tool's own saved settings on every call because a containerized shared runner has no access to the credential store.
+Services selected by the policy override those values.
+Dedicated Docker and Kubernetes workers keep reading tool settings from their own worker credential stores.
 
 Leases do not export API keys into shell environments, configure Git authentication, or install SSH keys.
 For shell authentication, explicitly configure [environment passthrough](#shell-env-and-path) or the [workspace env hook](#workspace-env-hook-mindroomworker-envsh) as needed.
@@ -23187,7 +23557,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   This explicit worker-pool policy applies even when Computer is disabled, regardless of which tools an agent selects.
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their prior launch settings and compatible identities.
-- With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
+- With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode mounts the directories of every non-private `worker_scope: user` agent plus the user's own private-instance namespace, since it shares one runtime across those agents, and never mounts agents on other scopes.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
@@ -23703,8 +24073,12 @@ Both modes store agent data in the same per-agent directory structure.
 `workerBackend: static_runner` is the default.
 The primary runtime talks to a shared sidecar over `localhost`.
 This keeps the deployment simple, but all proxied tool calls share the same runner process.
-The runner reads and writes the same agent storage directories as the main process.
-When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value so the primary runtime and static runner sidecar receive the same key.
+The runner reads and writes the same agent storage directories as the main process by mounting only the storage PVC's `agents` and `private_instances` directories over its own `sandbox-runner` directory.
+It cannot see the credential store, Matrix state, or other primary runtime state, and it never receives the credential encryption key.
+The primary leases each proxied tool's saved settings to the runner per call.
+Because the runner shares the pod network, the charts give the primary a generated `MINDROOM_API_KEY` unless Supabase authentication or an explicit opt-out is configured.
+When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value; only the primary runtime receives it.
+See [Kubernetes shared sidecar](https://docs.mindroom.chat/deployment/sandbox-proxy/#kubernetes-shared-sidecar-workerbackend-static_runner) for the exact mounts and remaining limits.
 
 ### Dedicated Worker Mode
 

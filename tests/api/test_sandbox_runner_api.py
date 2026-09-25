@@ -33,6 +33,7 @@ import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.constants as constants_module
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.registration as registration_module
+import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import __version__, runtime_env_policy, yaml_io
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.main import Config, ConfigRuntimeValidationError
@@ -3205,6 +3206,26 @@ def test_sandbox_runner_rejects_when_token_not_configured(
     )
     assert response.status_code == 503
     assert "not configured" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("source", ["env", "reader"])
+def test_sandbox_runner_rejects_every_request_when_token_is_empty(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+) -> None:
+    """An empty configured token must fail closed instead of matching a missing or empty header."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "")
+    if source == "reader":
+        # Pin the runner-side check even if the token reader stops normalizing empty values.
+        monkeypatch.setattr(sandbox_proxy_module, "_read_proxy_token", lambda _runtime_paths: "")
+    _refresh_runner_app_from_env()
+    request = {"tool_name": "calculator", "function_name": "add", "args": [1, 2], "kwargs": {}}
+
+    for headers in [{}, {"x-mindroom-sandbox-token": ""}]:
+        response = runner_client.post("/api/sandbox-runner/execute", headers=headers, json=request)
+        assert response.status_code == 503, headers
+        assert "not configured" in response.json()["detail"]
 
 
 def test_sandbox_runner_rejects_direct_credential_overrides(

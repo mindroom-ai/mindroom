@@ -11,6 +11,7 @@ Use these tools when you need repository context, issue tracking, documentation 
 
 - [`github`] - GitHub repositories, issues, pull requests, files, branches, code search, and review requests.
 - [`bitbucket`] - Bitbucket workspace and repository inspection for repositories, commits, pull requests, and issues.
+- [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) - Jira and Confluence Cloud as each requester through per-user OAuth, documented on its own page.
 - [`jira`] - Jira issue lookup, creation, JQL search, comments, and worklogs.
 - [`linear`] - Linear GraphQL access for viewer info, teams, issues, and issue updates.
 - [`clickup`] - ClickUp space, list, task, and task-lifecycle operations.
@@ -25,7 +26,7 @@ Use these tools when you need repository context, issue tracking, documentation 
 
 The `todo` tool is available without credentials.
 The other tools on this page are registered as `status=requires_config`, so they stay unavailable in the dashboard until their required credentials or connection fields are present.
-GitHub supports requester-scoped OAuth through MindRoom's built-in `github` provider, while the remaining project-management tools use stored tool credentials or environment variables.
+GitHub supports requester-scoped OAuth through MindRoom's built-in `github` provider, and [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) does the same for Jira and Confluence Cloud, while the remaining project-management tools use stored tool credentials or environment variables.
 Password and token fields should be stored through the dashboard or credential store instead of inline YAML.
 Most upstream SDKs also read environment variables, including `GITHUB_ACCESS_TOKEN`, `BITBUCKET_USERNAME`, `BITBUCKET_PASSWORD`, `BITBUCKET_TOKEN`, `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_PASSWORD`, `JIRA_TOKEN`, `LINEAR_API_KEY`, `CLICKUP_API_KEY`, `MASTER_SPACE_ID`, `CONFLUENCE_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_KEY`, `CONFLUENCE_PASSWORD`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`, `TRELLO_API_KEY`, `TRELLO_API_SECRET`, `TRELLO_TOKEN`, `TODOIST_API_TOKEN`, `ZENDESK_USERNAME`, `ZENDESK_PASSWORD`, and `ZENDESK_COMPANY_NAME`.
 Several registry fields on this page are marked optional in metadata even though the upstream tool effectively requires them at runtime, so the notes below call out the practical requirement level for each tool.
@@ -93,6 +94,10 @@ get_pull_request("mindroom-ai/mindroom", 123)
 `todo` exposes `plan()`, `add_todo()`, `list_todos()`, `update_todo()`, `apply_template()`, and `list_templates()`.
 Todo items are scoped to the current Matrix room and resolved thread, so separate threads can carry independent plans.
 Each item can have a priority, dependency list, status, and assigned agent name.
+Assigning work to an agent, or changing work assigned to an agent, is refused unless the requester may address that agent in the current room under its `access` policy.
+Each item records the requester who wrote its title, human or agent, and other changes keep that attribution.
+Items written before requesters were recorded have no attribution until their next change, which records the current requester.
+Reassigning an item without rewriting its title also requires that its recorded requester may address the new agent.
 State is stored under `mindroom_data/todo/` and survives restarts.
 Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
 
@@ -107,6 +112,9 @@ A failed send is recorded like any other attempt, so the retry waits out the cha
 Future persisted timestamps beyond the relevant cooldown or backstop window are treated as elapsed so clock skew cannot mute valid work indefinitely.
 Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
 Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
+Work written by a human is poked on that human's behalf, with one poke per human, so the assigned agent applies its normal reply access and tool authorization to that human.
+Work written by an agent, team, router, or the internal user, which access policies never restrict, shares one poke with items written before requesters were recorded, and that poke dispatches as the assigned agent's own internal turn as every poke did before.
+Work from a human the assigned agent may not currently reply to in that room, or from any other requester such as a configured bot account, is not poked, and each such item is logged once.
 
 | Environment variable | Default | Behavior |
 | --- | --- | --- |

@@ -19,6 +19,7 @@ from jinja2.sandbox import SandboxedEnvironment, SecurityError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mindroom import yaml_io
+from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.custom_tools.todo_state import (
     PRIORITY_ORDER,
     TERMINAL_STATUSES,
@@ -38,6 +39,8 @@ from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 _VALID_PRIORITIES = frozenset(PRIORITY_ORDER)
@@ -548,11 +551,16 @@ def _format_templates_table(templates: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _current_scope() -> tuple[Path, str, str, str]:
+def _runtime_context() -> ToolRuntimeContext:
     ctx = get_tool_runtime_context()
     if ctx is None:
         msg = "todo requires an active tool runtime context"
         raise RuntimeError(msg)
+    return ctx
+
+
+def _current_scope() -> tuple[Path, str, str, str]:
+    ctx = _runtime_context()
     thread_id = ctx.resolved_thread_id or ctx.thread_id or "main"
     return state_root(ctx.runtime_paths), ctx.room_id, thread_id, ctx.agent_name
 
@@ -561,7 +569,7 @@ def _configured_agent_names() -> set[str]:
     ctx = get_tool_runtime_context()
     if ctx is None:
         return set()
-    return set((ctx.config.agents or {}).keys())
+    return set((ctx.current_config.agents or {}).keys())
 
 
 def _unknown_assigned_agent_message(agent_name: str, configured: set[str]) -> str | None:
@@ -569,6 +577,35 @@ def _unknown_assigned_agent_message(agent_name: str, configured: set[str]) -> st
         available = ", ".join(sorted(configured)) or "none"
         return f"Unknown agent '{agent_name}'. Available: {available}"
     return None
+
+
+def _may_address(requester_id: str, agent_name: str) -> bool:
+    """Return whether a requester may direct todo work to one agent in the current room."""
+    ctx = _runtime_context()
+    config = ctx.current_config
+    # Unconfigured assignees have no reply policy and are never poked; new ones are rejected as unknown.
+    return agent_name not in config.agents or is_sender_allowed_for_responder(
+        requester_id,
+        agent_name,
+        ctx.room_id,
+        config,
+        ctx.runtime_paths,
+        ctx.require_agent_reply_memberships(),
+    )
+
+
+def _unauthorized_assignee_message(agent_name: str) -> str | None:
+    """Refuse todo work for a configured agent that the current requester may not address in this room."""
+    if _may_address(_runtime_context().requester_id, agent_name):
+        return None
+    return (
+        f"Cannot give or change todo work for '{agent_name}': that agent is not allowed to reply to you in this room."
+    )
+
+
+def _assignee_error(agent_name: str, configured: set[str]) -> str | None:
+    """Reject unknown assignees and agents the current requester may not address in this room."""
+    return _unknown_assigned_agent_message(agent_name, configured) or _unauthorized_assignee_message(agent_name)
 
 
 def _default_assignee(agent: Agent | Team, context_agent_name: str) -> str:
@@ -601,7 +638,7 @@ class TodoTools(Toolkit):
             ],
         )
 
-    def plan(self, agent: Agent | Team, tasks: str) -> str:
+    def plan(self, agent: Agent | Team, tasks: str) -> str:  # noqa: C901
         """Create a multi-step work plan for the current thread."""
         state_root, room_id, thread_id, agent_name = _current_scope()
         assigned_agent = _default_assignee(agent, agent_name)
@@ -626,6 +663,10 @@ class TodoTools(Toolkit):
 
         if not parsed:
             return "No valid tasks found after parsing."
+        assignee_error = _assignee_error(assigned_agent, _configured_agent_names())
+        if assignee_error is not None:
+            return assignee_error
+        requester_id = _runtime_context().requester_id
 
         def create_plan(data: dict[str, Any]) -> list[dict[str, Any]]:
             _ensure_thread_state(data, room_id, thread_id)
@@ -642,6 +683,7 @@ class TodoTools(Toolkit):
                     "priority": priority,
                     "depends_on": [],
                     "assigned_agent": assigned_agent,
+                    "requester_id": requester_id,
                     "created_at": now,
                     "updated_at": now,
                     "completed_at": None,
@@ -679,9 +721,10 @@ class TodoTools(Toolkit):
 
         dep_ids = [dep.strip() for dep in depends_on.split(",") if dep.strip()] if depends_on else []
         resolved_agent = assigned_agent.strip() or _default_assignee(agent, agent_name)
-        unknown_agent = _unknown_assigned_agent_message(resolved_agent, _configured_agent_names())
-        if unknown_agent is not None:
-            return unknown_agent
+        assignee_error = _assignee_error(resolved_agent, _configured_agent_names())
+        if assignee_error is not None:
+            return assignee_error
+        requester_id = _runtime_context().requester_id
 
         def create_item(data: dict[str, Any]) -> dict[str, Any] | str | NoWriteResult:
             _ensure_thread_state(data, room_id, thread_id)
@@ -700,6 +743,7 @@ class TodoTools(Toolkit):
                 "priority": priority,
                 "depends_on": dep_ids,
                 "assigned_agent": resolved_agent,
+                "requester_id": requester_id,
                 "created_at": now,
                 "updated_at": now,
                 "completed_at": None,
@@ -767,7 +811,7 @@ class TodoTools(Toolkit):
                 result_lines.append(f"- {mark} `{item['id']}` {item['title']}")
         return "\n".join(result_lines)
 
-    def update_todo(  # noqa: C901
+    def update_todo(  # noqa: C901, PLR0915
         self,
         agent: Agent | Team,
         todo_id: str,
@@ -795,14 +839,29 @@ class TodoTools(Toolkit):
             return "Title cannot be empty."
         if not path.exists():
             return f"Todo `{todo_id}` not found."
+        requester_id = _runtime_context().requester_id
 
-        def do_update(data: dict[str, Any]) -> str | NoWriteResult:  # noqa: C901, PLR0912
+        def do_update(data: dict[str, Any]) -> str | NoWriteResult:  # noqa: C901, PLR0911, PLR0912
             _ensure_thread_state(data, room_id, thread_id)
             items_by_id = {item["id"]: item for item in data["items"]}
             if todo_id not in items_by_id:
                 return no_write(f"Todo `{todo_id}` not found.")
 
             item = items_by_id[todo_id]
+            new_agent = assigned_agent.strip() if assigned_agent else ""
+            # Changing an agent's work, or handing work to an agent, needs the requester's access to that agent.
+            for target_agent in (item.get("assigned_agent", ""), new_agent):
+                unauthorized_agent = _unauthorized_assignee_message(target_agent)
+                if unauthorized_agent is not None:
+                    return no_write(unauthorized_agent)
+            # A kept title stays attributed to its author, who must also be allowed to address a new assignee.
+            # A legacy item has no author yet; the write below records the current requester, whose access is checked above.
+            title_author = item.get("requester_id")
+            if not clean_title and title_author is not None and not _may_address(title_author, new_agent):
+                return no_write(
+                    f"Cannot give todo `{todo_id}` to '{new_agent}': "
+                    "the person who wrote it is not allowed to address that agent in this room.",
+                )
             dep_ids: list[str] | None = None
             now = _now_iso()
             if depends_on is not None:
@@ -835,6 +894,14 @@ class TodoTools(Toolkit):
             if not changes:
                 return no_write("No fields to update.")
 
+            # Writing a title makes the current requester its author.
+            # LEGACY_COMPAT: Todo items without a recorded requester_id, adopted on their next write.
+            # Legacy format: A native `todos.json` item with no `requester_id` key.
+            # Last legacy release: v2026.9.292; replacement: the next release records the title author's `requester_id` on every item it writes.
+            # Handling: Any successful update records the current requester, after the access checks above, so unattributed text cannot reach a newly assigned agent as that agent's internal turn; the None guard above skips the title-author check that the adoption replaces.
+            # Coverage: tests/test_todo_builtin.py::test_todo_write_records_requester_on_legacy_item.
+            if clean_title or title_author is None:
+                item["requester_id"] = requester_id
             item["updated_at"] = now
             data["updated_at"] = now
             unblocked_message = ""
@@ -873,9 +940,10 @@ class TodoTools(Toolkit):
         configured_agents = _configured_agent_names()
         for template_todo in rendered_template["todos"]:
             resolved_agent = template_todo.get("assigned_agent") or default_assignee
-            unknown_agent = _unknown_assigned_agent_message(resolved_agent, configured_agents)
-            if unknown_agent is not None:
-                return unknown_agent
+            assignee_error = _assignee_error(resolved_agent, configured_agents)
+            if assignee_error is not None:
+                return assignee_error
+        requester_id = _runtime_context().requester_id
 
         def apply_template(data: dict[str, Any]) -> list[dict[str, Any]]:
             _ensure_thread_state(data, room_id, thread_id)
@@ -892,6 +960,7 @@ class TodoTools(Toolkit):
                     "priority": template_todo.get("priority", "medium"),
                     "depends_on": [],
                     "assigned_agent": template_todo.get("assigned_agent") or default_assignee,
+                    "requester_id": requester_id,
                     "created_at": now,
                     "updated_at": now,
                     "completed_at": None,
