@@ -387,14 +387,19 @@ async def review_conversation(
     identity: ToolExecutionIdentity | None,
     skills_root: Path,
     messages: Sequence[Message],
+    summary: str | None,
     progress: ReviewProgress,
 ) -> None:
-    """Run one review, recording each skill it creates or updates in ``progress`` as the write lands."""
+    """Run one review, recording each skill it creates or updates in ``progress`` as the write lands.
+
+    ``summary`` is the session's compaction summary of turns whose runs compaction removed.
+    """
     model_name = config.agents[agent_name].skill_learning.model or config.resolve_entity(agent_name).model_name
     budget_chars = _review_input_budget_chars(config, model_name)
     transcript = await asyncio.to_thread(
         render_transcript,
         messages,
+        summary=summary,
         budget_chars=budget_chars // _TRANSCRIPT_BUDGET_SHARE,
     )
     catalog, reserved_names = await asyncio.to_thread(_skill_catalog, config, runtime_paths, agent_name, skills_root)

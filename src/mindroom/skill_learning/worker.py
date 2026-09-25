@@ -6,14 +6,16 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
+from agno.db.utils import deserialize_run
 from agno.run.agent import RunOutput
 
 from mindroom.agent_storage import create_session_storage, load_agent_session
 from mindroom.background_loop import run_until_stopped
 from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, SKIP_MENTIONS_KEY
 from mindroom.file_locks import async_exclusive_file_lock
+from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
@@ -22,6 +24,7 @@ from mindroom.skill_learning.library import archive_unused_skills, skills_finger
 from mindroom.skill_learning.queue import (
     SKILL_LEARNING_WAKE,
     QueueEntry,
+    RunPosition,
     claim_due_reviews,
     record_count,
     settle_review,
@@ -31,7 +34,7 @@ from mindroom.skill_learning.transcript import conversation_messages, count_mode
 from mindroom.tool_system.skills import agent_workspace_skills_root
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
     from pathlib import Path
 
     import nio
@@ -46,14 +49,29 @@ _POLL_SECONDS = 30
 _MAX_REVIEWS_PER_CYCLE = 4
 
 
-def _count_run_replies(config: Config, runtime_paths: RuntimePaths, entry: QueueEntry, run_ids: Sequence[str]) -> int:
-    """Count model replies in the named runs of this conversation, reading only those runs."""
+_NO_RUN: RunPosition = (-1, -1)
+
+
+def _conversation_runs(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    entry: QueueEntry,
+) -> list[tuple[RunPosition, RunOutput]]:
+    """Return this conversation's model-visible runs with their creation positions, oldest first."""
     storage = create_session_storage(entry.agent, config, runtime_paths, execution_identity=entry.execution_identity())
     try:
-        runs = [storage.get_run(run_id) for run_id in run_ids]
+        rows, _total = cast(
+            "tuple[list[dict[str, Any]], int]",
+            storage.get_runs(session_id=entry.session, deserialize=False),
+        )
     finally:
         storage.close()
-    return count_model_replies(run for run in runs if isinstance(run, RunOutput) and run.session_id == entry.session)
+    runs: list[tuple[RunPosition, RunOutput]] = []
+    for row in rows:
+        run = deserialize_run(row.get("run_type"), row["run_data"])
+        if is_model_history_visible_run(run) and isinstance(run, RunOutput):
+            runs.append(((int(row["created_at"]), int(row["run_index"])), run))
+    return sorted(runs, key=lambda item: item[0])
 
 
 @dataclass
@@ -100,10 +118,10 @@ class SkillLearningWorker:
             reviews_left = _MAX_REVIEWS_PER_CYCLE
             for key, entry in due:
                 try:
-                    iterations, skills_root = await self._count(config, key, entry)
-                    if reviews_left and iterations >= config.agents[entry.agent].skill_learning.review_interval:
+                    replies, newest, skills_root = await self._count(config, key, entry)
+                    if reviews_left and replies >= config.agents[entry.agent].skill_learning.review_interval:
                         reviews_left -= 1
-                        await self._review(config, key, entry, skills_root)
+                        await self._review(config, key, entry, skills_root, newest)
                 except Exception:
                     logger.exception("Skill learning failed", agent=entry.agent, session_id=entry.session)
                     await asyncio.to_thread(
@@ -114,8 +132,8 @@ class SkillLearningWorker:
                         now=time.time(),
                     )
 
-    async def _count(self, config: Config, key: str, entry: QueueEntry) -> tuple[int, Path]:
-        """Fold the entry's new runs into its counter and return the counter and the skills root it counts for."""
+    async def _count(self, config: Config, key: str, entry: QueueEntry) -> tuple[int, RunPosition, Path]:
+        """Return the model replies since the conversation's marker, its newest run position, and its skills root."""
         runtime = await asyncio.to_thread(
             resolve_agent_runtime,
             entry.agent,
@@ -125,21 +143,36 @@ class SkillLearningWorker:
         )
         workspace_root = runtime.workspace.root if runtime.workspace is not None else None
         skills_root = agent_workspace_skills_root(self.runtime_paths, entry.agent, workspace_root=workspace_root)
-        counted = tuple(entry.pending_run_ids)
-        replies = await asyncio.to_thread(_count_run_replies, config, self.runtime_paths, entry, counted)
+        runs = await asyncio.to_thread(_conversation_runs, config, self.runtime_paths, entry)
         fingerprint = await asyncio.to_thread(skills_fingerprint, skills_root)
-        iterations = await asyncio.to_thread(
+        positions = [_NO_RUN, *(position for position, _run in runs)]
+        newest = positions[-1]
+        # The count starts just before the response that created the entry; without it, at the newest run.
+        start = next(
+            (positions[number] for number, (_position, run) in enumerate(runs) if run.run_id == entry.first_run_id),
+            newest,
+        )
+        reviewed_through = await asyncio.to_thread(
             record_count,
             self.runtime_paths,
             key,
-            counted,
-            replies=replies,
+            claimed=entry,
+            start=start,
+            newest=newest,
             skills_root=str(skills_root),
             fingerprint=fingerprint,
         )
-        return iterations, skills_root
+        replies = count_model_replies(run for position, run in runs if position > reviewed_through)
+        return replies, newest, skills_root
 
-    async def _review(self, config: Config, key: str, entry: QueueEntry, skills_root: Path) -> None:
+    async def _review(
+        self,
+        config: Config,
+        key: str,
+        entry: QueueEntry,
+        skills_root: Path,
+        through: RunPosition,
+    ) -> None:
         settings = config.agents[entry.agent].skill_learning
         identity = entry.execution_identity()
         before = await asyncio.to_thread(skills_fingerprint, skills_root)
@@ -172,6 +205,7 @@ class SkillLearningWorker:
                         identity=identity,
                         skills_root=skills_root,
                         messages=conversation_messages(session),
+                        summary=session.summary.summary if session.summary is not None else None,
                         progress=progress,
                     ),
                     timeout=settings.timeout_seconds,
@@ -180,7 +214,7 @@ class SkillLearningWorker:
             # Shutdown keeps the counter for a retry but still records the learner's partial writes as its own;
             # a bookkeeping error here must not replace the cancellation.
             try:
-                self._settle(key, skills_root, before, outcome="interrupted")
+                self._settle(key, skills_root, before, outcome="interrupted", through=through)
             except Exception:
                 logger.exception("Could not record an interrupted skill review", agent=entry.agent)
             raise
@@ -193,7 +227,7 @@ class SkillLearningWorker:
             # Like Hermes' best-effort review, one that already changed skills is done; rerunning the same
             # conversation would repeat its edits and notices.
             outcome = "reviewed"
-        await asyncio.to_thread(self._settle, key, skills_root, before, outcome=outcome)
+        await asyncio.to_thread(self._settle, key, skills_root, before, outcome=outcome, through=through)
         changes = progress.changes
         logger.info(
             "Skill review finished",
@@ -212,6 +246,7 @@ class SkillLearningWorker:
         before: str,
         *,
         outcome: Literal["reviewed", "failed", "interrupted"],
+        through: RunPosition,
     ) -> None:
         after = skills_fingerprint(skills_root)
         settle_review(
@@ -219,6 +254,7 @@ class SkillLearningWorker:
             key,
             outcome=outcome,
             now=time.time(),
+            through=through,
             learner_change=(before, after) if after != before else None,
         )
 

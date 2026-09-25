@@ -1,8 +1,10 @@
-"""Durable per-conversation review counters for automatic skill learning.
+"""Durable per-conversation review markers for automatic skill learning.
 
 Entries are keyed by agent, private worker scope, and session, never by requester, so a shared thread is reviewed
-once however many people talk in it. Completed runs are recorded by ID and folded into the counter in the same
-locked write that removes them, so a crash or retry can neither lose nor double-count model replies.
+once however many people talk in it. Progress is read from the session itself: the model replies in runs after
+``reviewed_through``, the position of the newest run a review already covered. A position is the run's creation
+time and its run index; Agno never renumbers run indexes, and a new run can only reuse the index of a deleted
+newest run with a later creation time, so compaction or redaction deleting runs cannot hide new ones.
 """
 
 from __future__ import annotations
@@ -25,7 +27,6 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
     from contextlib import AbstractContextManager
 
     from mindroom.config.main import Config
@@ -33,8 +34,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+RunPosition = tuple[int, int]
 _STATE_FILENAME = "skill_learning_state.json"
-_MAX_PENDING_RUN_IDS = 500
 _MAX_ENTRIES = 5000
 _MAX_DUE_ENTRIES = 32
 _STALE_SECONDS = 30 * 86400
@@ -45,7 +46,7 @@ SKILL_LEARNING_WAKE = WakeSignal()
 
 
 class QueueEntry(BaseModel):
-    """Review counter for one conversation scope."""
+    """Review marker for one conversation scope."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -53,8 +54,11 @@ class QueueEntry(BaseModel):
     session: str
     worker_key: str | None
     identity: dict[str, object] | None
-    pending_run_ids: list[str] = Field(default_factory=list)
-    iterations: int = 0
+    # The first count places the marker just before the response that created the entry, so enabling learning
+    # never reviews a conversation's older history.
+    first_run_id: str | None = None
+    reviewed_through: RunPosition | None = None
+    has_new_runs: bool = True
     skills_root: str | None = None
     seen_fingerprint: str | None = None
     failures: int = 0
@@ -110,11 +114,11 @@ def queue_skill_review(
     agent_name: str,
     session_id: str,
     execution_identity: ToolExecutionIdentity | None,
-    run_ids: Sequence[str],
+    run_id: str,
 ) -> None:
-    """Record the persisted runs of one completed response for a later review, without storing content."""
+    """Mark one conversation for counting after a person's response completed, without storing content."""
     agent = config.agents.get(agent_name)
-    if agent is None or not agent.skill_learning.enabled or not run_ids:
+    if agent is None or not agent.skill_learning.enabled:
         return
     worker_key = _scope_worker_key(config, agent_name, execution_identity)
     key = f"{agent_name}:{worker_key}:{session_id}" if worker_key is not None else f"{agent_name}:{session_id}"
@@ -127,16 +131,10 @@ def queue_skill_review(
             session=session_id,
             worker_key=worker_key,
             identity=identity,
+            first_run_id=run_id,
             last_seen_at=now,
         )
-        pending = [run for run in entry.pending_run_ids if run not in run_ids]
-        state.entries[key] = entry.model_copy(
-            update={
-                "identity": identity,
-                "pending_run_ids": [*pending, *run_ids][-_MAX_PENDING_RUN_IDS:],
-                "last_seen_at": now,
-            },
-        )
+        state.entries[key] = entry.model_copy(update={"identity": identity, "has_new_runs": True, "last_seen_at": now})
         _write(runtime_paths, state)
     SKILL_LEARNING_WAKE.notify()
 
@@ -145,7 +143,7 @@ def _entry_is_current(config: Config, entry: QueueEntry, now: float) -> bool:
     agent = config.agents.get(entry.agent)
     if agent is None or not agent.skill_learning.enabled:
         return False
-    if now - entry.last_seen_at > _STALE_SECONDS and not entry.pending_run_ids:
+    if now - entry.last_seen_at > _STALE_SECONDS and not entry.has_new_runs:
         return False
     try:
         return _scope_worker_key(config, entry.agent, entry.execution_identity()) == entry.worker_key
@@ -154,7 +152,7 @@ def _entry_is_current(config: Config, entry: QueueEntry, now: float) -> bool:
 
 
 def claim_due_reviews(config: Config, runtime_paths: RuntimePaths, *, now: float) -> list[tuple[str, QueueEntry]]:
-    """Drop retired entries and return conversations with runs to count or a review to retry.
+    """Drop retired entries and return conversations with new runs to count or a review to retry.
 
     Scope resolution happens outside the lock that completed responses also take.
     """
@@ -176,8 +174,7 @@ def claim_due_reviews(config: Config, runtime_paths: RuntimePaths, *, now: float
     due = [
         (key, entry)
         for key, entry in current
-        if entry.next_attempt_at <= now
-        and (entry.pending_run_ids or entry.iterations >= config.agents[entry.agent].skill_learning.review_interval)
+        if entry.next_attempt_at <= now and (entry.has_new_runs or entry.failures)
     ]
     return due[:_MAX_DUE_ENTRIES]
 
@@ -185,35 +182,42 @@ def claim_due_reviews(config: Config, runtime_paths: RuntimePaths, *, now: float
 def record_count(
     runtime_paths: RuntimePaths,
     key: str,
-    counted_run_ids: Collection[str],
     *,
-    replies: int,
+    claimed: QueueEntry,
+    start: RunPosition,
+    newest: RunPosition,
     skills_root: str,
     fingerprint: str,
-) -> int:
-    """Fold counted runs into the conversation's counter and return it.
+) -> RunPosition:
+    """Mark the conversation counted and return the run position its count starts after.
 
-    Hermes resets its counter when the agent saves a skill itself; here the counter restarts when anyone other
-    than the learner changed the workspace skills since this conversation last looked. The comparison uses the
-    stored state, which reviews of other conversations move forward when the learner itself changes skills.
+    ``start`` is the position just before the response that created the entry and ``newest`` the newest one.
+    Hermes resets its counter when the agent saves a skill itself; here counting restarts after ``newest`` when
+    anyone other than the learner changed the workspace skills since this conversation last looked. The
+    comparison uses the stored state, which reviews of other conversations move forward when the learner itself
+    changes skills.
     """
     with _locked(runtime_paths):
         state = _read(runtime_paths)
         entry = state.entries.get(key)
         if entry is None:
-            return 0
-        foreign_change = entry.seen_fingerprint not in {None, fingerprint}
-        iterations = 0 if foreign_change else entry.iterations + replies
-        state.entries[key] = entry.model_copy(
-            update={
-                "pending_run_ids": [run for run in entry.pending_run_ids if run not in counted_run_ids],
-                "iterations": iterations,
-                "skills_root": skills_root,
-                "seen_fingerprint": fingerprint,
-            },
-        )
+            return newest
+        if entry.seen_fingerprint not in {None, fingerprint}:
+            reviewed_through = newest
+        else:
+            reviewed_through = start if entry.reviewed_through is None else entry.reviewed_through
+        update: dict[str, object] = {
+            "first_run_id": None,
+            "reviewed_through": reviewed_through,
+            "skills_root": skills_root,
+            "seen_fingerprint": fingerprint,
+        }
+        if entry.last_seen_at == claimed.last_seen_at:
+            # A response that completed after the claim keeps its mark for the next cycle to count.
+            update["has_new_runs"] = False
+        state.entries[key] = entry.model_copy(update=update)
         _write(runtime_paths, state)
-    return iterations
+    return reviewed_through
 
 
 def settle_review(
@@ -222,12 +226,15 @@ def settle_review(
     *,
     outcome: Literal["reviewed", "failed", "interrupted"],
     now: float,
+    through: RunPosition | None = None,
     learner_change: tuple[str, str] | None = None,
 ) -> None:
     """Close one review attempt.
 
-    A review restarts the counter; a failure keeps it for a backed-off retry until it is abandoned; an
-    interruption by shutdown keeps everything for the next start. ``learner_change`` is the ``(before, after)``
+    A review moves the marker to ``through``, the newest run it saw; a failure keeps the marker for a backed-off
+    retry until it is abandoned; an interruption by shutdown keeps everything for the next start. A failure that
+    happened before counting passes no ``through``, and abandoning it keeps the marker. ``learner_change`` is the
+    ``(before, after)``
     skills fingerprint around the learner's own writes: every conversation that saw ``before`` in the same
     workspace moves to ``after``, so those writes never read as someone else's edits.
     """
@@ -243,14 +250,17 @@ def settle_review(
                     state.entries[other_key] = other.model_copy(update={"seen_fingerprint": after})
             entry = state.entries[key]
         failures = entry.failures + 1
+        done: dict[str, object] = {"failures": 0, "next_attempt_at": 0.0}
+        if through is not None:
+            done["reviewed_through"] = through
         if outcome == "reviewed":
-            update: dict[str, object] = {"failures": 0, "next_attempt_at": 0.0, "iterations": 0}
+            update = done
         elif outcome == "interrupted":
             update = {}
         elif failures < _MAX_FAILURES:
             delay = min(_MAX_RETRY_SECONDS, _RETRY_SECONDS * 2 ** (failures - 1))
             update = {"failures": failures, "next_attempt_at": now + delay}
         else:
-            update = {"failures": 0, "next_attempt_at": 0.0, "iterations": 0, "pending_run_ids": []}
+            update = done
         state.entries[key] = entry.model_copy(update=update)
         _write(runtime_paths, state)

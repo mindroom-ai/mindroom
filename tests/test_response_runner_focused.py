@@ -9788,7 +9788,8 @@ async def test_completed_response_counts_toward_a_scoped_skill_review(
     assert entry["agent"] == "general"
     assert entry["identity"]["requester_id"] == "@user:localhost"
     assert (entry["worker_key"] is not None) is private
-    assert len(entry["pending_run_ids"]) == 1
+    assert entry["has_new_runs"]
+    assert entry["first_run_id"]
 
 
 @pytest.mark.asyncio
@@ -9833,20 +9834,4 @@ async def test_approved_continuation_counts_toward_skill_review_unless_automated
     assert queue is not None
     await queue("run-1")
     state = json.loads((runner.deps.runtime_paths.storage_root / "skill_learning_state.json").read_text())
-    assert [entry["pending_run_ids"] for entry in state["entries"].values()] == [["run-1"]]
-
-
-@pytest.mark.asyncio
-async def test_every_attempt_of_a_response_is_queued_for_skill_review(tmp_path: Path) -> None:
-    """Dynamic-tool continuations and empty-run retries persist separate runs, and all of them are counted."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
-    queue = runner._skill_review(
-        agent_name="general",
-        session_id="session-1",
-        execution_identity=None,
-        attempt_run_ids=["first-attempt", "continuation"],
-    )
-    await queue("continuation")
-    state = json.loads((runner.deps.runtime_paths.storage_root / "skill_learning_state.json").read_text())
-    assert [entry["pending_run_ids"] for entry in state["entries"].values()] == [["first-attempt", "continuation"]]
+    assert [entry["first_run_id"] for entry in state["entries"].values()] == ["run-1"]

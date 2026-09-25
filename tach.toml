@@ -1038,6 +1038,7 @@ visibility = [
     "mindroom.history.storage",
     "mindroom.sync_restart_retry",
     "mindroom.skill_learning.transcript",
+    "mindroom.skill_learning.worker",
 ]
 
 [[modules]]
@@ -7433,6 +7434,7 @@ depends_on = [
     "mindroom.agent_storage",
     "mindroom.constants",
     "mindroom.file_locks",
+    "mindroom.history_run_visibility",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.message_builder",

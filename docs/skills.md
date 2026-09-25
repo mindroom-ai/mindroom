@@ -180,13 +180,16 @@ All fields, defaults, and bounds are listed in the [agent configuration referenc
 
 ### When reviews run
 
-Every successful standalone-agent response in Matrix, including an approved continuation, adds its model replies to a counter for its conversation, counting each tool-calling step and the final answer in every attempt of the response.
-A review runs once the counter reaches `review_interval`, and the counter then starts again.
-Automated responses from schedules, hooks, and external triggers are never counted, just as Hermes skips reviews for cron jobs, and team responses are excluded.
-When anyone other than the learner changes the workspace skills, for example an agent writing a skill with its file tools, the counter starts again because that lesson is already saved.
+After each successful standalone-agent response to a person in Matrix, including an approved continuation, the background worker counts the model replies stored in that conversation since its last review, counting each tool-calling step and the final answer.
+A review runs once that count reaches `review_interval`, and counting then starts after the newest run the review saw.
+The count is read from the stored runs rather than kept as a separate tally, so it cannot drift from the conversation, and runs that compaction or redaction deletes can neither hide nor repeat later runs.
+Counting starts with the response that first reaches the worker after learning is enabled, so older history is never reviewed.
+Automated responses from schedules, hooks, and external triggers never start a count, just as Hermes skips reviews for cron jobs, so a thread with only automated runs is never reviewed; in a thread people also use, automated replies are part of the conversation that is counted and reviewed.
+Team responses are excluded.
+When anyone other than the learner changes the workspace skills, for example an agent writing a skill with its file tools, counting starts again after the newest run because that lesson is already saved.
 Conversations are counted per agent and private instance, not per requester, so a thread shared by several people is reviewed once.
 Minimal-mode turns count like standard turns.
-The queue in `skill_learning_state.json` in the storage root holds run IDs, counters, and scope metadata, never message content.
+The queue in `skill_learning_state.json` in the storage root holds each conversation's review marker, retry state, and scope metadata, never message content.
 Reviews run one at a time across processes that share the storage root.
 A failed review, including a provider error, is retried with a growing delay and abandoned after three failures.
 A review that already changed skills before failing or timing out counts as done, like Hermes' best-effort review, so it never repeats its edits.
@@ -199,6 +202,7 @@ It receives the persisted conversation as evidence it must not obey: the newest 
 Older tool results are left out, and a very long message keeps its start and end.
 Hermes replays the full conversation when the review uses the agent's own model and shortens older turns only for a different model, to limit the cost of a review without a warm prompt cache; MindRoom reviews later from stored history, so every review is such a review and always shortens older turns.
 Runs that model history hides, such as errored, cancelled, or paused runs, are left out.
+When compaction has replaced older turns with a summary, the review evidence starts with that summary, as a Hermes review sees the compressed conversation.
 One review may read about 75% of the review model's `context_window` across all of its requests, capped at 600,000 tokens and defaulting to 120,000 tokens when the model sets no window.
 The budget is estimated at four characters per token.
 It makes at most 16 tool calls and stops after `timeout_seconds`.
