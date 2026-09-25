@@ -1604,7 +1604,7 @@ class AgentBot:
         self._schedule_delivery_recovery()
         if first_sync_response:
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
-        await self._personal_room_lifecycle.reconcile()
+        self._personal_room_lifecycle.schedule_reconciliation()
 
         orchestrator = self.orchestrator
         if orchestrator is None:
@@ -2367,12 +2367,13 @@ class AgentBot:
                 _ProcessShutdownMatrixClient,  # noqa: TC006 - runtime reference proves the private protocol is live
                 self.client,
             ).begin_process_shutdown_transport_fence()
-        if self.agent_name == ROUTER_AGENT_NAME:
-            await self._cancel_deferred_overdue_task_drain()
         shutdown_budget = self._sync_shutdown_budget
         if shutdown_budget is None:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
             self._sync_shutdown_budget = shutdown_budget
+        await self._personal_room_lifecycle.cancel_reconciliation(timeout_seconds=shutdown_budget.remaining_seconds())
+        if self.agent_name == ROUTER_AGENT_NAME:
+            await self._cancel_deferred_overdue_task_drain()
         background_tasks_completed = await wait_for_background_tasks(
             timeout=shutdown_budget.remaining_seconds(),
             owner=self._runtime_view,

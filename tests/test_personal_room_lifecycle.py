@@ -1,6 +1,7 @@
 """Personal-room coordination without constructing a bot or orchestrator."""
 
 import asyncio
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,8 @@ from unittest.mock import AsyncMock, Mock
 import nio
 import pytest
 
+from mindroom import personal_room_lifecycle
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.matrix.personal_rooms import PersonalRoomService
@@ -111,7 +114,7 @@ async def test_live_onboarding_does_not_wait_for_target_first_sync(coordination:
     lifecycle = coordination.lifecycle
     coordination.lookup.return_value = PersonalRoomTarget(coordination.owner, first_sync_complete=False)
     lifecycle.runtime.config.personal_rooms.backfill = True
-    await lifecycle.reconcile()
+    await lifecycle._reconcile()
     coordination.owner.ensure.assert_not_awaited()
     await lifecycle._onboard("@alice:localhost", "!lobby:localhost")
     coordination.owner.ensure.assert_awaited_once()
@@ -123,7 +126,7 @@ async def test_missing_target_keeps_live_trigger_retryable(coordination: Coordin
     coordination.lookup.return_value = None
     with pytest.raises(RuntimeError, match="target is not ready"):
         await coordination.lifecycle._onboard("@alice:localhost", "!lobby:localhost")
-    await coordination.lifecycle.reconcile()
+    await coordination.lifecycle._reconcile()
     coordination.owner.ensure.assert_not_awaited()
 
 
@@ -136,7 +139,7 @@ async def test_non_router_never_routes_onboarding(coordination: Coordination) ->
     assert not lifecycle.observes_onboarding_joins
     assert not await lifecycle.handle_command(nio.MatrixRoom("!lobby:localhost", "@helper:localhost"), command())
     await lifecycle._onboard("@alice:localhost", "!lobby:localhost")
-    await lifecycle.reconcile()
+    await lifecycle._reconcile()
     coordination.lookup.assert_not_called()
     coordination.owner.ensure.assert_not_awaited()
 
@@ -180,12 +183,12 @@ async def test_reconciliation_retries_failure_and_resets_on_reload(coordination:
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
     coordination.owner.ensure.side_effect = [RuntimeError("temporarily unavailable"), None, None]
-    await lifecycle.reconcile()
-    await lifecycle.reconcile()
-    await lifecycle.reconcile()
+    await lifecycle._reconcile()
+    await lifecycle._reconcile()
+    await lifecycle._reconcile()
     assert coordination.owner.ensure.await_count == 2
     lifecycle.config_changed()
-    await lifecycle.reconcile()
+    await lifecycle._reconcile()
     assert coordination.owner.ensure.await_count == 3
 
 
@@ -196,7 +199,184 @@ async def test_reconciliation_preserves_cancellation(coordination: Coordination)
     lifecycle.runtime.config.personal_rooms.backfill = True
     coordination.owner.ensure.side_effect = asyncio.CancelledError
     with pytest.raises(asyncio.CancelledError):
-        await lifecycle.reconcile()
+        await lifecycle._reconcile()
+
+
+@pytest.mark.asyncio
+async def test_failed_room_retry_does_not_repeat_successful_rooms(coordination: Coordination) -> None:
+    """One rejected room must not repeat successful provisioning for every requester."""
+    lifecycle = coordination.lifecycle
+    for user in ("alice", "bob"):
+        write_personal_room(
+            personal_room_record_path(lifecycle.runtime_paths, "helper", f"@{user}:localhost"),
+            PersonalRoomRecord(
+                user_id=f"@{user}:localhost",
+                alias=f"#personal_{user}:localhost",
+                source_room_id="!lobby:localhost",
+            ),
+        )
+    attempted = []
+    repaired = False
+
+    async def ensure(user_id: str, *_args: object, **_kwargs: object) -> None:
+        attempted.append(user_id)
+        if user_id == "@alice:localhost" and not repaired:
+            msg = "Personal-room ownership or membership does not match"
+            raise RuntimeError(msg)
+
+    coordination.owner.ensure.side_effect = ensure
+    await lifecycle._reconcile()
+    await lifecycle._reconcile()
+    repaired = True
+    await lifecycle._reconcile()
+    await lifecycle._reconcile()
+    assert attempted == ["@alice:localhost", "@bob:localhost", "@alice:localhost", "@alice:localhost"]
+    lifecycle.config_changed()
+    await lifecycle._reconcile()
+    assert attempted[-2:] == ["@alice:localhost", "@bob:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_reconciliation_is_single_flight_and_cancellable(coordination: Coordination) -> None:
+    """Sync notifications cannot overlap maintenance, and shutdown drains its task."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    attempts = []
+
+    async def ensure(*_args: object, **_kwargs: object) -> None:
+        attempts.append(1)
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    coordination.owner.ensure.side_effect = ensure
+    try:
+        lifecycle.schedule_reconciliation()
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        for _ in range(10):
+            lifecycle.schedule_reconciliation()
+        await lifecycle.cancel_reconciliation(timeout_seconds=2)
+        assert cancelled.is_set()
+        assert attempts == [1]
+        coordination.owner.ensure.side_effect = None
+        lifecycle.schedule_reconciliation()
+        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert coordination.owner.ensure.await_count == 2
+    finally:
+        await lifecycle.cancel_reconciliation(timeout_seconds=2)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_failure_has_cooldown_but_reload_can_retry(
+    coordination: Coordination,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A busy sync stream cannot hammer a rejected room; reload resets the delay."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    now = 1000.0
+    monkeypatch.setattr("mindroom.personal_room_lifecycle.monotonic", lambda: now)
+    coordination.owner.ensure.side_effect = RuntimeError("membership mismatch")
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    now += 1
+    for _ in range(10):
+        lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert coordination.owner.ensure.await_count == 1
+    now += 3600
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert coordination.owner.ensure.await_count == 2
+    lifecycle.config_changed()
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert coordination.owner.ensure.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_target_first_sync_does_not_impose_retry_cooldown(
+    coordination: Coordination,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first ready notification starts maintenance without waiting for a retry timer."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    monkeypatch.setattr("mindroom.personal_room_lifecycle.monotonic", lambda: 1000.0)
+    coordination.lookup.return_value = PersonalRoomTarget(coordination.owner, first_sync_complete=False)
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    coordination.owner.ensure.assert_not_awaited()
+    coordination.lookup.return_value = PersonalRoomTarget(coordination.owner, first_sync_complete=True)
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    coordination.owner.ensure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_slow_record_storage_does_not_block_event_loop(
+    coordination: Coordination,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The event loop progresses while durable room records are being read."""
+    lifecycle = coordination.lifecycle
+    write_personal_room(
+        personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost"),
+        PersonalRoomRecord(
+            user_id="@alice:localhost",
+            alias="#personal_alice:localhost",
+            source_room_id="!lobby:localhost",
+        ),
+    )
+    read = personal_room_lifecycle.read_personal_room
+    entered = threading.Event()
+    release = threading.Event()
+    timed_out = threading.Event()
+
+    def slow_read(path: Path) -> PersonalRoomRecord | None:
+        entered.set()
+        if not release.wait(timeout=2):
+            timed_out.set()
+        return read(path)
+
+    monkeypatch.setattr(personal_room_lifecycle, "read_personal_room", slow_read)
+    try:
+        lifecycle.schedule_reconciliation()
+        assert await asyncio.to_thread(entered.wait, 2)
+        assert not timed_out.is_set()
+    finally:
+        release.set()
+        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+
+
+@pytest.mark.asyncio
+async def test_reload_during_provisioning_does_not_cache_stale_success(coordination: Coordination) -> None:
+    """An old pass cannot satisfy the new configuration or impose its retry cooldown."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def ensure(*_args: object, **_kwargs: object) -> None:
+        entered.set()
+        await release.wait()
+
+    coordination.owner.ensure.side_effect = ensure
+    try:
+        lifecycle.schedule_reconciliation()
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        lifecycle.config_changed()
+        release.set()
+        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        lifecycle.schedule_reconciliation()
+        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert coordination.owner.ensure.await_count == 2
+    finally:
+        await lifecycle.cancel_reconciliation(timeout_seconds=2)
 
 
 @pytest.mark.asyncio
@@ -214,14 +394,14 @@ async def test_backfill_failure_does_not_block_recorded_user(coordination: Coord
         ),
     )
     lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersError("unavailable", "M_UNKNOWN")
-    await lifecycle.reconcile()
+    await lifecycle._reconcile()
     coordination.owner.ensure.assert_awaited_once()
     lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
         {"joined": {"@alice:localhost": {"display_name": "Alice", "avatar_url": None}}},
         "!lobby:localhost",
     )
-    await lifecycle.reconcile()
-    assert coordination.owner.ensure.await_count == 2
+    await lifecycle._reconcile()
+    assert coordination.owner.ensure.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -239,9 +419,9 @@ async def test_corrupt_record_does_not_block_other_record(coordination: Coordina
             source_room_id="!lobby:localhost",
         ),
     )
-    await lifecycle.reconcile()
-    await lifecycle.reconcile()
-    assert coordination.owner.ensure.await_count == 2
+    await lifecycle._reconcile()
+    await lifecycle._reconcile()
+    assert coordination.owner.ensure.await_count == 1
     coordination.owner.ensure.assert_awaited_with(
         "@bob:localhost",
         "!lobby:localhost",
@@ -282,7 +462,7 @@ async def test_reload_during_backfill_keeps_new_onboarding_room_pending(
     monkeypatch.setattr(lifecycle.runtime.client, "joined_members", joined_members)
     async with asyncio.timeout(2):
         async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(lifecycle.reconcile())
+            tasks.create_task(lifecycle._reconcile())
             await started.wait()
             changed = original if same_config_object else original.model_copy(deep=True)
             changed.personal_rooms.onboarding_rooms = ["new"]
@@ -290,7 +470,7 @@ async def test_reload_during_backfill_keeps_new_onboarding_room_pending(
             lifecycle.config_changed()
             release.set()
     coordination.owner.ensure.assert_not_awaited()
-    await lifecycle.reconcile()
+    await lifecycle._reconcile()
     assert membership_reads == ["!lobby:localhost", "!new:localhost"]
     coordination.owner.ensure.assert_awaited_once_with(
         "@alice:localhost",
@@ -320,5 +500,5 @@ async def test_disabled_provisioning_retains_only_recorded_ids_for_rejoin(coordi
     assert lifecycle.retained_room_ids() == {"!owned:localhost"}
     assert await lifecycle.cleanup_exclusions() == {"!owned:localhost", "!pending:localhost"}
     await lifecycle._onboard("@alice:localhost", "!lobby:localhost")
-    await lifecycle.reconcile()
+    await lifecycle._reconcile()
     coordination.owner.ensure.assert_not_awaited()

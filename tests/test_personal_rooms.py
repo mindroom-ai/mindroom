@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
@@ -287,7 +288,7 @@ async def test_validated_replacement_source_completes_deferred_welcome(
         lambda _: PersonalRoomTarget(restarted, True),
         lambda event: event.sender,
     )
-    await router.reconcile()
+    await router._reconcile()
     record = read_personal_room(path)
     assert record.source_room_id == "!lobby:localhost"
     assert record.welcome_completed
@@ -567,7 +568,7 @@ async def test_optional_backfill_and_cleanup_retention(tmp_path: Path, monkeypat
     """Backfill creates both rooms and ordinary cleanup retains them after disabling."""
     server = MatrixServer()
     router, target = bots(tmp_path, server, monkeypatch, backfill=True)
-    await router._personal_room_lifecycle.reconcile()
+    await router._personal_room_lifecycle._reconcile()
     assert server.create_count == 2
     target.config.personal_rooms = None
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=list(server.state)))
@@ -591,11 +592,12 @@ async def test_invalid_retained_room_does_not_block_router_sync_or_other_user(
 
     await router._run_sync_response_side_effects(first_sync_response=False)
 
+    ready.assert_awaited_once_with(router)
+    assert await wait_for_background_tasks(timeout=2, owner=router._runtime_view)
     assert server.create_count == 2
     assert read_personal_room(personal_room_record_path(router.runtime_paths, "helper", "@alice:localhost"))
     assert read_personal_room(personal_room_record_path(router.runtime_paths, "helper", "@bob:localhost"))
-    ready.assert_awaited_once_with(router)
-    await router._personal_room_lifecycle.reconcile()
+    await router._personal_room_lifecycle._reconcile()
     assert server.create_count == 2
 
 
@@ -852,7 +854,7 @@ async def test_default_backfill_does_not_create_for_existing_members(
     """Default startup touches only existing lifecycle records."""
     server = MatrixServer()
     router, _ = bots(tmp_path, server, monkeypatch)
-    await router._personal_room_lifecycle.reconcile()
+    await router._personal_room_lifecycle._reconcile()
     assert not server.state
 
 
@@ -861,11 +863,11 @@ async def test_config_reload_enables_backfill(tmp_path: Path, monkeypatch: pytes
     """A previously disabled backfill must run after an ordinary config reload."""
     server = MatrixServer()
     router, target = bots(tmp_path, server, monkeypatch)
-    await router._personal_room_lifecycle.reconcile()
+    await router._personal_room_lifecycle._reconcile()
     config = personal_config(backfill=True)
     router.config = config
     target.config = config
-    await router._personal_room_lifecycle.reconcile()
+    await router._personal_room_lifecycle._reconcile()
     assert server.create_count == 2
 
 
@@ -1028,7 +1030,7 @@ async def test_restart_backfill_preserves_departed_owner(tmp_path: Path, monkeyp
     room_id = "!personal1:localhost"
     server.set_member(room_id, "@alice:localhost", "leave")
     restarted_router, _ = bots(tmp_path, server, monkeypatch, backfill=True)
-    await restarted_router._personal_room_lifecycle.reconcile()
+    await restarted_router._personal_room_lifecycle._reconcile()
     membership = next(event for event in server.state[room_id] if event["state_key"] == "@alice:localhost")
     assert membership["content"]["membership"] == "leave"
 
