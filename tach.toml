@@ -1296,12 +1296,12 @@ visibility = [
     "mindroom.api.connections",
     "mindroom.api.oauth",
     "mindroom.api.tools",
-    "mindroom.custom_tools.atlassian",
     "mindroom.custom_tools.config_manager",
     "mindroom.custom_tools.google_drive",
     "mindroom.custom_tools.github",
     "mindroom.mcp.manager",
     "mindroom.oauth.client",
+    "mindroom.oauth.requester_access",
     "mindroom.oauth.reset",
     "mindroom.oauth.reset_execution",
 ]
