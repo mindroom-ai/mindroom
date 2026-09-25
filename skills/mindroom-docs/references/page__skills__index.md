@@ -180,7 +180,7 @@ After each successful standalone-agent response to a person in Matrix, including
 A review runs once that count reaches `review_interval`, and counting then starts after the newest run the review saw.
 The count is read from the stored runs rather than kept as a separate tally, so it cannot drift from the conversation, and runs that compaction or redaction deletes do not hide later runs.
 An approved continuation that finishes after a later turn of the same thread was already reviewed is not counted, although its messages still appear in later reviews.
-Counting starts with the first response after learning is enabled, including every attempt of that response, and conversations are forgotten while no agent learns, so the time learning was off is never reviewed.
+Counting starts with the first response after learning is enabled, including every attempt of that response, and the queued conversations of an agent that stops learning are forgotten, so the time learning was off is never reviewed.
 Automated responses from schedules, hooks, and external triggers never start a count, just as Hermes skips reviews for cron jobs, so a thread with only automated runs is never reviewed; in a thread people also use, automated replies are part of the conversation that is counted and reviewed.
 Team responses are excluded.
 When anyone other than the learner changes the workspace skills, for example an agent writing a skill with its file tools, counting starts again after the newest run because that lesson is already saved.
@@ -190,7 +190,7 @@ The queue in `skill_learning_state.json` in the storage root holds each conversa
 Reviews run one at a time across processes that share the storage root.
 A failed review, including a provider error, is retried with a growing delay and abandoned after three failures, and a later count that finds nothing to review clears the failures.
 A review that already changed skills before failing or timing out counts as done, like Hermes' best-effort review, so it never repeats its edits.
-Shutdown interrupts a running review, which runs again after the next start.
+Shutdown interrupts a running review, which runs again after the next start unless it had already changed skills; writes it started land first and count as the learner's.
 
 ### What a review can do
 
@@ -209,7 +209,7 @@ Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](https:/
 `skill_manage` can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/`, `templates/`, `scripts/`, or `assets/`.
 Before changing an existing file, the reviewer must load its current version with `skill_view` in the same review, and a write against any other version is refused.
 A new skill needs a lowercase hyphenated name matching its directory, a description of at most 60 characters, and the `learned` marker shown below.
-Files containing a literal credential are refused: a private key, a long known token or bearer token, a password or secret query value in a URL, or a long value assigned to a secret-named setting.
+Files containing a literal credential are refused: a PEM or PGP private key, a long known token or bearer token, a password or secret query value in a URL, or a long value assigned to a secret-named setting.
 Placeholders such as `OPENAI_API_KEY=<your key>`, `sk-...`, `$TOKEN`, and usernames in URLs like `ssh://git@github.com/...` are allowed.
 Workspace skill scripts still cannot be executed through `get_skill_script`.
 

@@ -17,6 +17,7 @@ from mindroom.redaction import (
     REDACTION_FAILED,
     contains_credential,
     redact_log_event,
+    redact_private_keys,
     redact_sensitive_data,
     redact_sensitive_text,
 )
@@ -996,6 +997,11 @@ def test_private_key_blocks_are_redacted_through_their_end_or_the_text_end() -> 
     block = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----"
     assert redact_sensitive_text(f"before\n{block}\nafter") == f"before\n{REDACTED}\nafter"
     assert redact_sensitive_text("-----BEGIN RSA PRIVATE KEY-----\nMIIabc") == REDACTED
+    pgp = "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----"
+    assert redact_sensitive_text(f"before\n{pgp}\nafter") == f"before\n{REDACTED}\nafter"
+    assert (
+        redact_private_keys("x" * 100_000 + "\n-----BEGIN EC PRIVATE KEY-----\nMHcC") == "x" * 100_000 + "\n" + REDACTED
+    )
 
 
 def test_contains_credential_flags_literal_secrets_but_not_placeholders() -> None:
@@ -1028,6 +1034,7 @@ def test_contains_credential_flags_literal_secrets_but_not_placeholders() -> Non
         "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
         "API_KEY=0123456789abcdef0123456789abcdef",
         "-----BEGIN RSA PRIVATE KEY-----\nMIIabc",
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF",
     )
     assert [text for text in placeholders if contains_credential(text)] == []
     assert [text for text in secrets if not contains_credential(text)] == []

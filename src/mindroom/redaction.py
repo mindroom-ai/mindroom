@@ -21,6 +21,7 @@ __all__ = [
     "REDACTION_FAILED",
     "contains_credential",
     "redact_log_event",
+    "redact_private_keys",
     "redact_sensitive_data",
     "redact_sensitive_text",
 ]
@@ -67,7 +68,7 @@ _ASSIGNED_VALUE_PATTERN = re.compile(r"[\"']?([^\s\"',;&)\]}]+)")
 _CODE_REFERENCE_PATTERN = re.compile(r".*[(\[].*|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
 # An unterminated block still redacts through the end of the text, so a split key never leaks its body.
 _PRIVATE_KEY_PATTERN = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\Z)",
     re.DOTALL,
 )
 _TOKEN_LIKE_PATTERN = re.compile(
@@ -504,7 +505,7 @@ def _redact_sensitive_text(value: str, *, max_length: int | None) -> str:
     has_bearer = "bearer" in lowered_value
     has_api_key_message = "api key" in lowered_value
     has_token = any(marker in bounded_value for marker in _TOKEN_LIKE_MARKERS)
-    has_private_key = "PRIVATE KEY-----" in bounded_value
+    has_private_key = "PRIVATE KEY" in bounded_value
     if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token, has_private_key)):
         return _truncate_text(bounded_value, max_length)
     redacted = _PRIVATE_KEY_PATTERN.sub(REDACTED, bounded_value) if has_private_key else bounded_value
@@ -526,6 +527,11 @@ def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None) ->
         return _redact_sensitive_text(value, max_length=max_length)
     except Exception:
         return _truncate_text(REDACTION_FAILED, max_length)
+
+
+def redact_private_keys(value: str) -> str:
+    """Remove PEM and PGP private-key blocks from text of any length, including a block without its END line."""
+    return _PRIVATE_KEY_PATTERN.sub(REDACTED, value) if "PRIVATE KEY" in value else value
 
 
 def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:

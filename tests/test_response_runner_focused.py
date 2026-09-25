@@ -9789,7 +9789,7 @@ async def test_completed_response_counts_toward_a_scoped_skill_review(
     assert entry["identity"]["requester_id"] == "@user:localhost"
     assert (entry["worker_key"] is not None) is private
     assert entry["has_new_runs"]
-    assert entry["first_run_id"]
+    assert entry["reviewed_through"][1] == -1
 
 
 @pytest.mark.asyncio
@@ -9832,22 +9832,18 @@ async def test_approved_continuation_counts_toward_skill_review_unless_automated
         assert queue is None
         return
     assert queue is not None
-    await queue("run-1")
+    await queue()
     state = json.loads((runner.deps.runtime_paths.storage_root / "skill_learning_state.json").read_text())
-    assert [entry["first_run_id"] for entry in state["entries"].values()] == ["run-1"]
+    assert [entry["has_new_runs"] for entry in state["entries"].values()] == [True]
 
 
 @pytest.mark.asyncio
-async def test_first_skill_review_count_starts_at_the_first_attempt(tmp_path: Path) -> None:
-    """Dynamic-tool continuations and empty-run retries persist separate runs, and a first count includes them all."""
+async def test_first_skill_review_count_starts_when_the_response_began(tmp_path: Path) -> None:
+    """Every run of the first response counts, including a retry after a discarded empty attempt."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
-    queue = runner._skill_review(
-        agent_name="general",
-        session_id="session-1",
-        execution_identity=None,
-        attempt_run_ids=["first-attempt", "continuation"],
-    )
-    await queue("continuation")
+    with patch("mindroom.response_runner.time.time", return_value=1_000.5):
+        queue = runner._skill_review(agent_name="general", session_id="session-1", execution_identity=None)
+    await queue()
     state = json.loads((runner.deps.runtime_paths.storage_root / "skill_learning_state.json").read_text())
-    assert [entry["first_run_id"] for entry in state["entries"].values()] == ["first-attempt"]
+    assert [entry["reviewed_through"] for entry in state["entries"].values()] == [[1_000, -1]]
