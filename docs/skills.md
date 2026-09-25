@@ -204,14 +204,15 @@ Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](configu
 
 `skill_manage` can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/`, `templates/`, `scripts/`, or `assets/`.
 Before changing an existing file, the reviewer must load its current version with `skill_view` in the same review, and a write against any other version is refused.
-A new skill needs a lowercase hyphenated name matching its directory, a description of at most 60 characters, and the ownership marker below.
+A new skill needs a lowercase hyphenated name matching its directory, a description of at most 60 characters, and the `learned` marker shown below.
 Files containing a literal credential are refused: a private key, a long known token or bearer token, a password or secret query value in a URL, or a long value assigned to a secret-named setting.
 Placeholders such as `OPENAI_API_KEY=<your key>`, `sk-...`, `$TOKEN`, and usernames in URLs like `ssh://git@github.com/...` are allowed.
 Workspace skill scripts still cannot be executed through `get_skill_script`.
 
 ### Ownership
 
-A workspace skill belongs to the learner only while its frontmatter carries this marker:
+Like Hermes' usage records, ownership is recorded outside the skill file, in `skills/.usage.json`, so a skill the learner created stays learner-owned when the agent or a person later rewrites it.
+New learned skills also carry a visible marker in their frontmatter:
 
 ```yaml
 metadata:
@@ -219,9 +220,9 @@ metadata:
     learned: true
 ```
 
-Remove the marker to take a learned skill over, and the learner and curator leave it alone from then on.
-Add the marker to hand a skill you wrote to the learner.
-Bundled, plugin, and user skills and workspace skills without the marker are never edited, and new learned skills cannot reuse their names.
+Add the marker to a skill you wrote to hand it to the learner.
+Add `pinned: true` under `metadata.mindroom` to take any skill away from the learner and the curator, which then never edit or archive it.
+Bundled, plugin, and user skills and workspace skills that someone else wrote are never edited, and new learned skills cannot reuse their names.
 Private agents learn only from and into the requester's private workspace, and shared agents use `<storage>/agents/<agent>/workspace/skills/`.
 
 ### History, archive, and notices

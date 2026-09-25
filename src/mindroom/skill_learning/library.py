@@ -1,8 +1,9 @@
 """Learner-owned workspace skill mutations with read-before-write, history, and archival.
 
 Every operation goes through no-follow descriptors below the resolved workspace, because worker code shares it.
-A skill is learner-owned only while its frontmatter carries ``metadata.mindroom.learned: true``; removing that
-marker hands the skill to its human owner, and adding it hands a skill to the learner.
+Like Hermes' ``created_by: agent`` usage records, ownership lives outside SKILL.md: a skill the learner created stays
+learner-owned when anyone later rewrites the file. Adding ``metadata.mindroom.learned: true`` hands a skill to the
+learner, and ``metadata.mindroom.pinned: true`` takes any skill away from the learner and the curator.
 """
 
 from __future__ import annotations
@@ -72,11 +73,13 @@ def content_digest(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
 
 
-def is_learned(frontmatter: dict[str, object], *, path: str) -> bool:
-    """Return whether frontmatter hands this skill to the learner."""
-    metadata = parse_skill_metadata(frontmatter.get("metadata"), path=path) or {}
-    mindroom = metadata.get("mindroom")
-    return isinstance(mindroom, dict) and mindroom.get("learned") is True
+def learner_owns(frontmatter: dict[str, object], usage: SkillUsage, *, path: str) -> bool:
+    """Return whether the learner created or was handed this skill and nobody pinned it."""
+    mindroom = (parse_skill_metadata(frontmatter.get("metadata"), path=path) or {}).get("mindroom")
+    flags = mindroom if isinstance(mindroom, dict) else {}
+    if flags.get("pinned") is True:
+        return False
+    return usage.created_by == "learner" or flags.get("learned") is True
 
 
 def _validate_skill_name(name: str) -> None:
@@ -113,8 +116,8 @@ def _validate_markdown(name: str, content: str, *, new: bool) -> None:
     if not body:
         msg = "SKILL.md must contain instructions after the frontmatter."
         raise SkillEditError(msg)
-    if not is_learned(frontmatter, path=name):
-        msg = "Learned skills must keep `metadata: {mindroom: {learned: true}}` in their frontmatter."
+    if new and not learner_owns(frontmatter, SkillUsage(), path=name):
+        msg = "A new learned skill needs `metadata: {mindroom: {learned: true}}` in its frontmatter."
         raise SkillEditError(msg)
 
 
@@ -153,12 +156,12 @@ def read_skill_file(skills_root: Path, name: str, relative_path: str = SKILL_FIL
     _split_relative_path(relative_path)
     try:
         with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
-            return _read_skill_file(skill_fd, name, relative_path)
+            return _read_skill_file(skill_fd, name, relative_path, load_skill_usage(root_fd).get(name, SkillUsage()))
     except FileNotFoundError:
         return None
 
 
-def _read_skill_file(skill_fd: int, name: str, relative_path: str) -> SkillFile | None:
+def _read_skill_file(skill_fd: int, name: str, relative_path: str, usage: SkillUsage) -> SkillFile | None:
     markdown = read_text_at(skill_fd, SKILL_FILENAME)
     content = markdown if relative_path == SKILL_FILENAME else read_text_at(skill_fd, relative_path)
     if content is None:
@@ -171,7 +174,7 @@ def _read_skill_file(skill_fd: int, name: str, relative_path: str) -> SkillFile 
     return SkillFile(
         content=content,
         digest=content_digest(content),
-        learned=is_learned(frontmatter, path=name),
+        learned=learner_owns(frontmatter, usage, path=name),
         name=skill_name if isinstance(skill_name, str) else name,
     )
 
@@ -204,7 +207,11 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
         os.mkdir(name, dir_fd=root_fd)
         with open_directory_within_root(root_fd, name) as skill_fd:
             atomic_write_bytes_at(skill_fd, SKILL_FILENAME, content.encode())
-        update_skill_usage(root_fd, name, lambda usage: usage.model_copy(update={"created_at": now}))
+        update_skill_usage(
+            root_fd,
+            name,
+            lambda usage: usage.model_copy(update={"created_by": "learner", "created_at": now}),
+        )
 
 
 def write_skill_file(
@@ -219,7 +226,7 @@ def write_skill_file(
     directory, filename = _split_relative_path(relative_path)
     _validate_content(relative_path, content)
     with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
-        markdown, current = _require_writable(skill_fd, name, relative_path, expected_digest)
+        markdown, current = _require_writable(root_fd, skill_fd, name, relative_path, expected_digest)
         if directory is None:
             # An edit keeps the skill's identity, which may differ from its directory for an adopted skill.
             _validate_markdown(markdown.name, content, new=False)
@@ -242,7 +249,7 @@ def remove_skill_file(skills_root: Path, name: str, relative_path: str, *, expec
         msg = "SKILL.md cannot be removed; only support files can."
         raise SkillEditError(msg)
     with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
-        _markdown, current = _require_writable(skill_fd, name, relative_path, expected_digest)
+        _markdown, current = _require_writable(root_fd, skill_fd, name, relative_path, expected_digest)
         if current is None:
             msg = f"{relative_path} does not exist."
             raise SkillEditError(msg)
@@ -253,20 +260,22 @@ def remove_skill_file(skills_root: Path, name: str, relative_path: str, *, expec
 
 
 def _require_writable(
+    root_fd: int,
     skill_fd: int,
     name: str,
     relative_path: str,
     expected_digest: str | None,
 ) -> tuple[SkillFile, SkillFile | None]:
     """Return the learner-owned SKILL.md and the current target, which must match the reviewer's last read."""
-    markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME)
+    usage = load_skill_usage(root_fd).get(name, SkillUsage())
+    markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage)
     if markdown is None or not markdown.learned:
         msg = (
             f"Skill {name!r} is not learner-owned. It belongs to its human owner; mention the needed change in "
             "your reply instead of editing it."
         )
         raise SkillEditError(msg)
-    current = _read_skill_file(skill_fd, name, relative_path)
+    current = _read_skill_file(skill_fd, name, relative_path, usage)
     if current is not None and current.digest != expected_digest:
         msg = (
             f"The current {relative_path} of {name!r} has not been loaded in this review. Call "
@@ -314,7 +323,7 @@ def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: da
         for name in list_entries(root_fd, directories=True):
             try:
                 with open_directory_within_root(root_fd, name) as skill_fd:
-                    markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME)
+                    markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage.get(name, SkillUsage()))
             except (OSError, ValueError) as exc:
                 # One unreadable user skill must not block archival, and with it every review of the workspace.
                 logger.warning("Skipping unreadable workspace skill during archival", skill=name, error=str(exc))
