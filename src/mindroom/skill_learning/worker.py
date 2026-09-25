@@ -263,7 +263,12 @@ class SkillLearningWorker:
         outcome: Literal["reviewed", "failed", "interrupted"],
         through: RunPosition,
     ) -> None:
-        after = skills_fingerprint(skills_root)
+        try:
+            after = skills_fingerprint(skills_root)
+        except OSError:
+            # Worker code can replace the skills root; the review still settles, and others later see a change.
+            logger.warning("Could not fingerprint the skills after a review", skills_root=str(skills_root))
+            after = before
         settle_review(
             self.runtime_paths,
             key,

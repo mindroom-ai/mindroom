@@ -2094,17 +2094,41 @@ class ResponseRunner:
             ),
         )
 
+    async def _start_skill_review(
+        self,
+        *,
+        agent_name: str,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> Callable[[bool], Awaitable[None]] | None:
+        """Register a starting response's conversation and return the handoff that marks it completed.
+
+        A response that pauses for approval never reaches post-response effects, so registration happens here.
+        """
+        queue = self._skill_review(
+            agent_name=agent_name,
+            session_id=session_id,
+            execution_identity=execution_identity,
+        )
+        if queue is not None:
+            await queue(False)
+        return queue
+
     def _skill_review(
         self,
         *,
         agent_name: str,
         session_id: str,
         execution_identity: ToolExecutionIdentity | None,
-    ) -> Callable[[bool], Awaitable[None]]:
-        """Build the handoff that records a finished response toward a background skill review.
+    ) -> Callable[[bool], Awaitable[None]] | None:
+        """Build the handoff that records a response toward a background skill review, or None without learning.
 
-        It is built before the response runs, so a conversation's first count covers every run of that response.
+        Calling it with ``False`` when the response starts registers the conversation, so its first count covers
+        every run of that response, including one that pauses for approval; ``True`` marks a completed response.
         """
+        agent = self.deps.runtime.config.agents.get(agent_name)
+        if agent is None or not agent.skill_learning.enabled:
+            return None
         started_at = int(time.time())
 
         async def queue(completed: bool) -> None:
@@ -5514,7 +5538,7 @@ class ResponseRunner:
         queue_skill_review = (
             None
             if is_automation_source_kind(request.response_envelope.source_kind)
-            else self._skill_review(
+            else await self._start_skill_review(
                 agent_name=self.deps.agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,

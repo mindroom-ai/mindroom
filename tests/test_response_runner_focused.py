@@ -9839,8 +9839,8 @@ async def test_approved_continuation_counts_toward_skill_review_unless_automated
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("succeeded", [True, False])
-async def test_every_finished_response_registers_its_skill_review_conversation(succeeded: bool) -> None:
-    """A response that fails or pauses for approval still fixes where counting starts; only a completed one is due."""
+async def test_only_a_completed_response_makes_its_skill_review_conversation_due(succeeded: bool) -> None:
+    """Post-response effects mark a completed response; registration already happened when the response started."""
     calls: list[bool] = []
 
     async def queue(completed: bool) -> None:
@@ -9851,7 +9851,44 @@ async def test_every_finished_response_registers_its_skill_review_conversation(s
         ResponseOutcome(run_succeeded=succeeded),
         PostResponseEffectsDeps(logger=MagicMock(), queue_skill_review=queue),
     )
-    assert calls == [succeeded]
+    assert calls == ([True] if succeeded else [])
+
+
+@pytest.mark.asyncio
+async def test_a_response_registers_its_skill_review_conversation_before_it_runs(tmp_path: Path) -> None:
+    """A response that pauses for approval never reaches post-response effects, so it registers before running."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    state_path = coordinator.deps.runtime_paths.storage_root / "skill_learning_state.json"
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=30,
+        max_response_chars=30,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    seen_while_running: list[list[bool]] = []
+    real_ainvoke = model.ainvoke
+
+    async def ainvoke(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        entries = json.loads(state_path.read_text())["entries"].values()
+        seen_while_running.append([entry["has_new_runs"] for entry in entries])
+        return await real_ainvoke(*args, **kwargs)
+
+    model.ainvoke = ainvoke
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=False),
+        ),
+    ):
+        await coordinator.generate_response(_plain_request(_target()))
+    assert seen_while_running[:1] == [[False]]
+    assert [entry["has_new_runs"] for entry in json.loads(state_path.read_text())["entries"].values()] == [True]
 
 
 @pytest.mark.asyncio

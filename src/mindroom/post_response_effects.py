@@ -238,10 +238,9 @@ async def apply_post_response_effects(
                 thread_id=(outcome.response_target.resolved_thread_id if outcome.response_target is not None else None),
             )
 
-    if deps.queue_skill_review is not None:
+    if outcome.run_succeeded and deps.queue_skill_review is not None:
         try:
-            # Every finished response registers its conversation; only a completed one makes it due for counting.
-            await deps.queue_skill_review(outcome.run_succeeded)
+            await deps.queue_skill_review(True)
         except Exception:
             deps.logger.exception(
                 "Failed to queue skill review after response",

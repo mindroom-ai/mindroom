@@ -13,7 +13,7 @@ import re
 from typing import TYPE_CHECKING
 
 from mindroom.history_run_visibility import is_model_history_visible_run
-from mindroom.redaction import redact_private_keys, redact_sensitive_text
+from mindroom.redaction import REDACTION_FAILED, redact_private_keys, redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -30,9 +30,11 @@ _DIGEST_ASSISTANT_CHARS = 200
 # Redaction handles at most 64 KiB per call, so one rendered message stays below it.
 _MAX_MESSAGE_CHARS = 60_000
 _MIN_MESSAGE_CHARS = 2_000
-# Room for the omission note, and how far past a cut redaction looks so a secret the cut splits keeps its prefix.
+# Room for the omission note inside a clipped message.
 _CLIP_NOTE_CHARS = 64
-_REDACTION_MARGIN = 512
+# Redaction handles 64 KiB per call, so longer text is redacted in line chunks with a little preceding context.
+_REDACTION_CHUNK_CHARS = 60_000
+_REDACTION_CONTEXT_CHARS = 256
 
 
 def conversation_messages(session: AgentSession) -> list[Message]:
@@ -71,7 +73,7 @@ def render_transcript(messages: Sequence[Message], *, summary: str | None = None
     message_chars = min(_MAX_MESSAGE_CHARS, max(_MIN_MESSAGE_CHARS, budget_chars // 8))
     verbatim = [_render_message(message, message_chars) for message in recent]
     compacted = (
-        [redact_sensitive_text(_clip(f"[Summary of earlier turns removed by compaction.]\n{text}", message_chars))]
+        [_clip(_redacted(f"[Summary of earlier turns removed by compaction.]\n{text}"), message_chars)]
         if summary and (text := summary.strip())
         else []
     )
@@ -89,7 +91,7 @@ def render_transcript(messages: Sequence[Message], *, summary: str | None = None
 
     sections = list(compacted)
     if omitted_digest or digest:
-        header = "[Earlier conversation digest; older turns are shortened to one line each, recent messages follow.]"
+        header = "[Earlier conversation digest; older turns are shortened, recent messages follow verbatim.]"
         if omitted_digest:
             header += f"\n[{omitted_digest} earlier turns omitted to fit the review budget.]"
         sections.append("\n".join([header, *digest]))
@@ -101,18 +103,18 @@ def render_transcript(messages: Sequence[Message], *, summary: str | None = None
 
 
 def _digest_line(message: Message) -> str | None:
-    # A digest line keeps a few hundred characters, so only that much of a long message is normalized.
-    text = " ".join(message.get_content_string()[: 4 * _DIGEST_USER_CHARS].split())
-    if message.role == "user" and text:
-        return redact_sensitive_text(f"USER: {text[:_DIGEST_USER_CHARS]}")
-    if message.role != "assistant":
+    if message.role not in {"user", "assistant"}:
         return None
+    # Only the leading lines a digest keeps are redacted, whole, before they are cut to length.
+    text = " ".join(_redacted(_leading_lines(message.get_content_string(), 4 * _DIGEST_USER_CHARS)).split())
+    if message.role == "user":
+        return f"USER: {text[:_DIGEST_USER_CHARS]}" if text else None
     parts = []
     if names := _tool_call_names(message):
         parts.append(f"ASSISTANT[tools: {', '.join(names)}]")
     if text:
         parts.append(f"ASSISTANT: {text[:_DIGEST_ASSISTANT_CHARS]}")
-    return redact_sensitive_text("\n".join(parts)) if parts else None
+    return "\n".join(parts) if parts else None
 
 
 def _render_message(message: Message, limit: int) -> str:
@@ -120,31 +122,56 @@ def _render_message(message: Message, limit: int) -> str:
         heading = f"TOOL RESULT ({message.tool_name or 'unknown tool'}):"
     else:
         heading = f"{message.role.upper()}:"
-    calls = []
+    lines = [heading, message.get_content_string()]
     for call in message.tool_calls or []:
         function = call.get("function") or {}
         arguments = function.get("arguments")
         rendered = arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
-        calls.append(f"-> calls {function.get('name', 'unknown tool')}({_clip(rendered, limit // 4)})")
-    content_limit = max(_MIN_MESSAGE_CHARS, limit - len(heading) - 1 - sum(len(line) + 1 for line in calls))
-    lines = [heading, _clip(message.get_content_string(), content_limit), *calls]
-    return redact_sensitive_text(_clip("\n".join(lines), limit))
+        lines.append(f"-> calls {function.get('name', 'unknown tool')}({rendered})")
+    return _clip(_redacted("\n".join(lines)), limit)
 
 
 def _tool_call_names(message: Message) -> list[str]:
     return [str((call.get("function") or {}).get("name", "?")) for call in message.tool_calls or []]
 
 
-def _clip(text: str, limit: int) -> str:
-    """Keep at most ``limit`` characters from the start and the end, where a command's error or result usually is.
+def _redacted(text: str) -> str:
+    """Redact text of any length before anything cuts it, so no cut can hide a secret's recognizable prefix.
 
-    Redaction recognizes secrets by what precedes them, and a private key by its BEGIN line, so keys go first over
-    the whole text and each kept part is redacted together with the text just past its cut.
+    Private keys span lines and go first over the whole text. The other patterns stay within a line, except a
+    prefix such as "Bearer" followed by a line break, so longer text is redacted in line-aligned chunks that each
+    see the end of the preceding non-blank line as context. A single line too long to redact fails closed.
     """
-    text = redact_private_keys(text)
+    lines = redact_private_keys(text).split("\n")
+    redacted: list[str] = []
+    start = 0
+    while start < len(lines):
+        end, size = start + 1, len(lines[start])
+        while end < len(lines) and size + len(lines[end]) + 1 <= _REDACTION_CHUNK_CHARS:
+            size += len(lines[end]) + 1
+            end += 1
+        context = start - 1
+        while context > 0 and not lines[context].strip():
+            context -= 1
+        before = [lines[context][-_REDACTION_CONTEXT_CHARS:], *lines[context + 1 : start]] if start else []
+        chunk = redact_sensitive_text("\n".join([*before, *lines[start:end]]))
+        redacted.append(chunk if chunk == REDACTION_FAILED else chunk.split("\n", len(before))[-1])
+        start = end
+    return "\n".join(redacted)
+
+
+def _leading_lines(text: str, chars: int) -> str:
+    """Return whole lines covering at least ``chars`` characters of ``text``."""
+    end = text.find("\n", chars)
+    return text if end == -1 else text[:end]
+
+
+def _clip(text: str, limit: int) -> str:
+    """Keep at most ``limit`` characters of already redacted text from its start and end.
+
+    The start and end are where a command's error or result usually is.
+    """
     if len(text) <= limit:
         return text
     half = (limit - _CLIP_NOTE_CHARS) // 2
-    head = redact_sensitive_text(text[: half + _REDACTION_MARGIN])[:half]
-    tail = redact_sensitive_text(text[-half - _REDACTION_MARGIN :])[-half:]
-    return f"{head}\n[... {len(text) - 2 * half} characters omitted ...]\n{tail}"
+    return f"{text[:half]}\n[... {len(text) - 2 * half} characters omitted ...]\n{text[-half:]}"
