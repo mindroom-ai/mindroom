@@ -41,7 +41,7 @@ from mindroom.skill_learning.transcript import count_model_replies, render_trans
 from mindroom.skill_learning.worker import SkillLearningWorker
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.tool_system.workspace_skills import open_skills_root, update_skill_usage
+from mindroom.tool_system.workspace_skills import open_skills_root, record_skill_use, update_skill_usage
 from mindroom.usage_stats import collect_admin_usage
 from tests.conftest import seed_session
 
@@ -458,7 +458,6 @@ def _count(
 
     Without ``fingerprint``, the skills are as they were when the conversation registered.
     """
-    assert claimed.seen_fingerprint is not None
     return queue.record_count(
         paths,
         key,
@@ -543,8 +542,6 @@ def test_learner_changes_move_every_conversation_forward(tmp_path: Path) -> None
     claimed = dict(queue.claim_due_reviews(config, paths, now=1.0))
     for key in ("mind:session", "mind:other"):
         _count(paths, key, claimed[key], (0, 1))
-    before = claimed["mind:session"].seen_fingerprint
-    assert before is not None
     queue.settle_review(
         paths,
         "mind:session",
@@ -552,19 +549,47 @@ def test_learner_changes_move_every_conversation_forward(tmp_path: Path) -> None
         outcome="reviewed",
         now=1.0,
         through=(0, 0),
-        learner_change=(before, "b"),
+        learner_change=queue.LearnerChange(claimed["mind:session"].seen_fingerprint, "b", started_at=time.time()),
     )
     assert _count(paths, "mind:other", claimed["mind:other"], (0, 1), (3, 1), fingerprint="b") == 2
     assert _count(paths, "mind:other", claimed["mind:other"], (0, 1), (3, 1), fingerprint="c") == 0
 
 
-def test_a_starting_response_leaves_the_last_completed_scope_in_place(tmp_path: Path) -> None:
-    """Only completed responses choose whose scope a review reports usage and notices under."""
+def test_conversations_that_look_while_a_review_writes_keep_counting(tmp_path: Path) -> None:
+    """A conversation registering between a review's writes saw only some of them, and they are still the learner's."""
     config, paths = _learner(tmp_path)
-    _queue(config, paths, identity=ALICE)
-    before = _entries(paths)["mind:session"]
-    _queue(config, paths, identity=BOB, completed=False)
-    assert _entries(paths)["mind:session"] == before
+    root = _skills_root(config, paths)
+    _queue(config, paths)
+    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
+    started_at = time.time()
+    before = library.skills_fingerprint(root)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    _queue(config, paths, "other")
+    library.create_skill(
+        root,
+        "older-lesson",
+        LEARNED.replace("deploy-checks", "older-lesson"),
+        reserved_names=frozenset(),
+    )
+    after = library.skills_fingerprint(root)
+    change = queue.LearnerChange(before, after, started_at)
+    queue.settle_review(paths, key, claimed=entry, outcome="reviewed", now=1.0, through=(0, 0), learner_change=change)
+    other = dict(queue.claim_due_reviews(config, paths, now=1.0))["mind:other"]
+    assert _count(paths, "mind:other", other, (0, 2), fingerprint=after) == 2
+
+
+def test_a_starting_response_keeps_its_conversation_without_taking_it_over(tmp_path: Path) -> None:
+    """A response paused for approval keeps a long-idle conversation, and only completed ones choose its scope."""
+    config, paths = _learner(tmp_path)
+    day = 86400.0
+    with patch("mindroom.skill_learning.queue.time.time", return_value=0.0):
+        _queue(config, paths, identity=ALICE)
+    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
+    assert _count(paths, key, entry) == 0
+    with patch("mindroom.skill_learning.queue.time.time", return_value=40 * day):
+        _queue(config, paths, identity=BOB, completed=False)
+    ((_key, kept),) = queue.drop_retired_reviews(config, paths, now=45 * day)
+    assert (kept.execution_identity(), kept.has_new_runs) == (ALICE, False)
 
 
 def test_queue_drops_entries_of_disabled_agents(tmp_path: Path) -> None:
@@ -1147,6 +1172,29 @@ def test_usage_timestamps_without_an_offset_read_as_utc(tmp_path: Path) -> None:
     }
     (root / ".usage.json").write_text(json.dumps({"deploy-checks": usage}))
     assert library.archive_unused_skills(root, archive_after_days=30, now=now) == ["deploy-checks"]
+
+
+def test_one_malformed_usage_record_never_erases_the_others(tmp_path: Path) -> None:
+    """Like Hermes, a hand-edited record keeps its own fields and never costs another skill its learner ownership."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    # The agent rewrote the learned skill and dropped its marker, so only the usage record says who owns it.
+    (root / "deploy-checks/SKILL.md").write_text(LEARNED.replace("metadata:\n  mindroom:\n    learned: true\n", ""))
+    _write_skill(root, "handwritten", HANDWRITTEN)
+    usage_path = root / ".usage.json"
+    records = json.loads(usage_path.read_text())
+    records["deploy-checks"]["note"] = "keep"
+    records["handwritten"] = {"use_count": "many"}
+    records["old-habit"] = {"use_count": "many"}
+    usage_path.write_text(json.dumps(records))
+    record_skill_use(root / "handwritten")
+    record_skill_use(root / "deploy-checks")
+    stored = json.loads(usage_path.read_text())
+    assert (stored["deploy-checks"]["note"], stored["deploy-checks"]["use_count"]) == ("keep", 1)
+    assert (stored["handwritten"]["use_count"], stored["old-habit"]) == (1, {"use_count": "many"})
+    learned = library.read_skill_file(root, "deploy-checks")
+    assert learned is not None
+    assert learned.learned
 
 
 def test_archival_skips_unreadable_user_skills(tmp_path: Path) -> None:

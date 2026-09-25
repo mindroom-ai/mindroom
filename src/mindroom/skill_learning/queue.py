@@ -15,6 +15,7 @@ failing review is picked up again.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -68,9 +69,11 @@ class QueueEntry(BaseModel):
     # count, and every run of that response counts: retries after a discarded empty attempt and an approved
     # continuation. Reviews still read the whole stored conversation as evidence.
     reviewed_through: RunPosition
+    skills_root: str
+    # The workspace skills as this conversation last saw them, and when it looked.
+    seen_fingerprint: str
+    seen_at: float
     has_new_runs: bool = False
-    skills_root: str | None = None
-    seen_fingerprint: str | None = None
     failures: int = 0
     next_attempt_at: float = 0.0
     last_seen_at: float
@@ -78,6 +81,15 @@ class QueueEntry(BaseModel):
     def execution_identity(self) -> ToolExecutionIdentity | None:
         """Return the latest requester scope that completed a run in this conversation, or the one that opened it."""
         return parse_tool_execution_identity_payload(self.identity) if self.identity is not None else None
+
+
+@dataclass(frozen=True)
+class LearnerChange:
+    """The skills fingerprint around one review's own writes, and when that review started."""
+
+    before: str
+    after: str
+    started_at: float
 
 
 class _State(BaseModel):
@@ -144,7 +156,8 @@ def queue_skill_review(
     The response runner registers each response as it starts, so the first one fixes where counting starts even
     when it later fails or pauses for approval, and the approved continuation of a paused run still counts. The
     first registration also records the workspace skills as they were, so an agent saving a skill itself during
-    that response restarts counting. Only a completed response updates the entry and makes the conversation due.
+    that response restarts counting. A starting response only keeps the conversation from going stale while it
+    runs or waits for approval; a completed one also sets whose scope the review uses and makes it due.
     """
     agent = config.agents.get(agent_name)
     if agent is None or not agent.skill_learning.enabled:
@@ -166,13 +179,13 @@ def queue_skill_review(
                 reviewed_through=(started_at, -1),
                 skills_root=str(skills_root),
                 seen_fingerprint=skills_fingerprint(skills_root),
+                seen_at=now,
                 last_seen_at=now,
             )
-        elif not completed:
-            return
+        update: dict[str, object] = {"last_seen_at": now}
         if completed:
-            entry = entry.model_copy(update={"identity": identity, "last_seen_at": now, "has_new_runs": True})
-        state.entries[key] = entry
+            update |= {"identity": identity, "has_new_runs": True}
+        state.entries[key] = entry.model_copy(update=update)
         _write(runtime_paths, state)
     if completed:
         SKILL_LEARNING_WAKE.notify()
@@ -246,13 +259,13 @@ def record_count(
         entry = state.entries.get(key)
         if entry is None:
             return 0
-        foreign_change = entry.seen_fingerprint not in {None, fingerprint}
-        reviewed_through = newest if foreign_change else entry.reviewed_through
+        reviewed_through = newest if entry.seen_fingerprint != fingerprint else entry.reviewed_through
         pending = sum(count for position, count in replies if position > reviewed_through)
         update: dict[str, object] = {
             "reviewed_through": reviewed_through,
             "skills_root": skills_root,
             "seen_fingerprint": fingerprint,
+            "seen_at": time.time(),
         }
         if pending < interval:
             update |= _idle(entry, claimed)
@@ -262,7 +275,7 @@ def record_count(
 
 
 def _idle(entry: QueueEntry, claimed: QueueEntry) -> dict[str, object]:
-    """Clear the entry's due state, unless a response completed after the claim and still needs counting."""
+    """Clear the entry's due state, unless a response started or completed after the claim and may need counting."""
     if entry.last_seen_at != claimed.last_seen_at:
         return {"failures": 0, "next_attempt_at": 0.0}
     return {"has_new_runs": False, "failures": 0, "next_attempt_at": 0.0}
@@ -276,16 +289,17 @@ def settle_review(
     outcome: Literal["reviewed", "failed", "interrupted"],
     now: float,
     through: RunPosition | None = None,
-    learner_change: tuple[str, str] | None = None,
+    learner_change: LearnerChange | None = None,
 ) -> None:
     """Close one review or count attempt.
 
     A review moves the marker to ``through``, the newest run it saw. A failure keeps the marker and the due state
     for a backed-off retry, and the third one is abandoned like a review; a failure before counting passes no
     ``through`` and keeps the marker. An interruption by shutdown keeps everything for the next start.
-    ``learner_change`` is the ``(before, after)`` skills fingerprint around the learner's own writes: every
-    conversation that saw ``before`` in the same workspace moves to ``after``, so those writes never read as
-    someone else's edits.
+    ``learner_change`` describes the learner's own writes: every conversation in the same workspace that saw the
+    skills before them, or looked while the review ran and may have seen only some of them, moves to ``after``, so
+    those writes never read as someone else's edits. A foreign edit made while the review ran then goes unnoticed,
+    which at most lets one review run that the edit would have postponed.
     """
     with _locked(runtime_paths):
         state = _read(runtime_paths)
@@ -293,10 +307,12 @@ def settle_review(
         if entry is None:
             return
         if learner_change is not None:
-            before, after = learner_change
             for other_key, other in state.entries.items():
-                if other.skills_root == entry.skills_root and other.seen_fingerprint == before:
-                    state.entries[other_key] = other.model_copy(update={"seen_fingerprint": after})
+                saw_writes = other.seen_fingerprint == learner_change.before or (
+                    other.seen_at >= learner_change.started_at
+                )
+                if other.skills_root == entry.skills_root and saw_writes:
+                    state.entries[other_key] = other.model_copy(update={"seen_fingerprint": learner_change.after})
             entry = state.entries[key]
         failures = entry.failures + 1
         done = _idle(entry, claimed)

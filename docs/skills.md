@@ -190,6 +190,7 @@ A review still reads the whole stored conversation as evidence, including turns 
 Automated responses from schedules, hooks, and external triggers never start a count, just as Hermes skips reviews for cron jobs, so a thread with only automated runs is never reviewed; in a thread people also use, automated replies are part of the conversation that is counted and reviewed.
 Team responses are excluded.
 When anyone other than the learner changes the workspace skills, for example an agent writing a skill with its file tools, counting starts again after the newest run because that lesson is already saved.
+This includes a change during a conversation's first response, because its first registration records the skills as they were; a change made while a review of another conversation is writing skills in the same workspace is taken as that review's own.
 Conversations are counted per agent and private instance, not per requester, so a thread shared by several people is reviewed once.
 Minimal-mode turns count like standard turns.
 The queue in `skill_learning_state.json` in the storage root holds each conversation's review marker, retry state, and scope metadata, never message content.
@@ -245,6 +246,7 @@ Before each review, learned skills with no use, creation, or learner edit for `a
 Archived directories are named `<skill>--<timestamp>`; move one back to `skills/<skill>/` to restore it.
 Archiving or deleting a skill forgets its record in `skills/.usage.json`, so a restored skill starts a new inactivity period and a new skill under the same name belongs to whoever wrote it.
 A use is recorded in `skills/.usage.json` whenever the agent loads a workspace skill through the skill tools or reads it as a minimal-mode context document.
+Like Hermes, a record that cannot be read is ignored without affecting the others and is kept as written, fields added by hand survive updates, and a timestamp without an offset is read as UTC.
 Rewrites keep a file's existing permissions.
 Archival is logged rather than announced, because other conversations may share the workspace.
 With `notify: true`, a review that changed skills posts an `m.notice` in the conversation naming only the skills that review changed, such as ``💾 Skill review: created `deploy-checks` ``; a review stopped by shutdown after changing skills posts none.
