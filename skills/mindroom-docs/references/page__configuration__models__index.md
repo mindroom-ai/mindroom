@@ -530,7 +530,7 @@ Native compaction requires automatic compaction to be enabled, all-history repla
 Explicit `compaction.model`, scheduled history limits, bounded replay, unsupported models, and requests already exceeding the hard budget use the portable path.
 Manual `compact_context` always requests portable text compaction.
 Native checkpoints are tied to their provider, model, endpoint, and current portable summary, so changing that route or rewriting the summary rebuilds context from canonical history.
-Native compaction itself never moves canonical runs; replay continues to load them until portable text compaction moves older runs into the compaction archive.
+Native compaction itself never moves canonical runs; they stay stored in `session.runs` until portable text compaction moves older runs into the compaction archive.
 
 Checkpoints and their following native output are persisted through the existing SQLite run storage and survive restarts.
 The system instructions keep their shared prompt-cache prefix.

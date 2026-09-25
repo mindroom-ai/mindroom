@@ -76,6 +76,7 @@ from tests.conftest import (
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
+    StoredGeneration,
     _agent,
     _close_test_storages,
     _completed_run,
@@ -84,6 +85,8 @@ from tests.history_helpers import (  # noqa: F401
     _make_config,
     _plugin,
     _session,
+    archived_run_ids,
+    compaction_generations,
 )
 
 if TYPE_CHECKING:
@@ -339,10 +342,6 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch(
-            "mindroom.history.compaction.archive_compaction_chunk",
-            wraps=archive_compaction_chunk,
-        ) as persist_spy,
-        patch(
             "mindroom.history.compaction.build_summary_input",
             wraps=build_summary_input,
         ) as build_summary_input_spy,
@@ -370,9 +369,10 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     retry_sleep.assert_not_awaited()
     # The second chunk rebuilds its input with the fallback's token estimator.
     assert build_summary_input_spy.call_args_list[-1].kwargs["token_estimator"].keywords["model_id"] == fallback.id
-    assert [[run.run_id for run in call.kwargs["archived_runs"]] for call in persist_spy.call_args_list] == [
-        ["run-1"],
-        ["run-2"],
+    assert archived_run_ids(storage) == ["run-1", "run-2"]
+    assert compaction_generations(storage, "agent:test_agent") == [
+        StoredGeneration(summary="first chunk summary", summary_model="fallback-model-id", legacy=False),
+        StoredGeneration(summary="merged summary", summary_model="fallback-model-id", legacy=False),
     ]
     assert rewrite_result.compacted_run_count == 2
     assert rewrite_result.served_by.model is fallback

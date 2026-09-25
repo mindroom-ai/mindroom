@@ -45,9 +45,9 @@ from mindroom.history import archive
 from mindroom.history.compaction import SummaryModel, _generate_compaction_summary_with_retry, compact_scope_history
 from mindroom.history.storage import (
     archive_compaction_chunk,
+    read_scope_seen_event_ids,
     read_scope_state,
     reconcile_compaction_state,
-    remove_runs_by_id,
     set_force_compaction_state,
     update_scope_state_on_latest,
 )
@@ -328,6 +328,34 @@ def test_reconcile_restores_the_latest_generation_summary(tmp_path: Path) -> Non
     storage.close()
 
 
+def test_reconcile_records_an_interrupted_chunk_whose_summary_text_did_not_change(tmp_path: Path) -> None:
+    """A chunk archived without its session write still counts its events as seen when its summary matches."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session([_completed_run("run-1"), _completed_run("run-2")])
+    session.summary = SessionSummary(summary="unchanged summary", updated_at=datetime.now(UTC))
+    seed_session(storage, session)
+    archive.archive_runs(
+        storage,
+        session_id="session-1",
+        scope_key=_SCOPE.key,
+        summary="unchanged summary",
+        summary_model="summary-model",
+        runs=[run for run in session.runs or [] if run.run_id == "run-1"],
+        event_ids={"run-1": {"$run-1"}},
+    )
+    reloaded = get_agent_session(storage, "session-1")
+    assert reloaded is not None
+
+    reconcile_compaction_state(storage, reloaded, _SCOPE)
+
+    persisted = get_agent_session(storage, "session-1")
+    storage.close()
+    assert persisted is not None
+    assert "$run-1" in read_scope_seen_event_ids(persisted, _SCOPE)
+    assert [run.run_id for run in persisted.runs or []] == ["run-2"]
+
+
 def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: Path) -> None:
     """The update callable sees the latest persisted state, and the write lands on that row."""
     config, runtime_paths = _make_config(tmp_path)
@@ -378,19 +406,6 @@ def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(tmp_pat
     upsert_spy.assert_not_called()
     assert returned_state == persisted_state
     assert [run.run_id for run in stale_session.runs or []] == ["run-1", "run-2"]
-
-
-def test_remove_runs_by_id_removes_descendants() -> None:
-    runs = [
-        RunOutput(run_id="unrelated", status=RunStatus.completed),
-        RunOutput(run_id="child", parent_run_id="root", status=RunStatus.completed),
-        RunOutput(run_id="grandchild", parent_run_id="child", status=RunStatus.completed),
-        RunOutput(run_id="root", status=RunStatus.completed),
-    ]
-
-    pruned_runs = remove_runs_by_id(runs, ["root"])
-
-    assert [run.run_id for run in pruned_runs] == ["unrelated"]
 
 
 def test_scope_state_writes_keep_other_scopes_verbatim() -> None:

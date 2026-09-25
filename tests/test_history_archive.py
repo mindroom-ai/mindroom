@@ -130,6 +130,25 @@ def test_roll_back_restores_earlier_runs_of_the_hit_generation_in_order(storage:
     ) == {"r1"}
 
 
+def test_roll_back_drops_member_runs_archived_before_their_hit_team_run(storage: SqliteDb) -> None:
+    """A member run stored ahead of the redacted run leaves with it instead of being restored."""
+    session = seed_session(
+        storage,
+        AgentSession(
+            session_id="session",
+            agent_id="code",
+            runs=[_run("r1"), _run("r2-member", parent_run_id="r2"), _run("r2")],
+        ),
+    )
+    _archive(storage, session, ["r1", "r2-member", "r2"], "generation one")
+
+    hit = archive.find_archived_event(storage, session_id="session", scope_key=_SCOPE, event_id="$r2")
+    assert hit is not None
+    archive.roll_back_to(storage, session_id="session", scope_key=_SCOPE, hit=hit, live_run_ids=[])
+
+    assert _live_run_ids(storage) == ["r1"]
+
+
 def test_clear_to_legacy_keeps_only_content_free_tombstones(storage: SqliteDb) -> None:
     """Legacy invalidation drops archived content and live runs but keeps legacy tombstones."""
     session = _seed(storage, ["r2", "r3"])

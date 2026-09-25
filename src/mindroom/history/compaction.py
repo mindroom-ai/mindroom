@@ -12,7 +12,8 @@ from uuid import uuid4
 
 from agno.session.summary import SessionSummary
 
-from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.agent_storage import runs_without
+from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
@@ -20,7 +21,6 @@ from mindroom.history.replay import current_summary_text, estimate_prompt_visibl
 from mindroom.history.storage import (
     archive_compaction_chunk,
     record_summary_usage,
-    remove_runs_by_id,
     save_working_run_changes,
     update_scope_state_on_latest,
 )
@@ -86,16 +86,17 @@ class _GeneratedSummaryChunk:
     served_by: SummaryModel
 
 
-def _persist_cleared_force_state_if_needed(
+async def _persist_cleared_force_state_if_needed(
     *,
     storage: BaseDb,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
     state: HistoryScopeState,
-) -> HistoryScopeState:
+) -> None:
     if not state.force_compact_before_next_run:
-        return state
-    return update_scope_state_on_latest(
+        return
+    await run_blocking_until_complete(
+        update_scope_state_on_latest,
         storage,
         session,
         scope,
@@ -180,7 +181,7 @@ async def compact_scope_history(
     """Compact one scope by moving its oldest runs into the archive behind a new session.summary."""
     visible_runs = scope_visible_runs(session, scope)
     if not visible_runs or (available_history_budget is None and not state.force_compact_before_next_run):
-        _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
+        await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
         return None
     if before_tokens is None:
         before_tokens = await asyncio.to_thread(
@@ -203,7 +204,7 @@ async def compact_scope_history(
         scope=scope,
     )
     if not selected_run_ids:
-        _persist_cleared_force_state_if_needed(
+        await _persist_cleared_force_state_if_needed(
             storage=storage,
             session=session,
             scope=scope,
@@ -250,7 +251,7 @@ async def compact_scope_history(
         replay_model=replay_model,
     )
     if rewrite_result is None:
-        _persist_cleared_force_state_if_needed(
+        await _persist_cleared_force_state_if_needed(
             storage=storage,
             session=session,
             scope=scope,
@@ -259,8 +260,8 @@ async def compact_scope_history(
         return None
 
     compacted_at = _iso_utc_now()
-    save_working_run_changes(storage, session, working_session)
-    _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
+    await run_blocking_until_complete(save_working_run_changes, storage, session, working_session)
+    await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
     logger.info(
         "Compaction summary generated",
         session_id=session.session_id,
@@ -406,7 +407,7 @@ async def _rewrite_working_session_for_compaction(
         compacted_run_ids = tuple(run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id)
         working_session.summary = SessionSummary(summary=generated_summary.summary, updated_at=datetime.now(UTC))
         runs_before_chunk = working_session.runs or []
-        working_session.runs = remove_runs_by_id(runs_before_chunk, compacted_run_ids)
+        working_session.runs = runs_without(runs_before_chunk, compacted_run_ids)
         kept_runs = {id(run) for run in working_session.runs}
         archived_runs = [run for run in runs_before_chunk if id(run) not in kept_runs]
         total_compacted_run_count += len(included_runs)
@@ -414,13 +415,16 @@ async def _rewrite_working_session_for_compaction(
             compacted_messages.extend(messages_for_runs(included_runs, history_settings))
         pending_selected_run_ids.difference_update(compacted_run_ids)
 
-        archive_compaction_chunk(
-            storage=storage,
-            session=persisted_session,
-            scope=scope,
-            summary=working_session.summary,
-            summary_model=_model_identifier(summary_model.model),
-            archived_runs=archived_runs,
+        await run_blocking_until_complete(
+            partial(
+                archive_compaction_chunk,
+                storage=storage,
+                session=persisted_session,
+                scope=scope,
+                summary=working_session.summary,
+                summary_model=_model_identifier(summary_model.model),
+                archived_runs=archived_runs,
+            ),
         )
 
         await _emit_lifecycle_progress_after_persist(

@@ -306,11 +306,11 @@ async def prepare_scope_history(
 ) -> PreparedScopeHistory:
     """Prepare durable scope history before final replay planning."""
     resolved_scope = scope or resolve_history_scope(agent)
-    native_model = configure_native_history(
+    configure_native = partial(
+        configure_native_history,
         active_model if active_model is not None else agent.model,
         plan=resolved_inputs.execution_plan,
         history_settings=resolved_inputs.history_settings,
-        session=scope_context.session if scope_context is not None else None,
         allowed=allow_native_compaction,
     )
     if scope_context is None or scope_context.session is None:
@@ -319,7 +319,7 @@ async def prepare_scope_history(
             session=None,
             resolved_inputs=resolved_inputs,
             compaction_decision=CompactionDecision(mode="none", reason="missing_session"),
-            native_model=native_model,
+            native_model=configure_native(session=None),
         )
 
     execution_plan = resolved_inputs.execution_plan
@@ -337,6 +337,8 @@ async def prepare_scope_history(
             execution_plan=execution_plan,
         ),
     )
+    # The native route names the summary generation, which reconciliation may have repaired.
+    native_model = configure_native(session=session)
     if state.force_compact_before_next_run and native_model is not None:
         native_model.configure_native_compaction(threshold=None)
     compaction_outcomes: list[CompactionOutcome] = []

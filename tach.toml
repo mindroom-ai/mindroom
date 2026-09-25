@@ -889,6 +889,7 @@ visibility = [
     "mindroom.approval_execution",
     "mindroom.conversation_state_writer",
     "mindroom.history.archive",
+    "mindroom.history.compaction",
     "mindroom.history.interrupted_replay",
     "mindroom.history.session_context",
     "mindroom.history.storage",
@@ -2188,6 +2189,7 @@ visibility = ["mindroom.agents", "mindroom.teams"]
 [[modules]]
 path = "mindroom.history.compaction"
 depends_on = [
+    "mindroom.agent_storage",
     "mindroom.background_tasks",
     "mindroom.claude_prompt_cache",
     "mindroom.error_handling",

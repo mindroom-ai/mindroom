@@ -160,23 +160,19 @@ def test_a_stale_pre_adoption_snapshot_does_not_replace_the_archive_summary(stor
     ]
 
 
-def test_state_an_older_release_wrote_after_a_downgrade_is_adopted_again(storage: SqliteDb) -> None:
-    """An older release that compacted after a downgrade deleted runs the archive never received."""
-    session = seed_session(storage, _legacy_session("legacy summary", ["gone"], ["r1", "r2"]))
-    reconcile_compaction_state(storage, session, _SCOPE)
-    _compact(storage, session, ["r1"], "legacy summary and r1")
+def test_adoption_keeps_a_concurrent_write_to_the_session_row(storage: SqliteDb) -> None:
+    """Dropping the retired keys rewrites the freshest row instead of the caller's snapshot."""
+    seed_session(storage, _legacy_session("legacy summary", ["gone"], ["r1"]))
+    snapshot = get_agent_session(storage, "session")
+    assert snapshot is not None
+    concurrent = get_agent_session(storage, "session")
+    assert concurrent is not None
+    concurrent.session_data = {"session_state": {"written": "concurrently"}}
+    storage.upsert_session(concurrent)
 
-    storage.upsert_session(_legacy_session("older release summary", ["gone", "r2"], []))
-    reconciled = get_agent_session(storage, "session")
-    assert reconciled is not None
-    reconcile_compaction_state(storage, reconciled, _SCOPE)
+    reconcile_compaction_state(storage, snapshot, _SCOPE)
 
     stored = get_agent_session(storage, "session")
     assert stored is not None
-    assert stored.summary is not None
-    assert stored.summary.summary == "older release summary"
-    assert compaction_generations(storage, _SCOPE.key, "session")[-1] == StoredGeneration(
-        summary="older release summary",
-        summary_model=None,
-        legacy=True,
-    )
+    assert stored.session_data == {"session_state": {"written": "concurrently"}}
+    assert read_scope_state(stored, _SCOPE) == HistoryScopeState()

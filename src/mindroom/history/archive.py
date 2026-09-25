@@ -21,12 +21,10 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from agno.db.sqlite import SqliteDb
-from agno.db.utils import get_run_type
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
+from agno.db.utils import deserialize_run, get_run_type
 
 from mindroom import agno_compat_sqlite
 from mindroom.agent_storage import delete_run_subtrees, runs_without
@@ -36,16 +34,20 @@ if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence
 
     from agno.db.base import BaseDb
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
     from sqlalchemy import Connection
 
 _ID_CHUNK_SIZE = 500
 
 
 @dataclass(frozen=True)
-class _ArchivedGeneration:
+class ArchivedGeneration:
     """The newest persisted compaction generation of a scope."""
 
     summary: str | None
+    # Matrix event ids of the runs this generation archived itself.
+    event_ids: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -75,7 +77,7 @@ def archive_runs(
     """
     db = _sqlite(storage)
     compactions, compacted_runs = _table_names(db)
-    archived = [run for run in runs if run.run_id]
+    archived = [(run.run_id, run) for run in runs if run.run_id]
     with agno_compat_sqlite.run_deletion_transaction(db) as (transaction, runs_table, sessions_table):
         connection = transaction.connection()
         _ensure_tables(connection, db)
@@ -87,31 +89,32 @@ def archive_runs(
         if archived:
             connection.exec_driver_sql(
                 f"INSERT INTO {compacted_runs} "  # noqa: S608
-                "(compaction_id, session_id, run_id, run_type, run_data, event_ids) "
+                "(compaction_id, session_id, run_id, run_type, event_ids, run_data) "
                 "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id, run_id) DO NOTHING",
                 [
                     (
                         compaction_id,
                         session_id,
-                        run.run_id,
+                        run_id,
                         get_run_type(run),
+                        json.dumps(sorted(event_ids.get(run_id, ()))),
                         json.dumps(run.to_dict()),
-                        json.dumps(sorted(event_ids.get(run.run_id or "", ()))),
                     )
-                    for run in archived
+                    for run_id, run in archived
                 ],
             )
-        delete_run_subtrees(transaction, runs_table, sessions_table, [run.run_id for run in archived if run.run_id])
+        delete_run_subtrees(transaction, runs_table, sessions_table, [run_id for run_id, _ in archived])
 
 
 # LEGACY_COMPAT: Content-free generations for history compacted before the archive existed.
 # Legacy format: A scope whose runs the destructive compactor deleted, leaving only a
 # ``session.summary``, tombstoned run ids, and preserved Matrix seen ids (see
 # ``history/legacy_compaction_state.py`` for provenance).
-# Last legacy release: v2026.9.305; replacement: the next release archives compacted runs.
+# Last legacy release: v2026.9.310; replacement: the next release archives compacted runs.
 # Handling: A ``legacy`` generation holds that summary, the preserved seen ids it may contain,
-# and ``run_data``-free tombstone rows. ``has_legacy_summary``, ``legacy_event_ids``, and
-# ``clear_to_legacy`` let redaction retire it as a whole, because it cannot be split by run.
+# and ``run_data``-free tombstone rows. ``has_legacy_summary``, ``legacy_event_ids``,
+# ``clear_to_legacy``, and ``retire_summaries`` let redaction retire it as a whole, because it
+# cannot be split by run.
 # Coverage: tests/test_legacy_compaction_state.py and tests/test_compaction_redaction.py.
 def record_legacy_generation(
     storage: BaseDb,
@@ -132,12 +135,11 @@ def record_legacy_generation(
             "(session_id, scope_key, summary, legacy, legacy_event_ids, created_at) VALUES (?, ?, ?, 1, ?, ?)",
             (session_id, scope_key, summary, json.dumps(sorted(set(event_ids))), int(time.time())),
         ).lastrowid
-        tombstones = sorted({run_id for run_id in tombstone_run_ids if run_id})
-        if tombstones:
+        if tombstone_run_ids:
             connection.exec_driver_sql(
                 f"INSERT INTO {compacted_runs} (compaction_id, session_id, run_id, event_ids) "  # noqa: S608
                 "VALUES (?, ?, ?, '[]') ON CONFLICT(session_id, run_id) DO NOTHING",
-                [(compaction_id, session_id, run_id) for run_id in tombstones],
+                [(compaction_id, session_id, run_id) for run_id in tombstone_run_ids],
             )
 
 
@@ -166,7 +168,7 @@ def legacy_event_ids(storage: BaseDb, *, session_id: str, scope_key: str) -> set
             "WHERE generation.session_id = ? AND generation.scope_key = ? AND generation.legacy = 1",
             (session_id, scope_key),
         ).fetchall()
-    return {row[0] for row in rows if isinstance(row[0], str) and row[0]}
+    return {row[0] for row in rows}
 
 
 def clear_to_legacy(
@@ -187,26 +189,51 @@ def clear_to_legacy(
             f"DELETE FROM {compactions} WHERE session_id = ? AND scope_key = ? AND legacy = 0",  # noqa: S608
             (session_id, scope_key),
         )
-        connection.exec_driver_sql(
-            f"UPDATE {compactions} SET summary = NULL, legacy_event_ids = '[]' "  # noqa: S608
-            "WHERE session_id = ? AND scope_key = ?",
-            (session_id, scope_key),
-        )
-        _keep_scope_generation(connection, db, session_id=session_id, scope_key=scope_key)
+        _clear_summaries(connection, db, session_id=session_id, scope_key=scope_key)
 
 
-def latest_generation(storage: BaseDb, *, session_id: str, scope_key: str) -> _ArchivedGeneration | None:
+def retire_summaries(storage: BaseDb, *, session_id: str, scope_key: str) -> None:
+    """Stop replaying every summary of the scope while its live and archived runs stay stored.
+
+    Archived runs of retired generations no longer count as compacted history.
+    """
+    db = _sqlite(storage)
+    with db.db_engine.begin() as connection:
+        _ensure_tables(connection, db)
+        _clear_summaries(connection, db, session_id=session_id, scope_key=scope_key)
+
+
+def _clear_summaries(connection: Connection, db: SqliteDb, *, session_id: str, scope_key: str) -> None:
+    compactions, _ = _table_names(db)
+    connection.exec_driver_sql(
+        f"UPDATE {compactions} SET summary = NULL, legacy_event_ids = '[]' "  # noqa: S608
+        "WHERE session_id = ? AND scope_key = ?",
+        (session_id, scope_key),
+    )
+
+
+def latest_generation(storage: BaseDb, *, session_id: str, scope_key: str) -> ArchivedGeneration | None:
     """Return the scope's newest generation, whose summary is the one in force."""
     db = _sqlite(storage)
-    compactions, _ = _table_names(db)
+    compactions, compacted_runs = _table_names(db)
     with db.db_engine.begin() as connection:
         _ensure_tables(connection, db)
         row = connection.exec_driver_sql(
-            f"SELECT summary FROM {compactions} "  # noqa: S608
+            f"SELECT id, summary FROM {compactions} "  # noqa: S608
             "WHERE session_id = ? AND scope_key = ? ORDER BY id DESC LIMIT 1",
             (session_id, scope_key),
         ).first()
-    return None if row is None else _ArchivedGeneration(summary=row[0])
+        if row is None:
+            return None
+        event_ids = frozenset(
+            event_id
+            for (event_id,) in connection.exec_driver_sql(
+                f"SELECT value FROM {compacted_runs} AS archived, json_each(archived.event_ids) "  # noqa: S608
+                "WHERE archived.compaction_id = ?",
+                (row[0],),
+            )
+        )
+    return ArchivedGeneration(summary=row[1], event_ids=event_ids)
 
 
 def archived_run_ids(storage: BaseDb, *, session_id: str, run_ids: Collection[str]) -> set[str]:
@@ -234,7 +261,11 @@ def archived_run_ids(storage: BaseDb, *, session_id: str, run_ids: Collection[st
 
 
 def archived_event_ids(storage: BaseDb, *, session_id: str, scope_key: str) -> set[str]:
-    """Return the Matrix event ids represented by the scope's archived runs."""
+    """Return the Matrix event ids of the archived runs the replayed summary still covers.
+
+    Summaries are cumulative until a generation without one, so only runs archived
+    after the scope's latest summary-less generation count.
+    """
     db = _sqlite(storage)
     compactions, compacted_runs = _table_names(db)
     with db.db_engine.begin() as connection:
@@ -242,10 +273,11 @@ def archived_event_ids(storage: BaseDb, *, session_id: str, scope_key: str) -> s
         rows = connection.exec_driver_sql(
             f"SELECT value FROM {compacted_runs} AS archived, json_each(archived.event_ids) "  # noqa: S608
             f"JOIN {compactions} AS generation ON generation.id = archived.compaction_id "
-            "WHERE generation.session_id = ? AND generation.scope_key = ?",
-            (session_id, scope_key),
+            "WHERE generation.session_id = ? AND generation.scope_key = ? AND generation.id > COALESCE("
+            f"(SELECT MAX(id) FROM {compactions} WHERE session_id = ? AND scope_key = ? AND summary IS NULL), 0)",
+            (session_id, scope_key, session_id, scope_key),
         ).fetchall()
-    return {row[0] for row in rows if isinstance(row[0], str) and row[0]}
+    return {row[0] for row in rows}
 
 
 def find_archived_event(
@@ -292,7 +324,7 @@ def roll_back_to(
         connection = transaction.connection()
         _ensure_tables(connection, db)
         earlier = [
-            _deserialize_run(run_type, run_data)
+            deserialize_run(run_type, run_data)
             for run_type, run_data in connection.exec_driver_sql(
                 f"SELECT run_type, run_data FROM {compacted_runs} "  # noqa: S608
                 "WHERE compaction_id = ? AND id < ? AND run_data IS NOT NULL ORDER BY id",
@@ -358,15 +390,11 @@ def _ensure_tables(connection: Connection, db: SqliteDb) -> None:
         f"CREATE TABLE IF NOT EXISTS {compacted_runs} ("
         "id INTEGER PRIMARY KEY, "
         f"compaction_id INTEGER NOT NULL REFERENCES {compactions}(id) ON DELETE CASCADE, "
-        "session_id TEXT NOT NULL, run_id TEXT NOT NULL, run_type TEXT, run_data TEXT, "
-        "event_ids TEXT NOT NULL, UNIQUE(session_id, run_id))",
+        # ``event_ids`` precedes the large ``run_data`` so event scans skip its overflow pages.
+        "session_id TEXT NOT NULL, run_id TEXT NOT NULL, run_type TEXT, event_ids TEXT NOT NULL, "
+        "run_data TEXT, UNIQUE(session_id, run_id))",
     )
     connection.exec_driver_sql(
         f"CREATE INDEX IF NOT EXISTS {quote_identifier(db.session_table_name + '_compacted_runs_generation')} "
         f"ON {compacted_runs} (compaction_id)",
     )
-
-
-def _deserialize_run(run_type: str, run_data: str) -> RunOutput | TeamRunOutput:
-    data: dict[str, Any] = json.loads(run_data)
-    return TeamRunOutput.from_dict(data) if run_type == "team" else RunOutput.from_dict(data)

@@ -188,8 +188,35 @@ def test_removing_a_live_run_retires_a_legacy_summary(storage: SqliteDb) -> None
     assert remove_redacted_event_from_compaction(storage, session, _SCOPE, event_id="$gone", removed_live_run=True)
 
     stored = _stored(storage)
-    assert stored.runs == []
+    assert [run.run_id for run in stored.runs or []] == ["r2"]
     assert stored.summary is None
+
+
+def test_removing_a_live_run_keeps_runs_archived_after_a_legacy_summary(storage: SqliteDb) -> None:
+    """Retiring a legacy summary keeps later archived runs stored, but no longer counts them as seen."""
+    session = seed_session(
+        storage,
+        AgentSession(
+            session_id="session",
+            agent_id="code",
+            runs=[_run("r1"), _run("r2")],
+            summary=SessionSummary(summary="legacy summary"),
+        ),
+    )
+    reconcile_compaction_state(storage, session, _SCOPE)
+    _compact(storage, session, ["r1"], "legacy summary and r1")
+
+    assert remove_redacted_event_from_compaction(storage, session, _SCOPE, event_id="$gone", removed_live_run=True)
+
+    stored = _stored(storage)
+    assert [run.run_id for run in stored.runs or []] == ["r2"]
+    assert stored.summary is None
+    assert archive.archived_run_ids(storage, session_id="session", run_ids=["r1"]) == {"r1"}
+    assert read_scope_seen_event_ids(stored, _SCOPE) == {"$r2"}
+    stored.summary = SessionSummary(summary="legacy summary and r1")
+    storage.upsert_session(stored)
+    reconcile_compaction_state(storage, stored, _SCOPE)
+    assert _stored(storage).summary is None
 
 
 def test_team_redaction_without_compaction_keeps_unrelated_runs(storage: SqliteDb) -> None:

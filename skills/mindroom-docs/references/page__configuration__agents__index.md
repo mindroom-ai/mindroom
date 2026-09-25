@@ -238,9 +238,10 @@ It always plans the replay that is safe for the current model call when the acti
 That replay planner can keep configured replay, reduce raw replay, fall back to summary-only replay, or disable persisted replay for the run.
 Portable text compaction rewrites the persisted Agno session in SQLite.
 Older compacted runs move out of `session.runs` into the conversation database's compaction archive and are replaced in replay by the merged `session.summary`.
-The archive keeps every compacted run and each intermediate summary, so compaction loses no stored history; it only grows, and deleting the conversation removes it.
-Redacting a Matrix event that a compacted run consumed rolls compaction back to just before that run instead of clearing the whole conversation.
-Summaries compacted before the archive existed record no per-run provenance, so redacting an event they may contain still clears that conversation's summaries and live runs.
+The archive keeps every compacted run and each intermediate summary, so compaction itself deletes no stored history; runs that releases before the archive deleted stay lost.
+Redaction and conversation deletion are the only removals from the archive.
+Redacting a Matrix event that a compacted run consumed rolls compaction back to just before that run, removing that run and everything after it, instead of clearing the whole conversation.
+Summaries compacted before the archive existed record no per-run provenance, so redacting an event they may contain still clears that conversation's summaries, the runs archived after them, and its live runs.
 
 Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
 `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`).

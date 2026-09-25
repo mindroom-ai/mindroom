@@ -2621,9 +2621,10 @@ It always plans the replay that is safe for the current model call when the acti
 That replay planner can keep configured replay, reduce raw replay, fall back to summary-only replay, or disable persisted replay for the run.
 Portable text compaction rewrites the persisted Agno session in SQLite.
 Older compacted runs move out of `session.runs` into the conversation database's compaction archive and are replaced in replay by the merged `session.summary`.
-The archive keeps every compacted run and each intermediate summary, so compaction loses no stored history; it only grows, and deleting the conversation removes it.
-Redacting a Matrix event that a compacted run consumed rolls compaction back to just before that run instead of clearing the whole conversation.
-Summaries compacted before the archive existed record no per-run provenance, so redacting an event they may contain still clears that conversation's summaries and live runs.
+The archive keeps every compacted run and each intermediate summary, so compaction itself deletes no stored history; runs that releases before the archive deleted stay lost.
+Redaction and conversation deletion are the only removals from the archive.
+Redacting a Matrix event that a compacted run consumed rolls compaction back to just before that run, removing that run and everything after it, instead of clearing the whole conversation.
+Summaries compacted before the archive existed record no per-run provenance, so redacting an event they may contain still clears that conversation's summaries, the runs archived after them, and its live runs.
 
 Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
 `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`).
@@ -3764,7 +3765,7 @@ Native compaction requires automatic compaction to be enabled, all-history repla
 Explicit `compaction.model`, scheduled history limits, bounded replay, unsupported models, and requests already exceeding the hard budget use the portable path.
 Manual `compact_context` always requests portable text compaction.
 Native checkpoints are tied to their provider, model, endpoint, and current portable summary, so changing that route or rewriting the summary rebuilds context from canonical history.
-Native compaction itself never moves canonical runs; replay continues to load them until portable text compaction moves older runs into the compaction archive.
+Native compaction itself never moves canonical runs; they stay stored in `session.runs` until portable text compaction moves older runs into the compaction archive.
 
 Checkpoints and their following native output are persisted through the existing SQLite run storage and survive restarts.
 The system instructions keep their shared prompt-cache prefix.
@@ -20648,7 +20649,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/config/legacy_fields.py`][config-legacy] | Agent or defaults validation sees a retired field. | Pydantic remains the strict validation boundary and the helper provides directed replacement errors. |
 | [`src/mindroom/tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] | Authored tool override validation sees a retired per-tool field such as `restrict_to_base_dir`. | `tool_system/metadata.py` keeps authored-override validation and raises the directed replacement error the helper names. |
 | [`src/mindroom/legacy_streaming.py`][legacy-streaming] | Streaming replay encounters body-only `[cancelled]` or `[error]` suffixes (each preceded by one space). | Current markers stay in `streaming.py`; `execution_preparation.py` gives recognized structured status precedence and delegates body fallback to the streaming reader. |
-| [`src/mindroom/history/legacy_compaction_state.py`][legacy-compaction-state] | History preparation or redaction cleanup finds v2 state carrying `compacted_run_ids` or last-compaction audit fields, or a replayed summary in a scope without archive generations. | `adopt_legacy_compaction` records one content-free legacy generation with the summary, its possible seen ids, and tombstones, and adopts reappearing keys again only when an older release deleted unarchived runs or cleared the summary; `history/storage.py` drops the retired keys and keeps replay, tombstone pruning, and legacy redaction invalidation. |
+| [`src/mindroom/history/legacy_compaction_state.py`][legacy-compaction-state] | History preparation or redaction cleanup finds v2 state carrying `compacted_run_ids` or last-compaction audit fields, or a replayed summary in a scope without archive generations. | `adopt_legacy_compaction` records one content-free legacy generation with the summary, its possible seen ids, and tombstones, and drops reappearing keys once the scope has a generation; `history/storage.py` drops the retired keys and keeps replay, tombstone pruning, and legacy redaction invalidation. |
 | [`src/mindroom/legacy_revision_replay.py`][legacy-revision-replay] | Turn-record merges and redaction cleanup encounter reconstructed revision provenance from pre-v2026.9.43 summaries. | Current revision facts win, storage mutation stays in `turn_store.py`, and source-only summary ownership applies only to labeled historical replay. |
 | [`src/mindroom/event_journal/legacy_schema.py`][journal-legacy-schema] | A journal lacks Nio-owned `matrix_sync_consumers`, or a current approval generation has executable calls without toolkit origins. | Schema setup preserves history and frozen deliveries while retiring obsolete work; unresumable approvals enter normal failure recovery before another card decision. |
 | [`src/mindroom/config/legacy_access.py`][access-legacy] | Config loading or `mindroom config migrate` finds retired access fields. | Complete-source validation, concrete grants, a backup, and atomic membership-schema publication are retained. |
@@ -21316,11 +21317,12 @@ Mantle currently needs its existing HTTP transport passed explicitly when copyin
 - The session summary is written after that transaction; before each run, reconciliation restores the latest generation's summary and deletes live runs that are already archived.
 - Earlier committed chunks survive later failure or cancellation; compacted runs cannot silently reappear.
 - Redacting an event represented by an archived run removes that run and everything after it, returns the generation's earlier runs to replay, and replays the previous generation's summary.
-- Content-free legacy generations cannot be split: while one still replays its summary, an event it may contain (its captured seen ids, retained source ownership, or any removed live run) clears it together with every later generation, their archived runs, and all live runs, as before the archive existed.
+- Content-free legacy generations cannot be split: while one still replays its summary, an event it may contain (its captured seen ids or retained source ownership) clears it together with every later generation, their archived runs, and all live runs, as before the archive existed.
+- A live run removed for any other event only retires the scope's summaries, because legacy provenance may be incomplete; live runs stay, and archived runs stay stored without counting as compacted history.
 - Legacy provenance takes precedence over an archive hit, because every later generation was built on the legacy summary.
 - After any redaction change, the scope's preserved seen ids are exactly those its remaining compacted history represents, so removed messages return as unseen thread context.
 - The archive only grows; redaction and conversation deletion are its only removals.
-- Downgrading to a release without the archive and upgrading again adopts the older release's compaction state once more; runs that release deleted stay lost.
+- Downgrading to a release without the archive is unsupported: older releases neither maintain nor redact the archive, and once a scope has a generation, compaction state they write is dropped rather than adopted.
 - Only the affected scope is rewritten; current-turn media and current-turn reasoning retain their existing replay rules.
 
 The history, provider transport, Agno patch, import-boundary, and native compaction tests exercise these contracts.

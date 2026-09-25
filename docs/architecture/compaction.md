@@ -60,11 +60,12 @@ Mantle currently needs its existing HTTP transport passed explicitly when copyin
 - The session summary is written after that transaction; before each run, reconciliation restores the latest generation's summary and deletes live runs that are already archived.
 - Earlier committed chunks survive later failure or cancellation; compacted runs cannot silently reappear.
 - Redacting an event represented by an archived run removes that run and everything after it, returns the generation's earlier runs to replay, and replays the previous generation's summary.
-- Content-free legacy generations cannot be split: while one still replays its summary, an event it may contain (its captured seen ids, retained source ownership, or any removed live run) clears it together with every later generation, their archived runs, and all live runs, as before the archive existed.
+- Content-free legacy generations cannot be split: while one still replays its summary, an event it may contain (its captured seen ids or retained source ownership) clears it together with every later generation, their archived runs, and all live runs, as before the archive existed.
+- A live run removed for any other event only retires the scope's summaries, because legacy provenance may be incomplete; live runs stay, and archived runs stay stored without counting as compacted history.
 - Legacy provenance takes precedence over an archive hit, because every later generation was built on the legacy summary.
 - After any redaction change, the scope's preserved seen ids are exactly those its remaining compacted history represents, so removed messages return as unseen thread context.
 - The archive only grows; redaction and conversation deletion are its only removals.
-- Downgrading to a release without the archive and upgrading again adopts the older release's compaction state once more; runs that release deleted stay lost.
+- Downgrading to a release without the archive is unsupported: older releases neither maintain nor redact the archive, and once a scope has a generation, compaction state they write is dropped rather than adopted.
 - Only the affected scope is rewritten; current-turn media and current-turn reasoning retain their existing replay rules.
 
 The history, provider transport, Agno patch, import-boundary, and native compaction tests exercise these contracts.
