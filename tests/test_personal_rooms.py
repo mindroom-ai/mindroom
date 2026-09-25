@@ -110,6 +110,7 @@ class MatrixServer:
         self.aliases: dict[str, str] = {}
         self.messages: dict[str, dict[str, Any]] = {}
         self.fail_invite = False
+        self.fail_kick = False
         self.fail_send = False
         self.fail_receipt = False
         self.create_count = 0
@@ -196,6 +197,25 @@ class MatrixServer:
             return nio.RoomInviteError("retry", "M_UNKNOWN")
         self.set_member(room_id, user_id, "invite")
         return nio.RoomInviteResponse()
+
+    async def room_kick(self, room_id: str, user_id: str, reason: str | None = None) -> object:
+        """Remove one member or revoke one invite."""
+        del reason
+        if self.fail_kick:
+            return nio.RoomKickError("retry", "M_UNKNOWN")
+        self.set_member(room_id, user_id, "leave")
+        return nio.RoomKickResponse()
+
+    def membership(self, room_id: str, user_id: str) -> str | None:
+        """Return one user's current membership."""
+        return next(
+            (
+                event["content"]["membership"]
+                for event in self.state[room_id]
+                if (event["type"], event["state_key"]) == ("m.room.member", user_id)
+            ),
+            None,
+        )
 
     def set_member(self, room_id: str, user_id: str, membership: str) -> None:
         """Replace one membership state event."""
@@ -416,17 +436,107 @@ async def test_service_accounts_and_denied_humans_are_excluded(tmp_path: Path, m
 
 
 @pytest.mark.asyncio
-async def test_existing_alias_requires_creator_marker_and_private_roster(
+async def test_owner_invited_agents_keep_the_room_valid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An owner may bring other MindRoom agents into a personal room."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    server.set_member(room_id, "@mindroom_router:localhost", "join")
+    server.set_member(room_id, "@mindroom_general:localhost", "invite")
+    owner.runtime.config.agents["general"] = owner.runtime.config.agents["helper"].model_copy()
+
+    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
+
+    assert server.membership(room_id, "@mindroom_router:localhost") == "join"
+    assert server.membership(room_id, "@mindroom_general:localhost") == "invite"
+    assert not server.messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("membership", ["invite", "join", "knock"])
+@pytest.mark.parametrize("guest", ["@bob:localhost", "@bridge:localhost"])
+async def test_other_people_are_removed_from_a_personal_room(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    membership: str,
+    guest: str,
+) -> None:
+    """A personal room stays private: another person, or a bridge relaying people, is removed once."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    owner.runtime.config.bot_accounts = ["@bridge:localhost"]
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    server.set_member(room_id, guest, membership)
+
+    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
+    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
+
+    assert server.membership(room_id, guest) == "leave"
+    assert server.membership(room_id, "@alice:localhost") in {"invite", "join"}
+    notices = [message["content"]["body"] for message in server.messages.values() if message["room_id"] == room_id]
+    assert notices == [
+        f"This room is private to @alice:localhost, so I removed {guest}. "
+        "To work with other people, use a shared room.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_guest_is_removed_when_the_invite_is_seen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Removal does not wait for the next reconciliation, and leaves agents alone."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    room = nio.MatrixRoom(room_id, server.user_id)
+    room.add_member("@alice:localhost", None, None)
+    for user_id in ("@mindroom_router:localhost", "@bob:localhost"):
+        server.set_member(room_id, user_id, "invite")
+        room.add_member(user_id, None, None, invited=True)
+        await owner.guest_membership_event(room, user_id, "invite")
+
+    assert server.membership(room_id, "@mindroom_router:localhost") == "invite"
+    assert server.membership(room_id, "@bob:localhost") == "leave"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_guest_removal_is_retried_without_raising(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An alias collision never authorizes mutation of somebody else's room."""
+    """A member event never raises, so a failure cannot hold the room's event lane."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    room = nio.MatrixRoom(room_id, server.user_id)
+    room.add_member("@alice:localhost", None, None)
+    room.add_member("@bob:localhost", None, None, invited=True)
+    server.set_member(room_id, "@bob:localhost", "invite")
+    server.fail_kick = True
+
+    await owner.guest_membership_event(room, "@bob:localhost", "invite")
+    assert server.membership(room_id, "@bob:localhost") == "invite"
+    with pytest.raises(RuntimeError, match="removal"):
+        await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+
+    server.fail_kick = False
+    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
+    assert server.membership(room_id, "@bob:localhost") == "leave"
+
+
+@pytest.mark.asyncio
+async def test_existing_alias_requires_creator_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An alias collision never authorizes mutation of somebody else's room, guests included."""
     server = MatrixServer()
     owner = service(tmp_path, server, monkeypatch)
     room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
     server.set_member(room_id, "@eve:localhost", "join")
+    marker = next(event for event in server.state[room_id] if event["type"] == "org.mindroom.personal_room")
+    marker["content"] = {}
     with pytest.raises(RuntimeError, match=r"ownership|member"):
         await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    assert server.membership(room_id, "@eve:localhost") == "join"
     assert len(server.messages) == 1
 
 
@@ -2068,8 +2178,9 @@ async def test_imported_policy_does_not_change_new_room_defaults(
     history = next(event["content"] for event in server.state[bob_room] if event["type"] == "m.room.history_visibility")
     assert history == {"history_visibility": "invited"}
     server.set_member(bob_room, "@guest:localhost", "invite")
-    with pytest.raises(RuntimeError, match="ownership"):
-        await owner.ensure("@bob:localhost", "!lobby:localhost", server)
+    assert await owner.ensure("@bob:localhost", "!lobby:localhost", server) == bob_room
+    assert server.membership(bob_room, "@guest:localhost") == "leave"
+    assert server.membership(alice_room, "@guest:localhost") == "join"
 
 
 @pytest.mark.asyncio

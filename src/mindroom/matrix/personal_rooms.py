@@ -19,6 +19,7 @@ from mindroom.constants import (
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.file_locks import async_exclusive_file_lock
+from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import set_room_avatar_from_file
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import (
@@ -48,7 +49,13 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.runtime_protocols import SupportsClientConfigMemberships
 
+logger = get_logger(__name__)
+
 _OWNERSHIP_EVENT = "org.mindroom.personal_room"
+_GUEST_REMOVAL_REASON = "Personal rooms are private to their owner"
+_GUEST_REMOVAL_NOTICE = (
+    "This room is private to {owner}, so I removed {guests}. To work with other people, use a shared room."
+)
 
 
 class _PolicyChangedError(Exception):
@@ -350,7 +357,9 @@ class PersonalRoomService:
         agent_id = self._client().user_id
         expected_creator = agent_id
         expected_history = "invited"
-        permitted_members = {record.user_id, agent_id}
+        # The owner may bring in any MindRoom agent: history visibility keeps
+        # what came before its invite hidden, and agent access rules still apply.
+        permitted_members = {record.user_id, agent_id, *filter(self._is_agent, joined_or_invited)}
         if record.adoption is not None:
             expected_creator = record.adoption.creator_user_id
             expected_history = record.adoption.expected_history_visibility
@@ -374,7 +383,6 @@ class PersonalRoomService:
             or marker.get("sender") != self._client().user_id
             or marker.get("content") != self._ownership(record.user_id)
             or roster.get(self._client().user_id) != "join"
-            or joined_or_invited - permitted_members
             or agent_power < max(100, power.get("state_default", 50), power.get("invite", 0))
             or state.get(("m.room.join_rules", ""), {}).get("content", {}).get("join_rule") != "invite"
             or state.get(("m.room.history_visibility", ""), {}).get("content", {}).get("history_visibility")
@@ -382,7 +390,72 @@ class PersonalRoomService:
         ):
             msg = "Personal-room ownership or membership does not match"
             raise RuntimeError(msg)
+        guests = joined_or_invited - permitted_members
+        if guests:
+            # Only a room this agent created is removed from; an imported room
+            # keeps its exact attested roster and fails closed instead.
+            if record.adoption is not None:
+                msg = "Personal-room ownership or membership does not match"
+                raise RuntimeError(msg)
+            await self._remove_guests(record, guests, state)
+            roster.update(dict.fromkeys(guests, "leave"))
         return roster
+
+    def _is_agent(self, user_id: str) -> bool:
+        """Return whether one member is a MindRoom account rather than a person or bridge."""
+        config = self.runtime.config
+        return user_id not in config.bot_accounts and not is_human_requester_id(user_id, config, self.runtime_paths)
+
+    async def _remove_guests(
+        self,
+        record: PersonalRoomRecord,
+        guests: set[str],
+        state: dict[tuple[str, str], dict],
+    ) -> None:
+        """Remove people other than the owner, then tell the room why once."""
+        assert record.room_id is not None
+        client = self._client()
+        for user_id in sorted(guests):
+            response = await client.room_kick(record.room_id, user_id, reason=_GUEST_REMOVAL_REASON)
+            if not isinstance(response, nio.RoomKickResponse):
+                msg = "Personal-room guest removal failed"
+                raise RuntimeError(msg)  # noqa: TRY004 - a Matrix transport failure is retryable, not a caller type error
+        logger.info("personal_room_guests_removed", room_id=record.room_id, removed_count=len(guests))
+        content = build_message_content(
+            _GUEST_REMOVAL_NOTICE.format(owner=record.user_id, guests=", ".join(sorted(guests))),
+        )
+        content["msgtype"] = "m.notice"
+        membership_event_ids = "|".join(
+            str(state.get(("m.room.member", user_id), {}).get("event_id", user_id)) for user_id in sorted(guests)
+        )
+        await send_message_result(
+            client,
+            record.room_id,
+            content,
+            transaction_id=f"personal-guests-{personal_room_digest(f'{record.room_id}|{membership_event_ids}')}",
+        )
+
+    async def guest_membership_event(self, room: nio.MatrixRoom, user_id: str, membership: str) -> None:
+        """Remove a person the owner brought into a personal room as soon as it is seen."""
+        if membership not in {"invite", "join", "knock"} or self._settings() is None or self._is_agent(user_id):
+            return
+        for member_id in room.users:
+            if member_id == user_id:
+                continue
+            path = personal_room_record_path(self.runtime_paths, self.agent_name, member_id)
+            if not path.is_file():
+                continue
+            try:
+                async with async_exclusive_file_lock(path.with_suffix(".lock")):
+                    record = await run_blocking_until_complete(read_personal_room, path)
+                    if record is None or record.room_id != room.room_id or record.adoption is not None:
+                        continue
+                    await self._validate_room(record)
+            except Exception:
+                # Raising here would hold this room's event lane until the room
+                # changed; the next reconciliation retries the removal instead.
+                logger.exception("Personal-room guest removal failed", room_id=room.room_id)
+            return
 
     def _template_values(self, record: PersonalRoomRecord) -> dict[str, str]:
         return {
