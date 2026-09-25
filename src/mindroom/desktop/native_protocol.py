@@ -21,6 +21,8 @@ NATIVE_ACTIONS = frozenset(
         "status",
         "configure",
         "set_allowed_apps",
+        "set_browser_config",
+        "finish_setup",
         "import_setup",
         "login",
         "pair",

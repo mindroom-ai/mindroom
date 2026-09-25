@@ -4,6 +4,8 @@ import Foundation
 
 @MainActor
 final class DesktopControlStore: ObservableObject {
+    typealias Request = (String, [String: Any], Duration) async throws -> [String: Any]
+
     static let shared = DesktopControlStore()
 
     @Published private(set) var status = DesktopStatus.stopped
@@ -12,6 +14,7 @@ final class DesktopControlStore: ObservableObject {
     @Published private(set) var recovery: String?
     @Published private(set) var verification = ""
     @Published private(set) var confirmationCommand = ""
+    @Published private(set) var setupImported = false
     @Published private(set) var leaseRemainingSeconds = 0
 
     @Published var homeserver = "https://mindroom.chat" {
@@ -37,6 +40,7 @@ final class DesktopControlStore: ObservableObject {
 
     @Published private(set) var applications = InstalledApplicationCatalog.applications()
     private let helper: DesktopBridgeProcess
+    private let request: Request
     private var subscriptions = Set<AnyCancellable>()
     private var countdownTimer: Timer?
     @Published private var confirmedIdentity: String?
@@ -48,10 +52,14 @@ final class DesktopControlStore: ObservableObject {
     private var hasInitialSessionEdits = false
     private var addedApplicationURLs = Set<URL>()
     private var pendingOperationCount = 0
+    private var pendingSetup: DesktopSetupSnapshot?
 
-    init(helper: DesktopBridgeProcess? = nil) {
+    init(helper: DesktopBridgeProcess? = nil, request: Request? = nil) {
         let helper = helper ?? DesktopBridgeProcess()
         self.helper = helper
+        self.request = request ?? { action, parameters, timeout in
+            try await helper.request(action: action, parameters: parameters, timeout: timeout)
+        }
         helper.$status
             .receive(on: RunLoop.main)
             .sink { [weak self] value in
@@ -97,16 +105,86 @@ final class DesktopControlStore: ObservableObject {
         perform("status")
     }
 
-    func saveConfiguration() {
+    var savedSessionMatchesSetup: Bool {
+        status.pairing.sessionState == .ready
+            && status.pairing.homeserver?.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                == homeserver.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            && (matrixUserID.isEmpty || status.pairing.userID == matrixUserID)
+    }
+
+    var needsPairing: Bool { setupImported || !confirmationCommand.isEmpty }
+
+    var connectionStatusLabel: String {
+        if status.bridge.state == "observe_only" || status.bridge.state == "control" {
+            return "Connected · \(desktopStatusLabel)"
+        }
+        if needsPairing && !status.canStopBridge {
+            return confirmationCommand.isEmpty ? "Finish connecting" : "Confirm connection in chat"
+        }
+        return status.connectionTitle
+    }
+
+    func finishChatConfirmation(completion: @escaping () -> Void = {}) {
+        guard let pendingSetup, pendingSetup.matches(status), !confirmationCommand.isEmpty else {
+            errorMessage = DesktopSetupError.changed.localizedDescription
+            recovery = nil
+            return
+        }
+        perform(
+            "finish_setup", parameters: [
+                "expected_revision": pendingSetup.config.revision,
+                "expected_session": pendingSetup.sessionParameters,
+            ],
+            then: { result in
+                guard pendingSetup.matches(
+                    try Self.responseStatus(result), revision: pendingSetup.config.revision + 1, enabled: true
+                ) else { throw DesktopSetupError.changed }
+                return result
+            },
+            completion: { [weak self] _ in
+                self?.confirmationCommand = ""
+                self?.pairingCode = ""
+                self?.setupImported = false
+                self?.pendingSetup = nil
+                completion()
+            }
+        )
+    }
+
+    func cancelSetupImport() {
+        setupImported = false
+        pairingCode = ""
+        confirmationCommand = ""
+        verification = ""
+        pendingSetup = nil
+        homeserver = status.pairing.homeserver ?? "https://mindroom.chat"
+        matrixUserID = status.pairing.userID ?? ""
+        matrixPassword = ""
+        controllerUserID = status.config.controllerUserID ?? ""
+        controllerDeviceID = status.config.controllerDeviceID ?? ""
+        controllerFingerprint = status.pairing.controllerFingerprint ?? ""
+        requesterIDs = (status.config.allowedRequesterIDs ?? []).joined(separator: ", ")
+        agentNames = (status.config.allowedAgentNames ?? []).joined(separator: ", ")
+        accessGatewayRequired = false
+        hasInitialSessionEdits = false
+        identityConfirmed = false
+    }
+
+    func saveAndConnect() {
         guard identityConfirmed else {
             errorMessage = "Confirm the displayed controller, requester, and agent before saving."
+            recovery = nil
+            return
+        }
+        if !savedSessionMatchesSetup || pairingCode.isEmpty {
+            errorMessage = "Import fresh setup data and sign in with the account shown before connecting."
             recovery = nil
             return
         }
         let config: [String: Any] = [
             "v": 1,
             "revision": status.config.revision,
-            "enabled": true,
+            "enabled": false,
             "controller": [
                 "user_id": controllerUserID,
                 "device_id": controllerDeviceID,
@@ -123,15 +201,68 @@ final class DesktopControlStore: ObservableObject {
                 "timeout_seconds": 90,
             ],
         ]
-        perform("configure", parameters: ["expected_revision": status.config.revision, "config": config])
+        let code = pairingCode
+        let accessGateway = accessGatewayRequired
+        let expected = DesktopSetupSnapshot(
+            config: DesktopConfigStatus(
+                state: "ready", revision: status.config.revision + 1, enabled: false,
+                controllerUserID: controllerUserID, controllerDeviceID: controllerDeviceID,
+                allowedRequesterIDs: split(requesterIDs), allowedAgentNames: split(agentNames),
+                allowedAppIDs: selectedAppIDs.sorted()
+            ),
+            session: status.pairing, controllerFingerprint: controllerFingerprint
+        )
+        let pair: ([String: Any]) async throws -> [String: Any] = { [request] result in
+            guard expected.matches(try Self.responseStatus(result)) else {
+                throw DesktopSetupError.changed
+            }
+            let claimed = try await request(
+                "pair",
+                ["code": code, "expected_revision": expected.config.revision, "cloudflare_access": accessGateway],
+                .seconds(180)
+            )
+            guard expected.matches(try Self.responseStatus(claimed)) else {
+                throw DesktopSetupError.changed
+            }
+            guard let verification = claimed["verification"] as? String, !verification.isEmpty,
+                  let command = claimed["confirmation_command"] as? String, !command.isEmpty else {
+                throw DesktopBridgeProcessError.malformedResponse
+            }
+            return claimed
+        }
+        pendingSetup = nil
+        perform(
+            "configure", parameters: ["expected_revision": status.config.revision, "config": config],
+            then: pair
+        ) { [weak self] result in
+            self?.pendingSetup = expected
+            self?.verification = result["verification"] as? String ?? ""
+            self?.confirmationCommand = result["confirmation_command"] as? String ?? ""
+        }
+    }
+
+    func saveBrowserConfiguration() {
+        guard status.hasSavedConnection, !needsPairing else {
+            errorMessage = "Complete connection setup before saving browser settings."
+            recovery = nil
+            return
+        }
+        perform("set_browser_config", parameters: [
+            "expected_revision": status.config.revision,
+            "browser": [
+                "enabled": browserEnabled,
+                "executable_path": browserExecutable.nilIfBlank,
+                "user_data_dir": browserProfile.nilIfBlank,
+            ],
+        ])
     }
 
     var hasAppSelectionChanges: Bool {
         selectedAppIDs != Set(status.config.allowedAppIDs ?? [])
     }
 
-    func saveAllowedApplications() {
-        guard status.config.state == "ready" else {
+    func saveAllowedApplications(completion: @escaping () -> Void = {}) {
+        guard status.hasSavedConnection, !needsPairing else {
             errorMessage = "Complete connection setup before saving app access."
             recovery = nil
             return
@@ -139,7 +270,8 @@ final class DesktopControlStore: ObservableObject {
         perform(
             "set_allowed_apps",
             parameters: ["expected_revision": status.config.revision, "allowed_app_ids": selectedAppIDs.sorted()],
-            stopFirst: status.canStopBridge
+            stopFirst: status.canStopBridge,
+            completion: { _ in completion() }
         )
     }
 
@@ -180,7 +312,7 @@ final class DesktopControlStore: ObservableObject {
             recovery = "Copy the complete setup descriptor from the same MindRoom chat."
             return
         }
-        perform("import_setup", parameters: ["descriptor": descriptor]) { [weak self] result in
+        perform("import_setup", parameters: ["descriptor": descriptor], completion: { [weak self] result in
             self?.homeserver = result["homeserver"] as? String ?? ""
             self?.matrixUserID = result["user_id"] as? String ?? ""
             self?.pairingCode = result["code"] as? String ?? ""
@@ -190,41 +322,34 @@ final class DesktopControlStore: ObservableObject {
             self?.requesterIDs = result["requester_id"] as? String ?? ""
             self?.agentNames = result["agent_name"] as? String ?? ""
             self?.accessGatewayRequired = result["cloudflare_access"] as? Bool ?? false
+            self?.setupImported = true
+            self?.verification = ""
+            self?.confirmationCommand = ""
+            self?.pendingSetup = nil
             self?.setupDescriptor = ""
             self?.confirmedIdentity = nil
-        }
+        })
     }
 
-    func login(replace: Bool = false) {
+    func login(replace: Bool = false, usePassword: Bool = false) {
         var parameters: [String: Any] = [
             "homeserver": homeserver,
             "method": "password",
             "user_id": matrixUserID,
             "password": matrixPassword,
             "replace": replace,
+            "cloudflare_access": accessGatewayRequired,
         ]
-        if matrixPassword.isEmpty {
+        if !usePassword {
             parameters["method"] = "sso"
             parameters.removeValue(forKey: "password")
             if matrixUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 parameters.removeValue(forKey: "user_id")
             }
         }
-        perform("login", parameters: parameters) { [weak self] _ in
+        perform("login", parameters: parameters, timeout: .seconds(300), completion: { [weak self] _ in
             self?.matrixPassword = ""
-        }
-    }
-
-    func pair() {
-        guard identityConfirmed, configurationMatchesCurrentIdentity else {
-            errorMessage = "Confirm the current identities after saving this configuration."
-            recovery = "Review the controller fingerprint, requester, and agent, then confirm again."
-            return
-        }
-        perform("pair", parameters: ["code": pairingCode]) { [weak self] result in
-            self?.verification = result["verification"] as? String ?? ""
-            self?.confirmationCommand = result["confirmation_command"] as? String ?? ""
-        }
+        })
     }
 
     func start() { perform("start") }
@@ -280,6 +405,7 @@ final class DesktopControlStore: ObservableObject {
         timeout: Duration = .seconds(35),
         urgent: Bool = false,
         stopFirst: Bool = false,
+        then continuation: (([String: Any]) async throws -> [String: Any])? = nil,
         completion: (([String: Any]) -> Void)? = nil
     ) {
         guard urgent || !isBusy else { return }
@@ -290,9 +416,10 @@ final class DesktopControlStore: ObservableObject {
         Task {
             do {
                 if stopFirst {
-                    _ = try await helper.request(action: "stop", timeout: .seconds(120))
+                    _ = try await request("stop", [:], .seconds(120))
                 }
-                let result = try await helper.request(action: action, parameters: parameters, timeout: timeout)
+                var result = try await request(action, parameters, timeout)
+                if let continuation { result = try await continuation(result) }
                 completion?(result)
             } catch let DesktopBridgeProcessError.helper(error) {
                 errorMessage = error.message
@@ -381,14 +508,6 @@ final class DesktopControlStore: ObservableObject {
             .joined(separator: "\u{1F}")
     }
 
-    private var configurationMatchesCurrentIdentity: Bool {
-        status.config.controllerUserID == controllerUserID
-            && status.config.controllerDeviceID == controllerDeviceID
-            && status.pairing.controllerFingerprint == controllerFingerprint
-            && Set(status.config.allowedRequesterIDs ?? []) == Set(split(requesterIDs))
-            && Set(status.config.allowedAgentNames ?? []) == Set(split(agentNames))
-    }
-
     private func configurationFieldChanged(_ field: PartialKeyPath<DesktopControlStore>) {
         if observedConfiguration == nil { initialConfigurationEdits.insert(field) }
         if confirmedIdentity != nil, confirmedIdentity != currentIdentity {
@@ -400,6 +519,47 @@ final class DesktopControlStore: ObservableObject {
         value.split(whereSeparator: { $0 == "," || $0.isNewline })
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+    }
+
+    private static func responseStatus(_ result: [String: Any]) throws -> DesktopStatus {
+        guard let status = result["status"] as? [String: Any] else {
+            throw DesktopBridgeProcessError.malformedResponse
+        }
+        return try JSONDecoder().decode(DesktopStatus.self, from: JSONSerialization.data(withJSONObject: status))
+    }
+}
+
+private enum DesktopSetupError: LocalizedError {
+    case changed
+
+    var errorDescription: String? {
+        "The saved setup or login changed. Import fresh setup data and connect again."
+    }
+}
+
+private struct DesktopSetupSnapshot {
+    let config: DesktopConfigStatus
+    let session: DesktopPairingStatus
+    let controllerFingerprint: String?
+
+    var sessionParameters: [String: String] {
+        ["homeserver": session.homeserver ?? "", "user_id": session.userID ?? "", "device_id": session.deviceID ?? ""]
+    }
+
+    func matches(_ status: DesktopStatus, revision: Int? = nil, enabled: Bool? = nil) -> Bool {
+        status.config.state == "ready"
+            && status.config.revision == (revision ?? config.revision)
+            && status.config.enabled == (enabled ?? config.enabled)
+            && status.config.controllerUserID == config.controllerUserID
+            && status.config.controllerDeviceID == config.controllerDeviceID
+            && status.config.allowedRequesterIDs == config.allowedRequesterIDs
+            && status.config.allowedAgentNames == config.allowedAgentNames
+            && status.config.allowedAppIDs == config.allowedAppIDs
+            && status.pairing.controllerFingerprint == controllerFingerprint
+            && status.pairing.sessionState == .ready
+            && status.pairing.homeserver == session.homeserver
+            && status.pairing.userID == session.userID
+            && status.pairing.deviceID == session.deviceID
     }
 }
 

@@ -11,9 +11,9 @@ import json
 import shutil
 import stat
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
+from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, cast
 
 from mindroom.desktop.command_journal import DesktopCommandJournalError, check_controller_binding
 from mindroom.desktop.native_config import (
@@ -32,6 +32,7 @@ from mindroom.desktop.native_protocol import (
     parse_native_request,
 )
 from mindroom.desktop.protocol import DesktopSetupDescriptor
+from mindroom.file_locks import async_exclusive_file_lock
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -224,8 +225,13 @@ class NativeDesktopHost:
         if action == "status":
             _expect_keys(parameters, set())
             return {"status": self.status()}
-        if action in {"configure", "set_allowed_apps"}:
-            config_key = "config" if action == "configure" else "allowed_app_ids"
+        if action in {"configure", "set_allowed_apps", "set_browser_config", "finish_setup"}:
+            config_key = {
+                "configure": "config",
+                "set_allowed_apps": "allowed_app_ids",
+                "set_browser_config": "browser",
+                "finish_setup": "expected_session",
+            }[action]
             _expect_keys(parameters, {"expected_revision", config_key})
             if self._runtime is not None:
                 raise NativeProtocolError("busy", "Stop the desktop bridge before changing its configuration.")
@@ -233,6 +239,36 @@ class NativeDesktopHost:
                 if self._config is None:
                     raise NativeProtocolError("invalid_request", "Complete desktop setup before saving app access.")
                 config = self._config.with_allowed_apps(parameters.get("allowed_app_ids"))
+            elif action == "set_browser_config":
+                current = self._require_config()
+                browser_raw = parameters.get("browser")
+                if not isinstance(browser_raw, dict):
+                    raise NativeProtocolError("invalid_request", "Native desktop browser must be a JSON object.")
+                browser = cast("dict[str, object]", browser_raw)
+                _expect_keys(browser, {"enabled", "executable_path", "user_data_dir"})
+                payload = current.to_payload()
+                payload["browser"] = {**browser, "timeout_seconds": current.browser.timeout_seconds}
+                config = NativeDesktopConfig.from_payload(payload, validate_browser_paths=False)
+                if (
+                    config.browser.executable_path != current.browser.executable_path
+                    and config.browser.executable_path is not None
+                    and not config.browser.executable_path.is_file()
+                ):
+                    raise NativeProtocolError(
+                        "invalid_request",
+                        "Native desktop browser executable_path must be a file.",
+                    )
+                if (
+                    config.browser.user_data_dir != current.browser.user_data_dir
+                    and config.browser.user_data_dir is not None
+                    and not config.browser.user_data_dir.is_dir()
+                ):
+                    raise NativeProtocolError(
+                        "invalid_request",
+                        "Native desktop browser user_data_dir must be a directory.",
+                    )
+            elif action == "finish_setup":
+                config = replace(self._require_config(), enabled=True)
             else:
                 config = NativeDesktopConfig.from_payload(parameters.get("config"))
             try:
@@ -242,11 +278,40 @@ class NativeDesktopHost:
                 )
             except DesktopCommandJournalError as exc:
                 raise NativeProtocolError("invalid_request", str(exc)) from exc
-            self._config = save_native_config(
-                native_config_path(self._runtime_paths.storage_root),
-                config,
-                expected_revision=_required_int(parameters, "expected_revision", minimum=0),
-            )
+            expected_revision = _required_int(parameters, "expected_revision", minimum=0)
+            if action == "finish_setup":
+                from mindroom.desktop.session import desktop_session_path
+
+                expected_session_raw = parameters.get("expected_session")
+                if not isinstance(expected_session_raw, dict):
+                    raise NativeProtocolError("invalid_request", "Expected desktop session must be a JSON object.")
+                expected_session = cast("dict[str, object]", expected_session_raw)
+                _expect_keys(expected_session, {"homeserver", "user_id", "device_id"})
+                for key in expected_session:
+                    _required_text(expected_session, key)
+                async with async_exclusive_file_lock(desktop_session_path(self._runtime_paths).with_suffix(".lock")):
+                    session_state, session_identity = _saved_session_identity(self._runtime_paths)
+                    if session_state != "ready":
+                        raise NativeProtocolError(
+                            "session_missing",
+                            "Sign in to a saved Matrix session before finishing setup.",
+                        )
+                    if session_identity != expected_session:
+                        raise NativeProtocolError(
+                            "session_conflict",
+                            "The saved Matrix session changed; review setup and retry.",
+                        )
+                    self._config = save_native_config(
+                        native_config_path(self._runtime_paths.storage_root),
+                        config,
+                        expected_revision=expected_revision,
+                    )
+            else:
+                self._config = save_native_config(
+                    native_config_path(self._runtime_paths.storage_root),
+                    config,
+                    expected_revision=expected_revision,
+                )
             self._last_error = None
             return {"status": self.status()}
         if action == "import_setup":
@@ -642,19 +707,25 @@ async def supervise_native_tasks(
 
 
 async def _login(runtime_paths: RuntimePaths, parameters: dict[str, object]) -> dict[str, object]:
+    from mindroom.desktop.cloudflare_access import cloudflare_access_headers
     from mindroom.desktop.login_method import DesktopLoginMethod
     from mindroom.desktop.session import (
         client_ed25519_fingerprint,
         desktop_session_path,
+        load_desktop_http_headers,
         login_desktop_client,
         resolve_desktop_login_method,
         save_desktop_session,
     )
     from mindroom.desktop.sso import receive_sso_login_token
 
-    _allow_keys(parameters, {"homeserver", "user_id", "method", "password", "login_token", "sso_idp", "replace"})
+    _allow_keys(
+        parameters,
+        {"homeserver", "user_id", "method", "password", "login_token", "sso_idp", "replace", "cloudflare_access"},
+    )
     homeserver = _required_text(parameters, "homeserver")
     user_id = _optional_text(parameters, "user_id")
+    cloudflare_access = _optional_bool(parameters, "cloudflare_access")
     try:
         requested = DesktopLoginMethod(str(parameters.get("method", "auto")))
     except ValueError as exc:
@@ -680,7 +751,17 @@ async def _login(runtime_paths: RuntimePaths, parameters: dict[str, object]) -> 
                 "The saved Matrix session path is not a regular file.",
                 recovery="Move the directory, link, or special file aside before signing in again.",
             )
-    method = await resolve_desktop_login_method(requested, homeserver=homeserver, runtime_paths=runtime_paths)
+    headers_path = _optional_env_path(runtime_paths, "MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE")
+    http_headers = load_desktop_http_headers(headers_path)
+    if cloudflare_access:
+        http_headers = cloudflare_access_headers(homeserver, http_headers)
+        await http_headers.prepare()
+    method = await resolve_desktop_login_method(
+        requested,
+        homeserver=homeserver,
+        runtime_paths=runtime_paths,
+        http_headers=http_headers,
+    )
     password, login_token = _optional_text(parameters, "password"), _optional_text(parameters, "login_token")
     if method is DesktopLoginMethod.PASSWORD:
         if user_id is None or password is None or login_token is not None:
@@ -702,6 +783,8 @@ async def _login(runtime_paths: RuntimePaths, parameters: dict[str, object]) -> 
         password=password,
         login_token=login_token,
         runtime_paths=runtime_paths,
+        http_headers=http_headers,
+        cloudflare_access=cloudflare_access,
     )
     try:
         save_desktop_session(session_path, session)
@@ -727,18 +810,44 @@ async def _pair(
         load_desktop_http_headers,
         load_desktop_session,
         open_desktop_client,
+        save_desktop_session,
     )
 
-    _expect_keys(parameters, {"code"})
+    _allow_keys(parameters, {"code", "cloudflare_access", "expected_revision"})
     code = _required_text(parameters, "code")
-    session = load_desktop_session(desktop_session_path(runtime_paths))
+    cloudflare_access = _optional_bool(parameters, "cloudflare_access")
+    if "expected_revision" in parameters:
+        expected_revision = _required_int(parameters, "expected_revision", minimum=0)
+        if expected_revision != config.revision:
+            raise NativeProtocolError(
+                "revision_conflict",
+                "Desktop configuration changed; review setup and retry pairing.",
+            )
+    session_path = desktop_session_path(runtime_paths)
+    session = load_desktop_session(session_path)
     headers_path = _optional_env_path(runtime_paths, "MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE")
     http_headers = load_desktop_http_headers(headers_path)
-    if session.cloudflare_access:
+    if cloudflare_access or session.cloudflare_access:
         http_headers = cloudflare_access_headers(session.homeserver, http_headers)
+        await http_headers.prepare()
     owner = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
     try:
+        if "expected_revision" in parameters:
+            try:
+                current_config = load_native_config(native_config_path(runtime_paths.storage_root))
+            except NativeConfigError as exc:
+                raise NativeProtocolError(
+                    "revision_conflict",
+                    "Desktop configuration changed; review setup and retry pairing.",
+                ) from exc
+            if current_config != config:
+                raise NativeProtocolError(
+                    "revision_conflict",
+                    "Desktop configuration changed; review setup and retry pairing.",
+                )
         verification = await send_desktop_pairing_claim(owner, config.controller, code=code)
+        if cloudflare_access and not session.cloudflare_access:
+            save_desktop_session(session_path, replace(session, cloudflare_access=True), expected_session=session)
         return {"verification": verification, "confirmation_command": f"!desktop confirm {code} {verification}"}
     finally:
         await owner.close()
@@ -925,6 +1034,13 @@ def _required_text(parameters: dict[str, object], key: str) -> str:
 
 def _optional_text(parameters: dict[str, object], key: str) -> str | None:
     return None if parameters.get(key) is None else _required_text(parameters, key)
+
+
+def _optional_bool(parameters: dict[str, object], key: str) -> bool:
+    value = parameters.get(key, False)
+    if not isinstance(value, bool):
+        raise NativeProtocolError("invalid_request", f"Native desktop {key} must be a boolean.")
+    return value
 
 
 def _required_int(parameters: dict[str, object], key: str, *, minimum: int, maximum: int | None = None) -> int:

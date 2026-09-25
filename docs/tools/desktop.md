@@ -153,12 +153,13 @@ Chrome and Brave are supported by the local command through an explicit browser 
 ## Native macOS setup
 
 Open MindRoom and select **Computer access**, or click the **Computer access: …** status row in the menu bar.
-In the requester-agent chat, run `!desktop setup` and paste its JSON setup data into the app.
-Review the displayed controller fingerprint, requester, and agent, then sign in and choose allowed applications.
-Confirm the displayed controller fingerprint, requester, and agent locally, then choose **Save Setup**.
-Confirm the saved identities again before choosing **Claim Pairing**.
-Return the displayed `!desktop confirm ...` command to the same chat.
-For a homeserver behind Cloudflare Access, complete the printed terminal login flow first.
+In the requester-agent chat, run `!desktop setup` and paste its JSON setup data into **Connect**.
+Review the displayed controller fingerprint, requester, and agent, then reuse the saved Matrix login or sign in.
+Confirm those identities and select **Save and Connect**. Return the displayed confirmation command to the same chat, wait for the agent's confirmation, and select **I’ve Confirmed in Chat**.
+Choose allowed applications in **Apps** and select **Save App Access**, then complete **Permissions** and **Start**.
+The top summary distinguishes a missing connection, saved setup with access off, and an active connection; it names the next action.
+Incomplete app setup remains disabled across restarts and can be retried with fresh setup data without replacing the login.
+Cloudflare Access authentication is supported in the app when `cloudflared` is installed.
 
 The permission controls show Accessibility and Screen Recording readiness and link to the corresponding System Settings panes.
 Start in observe-only mode, then grant a bounded local lease when control is needed.

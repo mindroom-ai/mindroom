@@ -106,8 +106,8 @@ def _setup_response(scope: DesktopCommandScope) -> str:
     )
     return (
         "🔐 **Desktop pairing started**\n\n"
-        "In the MindRoom macOS app, open Computer access and import this setup data. "
-        "Confirm the displayed controller and choose the applications it may use:\n\n"
+        "In the MindRoom macOS app, open Computer access > Connect and import this setup data. "
+        "Review the controller, requester, and agent, then select Save and Connect:\n\n"
         f"```json\n{json.dumps(descriptor.to_content(), indent=2)}\n```\n\n"
         "For terminal setup, run this command on your computer. It logs in if needed, claims the pairing, and saves setup for both the terminal and app:\n\n"
         f"```bash\n{setup_command}\n```\n\n"
@@ -170,7 +170,8 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
     complete_desktop_pairing(scope.runtime_paths, token=token)
     return (
         f"✅ Desktop paired for you and agent `{scope.agent_name}`.\n\n"
-        "Choose and save apps in MindRoom > Computer access, then select Start Observe Only or run "
+        "If you connected in the macOS app, select I've Confirmed in Chat. "
+        "Choose and save apps in MindRoom > Computer access > Apps, complete Permissions, then select Start Observe Only or run "
         "`mindroom desktop run`. Both use the same saved setup. Stop one before starting the other.\n\n"
         "To override app access for one terminal run, use:\n\n"
         f"```bash\n{run_command}\n```\n\n"
