@@ -12,18 +12,24 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from agno.models.message import Message, MessageMetrics
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
+from anthropic import AsyncAnthropic
+from google import genai
+from google.genai.types import HttpOptions, HttpRetryOptions
+from openai import AsyncOpenAI
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.model_loading import get_model_instance
 from mindroom.provider_tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.skill_learning import library, queue
@@ -38,7 +44,7 @@ from mindroom.usage_stats import collect_admin_usage
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -446,7 +452,7 @@ def test_queue_drops_entries_of_disabled_agents(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_reviewer_creates_views_and_patches_with_only_skill_tools(tmp_path: Path) -> None:
-    """The review is an Agno tool loop with Hermes' three skill tools, no provider tools, and recorded usage."""
+    """The review is an Agno tool loop with Hermes' three skill tools only, and its usage is recorded."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     root = _skills_root(config, paths)
@@ -496,6 +502,188 @@ async def test_reviewer_creates_views_and_patches_with_only_skill_tools(tmp_path
     assert report.request_breakdown is not None
     assert {row.kind for row in report.request_breakdown} == {"skill_learning"}
     assert report.totals.total_tokens == 10 * len(model.requests)
+
+
+def _chat_reply(message: dict[str, object], finish_reason: str) -> dict[str, object]:
+    return {
+        "id": "chatcmpl-review",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "reviewer",
+        "choices": [{"index": 0, "finish_reason": finish_reason, "message": {"role": "assistant", **message}}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+    }
+
+
+def _responses_reply(item: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": "resp_review",
+        "object": "response",
+        "created_at": 1,
+        "status": "completed",
+        "model": "reviewer",
+        "output": [item],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+        "usage": {
+            "input_tokens": 5,
+            "output_tokens": 1,
+            "total_tokens": 6,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        },
+    }
+
+
+def _claude_reply(block: dict[str, object], stop_reason: str) -> dict[str, object]:
+    return {
+        "id": "msg_review",
+        "type": "message",
+        "role": "assistant",
+        "model": "reviewer",
+        "content": [block],
+        "stop_reason": stop_reason,
+        "stop_sequence": None,
+        "usage": {"input_tokens": 5, "output_tokens": 1},
+    }
+
+
+def _gemini_reply(part: dict[str, object]) -> dict[str, object]:
+    return {
+        "candidates": [{"content": {"role": "model", "parts": [part]}, "finishReason": "STOP"}],
+        "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 1, "totalTokenCount": 6},
+    }
+
+
+@dataclass(frozen=True)
+class _ProviderWire:
+    """One provider's real adapter, its HTTP replies, and how its requests offer and select tools."""
+
+    model: ModelConfig
+    replies: tuple[dict[str, object], dict[str, object]]
+    offered: Callable[[dict[str, Any]], set[str]]
+    selection_disabled: Callable[[dict[str, Any]], bool]
+
+
+_PROVIDER_WIRES = {
+    "openai-chat": _ProviderWire(
+        ModelConfig(provider="openai", id="gpt-6-astra", api="chat_completions", api_key="test-key"),
+        (
+            _chat_reply(
+                {
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "skills_list", "arguments": "{}"}},
+                    ],
+                },
+                "tool_calls",
+            ),
+            _chat_reply({"content": "Nothing to save."}, "stop"),
+        ),
+        lambda request: {tool["function"]["name"] for tool in request.get("tools", [])},
+        lambda request: request.get("tool_choice") == "none",
+    ),
+    "openai-responses": _ProviderWire(
+        ModelConfig(provider="openai", id="gpt-6-astra", api="responses", api_key="test-key"),
+        (
+            _responses_reply(
+                {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "skills_list",
+                    "arguments": "{}",
+                    "status": "completed",
+                },
+            ),
+            _responses_reply(
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Nothing to save.", "annotations": []}],
+                },
+            ),
+        ),
+        lambda request: {tool["name"] for tool in request.get("tools", []) if tool.get("type") == "function"},
+        lambda request: request.get("tool_choice") == "none",
+    ),
+    "anthropic": _ProviderWire(
+        ModelConfig(provider="anthropic", id="claude-sonnet-5", api_key="test-key"),
+        (
+            _claude_reply({"type": "tool_use", "id": "toolu_1", "name": "skills_list", "input": {}}, "tool_use"),
+            _claude_reply({"type": "text", "text": "Nothing to save."}, "end_turn"),
+        ),
+        lambda request: {tool["name"] for tool in request.get("tools", [])},
+        lambda request: (request.get("tool_choice") or {}).get("type") == "none",
+    ),
+    "google": _ProviderWire(
+        ModelConfig(provider="google", id="gemini-3.8-flash", api_key="test-key"),
+        (
+            _gemini_reply({"functionCall": {"name": "skills_list", "args": {}}}),
+            _gemini_reply({"text": "Nothing to save."}),
+        ),
+        lambda request: {
+            declaration["name"]
+            for tool in request.get("tools", [])
+            for declaration in tool.get("functionDeclarations", [])
+        },
+        lambda request: request.get("toolConfig", {}).get("functionCallingConfig", {}).get("mode") == "NONE",
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wire_name", list(_PROVIDER_WIRES))
+async def test_review_calls_skill_tools_through_each_real_provider_adapter(tmp_path: Path, wire_name: str) -> None:
+    """Every provider adapter must offer and allow the skill tools; a scripted model cannot see tool selection."""
+    wire = _PROVIDER_WIRES[wire_name]
+    config, paths = _learner(tmp_path)
+    config.models["default"] = wire.model
+    _seed(config, paths, _tool_turn("r1"))
+    root = _skills_root(config, paths)
+    library.create_skill(
+        root,
+        "older-lesson",
+        LEARNED.replace("deploy-checks", "older-lesson"),
+        reserved_names=frozenset(),
+    )
+    requests: list[dict[str, Any]] = []
+    replies = list(wire.replies)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=replies.pop(0))
+
+    model = get_model_instance(config, paths, "default")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
+        if wire.model.provider == "openai":
+            model.async_client = AsyncOpenAI(api_key="test-key", max_retries=0, http_client=http_client)
+        elif wire.model.provider == "anthropic":
+            model.async_client = AsyncAnthropic(api_key="test-key", max_retries=0, http_client=http_client)
+        else:
+            model.client = genai.Client(
+                api_key="test-key",
+                http_options=HttpOptions(httpx_async_client=http_client, retry_options=HttpRetryOptions(attempts=1)),
+            )
+        with patch("mindroom.model_loading.get_model_instance", return_value=model):
+            await review_conversation(
+                config=config,
+                runtime_paths=paths,
+                agent_name="mind",
+                session_id="session",
+                identity=None,
+                skills_root=root,
+                messages=_tool_turn("r1").messages or [],
+                progress=ReviewProgress(),
+            )
+    assert len(requests) == 2
+    assert wire.offered(requests[0]) == {"skills_list", "skill_view", "skill_manage"}
+    assert not any(wire.selection_disabled(request) for request in requests)
+    assert "older-lesson" not in json.dumps(requests[0])
+    assert "older-lesson" in json.dumps(requests[1])
 
 
 @pytest.mark.asyncio
