@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from functools import cache
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.legacy_usage_storage import legacy_request_model
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.usage_stats_storage import (
     TOKEN_FIELDS,
@@ -21,6 +22,7 @@ from mindroom.usage_stats_storage import (
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
+from mindroom.usage_storage import SYSTEM_USAGE_ENTITY
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -95,8 +97,9 @@ _PRIVATE_COVERAGE_NOTE = (
 )
 _REQUEST_COVERAGE_NOTE = (
     "Request breakdown contains stored provider requests with usable timestamps and token counters. "
-    "Every request counter must reconcile to one known run-model bucket before attribution is inherited. "
-    "Missing, unreadable, mixed-model, or mismatched details are excluded without changing aggregate totals. "
+    "Request counters must reconcile with both run totals and recorded per-model totals. "
+    "Requests without stored model attribution may inherit it from a single known run model. "
+    "Missing, unreadable, ambiguous, or mismatched details are excluded without changing aggregate totals. "
     "Stored team-member requests are included without adding top-level runs. "
     "Usage lost before request capture and deleted sessions cannot be reconstructed. "
     "Unavailable sources include retained session usage without matching request detail."
@@ -474,13 +477,19 @@ class _UsageAccumulator:
         if row_totals is None:
             return
         self.total = self.total.plus(row_totals)
-        self.sessions.add((row.source.path_label, row.row_key))
+        is_system = row.source.scope == "system"
+        if not is_system:
+            self.sessions.add((row.source.path_label, row.row_key))
         models: Mapping[tuple[str, str], TokenTotals] = {}
         if not uses_runs:
             models = self._add_cumulative_models(row, row_totals)
         if entity_id is not None:
-            self.buckets.setdefault(entity_id, _Aggregate()).add(row_totals)
-            _add_model_totals(self.entity_cumulative_model_buckets.setdefault(entity_id, {}), models)
+            self.buckets.setdefault(entity_id, _Aggregate()).add(row_totals, count=0 if is_system else 1)
+            _add_model_totals(
+                self.entity_cumulative_model_buckets.setdefault(entity_id, {}),
+                models,
+                count=0 if is_system else 1,
+            )
 
     def _add_cumulative_models(
         self,
@@ -493,7 +502,7 @@ class _UsageAccumulator:
             self.cumulative_model_unavailable_sources.add(row.source.path_label)
         elif any("unknown" in key for key in models):
             self.cumulative_model_unavailable_sources.add(row.source.path_label)
-        _add_model_totals(self.cumulative_model_buckets, models)
+        _add_model_totals(self.cumulative_model_buckets, models, count=0 if row.source.scope == "system" else 1)
         return models
 
 
@@ -513,10 +522,19 @@ class _DailyUsageAccumulator:
     ) -> None:
         requests = _reconciled_request_totals(run, totals, models)
         if requests is not None:
-            model_key = next(iter(models))
-            for index, (created_at, request_totals) in enumerate(sorted(requests, key=lambda request: request[0])):
+            counted_models: set[tuple[str, str]] = set()
+            for index, (created_at, model_key, request_totals) in enumerate(
+                sorted(requests, key=lambda request: request[0]),
+            ):
                 date = datetime.fromtimestamp(created_at, tz=UTC).date().isoformat()
-                self._add(date, request_totals, {model_key: request_totals}, count=run.run_count if index == 0 else 0)
+                self._add(
+                    date,
+                    request_totals,
+                    {model_key: request_totals},
+                    count=run.run_count if index == 0 else 0,
+                    model_count=run.run_count if model_key not in counted_models else 0,
+                )
+                counted_models.add(model_key)
             return
         if run.created_at is None:
             self.unavailable_sources.add(source_path)
@@ -526,7 +544,7 @@ class _DailyUsageAccumulator:
         except (OverflowError, OSError, ValueError):
             self.unavailable_sources.add(source_path)
             return
-        self._add(date, totals, models, count=run.run_count)
+        self._add(date, totals, models, count=run.run_count, model_count=run.run_count)
 
     def _add(
         self,
@@ -535,9 +553,10 @@ class _DailyUsageAccumulator:
         models: Mapping[tuple[str, str], TokenTotals],
         *,
         count: int,
+        model_count: int,
     ) -> None:
         self.buckets.setdefault(date, _Aggregate()).add(totals, count=count)
-        _add_model_totals(self.model_buckets.setdefault(date, {}), models, count=count)
+        _add_model_totals(self.model_buckets.setdefault(date, {}), models, count=model_count)
 
     def rows(self) -> tuple[UsageDailyBreakdownRow, ...]:
         """Build the same sorted daily rows for overall and per-user usage."""
@@ -576,7 +595,6 @@ class _RequestUsageAccumulator:
             if requests is None:
                 self.unavailable_sources.add(row.source.path_label)
             else:
-                provider, model = next(iter(models))
                 self.requests.extend(
                     UsageRequestBreakdownRow(
                         entity=entity,
@@ -587,14 +605,14 @@ class _RequestUsageAccumulator:
                         created_at=created_at,
                         totals=request_totals,
                     )
-                    for created_at, request_totals in requests
+                    for created_at, (provider, model), request_totals in requests
                 )
         try:
             session_totals = _metrics_totals(row.session_metrics) or TokenTotals()
         except ValueError:
             self.unavailable_sources.add(row.source.path_label)
             return
-        if not row.session_metrics_available or retained != session_totals:
+        if row.source.scope != "system" and (not row.session_metrics_available or retained != session_totals):
             self.unavailable_sources.add(row.source.path_label)
 
     def rows(self) -> tuple[UsageRequestBreakdownRow, ...]:
@@ -618,26 +636,33 @@ def _reconciled_request_totals(
     run: UsageRunNode,
     totals: TokenTotals,
     models: Mapping[tuple[str, str], TokenTotals],
-) -> list[tuple[int | float, TokenTotals]] | None:
-    """Only inherit attribution after all request counters match one known model."""
-    if not run.requests or len(models) != 1:
-        return None
-    (provider, model), model_totals = next(iter(models.items()))
-    if "unknown" in (provider, model) or model_totals != totals:
+) -> list[tuple[int | float, tuple[str, str], TokenTotals]] | None:
+    """Require complete request counters to match the run and each known model."""
+    if not run.requests or not models or any("unknown" in key for key in models):
         return None
     combined = TokenTotals()
-    requests: list[tuple[int | float, TokenTotals]] = []
+    by_model: dict[tuple[str, str], TokenTotals] = {}
+    requests: list[tuple[int | float, tuple[str, str], TokenTotals]] = []
     try:
         for request in run.requests:
+            if request.model_provider is None and request.model is None:
+                model_key = legacy_request_model(models)
+            elif request.model_provider is not None and request.model is not None:
+                model_key = (request.model_provider, request.model)
+            else:
+                return None
+            if model_key is None:
+                return None
             request_totals = _metrics_totals(request.metrics)
             if request_totals is None:
                 return None
             datetime.fromtimestamp(request.created_at, tz=UTC)
             combined = combined.plus(request_totals)
-            requests.append((request.created_at, request_totals))
+            by_model[model_key] = by_model.get(model_key, TokenTotals()).plus(request_totals)
+            requests.append((request.created_at, model_key, request_totals))
     except (OverflowError, OSError, ValueError):
         return None
-    return requests if combined == totals else None
+    return requests if combined == totals and by_model == models else None
 
 
 @dataclass(slots=True)
@@ -1275,6 +1300,8 @@ def _self_source_allowed(source: UsageStorageSource, expected_agent: str | None)
 
 
 def _admin_entity_id(row: UsageSessionRow) -> str | None:
+    if row.source.scope == "system":
+        return SYSTEM_USAGE_ENTITY if row.entity_id == SYSTEM_USAGE_ENTITY else None
     if row.source.scope in {"shared_agent", "private_agent"}:
         entity_id = row.source.source_agent_id
         return entity_id if entity_id in row.source.allowed_agent_ids else None
