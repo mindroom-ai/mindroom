@@ -85,6 +85,7 @@ arxiv = [
   "arxiv",
   "pypdf",
 ]
+atlassian = []
 attachments = []
 aws_lambda = [
   "boto3>=1.40.8",

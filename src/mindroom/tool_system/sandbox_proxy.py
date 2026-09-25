@@ -68,7 +68,7 @@ if TYPE_CHECKING:
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
-_INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
+INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
 _DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
 _SANDBOX_ALL_EXECUTION_MODES = frozenset({"all", "sandbox_all"})
 _SANDBOX_SELECTIVE_EXECUTION_MODES = frozenset({"selective", "sandbox_selective"})
@@ -200,8 +200,8 @@ def _read_proxy_timeout(runtime_paths: RuntimePaths) -> float:
 def inline_attachment_byte_limit(runtime_paths: RuntimePaths) -> int:
     """Return the hard cap for inline primary-to-worker attachment saves."""
     raw_value = (
-        runtime_paths.env_value(_INLINE_ATTACHMENT_BYTES_ENV)
-        or os.environ.get(_INLINE_ATTACHMENT_BYTES_ENV)
+        runtime_paths.env_value(INLINE_ATTACHMENT_BYTES_ENV)
+        or os.environ.get(INLINE_ATTACHMENT_BYTES_ENV)
         or str(_DEFAULT_INLINE_ATTACHMENT_BYTES)
     )
     try:

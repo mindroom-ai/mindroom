@@ -32,6 +32,7 @@ from mindroom.attachments import (
     load_attachment,
     parse_attachment_ids_from_event_source,
     parse_attachment_ids_from_thread_history,
+    register_bytes_attachment,
     register_local_attachment,
     resolve_attachments,
     resolve_thread_attachment_ids,
@@ -248,6 +249,59 @@ async def test_register_media_attachment_rejects_payload_over_limit(
 
     assert record is None
     assert not (tmp_path / "incoming_media").exists()
+
+
+def test_register_bytes_attachment_retains_any_file_type_under_a_generated_name(tmp_path: Path) -> None:
+    """Tool-produced bytes of any type become a scoped record under a name derived from its ID."""
+    payload = b"%PDF-1.7 example"
+
+    record = register_bytes_attachment(
+        tmp_path,
+        payload,
+        kind="file",
+        mime_type="application/pdf",
+        attachment_id="att_0123456789abcdef",
+        filename="../Quarterly report.pdf",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        sender="@user:localhost",
+    )
+
+    assert record is not None
+    assert record.local_path == (tmp_path / "incoming_media" / "att_0123456789abcdef.pdf").resolve()
+    assert record.local_path.read_bytes() == payload
+    assert record.filename == "../Quarterly report.pdf"
+    assert record.size_bytes == len(payload)
+    assert record.content_sha256 == hashlib.sha256(payload).hexdigest()
+    loaded = load_attachment(tmp_path, "att_0123456789abcdef")
+    assert loaded is not None
+    assert (loaded.kind, loaded.mime_type, loaded.room_id, loaded.thread_id) == (
+        "file",
+        "application/pdf",
+        "!room:localhost",
+        "$thread",
+    )
+
+
+def test_register_bytes_attachment_rejects_unsafe_ids_and_oversized_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsafe IDs and payloads above the retained media limit never reach storage."""
+    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
+    common = {
+        "kind": "file",
+        "mime_type": "text/plain",
+        "filename": "notes.txt",
+        "room_id": "!room:localhost",
+        "thread_id": None,
+        "sender": "@user:localhost",
+    }
+
+    assert register_bytes_attachment(tmp_path, b"1234", attachment_id="../escape", **common) is None
+    assert register_bytes_attachment(tmp_path, b"123456", attachment_id="att_large", **common) is None
+    assert not (tmp_path / "incoming_media").exists()
+    assert load_attachment(tmp_path, "att_large") is None
 
 
 def test_register_local_attachment_keeps_already_retained_media_in_place(tmp_path: Path) -> None:
