@@ -206,7 +206,6 @@ class _AccessHomeserver:
             {
                 "next_batch": f"s{next_batch}",
                 "to_device": {"events": [event for _sequence, event in inbox]},
-                "device_one_time_keys_count": {"signed_curve25519": len(self.one_time_keys.get(identity, {}))},
             },
         )
 
@@ -292,21 +291,24 @@ def _cloud_side(tmp_path: Path, access_token: str) -> Iterator[_CloudSide]:
         return app_runner, url, controller, task
 
     app_runner, url, controller, task = run(start())
-    assert controller.olm is not None
     try:
         yield _CloudSide(url, homeserver, runtime_paths, controller, run)
     finally:
 
         async def shutdown() -> None:
             stop.set()
-            await task
-            await controller.close()
-            await app_runner.cleanup()
+            try:
+                await task
+            finally:
+                await controller.close()
+                await app_runner.cleanup()
 
-        run(shutdown())
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(timeout=10)
-        loop.close()
+        try:
+            run(shutdown())
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=10)
+            loop.close()
 
 
 _FAKE_CLOUDFLARED = """#!{python} -S
@@ -615,7 +617,8 @@ def test_desktop_bridge_answers_controller_through_cloudflare_access(tmp_path: P
         async def request_status() -> DesktopResponse:
             router = DesktopResponseRouter(cloud.controller)
             target = PinnedMatrixDevice(REQUESTER, DESKTOP_DEVICE, paired.ed25519)
-            return await router.request(target, command, timeout_seconds=30)
+            # Below the 30 s cloud-loop wait so the router's own timeout message is reported.
+            return await router.request(target, command, timeout_seconds=20)
 
         with _running_bridge(cloud, local) as output:
             response = cloud.run(request_status())
