@@ -265,6 +265,11 @@ const PROVIDERS_WITHOUT_API_KEYS = new Set([
   "synthetic",
 ]);
 
+/** Ollama needs no key, and the providers above drop any key model loading would pass. */
+function usesNoApiKey(provider: string): boolean {
+  return provider === "ollama" || PROVIDERS_WITHOUT_API_KEYS.has(provider);
+}
+
 /**
  * The model's own key from config.yaml (api_key or extra_kwargs.api_key) as used with `provider`,
  * which may be an unsaved draft; blank values count as unset.
@@ -298,7 +303,7 @@ function getKeyStatusDisplay(
   modelKeys: Record<string, KeyStatus>,
   providerKeys: Record<string, KeyStatus>,
 ): KeyDisplayInfo | null {
-  if (provider === "ollama" || PROVIDERS_WITHOUT_API_KEYS.has(provider)) {
+  if (usesNoApiKey(provider)) {
     return null;
   }
 
@@ -784,7 +789,7 @@ export function ModelConfig() {
 
     let keyOperationOk = true;
 
-    if (rowDraft.provider !== "ollama") {
+    if (!usesNoApiKey(rowDraft.provider)) {
       if (hasKeyReuseSource) {
         keyOperationOk = await copyModelApiKey(
           targetModelName,
@@ -921,7 +926,7 @@ export function ModelConfig() {
     setIsSavingNewRow(true);
 
     let keyOperationOk = true;
-    if (newRowDraft.provider !== "ollama") {
+    if (!usesNoApiKey(newRowDraft.provider)) {
       if (newRowDraft.selectedKeySourceModel) {
         keyOperationOk = await copyModelApiKey(
           modelName,
@@ -1425,8 +1430,9 @@ export function ModelConfig() {
                         baseUrl: provider === "openai" ? current.baseUrl : "",
                         apiKey: "",
                         selectedKeySourceModel: "",
-                        clearCustomKey:
-                          provider === "ollama" ? true : current.clearCustomKey,
+                        clearCustomKey: usesNoApiKey(provider)
+                          ? true
+                          : current.clearCustomKey,
                       }
                     : current,
                 );

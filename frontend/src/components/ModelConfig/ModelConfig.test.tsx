@@ -609,6 +609,56 @@ describe("ModelConfig", () => {
     },
   );
 
+  it.each([
+    ["an existing codex model", "codex", null],
+    ["a model switched to Vertex AI Claude", "openrouter", "Vertex AI Claude"],
+  ])(
+    "clears the saved key of %s on save, because the runtime drops it",
+    async (_label, savedProvider, draftProviderName) => {
+      vi.mocked(useConfigStore).mockReturnValue({
+        ...mockStore,
+        config: {
+          ...mockStore.config,
+          models: {
+            ...mockStore.config.models,
+            keyless: { provider: savedProvider, id: "some-model" },
+          },
+        },
+      } as never);
+      keyStatusByService["model:keyless"] = {
+        has_key: true,
+        source: "ui",
+        masked_key: "sk-ui...4321",
+        api_key: "sk-dashboard-real",
+      };
+
+      render(<ModelConfig />);
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          "/api/credentials/model:keyless/api-key?key_name=api_key",
+        );
+      });
+      fireEvent.click(screen.getByText("keyless"));
+      const row = screen.getByDisplayValue("keyless").closest("tr");
+      if (!row) throw new Error("row not found");
+      if (draftProviderName) {
+        fireEvent.click(within(row).getAllByRole("combobox")[0]);
+        fireEvent.click(
+          screen.getByRole("option", { name: new RegExp(draftProviderName) }),
+        );
+      }
+      fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          "/api/credentials/model:keyless",
+          { method: "DELETE" },
+        );
+      });
+    },
+  );
+
   it.each(["codex", "kimi", "bedrock_claude", "vertexai_claude", "synthetic"])(
     "shows no key status for %s, which drops config and saved API keys",
     async (provider) => {
