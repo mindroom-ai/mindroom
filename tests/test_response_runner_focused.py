@@ -181,7 +181,7 @@ from tests.test_response_turn import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine
+    from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
     from pathlib import Path
     from typing import Literal
 
@@ -9853,25 +9853,25 @@ async def test_approved_continuation_counts_toward_skill_review_unless_automated
         "mindroom.response_runner.queue_skill_review",
         side_effect=lambda *_args, **kwargs: counted.append(kwargs),
     ):
-        await queue("run-1")
-    assert [(call["session_id"], call["run_id"]) for call in counted] == [("session-1", "run-1")]
+        await queue(("run-1",))
+    assert [(call["session_id"], tuple(call["run_ids"])) for call in counted] == [("session-1", ("run-1",))]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("succeeded", [True, False])
 async def test_only_a_completed_response_counts_toward_its_skill_review(succeeded: bool) -> None:
     """Post-response effects count a completed response's run, and nothing for a failed one."""
-    calls: list[str] = []
+    calls: list[tuple[str, ...]] = []
 
-    async def queue(run_id: str) -> None:
-        calls.append(run_id)
+    async def queue(run_ids: Sequence[str]) -> None:
+        calls.append(tuple(run_ids))
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(terminal_status="completed" if succeeded else "error", event_id=None),
-        ResponseOutcome(response_run_id="run-1", run_succeeded=succeeded),
+        ResponseOutcome(response_run_ids=("run-1", "run-2"), run_succeeded=succeeded),
         PostResponseEffectsDeps(logger=MagicMock(), queue_skill_review=queue),
     )
-    assert calls == (["run-1"] if succeeded else [])
+    assert calls == ([("run-1", "run-2")] if succeeded else [])
 
 
 @pytest.mark.asyncio
@@ -9923,6 +9923,36 @@ async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_pat
         assert await wait_for_background_tasks(5, owner=coordinator.deps.runtime)
     assert bot.client.room_send.await_count >= 1
     assert not (coordinator.deps.runtime_paths.storage_root / "skill_learning_state.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_response_that_pauses_for_approval_counts_the_runs_it_finished(tmp_path: Path) -> None:
+    """A paused response never reaches post-response effects, so its runs count when it pauses; the paused one adds 0."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    counted: list[tuple[str, ...]] = []
+
+    async def pause_after_a_reload(*_args: object, attempt_run_id_collector: list[str], **_kwargs: object) -> Any:  # noqa: ANN401
+        attempt_run_id_collector.extend(["loaded-run", "paused-run"])
+        return _ResponseGenerationOutcome(
+            delivery=FinalDeliveryOutcome(terminal_status="suspended", event_id="$waiting", is_visible_response=True),
+            run_succeeded=False,
+        )
+
+    with (
+        patch.object(coordinator, "_process_and_respond", new=pause_after_a_reload),
+        patch(
+            "mindroom.response_runner.queue_skill_review",
+            side_effect=lambda *_args, **kwargs: counted.append(tuple(kwargs["run_ids"])),
+        ),
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=False),
+        ),
+    ):
+        await coordinator.generate_response(_plain_request(_target()))
+    assert counted == [("loaded-run", "paused-run")]
 
 
 @pytest.mark.asyncio

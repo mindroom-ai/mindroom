@@ -35,6 +35,8 @@ class ResponseOutcome:
     """Terminal response facts needed for post-delivery side effects."""
 
     response_run_id: str | None = None
+    # Every run the response produced, oldest first: a dynamic tool change continues in a new run.
+    response_run_ids: tuple[str, ...] = ()
     session_id: str | None = None
     session_type: SessionType | None = None
     execution_identity: ToolExecutionIdentity | None = None
@@ -55,7 +57,7 @@ class PostResponseEffectsDeps:
     logger: structlog.stdlib.BoundLogger
     add_interactive_buttons: Callable[[str, interactive.InteractiveMetadata], Awaitable[None]] | None = None
     queue_memory_persistence: Callable[[], None] | None = None
-    queue_skill_review: Callable[[str], Awaitable[None]] | None = None
+    queue_skill_review: Callable[[Sequence[str]], Awaitable[None]] | None = None
     persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, str | None, DeliveredResponse], None] | None = None
@@ -137,7 +139,7 @@ class PostResponseEffectsSupport:
         room_id: str,
         membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
-        queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
+        queue_skill_review: Callable[[Sequence[str]], Awaitable[None]] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
@@ -238,9 +240,9 @@ async def apply_post_response_effects(
                 thread_id=(outcome.response_target.resolved_thread_id if outcome.response_target is not None else None),
             )
 
-    if outcome.run_succeeded and deps.queue_skill_review is not None and outcome.response_run_id is not None:
+    if outcome.run_succeeded and deps.queue_skill_review is not None and outcome.response_run_ids:
         try:
-            await deps.queue_skill_review(outcome.response_run_id)
+            await deps.queue_skill_review(outcome.response_run_ids)
         except Exception:
             deps.logger.exception(
                 "Failed to queue skill review after response",

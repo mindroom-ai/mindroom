@@ -5234,7 +5234,14 @@ def _count_a_skill_learning_reply(config: Config, paths: RuntimePaths, agent_nam
         seed_session(storage, AgentSession(session_id="s", agent_id=agent_name, runs=[run]))
     finally:
         storage.close()
-    queue_skill_review(config, paths, agent_name=agent_name, session_id="s", execution_identity=None, run_id=run.run_id)
+    queue_skill_review(
+        config,
+        paths,
+        agent_name=agent_name,
+        session_id="s",
+        execution_identity=None,
+        run_ids=(run.run_id,),
+    )
 
 
 @pytest.mark.asyncio

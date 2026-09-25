@@ -583,7 +583,7 @@ class _MultiAgentOrchestrator:
             ),
         )
         if config is not None:
-            # Conversations of agents that stopped learning would otherwise count the whole pause once it returns.
+            # Counts of agents that stopped learning are forgotten, so learning turned on again starts from zero.
             await asyncio.to_thread(drop_retired_reviews, config, self.runtime_paths, now=time.time())
         await self._skill_learning.sync(
             enabled=config is not None and skill_learning_enabled(config),

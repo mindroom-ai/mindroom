@@ -30,6 +30,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from contextlib import AbstractContextManager
 
     from mindroom.config.main import Config
@@ -107,14 +108,14 @@ def _run_replies(
     runtime_paths: RuntimePaths,
     agent_name: str,
     identity: ToolExecutionIdentity | None,
-    run_id: str,
+    run_ids: Sequence[str],
 ) -> int:
     storage = create_session_storage(agent_name, config, runtime_paths, execution_identity=identity)
     try:
-        run = storage.get_run(run_id)
+        runs = [storage.get_run(run_id) for run_id in dict.fromkeys(run_ids)]
     finally:
         storage.close()
-    return count_model_replies([run]) if isinstance(run, RunOutput) else 0
+    return count_model_replies(run for run in runs if isinstance(run, RunOutput))
 
 
 def queue_skill_review(
@@ -124,16 +125,17 @@ def queue_skill_review(
     agent_name: str,
     session_id: str,
     execution_identity: ToolExecutionIdentity | None,
-    run_id: str,
+    run_ids: Sequence[str],
 ) -> None:
-    """Add the model replies of a person's completed response to its conversation's count, without its content.
+    """Add the model replies of a person's response to its conversation's count, without its content.
 
-    An approved continuation completes the same run, so its count includes the replies from before the pause.
+    ``run_ids`` are every run the response produced, for example one more after it loaded a tool. A run paused for
+    approval counts nothing yet; the approved continuation that completes it counts it with all of its replies.
     """
     agent = config.agents.get(agent_name)
     if agent is None or not agent.skill_learning.enabled:
         return
-    replies = _run_replies(config, runtime_paths, agent_name, execution_identity, run_id)
+    replies = _run_replies(config, runtime_paths, agent_name, execution_identity, run_ids)
     if replies == 0:
         return
     worker_key = _scope_worker_key(config, agent_name, execution_identity)
@@ -176,8 +178,8 @@ def _entry_is_current(config: Config, entry: QueueEntry, now: float) -> bool:
 def drop_retired_reviews(config: Config, runtime_paths: RuntimePaths, *, now: float) -> list[tuple[str, QueueEntry]]:
     """Drop entries of disabled agents, idle conversations short of a review, and changed scopes; return the rest.
 
-    The orchestrator also calls this on every config change, so learning turned off and on again never counts the
-    replies from the time it was off. Scope resolution happens outside the lock that completed responses also take.
+    The orchestrator also calls this on every config change, so learning turned off and on again starts every count
+    from zero. Scope resolution happens outside the lock that completed responses also take.
     """
     if not (runtime_paths.storage_root / _STATE_FILENAME).exists():
         return []

@@ -178,7 +178,8 @@ def _read_skill_file(skill_fd: int, name: str, relative_path: str, usage: SkillU
     try:
         frontmatter = parse_skill_markdown(markdown)[0] if markdown is not None else {}
     except (TypeError, YAMLError):
-        frontmatter = {}
+        # A pin in frontmatter that cannot be parsed must still hold, so such a skill is never the learner's.
+        return SkillFile(content=content, digest=content_digest(content), learned=False, name=name)
     skill_name = frontmatter.get("name")
     return SkillFile(
         content=content,
