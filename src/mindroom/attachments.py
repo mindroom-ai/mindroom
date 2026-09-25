@@ -746,14 +746,15 @@ def _validate_attachment_directories(root: Path, root_fd: int, directories: dict
         not os.path.samestat(os.fstat(descriptor), os.stat(name, dir_fd=root_fd, follow_symlinks=False))
         for name, descriptor in directories.items()
     ):
-        message = "Attachment storage directory changed during image retention."
+        message = "Attachment storage directory changed during retention."
         raise OSError(message)
 
 
-def register_image_bytes_attachment(
+def register_bytes_attachment(
     storage_path: Path,
     payload: bytes,
     *,
+    kind: _AttachmentKind,
     mime_type: str,
     attachment_id: str,
     filename: str,
@@ -761,10 +762,12 @@ def register_image_bytes_attachment(
     thread_id: str | None,
     sender: str,
 ) -> AttachmentRecord | None:
-    """Retain prepared image bytes without reopening paths that can change during registration."""
+    """Retain tool-produced bytes without reopening paths that can change during registration.
+
+    The retained file name derives from the attachment ID, so ``filename`` is display metadata only.
+    """
     normalized_id = normalize_attachment_id(attachment_id)
-    extension = {"image/png": ".png", "image/jpeg": ".jpg"}.get(mime_type)
-    if normalized_id is None or extension is None:
+    if normalized_id is None or media_payload_exceeds_limit(payload):
         return None
     try:
         root = storage_path.resolve()
@@ -779,12 +782,12 @@ def register_image_bytes_attachment(
                     open_directory_within_root(root_fd, name, create=True, mode=0o700),
                 )
             media_fd, metadata_fd = directories[media_directory], directories[metadata_directory]
-            local_path = _incoming_media_dir(root) / f"{normalized_id}{extension}"
+            local_path = _incoming_media_dir(root) / _retained_media_name(normalized_id, mime_type)
             record_path = _attachment_record_path(root, normalized_id)
             record = AttachmentRecord(
                 attachment_id=normalized_id,
                 local_path=local_path,
-                kind="image",
+                kind=kind,
                 filename=filename,
                 mime_type=mime_type,
                 room_id=room_id,
@@ -811,7 +814,7 @@ def register_image_bytes_attachment(
                         os.unlink(name, dir_fd=descriptor)
                 raise
     except OSError:
-        logger.exception("Failed to retain image attachment", attachment_id=normalized_id)
+        logger.exception("Failed to retain attachment bytes", attachment_id=normalized_id)
         return None
     # Normal attachment registration also prunes these managed records.
     # Do not start path-based cleanup after releasing the pinned directories.
