@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from agno.agent import Agent
@@ -39,7 +39,7 @@ from mindroom.tool_system.workspace_skills import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from agno.models.message import Message
 
@@ -80,13 +80,19 @@ class _CatalogEntry:
 
 @dataclass
 class ReviewProgress:
-    """What a review changed so far, and its file writes, which finish even after a timeout cancels the review."""
+    """What a review changed so far, and its file work, which finishes even after a timeout or a stop."""
 
     changes: dict[str, str] = field(default_factory=dict)
-    writes: set[asyncio.Future[None]] = field(default_factory=set)
+    writes: set[asyncio.Future[Any]] = field(default_factory=set)
+
+    def track[T](self, operation: Awaitable[T]) -> Awaitable[T]:
+        """Run file work that a cancelled review must not abandon halfway."""
+        future = asyncio.ensure_future(operation)
+        self.writes.add(future)
+        return asyncio.shield(future)
 
     async def settled(self) -> None:
-        """Wait until every file write the review started has landed or failed."""
+        """Wait until all file work the review started has landed or failed."""
         await asyncio.gather(*self.writes, return_exceptions=True)
 
 

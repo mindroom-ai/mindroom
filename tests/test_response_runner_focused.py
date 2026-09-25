@@ -9832,9 +9832,26 @@ async def test_approved_continuation_counts_toward_skill_review_unless_automated
         assert queue is None
         return
     assert queue is not None
-    await queue()
+    await queue(True)
     state = json.loads((runner.deps.runtime_paths.storage_root / "skill_learning_state.json").read_text())
     assert [entry["has_new_runs"] for entry in state["entries"].values()] == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("succeeded", [True, False])
+async def test_every_finished_response_registers_its_skill_review_conversation(succeeded: bool) -> None:
+    """A response that fails or pauses for approval still fixes where counting starts; only a completed one is due."""
+    calls: list[bool] = []
+
+    async def queue(completed: bool) -> None:
+        calls.append(completed)
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(terminal_status="completed" if succeeded else "error", event_id=None),
+        ResponseOutcome(run_succeeded=succeeded),
+        PostResponseEffectsDeps(logger=MagicMock(), queue_skill_review=queue),
+    )
+    assert calls == [succeeded]
 
 
 @pytest.mark.asyncio
@@ -9844,6 +9861,6 @@ async def test_first_skill_review_count_starts_when_the_response_began(tmp_path:
     runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
     with patch("mindroom.response_runner.time.time", return_value=1_000.5):
         queue = runner._skill_review(agent_name="general", session_id="session-1", execution_identity=None)
-    await queue()
+    await queue(True)
     state = json.loads((runner.deps.runtime_paths.storage_root / "skill_learning_state.json").read_text())
     assert [entry["reviewed_through"] for entry in state["entries"].values()] == [[1_000, -1]]

@@ -195,8 +195,9 @@ def _queue(
     *,
     identity: ToolExecutionIdentity | None = None,
     started_at: int = 0,
+    completed: bool = True,
 ) -> None:
-    """Queue a completed response to a person; ``started_at`` defaults to counting every seeded run."""
+    """Record a finished response to a person; ``started_at`` defaults to counting every seeded run."""
     queue.queue_skill_review(
         config,
         paths,
@@ -204,6 +205,7 @@ def _queue(
         session_id=session_id,
         execution_identity=identity,
         started_at=started_at,
+        completed=completed,
     )
 
 
@@ -397,6 +399,7 @@ def test_long_tool_output_keeps_its_start_and_end() -> None:
     assert transcript.endswith("FAILED test_deploy.py::test_rollback - KeyError")
     assert "characters omitted ..." in transcript
     assert transcript.count("characters omitted") == 1
+    assert len(transcript) <= 40_000 // 8 + 64
 
 
 def test_clipping_never_leaves_a_private_key_body_behind() -> None:
@@ -1455,3 +1458,97 @@ async def test_write_in_flight_at_shutdown_is_recorded_as_the_learners(tmp_path:
     entries = _entries(paths)
     assert entries["mind:other"]["seen_fingerprint"] == library.skills_fingerprint(_skills_root(config, paths))
     assert (entries["mind:session"]["has_new_runs"], _marker_index(entries["mind:session"])) == (False, 0)
+
+
+@pytest.mark.asyncio
+async def test_an_approved_continuation_counts_when_its_request_opened_the_conversation(tmp_path: Path) -> None:
+    """A continued run keeps its first save time, so the paused request that began it fixes where counting starts."""
+    config, paths = _learner(tmp_path)
+    started = int(time.time()) - 600
+    paused = _tool_turn("r1")
+    paused.created_at = started + 1
+    _seed(config, paths, paused)
+    model = _model()
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        _queue(config, paths, started_at=started, completed=False)
+        assert queue.claim_due_reviews(config, paths, now=time.time()) == []
+        _queue(config, paths, started_at=int(time.time()))
+        await _cycle(config, paths)
+    assert model.requests
+
+
+def test_clipping_keeps_secrets_split_by_the_cut_redacted() -> None:
+    """A secret next to either cut is still redacted, even when its recognizable prefix falls on the other side."""
+    heading = "TOOL RESULT (shell):\n"
+
+    def render(content: str) -> str:
+        return render_transcript([Message(role="tool", content=content, tool_name="shell")], budget_chars=80_000)
+
+    probe = render("x" * 100_000)
+    head_len = probe.index("\n[... ") - len(heading)
+    tail_len = len(probe) - probe.index(" ...]\n") - len(" ...]\n")
+    secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    for prefix in ("GITHUB_TOKEN=", "Authorization: Bearer ", ""):
+        for offset in range(-45, 45, 3):
+            near_head = "x" * max(0, head_len + offset - len(prefix) - 1) + " " + prefix + secret + " " + "z" * 100_000
+            near_tail = "z" * 100_000 + " " + prefix + secret + " " + "x" * max(0, tail_len - offset)
+            for content in (near_head, near_tail):
+                assert secret[6:24] not in render(content), (prefix, offset)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["archival", "bookkeeping"])
+async def test_a_stop_during_archival_or_bookkeeping_still_records_the_learners_changes(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    """A stop while archival runs, or while a timed-out review waits for its write, still settles the review."""
+    config, paths = _learner(tmp_path)
+    config.agents["mind"].skill_learning.timeout_seconds = 1
+    _seed(config, paths, _tool_turn("r1"))
+    _seed(config, paths, _run("o1", Message(role="assistant", content="hi")), session_id="other")
+    root = _skills_root(config, paths)
+    library.create_skill(root, "old-habit", LEARNED.replace("deploy-checks", "old-habit"), reserved_names=frozenset())
+    with open_skills_root(root) as root_fd:
+        update_skill_usage(
+            root_fd,
+            "old-habit",
+            lambda usage: usage.model_copy(update={"created_at": datetime.now(UTC) - timedelta(days=90)}),
+        )
+    reached = threading.Event()
+    real_archive, real_create = worker_module.archive_unused_skills, library.create_skill
+
+    def slow_archive(*args: object, **kwargs: Any) -> list[str]:  # noqa: ANN401
+        if phase == "archival":
+            reached.set()
+            time.sleep(1)
+        return real_archive(*args, **kwargs)
+
+    def slow_create(*args: object, **kwargs: Any) -> None:  # noqa: ANN401
+        time.sleep(2)
+        real_create(*args, **kwargs)
+
+    real_finish = SkillLearningWorker._finish
+
+    async def finish(self: SkillLearningWorker, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if phase == "bookkeeping":
+            reached.set()
+        return await real_finish(self, *args, **kwargs)
+
+    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
+    worker = SkillLearningWorker(paths, lambda: config, client_provider=lambda _agent: None)
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch.object(worker_module, "archive_unused_skills", slow_archive),
+        patch("mindroom.skill_learning.reviewer.create_skill", slow_create),
+        patch.object(SkillLearningWorker, "_finish", finish),
+    ):
+        _queue(config, paths, "other")
+        await _cycle(config, paths)
+        _queue(config, paths)
+        task = asyncio.create_task(worker.run())
+        assert await asyncio.to_thread(reached.wait, 10)
+        worker.stop()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=10)
+    assert _entries(paths)["mind:other"]["seen_fingerprint"] == library.skills_fingerprint(root)
+    assert not (root / "old-habit").exists()

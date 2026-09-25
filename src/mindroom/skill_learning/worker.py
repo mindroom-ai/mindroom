@@ -168,13 +168,16 @@ class SkillLearningWorker:
         identity = entry.execution_identity()
         before = await asyncio.to_thread(skills_fingerprint, skills_root)
         progress = ReviewProgress()
-        outcome: Literal["reviewed", "failed"] = "reviewed"
+        outcome: Literal["reviewed", "failed", "interrupted"] = "reviewed"
+        stopped: asyncio.CancelledError | None = None
         try:
-            archived = await asyncio.to_thread(
-                archive_unused_skills,
-                skills_root,
-                archive_after_days=settings.archive_after_days,
-                now=datetime.now(UTC),
+            archived = await progress.track(
+                asyncio.to_thread(
+                    archive_unused_skills,
+                    skills_root,
+                    archive_after_days=settings.archive_after_days,
+                    now=datetime.now(UTC),
+                ),
             )
             if archived:
                 logger.info("Archived unused learned skills", agent=entry.agent, archived=archived)
@@ -201,26 +204,26 @@ class SkillLearningWorker:
                     ),
                     timeout=settings.timeout_seconds,
                 )
-        except asyncio.CancelledError:
-            # Shutdown lets started writes land so they count as the learner's, then keeps an unchanged review due
-            # for the next start; a bookkeeping error here must not replace the cancellation.
-            try:
-                await asyncio.shield(progress.settled())
-                outcome_on_stop = "reviewed" if progress.changes else "interrupted"
-                self._settle(key, entry, skills_root, before, outcome=outcome_on_stop, through=through)
-            except Exception:
-                logger.exception("Could not record an interrupted skill review", agent=entry.agent)
-            raise
+        except asyncio.CancelledError as error:
+            stopped, outcome = error, "interrupted"
         except Exception:
             outcome = "failed"
             logger.exception("Skill review failed", agent=entry.agent, session_id=entry.session)
-        # A timeout cancels the review, not the file writes it started; they land before the state is recorded.
-        await progress.settled()
-        if progress.changes:
-            # Like Hermes' best-effort review, one that already changed skills is done; rerunning the same
-            # conversation would repeat its edits and notices.
-            outcome = "reviewed"
-        await asyncio.to_thread(self._settle, key, entry, skills_root, before, outcome=outcome, through=through)
+        # Every exit, a stop included, waits for the archival and writes it started, which land even after a timeout
+        # or a stop cancels the review, so they are recorded as the learner's before the state is settled.
+        finish = asyncio.ensure_future(self._finish(key, entry, skills_root, before, progress, outcome, through))
+        while not finish.done():
+            try:
+                # Waiting never cancels the bookkeeping, so a stop arriving now still lets it finish.
+                await asyncio.wait([finish])
+            except asyncio.CancelledError as error:
+                stopped = error
+        if stopped is not None:
+            # A bookkeeping error must not replace the cancellation.
+            if (error := finish.exception()) is not None:
+                logger.error("Could not record an interrupted skill review", agent=entry.agent, exc_info=error)
+            raise stopped
+        outcome = finish.result()
         changes = progress.changes
         logger.info(
             "Skill review finished",
@@ -231,6 +234,24 @@ class SkillLearningWorker:
         )
         if settings.notify and changes and identity is not None:
             await self._notify(entry.agent, identity, changes)
+
+    async def _finish(
+        self,
+        key: str,
+        claimed: QueueEntry,
+        skills_root: Path,
+        before: str,
+        progress: ReviewProgress,
+        outcome: Literal["reviewed", "failed", "interrupted"],
+        through: RunPosition,
+    ) -> Literal["reviewed", "failed", "interrupted"]:
+        await progress.settled()
+        if progress.changes:
+            # Like Hermes' best-effort review, one that already changed skills is done; rerunning the same
+            # conversation would repeat its edits and notices.
+            outcome = "reviewed"
+        await asyncio.to_thread(self._settle, key, claimed, skills_root, before, outcome=outcome, through=through)
+        return outcome
 
     def _settle(
         self,

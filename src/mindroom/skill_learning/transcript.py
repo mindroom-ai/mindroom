@@ -30,6 +30,9 @@ _DIGEST_ASSISTANT_CHARS = 200
 # Redaction handles at most 64 KiB per call, so one rendered message stays below it.
 _MAX_MESSAGE_CHARS = 60_000
 _MIN_MESSAGE_CHARS = 2_000
+# Room for the omission note, and how far past a cut redaction looks so a secret the cut splits keeps its prefix.
+_CLIP_NOTE_CHARS = 64
+_REDACTION_MARGIN = 512
 
 
 def conversation_messages(session: AgentSession) -> list[Message]:
@@ -98,7 +101,8 @@ def render_transcript(messages: Sequence[Message], *, summary: str | None = None
 
 
 def _digest_line(message: Message) -> str | None:
-    text = " ".join(message.get_content_string().split())
+    # A digest line keeps a few hundred characters, so only that much of a long message is normalized.
+    text = " ".join(message.get_content_string()[: 4 * _DIGEST_USER_CHARS].split())
     if message.role == "user" and text:
         return redact_sensitive_text(f"USER: {text[:_DIGEST_USER_CHARS]}")
     if message.role != "assistant":
@@ -122,7 +126,7 @@ def _render_message(message: Message, limit: int) -> str:
         arguments = function.get("arguments")
         rendered = arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
         calls.append(f"-> calls {function.get('name', 'unknown tool')}({_clip(rendered, limit // 4)})")
-    content_limit = max(_MIN_MESSAGE_CHARS, limit - len(heading) - sum(len(line) + 1 for line in calls))
+    content_limit = max(_MIN_MESSAGE_CHARS, limit - len(heading) - 1 - sum(len(line) + 1 for line in calls))
     lines = [heading, _clip(message.get_content_string(), content_limit), *calls]
     return redact_sensitive_text(_clip("\n".join(lines), limit))
 
@@ -132,12 +136,15 @@ def _tool_call_names(message: Message) -> list[str]:
 
 
 def _clip(text: str, limit: int) -> str:
-    """Keep the start and the end, where a command and its error or result usually are.
+    """Keep at most ``limit`` characters from the start and the end, where a command's error or result usually is.
 
-    Private keys go first: redaction recognizes one by its BEGIN line, which clipping could cut away from its body.
+    Redaction recognizes secrets by what precedes them, and a private key by its BEGIN line, so keys go first over
+    the whole text and each kept part is redacted together with the text just past its cut.
     """
     text = redact_private_keys(text)
     if len(text) <= limit:
         return text
-    half = limit // 2
-    return f"{text[:half]}\n[... {len(text) - 2 * half} characters omitted ...]\n{text[-half:]}"
+    half = (limit - _CLIP_NOTE_CHARS) // 2
+    head = redact_sensitive_text(text[: half + _REDACTION_MARGIN])[:half]
+    tail = redact_sensitive_text(text[-half - _REDACTION_MARGIN :])[-half:]
+    return f"{head}\n[... {len(text) - 2 * half} characters omitted ...]\n{tail}"
