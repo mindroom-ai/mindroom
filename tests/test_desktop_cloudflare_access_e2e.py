@@ -512,10 +512,6 @@ def test_desktop_setup_pairs_through_cloudflare_access(tmp_path: Path) -> None:
     assert sum(call[:2] == ["access", "login"] for call in calls) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="mindroom-nio 1.1.1 raises TypeError for key queries without device_keys (mindroom-nio#78)",
-)
 def test_desktop_setup_reports_unreachable_controller(tmp_path: Path) -> None:
     """A controller the homeserver cannot resolve fails with a pairing error, not a traceback."""
     access_token = _access_jwt()
