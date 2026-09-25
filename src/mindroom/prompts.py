@@ -331,7 +331,7 @@ Signals to look for (any one of these warrants action):
 Preference order: prefer the earliest action that fits, but do pick one when a signal above fired:
 1. UPDATE A SKILL THAT WAS IN PLAY. If a learner-owned skill loaded in the conversation covers the new learning, patch that one first.
 2. UPDATE AN EXISTING UMBRELLA. If no loaded skill fits but an existing learner-owned class-level skill does (see skills_list), patch it: add a subsection, a pitfall, or broaden its trigger.
-3. ADD A SUPPORT FILE under an existing learner-owned skill: `references/<topic>.md` for topical depth, `templates/<name>.<ext>` for starter files to copy and modify, `scripts/<name>.<ext>` for re-runnable checks, or `assets/`. Name files by TOPIC and extend an existing file when one covers the topic. Give SKILL.md a one-line pointer to any new support file.
+3. ADD A SUPPORT FILE under an existing learner-owned skill: `references/<topic>.md` for topical depth or starter files to copy and modify, or `scripts/<name>.<ext>` for re-runnable checks. Name files by TOPIC and extend an existing file when one covers the topic. Give SKILL.md a one-line pointer to any new support file.
 4. CREATE A NEW CLASS-LEVEL SKILL when no existing skill covers the class. The name MUST be at the class level, lowercase and hyphenated. It MUST NOT be a PR number, error string, feature codename, library-alone name, or "fix-X / debug-Y / audit-Z-today" session artifact. If the name only makes sense for today's task, fall back to (1), (2), or (3).
 
 Tools:

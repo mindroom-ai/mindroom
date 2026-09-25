@@ -215,15 +215,18 @@ def read_support_file(skill_path: Path, directory: str, filename: str) -> str:
     return content
 
 
-def _usage_records(root_fd: int) -> dict[str, object]:
-    """Return the raw usage records; an unreadable file or one that is not a JSON object reads as empty."""
+def _usage_records(root_fd: int) -> dict[str, object] | None:
+    """Return the raw usage records, empty without a file, or None for a file that is not a readable JSON object."""
     try:
         payload = read_text_at(root_fd, _USAGE_FILENAME)
         records = json.loads(payload) if payload else {}
     except (OSError, ValueError) as exc:
         logger.warning("Ignoring unreadable skill usage telemetry", error=str(exc))
-        return {}
-    return records if isinstance(records, dict) else {}
+        return None
+    if not isinstance(records, dict):
+        logger.warning("Ignoring skill usage telemetry that is not a JSON object")
+        return None
+    return records
 
 
 def _parse_usage(record: object) -> SkillUsage | None:
@@ -243,7 +246,7 @@ def _write_usage_records(root_fd: int, records: dict[str, object]) -> None:
 
 def load_skill_usage(root_fd: int) -> dict[str, SkillUsage]:
     """Return usage keyed by skill directory; a malformed record reads as absent without hiding the others."""
-    usage = {name: _parse_usage(record) for name, record in _usage_records(root_fd).items()}
+    usage = {name: _parse_usage(record) for name, record in (_usage_records(root_fd) or {}).items()}
     return {name: record for name, record in usage.items() if record is not None}
 
 
@@ -255,6 +258,9 @@ def update_skill_usage(root_fd: int, directory: str, update: Callable[[SkillUsag
     """
     with _USAGE_LOCK:
         records = _usage_records(root_fd)
+        if records is None:
+            # Rewriting an unreadable file would drop every record in it; a person can still repair it.
+            return
         current = _parse_usage(records.get(directory)) or SkillUsage()
         records[directory] = update(current).model_dump(mode="json", exclude_defaults=True)
         _write_usage_records(root_fd, records)
@@ -264,6 +270,8 @@ def forget_missing_skill_usage(root_fd: int) -> None:
     """Drop records of skill directories that are gone, so a restored or reused name starts as a new skill."""
     with _USAGE_LOCK:
         records = _usage_records(root_fd)
+        if records is None:
+            return
         present = set(list_entries(root_fd, directories=True))
         kept = {name: record for name, record in records.items() if name in present}
         if len(kept) < len(records):

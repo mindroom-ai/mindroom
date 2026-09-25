@@ -48,7 +48,8 @@ _MAX_DESCRIPTION_CHARS = 1024
 # Hermes SKILL_PROMPT_DESC_LIMIT: new skills must fit the one-line skill index every prompt carries.
 _NEW_DESCRIPTION_CHARS = 60
 _MAX_SKILL_MARKDOWN_CHARS = 100_000
-_SUPPORT_DIRECTORIES = frozenset({"references", "templates", "scripts", "assets"})
+# Only the support files the agent's skill tools can serve; Hermes also has templates/ and assets/.
+_SUPPORT_DIRECTORIES = frozenset({"references", "scripts"})
 _NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _HISTORY_DIRNAME = ".history"
 _ARCHIVE_DIRNAME = ".archive"

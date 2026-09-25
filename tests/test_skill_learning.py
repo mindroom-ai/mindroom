@@ -42,7 +42,12 @@ from mindroom.skill_learning.transcript import count_model_replies, render_trans
 from mindroom.skill_learning.worker import SkillLearningWorker
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.tool_system.workspace_skills import open_skills_root, record_skill_use, update_skill_usage
+from mindroom.tool_system.workspace_skills import (
+    forget_missing_skill_usage,
+    open_skills_root,
+    record_skill_use,
+    update_skill_usage,
+)
 from mindroom.usage_stats import collect_admin_usage
 from tests.conftest import seed_session
 
@@ -286,10 +291,12 @@ def test_writes_require_a_current_read_and_learner_ownership(tmp_path: Path) -> 
 
 
 def test_support_files_stay_directly_under_support_directories(tmp_path: Path) -> None:
-    """Support writes are single files under Hermes' support directories and can be removed after a read."""
+    """Support writes are single files under the support directories the skill tools serve, removable after a read."""
     root = tmp_path / "skills"
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
-    for bad in ("../escape.md", "references/../x.md", "references/nested/x.md", "other/x.md", "references/.hidden"):
+    bad_paths = ("../escape.md", "references/../x.md", "references/nested/x.md", "other/x.md", "references/.hidden")
+    # Hermes' templates/ and assets/ would never reach the agent, whose skill tools serve references and scripts.
+    for bad in (*bad_paths, "templates/report.md", "assets/logo.png"):
         with pytest.raises(library.SkillEditError, match="file_path"):
             library.write_skill_file(root, "deploy-checks", bad, "x", expected_digest=None)
     library.write_skill_file(root, "deploy-checks", "references/rollback.md", "Roll back.", expected_digest=None)
@@ -1212,6 +1219,18 @@ def test_conversations_outlast_their_longest_approval_wait(tmp_path: Path) -> No
     assert [key for key, _entry in queue.drop_retired_reviews(config, paths, now=89 * day)] == ["mind:session"]
 
 
+def test_an_unreadable_usage_file_is_left_for_a_person_to_repair(tmp_path: Path) -> None:
+    """A hand edit that breaks the JSON reads as empty, but no skill load rewrites the file and drops its records."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    broken = '{"report-writing": {"created_by": "learner"},}'
+    (root / ".usage.json").write_text(broken)
+    record_skill_use(root / "deploy-checks")
+    with open_skills_root(root) as root_fd:
+        forget_missing_skill_usage(root_fd)
+    assert (root / ".usage.json").read_text() == broken
+
+
 def test_archival_skips_unreadable_user_skills(tmp_path: Path) -> None:
     """A user skill the learner cannot read must not stop archival, and with it every review of the workspace."""
     root = tmp_path / "skills"
@@ -1738,17 +1757,17 @@ async def test_a_skills_root_that_cannot_be_fingerprinted_still_settles_the_revi
 
 @pytest.mark.asyncio
 async def test_writing_over_a_binary_support_file_is_refused_not_crashed(tmp_path: Path) -> None:
-    """An existing asset that is not text cannot be read back, and the reviewer gets a refusal it can act on."""
+    """An existing support file that is not text cannot be read back, and the reviewer gets a refusal it can act on."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     root = _skills_root(config, paths)
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
-    (root / "deploy-checks/assets").mkdir()
-    (root / "deploy-checks/assets/logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe")
+    (root / "deploy-checks/references").mkdir()
+    (root / "deploy-checks/references/logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe")
     model = _model(
         (
             "skill_manage",
-            {"action": "write_file", "name": "deploy-checks", "file_path": "assets/logo.png", "file_content": "x"},
+            {"action": "write_file", "name": "deploy-checks", "file_path": "references/logo.png", "file_content": "x"},
         ),
     )
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
@@ -1764,4 +1783,4 @@ async def test_writing_over_a_binary_support_file_is_refused_not_crashed(tmp_pat
             progress=ReviewProgress(),
         )
     assert json.loads(model.requests[1][-1])["success"] is False
-    assert (root / "deploy-checks/assets/logo.png").read_bytes().startswith(b"\x89PNG")
+    assert (root / "deploy-checks/references/logo.png").read_bytes().startswith(b"\x89PNG")
