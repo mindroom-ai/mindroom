@@ -105,7 +105,10 @@ Set `config.source: file` when another init container or content bundle places `
 In file mode, `config.path` must be an absolute container path.
 In file mode, the chart does not render or mount the runtime config ConfigMap.
 Dedicated Kubernetes workers receive the same config file path and do not receive worker ConfigMap settings.
-Dedicated Kubernetes workers also mount the storage subtree containing the config file read-only so content-bundle files under that subtree are visible without broad worker state access.
+Dedicated Kubernetes workers and the `static_runner` sidecar also mount the storage subtree containing the config file read-only so content-bundle files under that subtree are visible without broad worker state access.
+That subtree is the first path component below `storage.mountPath`, and tool code can read all of it, so keep the config in its own directory away from credentials and Matrix state.
+With `workers.backend: static_runner`, the chart rejects a config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
+A config directly in `storage.mountPath` is mounted into the sidecar as a single file, so it must exist before the pod starts; otherwise kubelet creates a directory in its place.
 
 Use a content bundle as the source of truth for the runtime config:
 
@@ -622,8 +625,14 @@ workers:
 - The chart can create PostgreSQL for MindRoom's event journal, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
 - Use `providerCredentials` to feed model-provider API keys from existing Kubernetes Secrets into the runtime's credential service.
-- Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime and static runner sidecar receive the same Secret-backed key.
+- Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime receives the Secret-backed key.
 - `workers.backend: static_runner` adds a sandbox-runner sidecar to the runtime pod.
+  The sidecar never receives the credentials encryption key, and saved settings for each proxied tool reach it as per-call leases from the primary.
+  From the storage PVC it mounts only the `agents` and `private_instances` directories read-write over its own `sandbox-runner` directory, plus the read-only config subtree in file mode, so agent workspaces persist while the credential store and Matrix state stay out of reach.
+  An init container creates those directories as the runtime user.
+  The sidecar shares the pod network namespace, so the chart gives the primary a generated `MINDROOM_API_KEY` from the `<fullname>-api-key` Secret, and the dashboard and API then require it; the install notes show how to read it.
+  A `MINDROOM_API_KEY` from `env.extra` or `env.envFrom` takes precedence, which GitOps and `helm template` workflows should use because the generated key changes on every offline render.
+  `apiAuth.allowUnauthenticatedPrimary: true` removes the key and is unsafe unless other primary API authentication is configured.
 - `workers.backend: kubernetes` lets the runtime create dedicated worker Deployments and Services on demand.
   In the release namespace, the chart stores derived worker tokens and optional credential-encryption keys as entries in one chart-created worker-auth Secret and grants only `get` and `patch` on that Secret.
   When `workers.kubernetes.namespace` points at a separate worker namespace, the chart uses per-worker auth Secrets and grants Secret CRUD only in that namespace.

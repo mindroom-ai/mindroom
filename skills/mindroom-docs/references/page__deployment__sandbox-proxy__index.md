@@ -114,15 +114,29 @@ This is the `workerBackend: static_runner` Helm mode.
 See `cluster/k8s/instance/templates/deployment-mindroom.yaml` for the full manifest.
 The sidecar gets:
 
-- An `emptyDir` volume for worker-local scratch files and caches.
-- Access to the same shared storage that holds agent data directories.
+- Its own storage root at the primary's storage path, backed by the storage PVC's `sandbox-runner` directory, for worker-local files, virtualenvs, and caches.
+- The storage PVC's `agents` and `private_instances` directories mounted read-write at their usual paths, so agent workspaces persist and stay shared with the primary runtime.
 - Read-only access to config for plugin tool registration.
-- The configured credentials-encryption key so it can consume encrypted credential leases.
+  With the runtime chart's `config.source: file`, this is the read-only storage subtree holding the config file, the same subtree dedicated Kubernetes workers mount.
+- The sandbox proxy token that authenticates requests from the primary runtime.
+
+The sidecar does not mount the rest of the storage PVC, so tool code cannot read the credential store, Matrix encryption keys and access tokens, or other primary state, and cannot modify the config the primary loads.
+It never receives the credentials-encryption key.
+The primary leases each proxied tool's saved settings to the sidecar per call, as described in [Credential leases](#credential-leases).
+A `prepare-sandbox-runner-storage` init container creates the three storage directories as the runtime user before the containers start.
+The runtime chart rejects a file-sourced config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
+A file-sourced config directly in the storage root is mounted as a single read-only file, so it must exist before the pod starts; otherwise kubelet creates a directory in its place.
+
+Upgrading an existing release keeps agent data in place because the sidecar mounts the same PVC directories.
+Files that earlier sidecar versions wrote elsewhere on the PVC, such as worker virtualenvs under `workers/` and caches in the storage root used as `HOME`, remain on disk but are no longer visible to the sidecar, which recreates worker virtualenvs on first use.
 
 > [!WARNING]
-> The Kubernetes `static_runner` sidecar is not a secrets or filesystem isolation boundary.
-> It can read the full shared storage mount, including persisted credential data, and tools running in the sidecar may access its environment.
-> Use dedicated Kubernetes workers when agent-scoped filesystem and credential isolation are required.
+> The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
+> All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, learning data, and memory.
+> The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication with `requireJwt`.
+> Without Supabase authentication, both charts give the primary a generated `MINDROOM_API_KEY` so tool code cannot use the API over `localhost`.
+> Header-only trusted-upstream authentication is still forgeable from the sidecar.
+> Use dedicated Kubernetes workers when per-agent filesystem and credential isolation are required.
 
 ### Kubernetes dedicated workers (`workerBackend: kubernetes`)
 
@@ -557,6 +571,9 @@ A **credential lease** supplies short-lived credential values as constructor con
 Selected services follow the call's scoped credential policy and, where applicable, the worker-grantable shared-service allowlist.
 Only fields declared by the receiving toolkit are applied as constructor configuration; unrelated credential fields are ignored.
 The lease holds its values in memory until consumed or expired, and the proxy requests one use with the configured TTL.
+With the `static_runner` backend, the primary also leases the called tool's own saved settings on every call because a containerized shared runner has no access to the credential store.
+Services selected by the policy override those values.
+Dedicated Docker and Kubernetes workers keep reading tool settings from their own worker credential stores.
 
 Leases do not export API keys into shell environments, configure Git authentication, or install SSH keys.
 For shell authentication, explicitly configure [environment passthrough](#shell-env-and-path) or the [workspace env hook](#workspace-env-hook-mindroomworker-envsh) as needed.
@@ -575,7 +592,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   This explicit worker-pool policy applies even when Computer is disabled, regardless of which tools an agent selects.
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their prior launch settings and compatible identities.
-- With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
+- With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
