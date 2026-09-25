@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
-from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
+from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path, runtime_openai_base_url
 from mindroom.credentials_sync import get_api_key_for_provider, get_model_api_key, get_ollama_host, get_secret_from_env
 from mindroom.google_adc import load_google_application_credentials
 from mindroom.llm_request_logging import install_llm_request_logging
@@ -302,7 +302,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if canonical_provider_key == "openai":
         from mindroom.openai_tool_search import openai_native_tool_search_supported  # noqa: PLC0415
 
-        base_url = extra_kwargs.get("base_url") or runtime_paths.env_value("OPENAI_BASE_URL")
+        base_url = runtime_openai_base_url(runtime_paths, extra_kwargs)
         if base_url:
             extra_kwargs["base_url"] = base_url
         if model_config.api == "responses" or (

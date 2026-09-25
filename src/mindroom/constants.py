@@ -888,6 +888,12 @@ def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
     return source_path.resolve()
 
 
+def runtime_openai_base_url(runtime_paths: RuntimePaths, extra_kwargs: Mapping[str, object] | None) -> str | None:
+    """Return the endpoint an ``openai`` model calls: ``extra_kwargs.base_url``, else ``OPENAI_BASE_URL``."""
+    base_url = (extra_kwargs or {}).get("base_url") or runtime_paths.env_value("OPENAI_BASE_URL")
+    return str(base_url) if base_url else None
+
+
 def runtime_env_flag(
     name: str,
     runtime_paths: RuntimePaths,

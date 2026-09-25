@@ -2856,63 +2856,100 @@ class TestDoctor:
         assert result.exit_code == 1
         assert "API key invalid" in result.output
 
-    def test_doctor_validates_the_key_each_model_uses(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Model-specific keys are validated in place of the shared key, in the runtime's precedence order."""
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n"
-            "  default:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-config\n"
-            "  saved:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-config-shadowed\n"
-            "  proxy:\n    provider: openai\n    id: gpt-6-astra\n"
-            "    extra_kwargs:\n      api_key: sk-proxy\n      base_url: https://proxy.example/v1\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n",
-        )
-        storage = tmp_path / "storage"
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        runtime_paths = constants_module.resolve_runtime_paths(config_path=cfg, storage_path=storage)
-        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
-            "model:saved",
-            {"api_key": "sk-dashboard"},
-        )
+    @staticmethod
+    def _record_provider_probes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+        """Answer every doctor HTTP probe with 200 and record provider key probes as (url, Authorization)."""
         monkeypatch.setattr(
             "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
             lambda *_args, **_kwargs: "http://localhost:8008",
         )
-        provider_requests: list[tuple[str, str]] = []
+        probes: list[tuple[str, str]] = []
 
         def _mock_get(url: str, headers: dict[str, str] | None = None, **_kw: object) -> httpx.Response:
             if "/_matrix/" in str(url):
                 return httpx.Response(200, json={"versions": ["v1.1"]})
             if str(url).endswith("/models"):
-                provider_requests.append((str(url), (headers or {}).get("Authorization", "")))
+                probes.append((str(url), (headers or {}).get("Authorization", "")))
             return httpx.Response(200, json={"data": []})
 
         monkeypatch.setattr("mindroom.cli.doctor.httpx.get", _mock_get)
+        return probes
 
-        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
-
-        assert result.exit_code == 0
-        assert "OPENAI_API_KEY not set" not in result.output
-        assert sorted(provider_requests) == [
-            ("https://api.openai.com/v1/models", "Bearer sk-config"),
-            ("https://api.openai.com/v1/models", "Bearer sk-dashboard"),
-            ("https://proxy.example/v1/models", "Bearer sk-proxy"),
-        ]
-        assert "openai API key for model default (from config) valid" in result.output
-        assert "openai API key for model saved (from dashboard) valid" in result.output
-        assert "openai API key for model proxy (from config) valid" in result.output
-
-    def test_memory_llm_explicit_key_is_validated(
+    def test_doctor_validates_only_the_shared_key_models_use(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """An explicit memory.llm.config.api_key is the key doctor validates."""
+        """Model-specific keys are reported, never sent; the stored shared key is probed at a shared-key model's endpoint."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-config\n"
+            "  saved:\n    provider: openai\n    id: gpt-6-astra\n"
+            "  proxy:\n    provider: openai\n    id: gpt-6-astra\n"
+            "    extra_kwargs:\n      api_key: sk-proxy\n      base_url: https://proxy.example/v1\n"
+            "  plain:\n    provider: openai\n    id: gpt-6-astra\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        credentials = get_runtime_shared_credentials_manager(
+            constants_module.resolve_runtime_paths(config_path=cfg, storage_path=storage),
+        )
+        credentials.save_credentials("model:saved", {"api_key": "sk-dashboard"})
+        credentials.save_credentials("openai", {"api_key": "sk-store"})
+        probes = self._record_provider_probes(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        assert result.exit_code == 0
+        assert probes == [("https://api.openai.com/v1/models", "Bearer sk-store")]
+        assert "OPENAI_API_KEY not set" not in result.output
+        assert "openai API key valid" in result.output
+        assert "model default uses its own API key from config (not validated)" in result.output
+        assert "model saved uses its own API key from dashboard (not validated)" in result.output
+        assert "model proxy uses its own API key from config (not validated)" in result.output
+
+    def test_doctor_probes_the_shared_key_at_openai_base_url(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The shared key goes where the runtime sends it, and a model's own key goes nowhere."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n    provider: openai\n    id: gpt-6-astra\n"
+            "  local:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-local-proxy\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:9292/v1")
+        probes = self._record_provider_probes(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+
+        assert result.exit_code == 0
+        assert ("http://localhost:9292/v1/models", "Bearer sk-env") in probes
+        assert all("sk-local-proxy" not in authorization for _url, authorization in probes)
+        assert all(url.startswith("http://localhost:9292/v1") for url, _authorization in probes)
+
+    @pytest.mark.parametrize(
+        ("memory_api_key", "expected_authorization"),
+        [("sk-memory", "Bearer sk-memory"), ("'   '", "Bearer sk-store")],
+        ids=["explicit", "whitespace"],
+    )
+    def test_memory_llm_check_validates_the_key_mem0_uses(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        memory_api_key: str,
+        expected_authorization: str,
+    ) -> None:
+        """Doctor validates an explicit memory LLM key, else the stored shared key, like the runtime."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
@@ -2923,31 +2960,22 @@ class TestDoctor:
             "    provider: openai\n"
             "    config:\n"
             "      model: gpt-5.6-luna\n"
-            "      api_key: sk-memory\n",
+            f"      api_key: {memory_api_key}\n",
         )
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.setattr(
-            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
-            lambda *_args, **_kwargs: "http://localhost:8008",
-        )
-        openai_keys: list[str] = []
-
-        def _mock_get(url: str, headers: dict[str, str] | None = None, **_kw: object) -> httpx.Response:
-            if "/_matrix/" in str(url):
-                return httpx.Response(200, json={"versions": ["v1.1"]})
-            if "openai.com" in str(url):
-                openai_keys.append((headers or {}).get("Authorization", ""))
-            return httpx.Response(200, json={"data": []})
-
-        monkeypatch.setattr("mindroom.cli.doctor.httpx.get", _mock_get)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        get_runtime_shared_credentials_manager(
+            constants_module.resolve_runtime_paths(config_path=cfg, storage_path=storage),
+        ).save_credentials("openai", {"api_key": "sk-store"})
+        probes = self._record_provider_probes(monkeypatch)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
 
         assert result.exit_code == 0
         assert "OPENAI_API_KEY not set" not in result.output
-        assert openai_keys == ["Bearer sk-memory"]
+        assert ("https://api.openai.com/v1/models", expected_authorization) in probes
 
     def test_provider_summary_multiple_providers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor shows provider summary with correct model counts."""
