@@ -201,13 +201,15 @@ class _ReviewTools:
         if self._exhausted():
             return self._refusal(_BUDGET_EXHAUSTED, *arguments)
         entry = self.catalog.get(name)
-        if action != "create" and entry is not None and entry.owner != "learner":
+        if action != "create" and entry is None:
+            return self._refusal(f"Unknown skill {name!r}; call skills_list.", *arguments)
+        if action != "create" and entry is not None and (entry.directory is None or not entry.learned):
             return self._refusal(
                 f"Skill {name!r} is {entry.owner}-owned and read-only; mention the needed change in your reply.",
                 *arguments,
             )
         # An adopted skill may live in a directory named differently from its frontmatter name.
-        directory = entry.directory if entry is not None and entry.directory is not None else name
+        directory = name if entry is None or entry.directory is None else entry.directory
         relative_path = file_path or SKILL_FILENAME
         try:
             if action == "create":
@@ -310,12 +312,7 @@ class _ReviewTools:
             name=name,
             action="updated",
         )
-        self._reads[directory, relative_path] = SkillFile(
-            content,
-            content_digest(content),
-            learned=True,
-            name=directory,
-        )
+        self._reads[directory, relative_path] = SkillFile(content, content_digest(content), learned=True, name=name)
 
 
 _BUDGET_EXHAUSTED = "The review input budget is exhausted. Stop calling tools and reply with the changes you made."

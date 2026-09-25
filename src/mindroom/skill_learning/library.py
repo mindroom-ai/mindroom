@@ -346,9 +346,14 @@ def skills_fingerprint(skills_root: Path) -> str:
         return digest.hexdigest()
     with open_skills_root(skills_root) as root_fd:
         for name in list_entries(root_fd, directories=True):
-            with open_directory_within_root(root_fd, name) as skill_fd:
-                for entry in _visible_files(skill_fd):
-                    digest.update(f"{name}/{entry}\0".encode())
+            try:
+                with open_directory_within_root(root_fd, name) as skill_fd:
+                    entries = list(_visible_files(skill_fd))
+            except OSError:
+                # An unreadable user skill still counts as present without blocking every review of the workspace.
+                entries = ["<unreadable>"]
+            for entry in entries:
+                digest.update(f"{name}/{entry}\0".encode())
     return digest.hexdigest()
 
 

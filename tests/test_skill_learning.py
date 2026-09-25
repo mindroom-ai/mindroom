@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -196,7 +197,7 @@ async def _cycle(config: Config, paths: RuntimePaths, client: object | None = No
         ("deploy-checks", LEARNED.replace("Use when deploying the web service", "x" * 61), "Description exceeds 60"),
         ("deploy-checks", LEARNED.replace("learned: true", "learned: false"), "learned: true"),
         ("deploy-checks", LEARNED.replace("---\n1. Run the smoke test.\n", "---\n"), "instructions"),
-        ("deploy-checks", LEARNED + "Log in with sk-abcdefghijklmnopqrstu.\n", "credential-like"),
+        ("deploy-checks", LEARNED + "Log in with sk-abcdefghij0123456789.\n", "credential-like"),
         ("deploy-checks", LEARNED + "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n", "credential-like"),
         ("deploy-checks", LEARNED + "Clone https://alice:hunter2@git.example.test/repo.\n", "credential-like"),
         ("mindroom-docs", LEARNED.replace("deploy-checks", "mindroom-docs"), "already exists"),
@@ -449,13 +450,23 @@ async def test_reviewer_creates_views_and_patches_with_only_skill_tools(tmp_path
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     root = _skills_root(config, paths)
-    patch_step = {"action": "patch", "name": "deploy-checks", "old_string": "1. Run the smoke test."}
+    library.create_skill(
+        root,
+        "older-lesson",
+        LEARNED.replace("deploy-checks", "older-lesson"),
+        reserved_names=frozenset(),
+    )
+    patch_step = {"action": "patch", "old_string": "1. Run the smoke test."}
     model = _model(
         ("skills_list", {}),
-        ("skill_manage", {**patch_step, "new_string": "0. Guess."}),
+        ("skill_manage", {**patch_step, "name": "older-lesson", "new_string": "0. Guess."}),
         ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}),
-        ("skill_view", {"name": "deploy-checks"}),
-        ("skill_manage", {**patch_step, "new_string": "1. Run the smoke test.\n2. Check the logs."}),
+        ("skill_view", {"name": "older-lesson"}),
+        (
+            "skill_manage",
+            {**patch_step, "name": "older-lesson", "new_string": "1. Run the smoke test.\n2. Check logs."},
+        ),
+        ("skill_manage", {**patch_step, "name": "deploy-checks", "new_string": "1. Run the smoke test.\n2. Retry."}),
     )
     progress = ReviewProgress()
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
@@ -469,15 +480,16 @@ async def test_reviewer_creates_views_and_patches_with_only_skill_tools(tmp_path
             messages=_tool_turn("r1").messages or [],
             progress=progress,
         )
-    assert progress.changes == {"deploy-checks": "created"}
-    assert (root / "deploy-checks/SKILL.md").read_text().endswith("2. Check the logs.\n")
+    assert progress.changes == {"deploy-checks": "created", "older-lesson": "updated"}
+    assert (root / "older-lesson/SKILL.md").read_text().endswith("2. Check logs.\n")
+    assert (root / "deploy-checks/SKILL.md").read_text().endswith("2. Retry.\n")
     assert all(tools == {"skills_list", "skill_view", "skill_manage"} for tools in model.offered_tools)
     assert all(model.provider_tools_blocked)
     assert "<conversation>" in model.requests[0][-1]
     assert "tests passed" in model.requests[0][-1]
     refused = json.loads(model.requests[2][-1])
     assert refused["success"] is False
-    assert "has not been loaded" in refused["error"] or "Call skill_view" in refused["error"]
+    assert "Call skill_view" in refused["error"]
 
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.request_breakdown is not None
@@ -838,3 +850,113 @@ def test_transcript_cannot_close_the_evidence_block() -> None:
         budget_chars=10_000,
     )
     assert "</conversation" not in transcript.lower().replace("<\\/conversation>", "")
+
+
+@pytest.mark.asyncio
+async def test_unreadable_user_skill_does_not_block_reviews(tmp_path: Path) -> None:
+    """The fingerprint counts an unreadable user skill as present instead of failing every review."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    locked = _write_skill(_skills_root(config, paths), "locked", HANDWRITTEN).parent
+    locked.chmod(0)
+    model = _model()
+    try:
+        with patch("mindroom.model_loading.get_model_instance", return_value=model):
+            _queue(config, paths, "r1")
+            await _cycle(config, paths)
+    finally:
+        locked.chmod(0o755)
+    assert model.requests
+    assert _entries(paths)["mind:session"]["failures"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reviewer_refuses_edits_to_unknown_skills(tmp_path: Path) -> None:
+    """Only create may name a skill the reviewer has not been shown."""
+    config, paths = _learner(tmp_path)
+    model = _model(
+        ("skill_manage", {"action": "write_file", "name": "", "file_path": "references/x.md", "file_content": "x"}),
+    )
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
+    ):
+        await review_conversation(
+            config=config,
+            runtime_paths=paths,
+            agent_name="mind",
+            session_id="session",
+            identity=None,
+            skills_root=_skills_root(config, paths),
+            messages=[Message(role="user", content="hi")],
+            progress=ReviewProgress(),
+        )
+    assert "Unknown skill" in json.loads(model.requests[1][-1])["error"]
+    assert not _skills_root(config, paths).exists()
+
+
+@pytest.mark.asyncio
+async def test_write_running_at_timeout_lands_before_settlement_and_is_announced(tmp_path: Path) -> None:
+    """A timeout cancels the review, not its write; the write is recorded as the learner's and announced."""
+    config, paths = _learner(tmp_path)
+    config.agents["mind"].skill_learning.timeout_seconds = 1
+    _seed(config, paths, _tool_turn("r1"))
+    real_create = library.create_skill
+
+    def slow_create(*args: object, **kwargs: Any) -> None:  # noqa: ANN401
+        time.sleep(2)
+        real_create(*args, **kwargs)
+
+    send = AsyncMock(return_value=object())
+    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.skill_learning.reviewer.create_skill", slow_create),
+        patch("mindroom.skill_learning.worker.send_message_result", send),
+    ):
+        _queue(config, paths, "r1", identity=ALICE)
+        await _cycle(config, paths, object())
+    entry = _entries(paths)["mind:session"]
+    assert (entry["failures"], entry["iterations"]) == (1, 2)
+    assert entry["seen_fingerprint"] == library.skills_fingerprint(_skills_root(config, paths, ALICE))
+    assert send.await_args.args[2]["body"] == "💾 Skill review: created `deploy-checks`"
+
+
+def test_pruning_keeps_an_entry_that_received_a_run_meanwhile(tmp_path: Path) -> None:
+    """An entry judged stale is kept when a run arrives between the snapshot and the removal."""
+    config, paths = _learner(tmp_path)
+    _queue(config, paths, "r1")
+    queue.record_count(paths, "mind:session", ["r1"], replies=1, skills_root="root", fingerprint="a")
+    state = json.loads((paths.storage_root / "skill_learning_state.json").read_text())
+    state["entries"]["mind:session"]["last_seen_at"] = 0.0
+    (paths.storage_root / "skill_learning_state.json").write_text(json.dumps(state))
+    judge = queue._entry_is_current
+
+    def judge_then_queue(config: Config, entry: queue.QueueEntry, now: float) -> bool:
+        current = judge(config, entry, now)
+        _queue(config, paths, "r2")
+        return current
+
+    with patch.object(queue, "_entry_is_current", judge_then_queue):
+        queue.claim_due_reviews(config, paths, now=datetime.now(UTC).timestamp())
+    assert _entries(paths)["mind:session"]["pending_run_ids"] == ["r2"]
+
+
+@pytest.mark.asyncio
+async def test_failed_shutdown_bookkeeping_does_not_swallow_the_cancellation(tmp_path: Path) -> None:
+    """Stopping still ends the worker even when recording the interrupted review fails."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    model = _model()
+    model.release = asyncio.Event()
+    worker = SkillLearningWorker(paths, lambda: config, client_provider=lambda _agent: None)
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch.object(SkillLearningWorker, "_settle", side_effect=OSError("disk full")),
+    ):
+        _queue(config, paths, "r1")
+        task = asyncio.create_task(worker.run())
+        await asyncio.wait_for(model.started.wait(), timeout=10)
+        worker.stop()
+        (result,) = await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5)
+    assert isinstance(result, asyncio.CancelledError)
