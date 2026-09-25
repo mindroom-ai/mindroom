@@ -189,6 +189,7 @@ Minimal-mode turns count like standard turns.
 The queue in `skill_learning_state.json` in the storage root holds run IDs, counters, and scope metadata, never message content.
 Reviews run one at a time across processes that share the storage root.
 A failed review, including a provider error, is retried with a growing delay and abandoned after three failures.
+A review that already changed skills before failing or timing out counts as done, like Hermes' best-effort review, so it never repeats its edits.
 Shutdown interrupts a running review, which runs again after the next start.
 
 ### What a review can do
@@ -231,9 +232,11 @@ Before the learner replaces or removes a file, it saves the previous version und
 Copy a saved version back to restore it.
 Before each review, learned skills with no use, creation, or learner edit for `archive_after_days` days move to `skills/.archive/`, and nothing is deleted.
 Archived directories are named `<skill>--<timestamp>`; move one back to `skills/<skill>/` to restore it.
+Archiving or deleting a skill forgets its record in `skills/.usage.json`, so a restored skill starts a new inactivity period and a new skill under the same name belongs to whoever wrote it.
 A use is recorded in `skills/.usage.json` whenever the agent loads a workspace skill through the skill tools or reads it as a minimal-mode context document.
 Rewrites keep a file's existing permissions.
 Archival is logged rather than announced, because other conversations may share the workspace.
 With `notify: true`, a review that changed skills posts an `m.notice` in the conversation naming only the skills that review changed, such as ``💾 Skill review: created `deploy-checks` ``.
+The notice carries `io.mindroom.skill_review` metadata and is left out of later model context, like compaction notices.
 Review usage counts against the source conversation as `kind: skill_learning` in the [dashboard usage reports](dashboard.md), except for a review that times out or is interrupted before the model run returns.
 Learned skills are generated from conversation content, so review them before relying on them for sensitive work.

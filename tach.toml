@@ -7431,6 +7431,7 @@ visibility = ["mindroom.orchestrator", "mindroom.response_runner", "mindroom.ski
 path = "mindroom.skill_learning.worker"
 depends_on = [
     "mindroom.agent_storage",
+    "mindroom.constants",
     "mindroom.file_locks",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",

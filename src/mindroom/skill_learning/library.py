@@ -26,6 +26,7 @@ from mindroom.tool_system.workspace_skills import (
     MAX_SKILL_FILE_BYTES,
     SKILL_FILENAME,
     SkillUsage,
+    forget_missing_skill_usage,
     list_entries,
     list_support_files,
     load_skill_usage,
@@ -314,37 +315,49 @@ def _save_history(root_fd: int, name: str, relative_path: str, content: str) -> 
 
 
 def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: datetime) -> list[str]:
-    """Move learner-owned skills without recent activity into ``skills/.archive``; never delete them."""
-    if archive_after_days <= 0 or not skills_root.is_dir():
+    """Move learner-owned skills without recent activity into ``skills/.archive``; never delete them.
+
+    Like Hermes forgetting deleted skills, records of archived or deleted directories are dropped, so a restored
+    or reused name starts over instead of inheriting the old ownership and inactivity.
+    """
+    if not skills_root.is_dir():
+        return []
+    with open_skills_root(skills_root) as root_fd:
+        archived = _archive_inactive(root_fd, archive_after_days=archive_after_days, now=now)
+        forget_missing_skill_usage(root_fd)
+    return archived
+
+
+def _archive_inactive(root_fd: int, *, archive_after_days: int, now: datetime) -> list[str]:
+    if archive_after_days <= 0:
         return []
     archived: list[str] = []
-    with open_skills_root(skills_root) as root_fd:
-        usage = load_skill_usage(root_fd)
-        for name in list_entries(root_fd, directories=True):
-            try:
-                with open_directory_within_root(root_fd, name) as skill_fd:
-                    markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage.get(name, SkillUsage()))
-            except (OSError, ValueError) as exc:
-                # One unreadable user skill must not block archival, and with it every review of the workspace.
-                logger.warning("Skipping unreadable workspace skill during archival", skill=name, error=str(exc))
-                continue
-            if markdown is None or not markdown.learned:
-                continue
-            last_activity = usage.get(name, SkillUsage()).last_activity_at()
-            if last_activity is None:
-                # First sight of an adopted skill starts its inactivity clock now, like Hermes' seeded records.
-                update_skill_usage(root_fd, name, lambda record: record.model_copy(update={"created_at": now}))
-                continue
-            if (now - last_activity).days < archive_after_days:
-                continue
-            with open_directory_within_root(root_fd, _ARCHIVE_DIRNAME, create=True) as archive_fd:
-                os.rename(
-                    name,
-                    f"{name}--{now.strftime('%Y%m%dT%H%M%SZ')}",
-                    src_dir_fd=root_fd,
-                    dst_dir_fd=archive_fd,
-                )
-            archived.append(name)
+    usage = load_skill_usage(root_fd)
+    for name in list_entries(root_fd, directories=True):
+        try:
+            with open_directory_within_root(root_fd, name) as skill_fd:
+                markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME, usage.get(name, SkillUsage()))
+        except (OSError, ValueError) as exc:
+            # One unreadable user skill must not block archival, and with it every review of the workspace.
+            logger.warning("Skipping unreadable workspace skill during archival", skill=name, error=str(exc))
+            continue
+        if markdown is None or not markdown.learned:
+            continue
+        last_activity = usage.get(name, SkillUsage()).last_activity_at()
+        if last_activity is None:
+            # First sight of an adopted or restored skill starts its inactivity clock, like Hermes' seeded records.
+            update_skill_usage(root_fd, name, lambda record: record.model_copy(update={"created_at": now}))
+            continue
+        if (now - last_activity).days < archive_after_days:
+            continue
+        with open_directory_within_root(root_fd, _ARCHIVE_DIRNAME, create=True) as archive_fd:
+            os.rename(
+                name,
+                f"{name}--{now.strftime('%Y%m%dT%H%M%SZ')}",
+                src_dir_fd=root_fd,
+                dst_dir_fd=archive_fd,
+            )
+        archived.append(name)
     return archived
 
 

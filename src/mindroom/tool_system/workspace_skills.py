@@ -230,6 +230,16 @@ def update_skill_usage(root_fd: int, directory: str, update: Callable[[SkillUsag
         atomic_write_bytes_at(root_fd, _USAGE_FILENAME, _USAGE.dump_json(usage, exclude_defaults=True))
 
 
+def forget_missing_skill_usage(root_fd: int) -> None:
+    """Drop records of skill directories that are gone, so a restored or reused name starts as a new skill."""
+    with _USAGE_LOCK:
+        usage = load_skill_usage(root_fd)
+        present = set(list_entries(root_fd, directories=True))
+        kept = {name: record for name, record in usage.items() if name in present}
+        if len(kept) < len(usage):
+            atomic_write_bytes_at(root_fd, _USAGE_FILENAME, _USAGE.dump_json(kept, exclude_defaults=True))
+
+
 def record_skill_use(skill_path: Path) -> None:
     """Count one agent load of a workspace skill; telemetry failures never fail the load."""
     now = datetime.now(UTC)

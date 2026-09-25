@@ -16,6 +16,7 @@ from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
     ORIGINAL_SENDER_KEY,
+    SKILL_REVIEW_NOTICE_CONTENT_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -69,6 +70,8 @@ _PARTIAL_REPLY_SENDER_LABELS = {
     "in_progress": "You (reply still streaming)",
 }
 _PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
+# Lifecycle notices describe the runtime, not the conversation, so no model sees them as a turn.
+_LIFECYCLE_NOTICE_CONTENT_KEYS = (COMPACTION_NOTICE_CONTENT_KEY, SKILL_REVIEW_NOTICE_CONTENT_KEY)
 
 
 class _PartialReplyKind(str, Enum):
@@ -689,7 +692,7 @@ def _get_unseen_messages_for_sender(
             continue
         if current_event_id and event_id == current_event_id:
             continue
-        if isinstance(content, dict) and COMPACTION_NOTICE_CONTENT_KEY in content:
+        if isinstance(content, dict) and any(key in content for key in _LIFECYCLE_NOTICE_CONTENT_KEYS):
             continue
         if sender_id and sender == sender_id and not _is_relayed_user_message(msg):
             partial_kind = _classify_partial_reply(
