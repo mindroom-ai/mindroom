@@ -55,6 +55,7 @@ class PostResponseEffectsDeps:
     logger: structlog.stdlib.BoundLogger
     add_interactive_buttons: Callable[[str, interactive.InteractiveMetadata], Awaitable[None]] | None = None
     queue_memory_persistence: Callable[[], None] | None = None
+    queue_skill_review: Callable[[str], None] | None = None
     persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, str | None, DeliveredResponse], None] | None = None
@@ -136,6 +137,7 @@ class PostResponseEffectsSupport:
         room_id: str,
         membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
+        queue_skill_review: Callable[[str], None] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
@@ -168,6 +170,7 @@ class PostResponseEffectsSupport:
             logger=self.logger,
             add_interactive_buttons=add_interactive_buttons,
             queue_memory_persistence=queue_memory_persistence,
+            queue_skill_review=queue_skill_review,
             persist_response_event_id=persist_response_event_id,
             should_queue_thread_summary=self._should_queue_thread_summary,
             queue_thread_summary=self._queue_thread_summary,
@@ -233,6 +236,16 @@ async def apply_post_response_effects(
                 session_id=outcome.session_id,
                 room_id=outcome.response_target.room_id if outcome.response_target is not None else None,
                 thread_id=(outcome.response_target.resolved_thread_id if outcome.response_target is not None else None),
+            )
+
+    if outcome.run_succeeded and outcome.response_run_id is not None and deps.queue_skill_review is not None:
+        try:
+            deps.queue_skill_review(outcome.response_run_id)
+        except Exception:
+            deps.logger.exception(
+                "Failed to queue skill review after response",
+                session_id=outcome.session_id,
+                run_id=outcome.response_run_id,
             )
 
     if (

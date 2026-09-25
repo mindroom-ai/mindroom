@@ -2619,7 +2619,7 @@ class TestMultiAgentOrchestrator:
                 side_effect=_recover_approval_cards_on_startup,
             ) as recover_approval_cards_on_startup,
             patch.object(orchestrator, "_sync_runtime_support_services", side_effect=_sync_runtime_support_services),
-            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_background_workers", new=AsyncMock()),
             patch("mindroom.orchestrator.sync_forever_with_restart", side_effect=_sync_forever_with_restart),
         ):
             await _run_orchestrator_start_until_ready(
@@ -3826,7 +3826,7 @@ class TestMultiAgentOrchestrator:
                 new=AsyncMock(side_effect=_shutdown_approvals),
             ) as mock_shutdown_approvals,
             patch.object(orchestrator.config_reload, "cancel", new=AsyncMock()),
-            patch.object(orchestrator, "_stop_memory_auto_flush_worker", new=AsyncMock()),
+            patch.object(orchestrator._memory_auto_flush, "stop", new=AsyncMock()),
             patch.object(orchestrator._knowledge_source_watcher, "shutdown", new=AsyncMock()),
             patch.object(orchestrator, "_cancel_bot_start_tasks", new=AsyncMock()),
             patch.object(orchestrator, "_stop_mcp_manager", new=AsyncMock(side_effect=_stop_mcp_manager)),
@@ -4442,7 +4442,7 @@ class TestMultiAgentOrchestrator:
         try:
             with (
                 patch.object(orchestrator._knowledge_source_watcher, "sync", new=AsyncMock()),
-                patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+                patch.object(orchestrator, "_sync_background_workers", new=AsyncMock()),
             ):
                 await orchestrator._sync_runtime_support_services(config, start_watcher=False)
 
@@ -4964,7 +4964,7 @@ class TestMultiAgentOrchestrator:
                 ),
             ),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
-            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_background_workers", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
@@ -5058,7 +5058,7 @@ class TestMultiAgentOrchestrator:
                 ),
             ),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
-            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_background_workers", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
@@ -5217,21 +5217,22 @@ async def test_dashboard_departure_uses_live_membership_owner(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_skill_learning_lifecycle_start_reload_and_stop(tmp_path: Path) -> None:
-    """The orchestrator owns one cancellable learner and disables it on reload."""
+async def test_background_workers_follow_config_across_reloads(tmp_path: Path) -> None:
+    """The orchestrator keeps one skill-learning worker exactly while an agent opts in."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     orchestrator = orchestrator_module._MultiAgentOrchestrator(runtime_paths=paths)
     config = Config(agents={"general": AgentConfig(display_name="General")})
     orchestrator.config = config
-    await orchestrator._sync_skill_learning_worker()
-    assert orchestrator._skill_learning_task is None
+    await orchestrator._sync_background_workers()
+    assert not orchestrator._skill_learning.running
     config.agents["general"].skill_learning.enabled = True
-    await orchestrator._sync_skill_learning_worker()
-    first = orchestrator._skill_learning_task
-    assert first is not None
-    await orchestrator._sync_skill_learning_worker()
-    assert orchestrator._skill_learning_task is first
+    await orchestrator._sync_background_workers()
+    assert orchestrator._skill_learning.running
+    first = orchestrator._skill_learning._task
+    await orchestrator._sync_background_workers()
+    assert orchestrator._skill_learning._task is first
     config.agents["general"].skill_learning.enabled = False
-    await orchestrator._sync_skill_learning_worker()
+    await orchestrator._sync_background_workers()
+    assert first is not None
     assert first.done()
-    assert orchestrator._skill_learning_task is None
+    assert not orchestrator._skill_learning.running

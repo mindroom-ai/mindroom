@@ -65,6 +65,7 @@ __all__ = [
     "get_agent_runtime_state_dbs",
     "get_agent_session",
     "get_team_session",
+    "load_agent_session",
     "replace_runs",
     "run_session_storage_operation",
     "runs_without",
@@ -547,6 +548,22 @@ def get_agent_session(storage: BaseDb, session_id: str) -> AgentSession | None:
     """Load one agent session, or None when the row is missing or not an agent session."""
     session = storage.get_session(session_id, SessionType.AGENT)
     return session if isinstance(session, AgentSession) else None
+
+
+def load_agent_session(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    session_id: str,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> AgentSession | None:
+    """Open the agent's scoped session storage just long enough to load one session."""
+    storage = create_session_storage(agent_name, config, runtime_paths, execution_identity=execution_identity)
+    try:
+        return get_agent_session(storage, session_id)
+    finally:
+        storage.close()
 
 
 def get_team_session(storage: BaseDb, session_id: str) -> TeamSession | None:

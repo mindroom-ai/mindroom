@@ -97,6 +97,7 @@ from mindroom.runtime_state import (
     set_runtime_starting,
 )
 from mindroom.scheduling_executor import set_scheduling_hook_registry
+from mindroom.skill_learning.queue import skill_learning_enabled
 from mindroom.skill_learning.worker import SkillLearningWorker
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
@@ -123,6 +124,7 @@ from .config.main import Config, load_config
 from .credentials_sync import sync_env_to_credentials
 from .event_journal_open import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
+from .orchestration.background_workers import BackgroundWorkerSlot
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import build_config_update_plan, configured_entity_names
@@ -401,10 +403,14 @@ class _MultiAgentOrchestrator:
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _bot_start_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _permanently_failed_entities: set[str] = field(default_factory=set, init=False)
-    _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
-    _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
-    _skill_learning_task: asyncio.Task[None] | None = field(default=None, init=False)
-    _skill_learning_worker: SkillLearningWorker | None = field(default=None, init=False)
+    _memory_auto_flush: BackgroundWorkerSlot = field(
+        default_factory=lambda: BackgroundWorkerSlot("memory_auto_flush_worker"),
+        init=False,
+    )
+    _skill_learning: BackgroundWorkerSlot = field(
+        default_factory=lambda: BackgroundWorkerSlot("skill_learning_worker"),
+        init=False,
+    )
     _todo_poke_runtime: TodoPokeRuntimeCoordinator = field(init=False, repr=False)
     _thread_export_runner: WorkspaceThreadExportRunner = field(init=False, repr=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
@@ -564,62 +570,30 @@ class _MultiAgentOrchestrator:
             self.agent_bots.get(entity_name),
         )
 
-    async def _stop_skill_learning_worker(self) -> None:
-        """Cancel the learner; its unfinished durable work is replayed next startup."""
-        task = self._skill_learning_task
-        worker = self._skill_learning_worker
-        self._skill_learning_task = None
-        self._skill_learning_worker = None
-        if worker is not None:
-            worker.stop()
-        if task is not None:
-            task.cancel()
-            await asyncio.wait({task}, timeout=5)
-
-    async def _sync_skill_learning_worker(self) -> None:
-        """Keep one learner task while at least one agent opts in."""
-        if self.config is None or not any(agent.skill_learning.enabled for agent in self.config.agents.values()):
-            await self._stop_skill_learning_worker()
-            return
-        if self._skill_learning_task is None or self._skill_learning_task.done():
-            worker = SkillLearningWorker(self.runtime_paths, lambda: self.config)
-            self._skill_learning_worker = worker
-            self._skill_learning_task = asyncio.create_task(worker.run(), name="skill_learning_worker")
-
-    async def _stop_memory_auto_flush_worker(self) -> None:
-        """Stop the background memory auto-flush worker if running."""
-        worker = self._memory_auto_flush_worker
-        task = self._memory_auto_flush_task
-        self._memory_auto_flush_worker = None
-        self._memory_auto_flush_task = None
-
-        if worker is not None:
-            worker.stop()
-        if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
-
-    async def _sync_memory_auto_flush_worker(self) -> None:
-        """Start or stop background memory auto-flush worker based on current config."""
+    async def _sync_background_workers(self) -> None:
+        """Keep memory auto-flush and skill learning running exactly while their config enables them."""
         config = self.config
-        if config is None:
-            await self._stop_memory_auto_flush_worker()
-            return
-
-        if not auto_flush_enabled(config):
-            await self._stop_memory_auto_flush_worker()
-            return
-
-        task = self._memory_auto_flush_task
-        if task is not None and not task.done():
-            return
-
-        worker = MemoryAutoFlushWorker(
-            storage_path=self.storage_path,
-            runtime_paths=self.runtime_paths,
-            config_provider=lambda: self.config,
+        await self._memory_auto_flush.sync(
+            enabled=config is not None and auto_flush_enabled(config),
+            factory=lambda: MemoryAutoFlushWorker(
+                storage_path=self.storage_path,
+                runtime_paths=self.runtime_paths,
+                config_provider=lambda: self.config,
+            ),
         )
-        self._memory_auto_flush_worker = worker
-        self._memory_auto_flush_task = asyncio.create_task(worker.run(), name="memory_auto_flush_worker")
+        await self._skill_learning.sync(
+            enabled=config is not None and skill_learning_enabled(config),
+            factory=lambda: SkillLearningWorker(
+                runtime_paths=self.runtime_paths,
+                config_provider=lambda: self.config,
+                client_provider=self._running_agent_client,
+            ),
+        )
+
+    def _running_agent_client(self, agent_name: str) -> nio.AsyncClient | None:
+        """Return a running agent bot's Matrix client for background notices."""
+        bot = self.agent_bots.get(agent_name)
+        return bot.client if bot is not None and bot.running else None
 
     def _reset_runtime_shutdown_event(self) -> asyncio.Event:
         """Create the shutdown event for the current orchestrator run."""
@@ -1050,8 +1024,7 @@ class _MultiAgentOrchestrator:
         )
         ensure_default_agent_workspaces(config, self.storage_path)
         self._configure_approval_store_transport()
-        await self._sync_memory_auto_flush_worker()
-        await self._sync_skill_learning_worker()
+        await self._sync_background_workers()
         await self._todo_poke_runtime.sync()
         self._thread_export_runner.start()
         if self.running:
@@ -2521,8 +2494,8 @@ class _MultiAgentOrchestrator:
         await _run_shutdown_step("startup_maintenance", self._startup_maintenance.cancel())
         await _run_shutdown_step("todo_poke", self._todo_poke_runtime.stop())
         await _run_shutdown_step("thread_exports", self._thread_export_runner.stop())
-        await _run_shutdown_step("memory_auto_flush", self._stop_memory_auto_flush_worker())
-        await _run_shutdown_step("skill_learning", self._stop_skill_learning_worker())
+        await _run_shutdown_step("memory_auto_flush", self._memory_auto_flush.stop())
+        await _run_shutdown_step("skill_learning", self._skill_learning.stop())
         await _run_shutdown_step("knowledge_source_watchers", self._knowledge_source_watcher.shutdown())
         await _run_shutdown_step("knowledge_refresh", self._knowledge_refresh_scheduler.shutdown())
         await _run_shutdown_step("bot_start_tasks", self._cancel_bot_start_tasks())

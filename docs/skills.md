@@ -89,6 +89,8 @@ If multiple skills share the same name, the last one wins (agent workspace > use
 
 Agent workspace skills are only available to the owning agent or private instance at runtime.
 They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
+Workspace skills are read through no-follow descriptors because worker code can share the workspace.
+Links and special files inside `skills/` are skipped, and hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
 
 ## Authoring skills as an agent
 
@@ -120,7 +122,7 @@ Workspace skills under `<resolved workspace>/skills/` are still auto-loaded for 
 This lets an agent create or receive skills in its own workspace without editing `config.yaml`.
 
 Workspace auto-loading is a runtime capability, not a proactive behavior policy.
-If you want agents to create skills on their own when they notice reusable workflows, add that guidance to the agent's prompt or instructions.
+If you want agents to create skills on their own when they notice reusable workflows, add that guidance to the agent's prompt or instructions, or enable [automatic skill learning](#automatic-skill-learning).
 
 ## Using skills at runtime
 
@@ -157,7 +159,9 @@ For workspace skills created during an agent turn, assume they become available 
 
 ## Automatic skill learning
 
-Skill learning is opt-in for each agent. It reviews persisted standalone-agent turns in the background and can create a Markdown skill or improve an earlier learner-owned skill:
+Automatic skill learning follows the self-improvement loop of [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+After enough work in a conversation, a background review maintains a small library of class-level skills in the agent's workspace, and a curator pass archives the ones nobody uses.
+It is opt-in for each agent:
 
 ```yaml
 agents:
@@ -166,29 +170,63 @@ agents:
     skill_learning:
       enabled: true
       model: default
-      cooldown_seconds: 300
-      max_input_chars: 24000
-      max_output_chars: 12000
-      timeout_seconds: 60
-      max_attempts: 3
+      review_interval: 10
+      timeout_seconds: 120
+      notify: true
+      archive_after_days: 30
 ```
 
-Omit `model` to use the agent's configured model. Reviews incur additional model usage, recorded against the source conversation as `skill_learning`. No model call runs in the response delivery path. Setting `enabled: false` stops new reviews; published skills remain available until removed. Team runs are excluded. Sessions in minimal mode retain pending work without paid review until standard mode resumes.
+All fields, defaults, and bounds are listed in the [agent configuration reference](configuration/agents.md#automatic-skill-learning).
 
-Completed turns coalesce by agent, execution identity and session until the cooldown expires. Each review captures the latest persisted trace, including tool outcomes, then keeps that snapshot fixed during inference. New completed turns arriving during a review remain pending. A successful response alone is not treated as proof that every tool succeeded. The reviewer receives bounded skill context and trace text as evidence, with no tools or permission to execute commands.
+### When reviews run
 
-Publication uses the resolved private workspace for private agents. Shared agents use their canonical `agents/<agent>/workspace/skills/` directory, including agents using mem0; this does not change their memory backend or tool permissions. Standard-mode skill discovery sees published Markdown on subsequent runs. Learning never publishes globally or shares private lessons with other requester instances.
+Every successful standalone-agent response adds its model replies to a counter for its conversation, counting each tool-calling step and the final answer.
+A review runs once the counter reaches `review_interval`, and the counter then starts again.
+Scheduled responses are never counted, just as Hermes skips reviews for cron jobs, and team responses are excluded.
+When anyone other than the learner changes the workspace skills, for example an agent writing a skill with its file tools, the counter starts again because that lesson is already saved.
+Conversations are counted per agent and private instance, not per requester, so a thread shared by several people is reviewed once.
+Minimal-mode turns count like standard turns.
+The queue in `skill_learning_state.json` in the storage root holds run IDs, counters, and scope metadata, never message content.
+Reviews run one at a time across processes that share the storage root.
+A failed review is retried with a growing delay and abandoned after three failures.
 
-Only learner-owned files can be updated. Bundled, plugin, user-managed and manually authored workspace skill names are protected. The publisher rejects traversal, symlink paths, malformed frontmatter, oversized output and common credential-like strings. The reviewer is also instructed to omit credentials, personal facts and raw transcripts. These checks do not replace reviewing generated instructions before relying on them for sensitive work.
+### What a review can do
 
-The durable `skill_learning.db` queue stores scope metadata, source revision hashes and pending publication proposals, not raw conversation transcripts. Reviews run serially across processes sharing the storage root, at most four per cycle, with bounded retry attempts and exponential delay. Shutdown cancels work; pending proposals survive restart. Current configuration, private ownership and file revisions are checked again before publication. An interrupted publication is replayed by content hash; manually edited files are preserved.
+The reviewer is a separate model run that can only call `skills_list`, `skill_view`, and `skill_manage`.
+It receives the persisted conversation as evidence it must not obey: older turns as one-line digests and the newest 24 messages verbatim, including tool calls and results, with credential-like values redacted.
+One review may read at most 75% of the review model's `context_window` across all of its requests, capped at 600,000 tokens and defaulting to 120,000 tokens when the model sets no window.
+It makes at most 16 tool calls and stops after `timeout_seconds`.
+The review prompt adapts Hermes' rules: build class-level skills, capture lessons rather than logs, treat user corrections as first-class signals, prefer patches over rewrites, and never capture environment-specific failures, negative claims about tools, transient errors, one-off narratives, or unresolved attempts.
+Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](configuration/index.md#built-in-prompt-overrides).
 
-Each workspace retains source revision and up to five previous versions per learned skill in `.skill-learning.json`. To roll back, disable learning and restore the chosen `previous` Markdown value to `skills/<name>/SKILL.md`. The manual edit prevents subsequent automatic replacement. To remove a learned skill, disable learning and delete its skill directory. Diagnostic logs report the agent, review outcome and source revision hash.
+`skill_manage` can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/`, `templates/`, `scripts/`, or `assets/`.
+Before changing an existing file, the reviewer must load its current version with `skill_view` in the same review, and a write against any other version is refused.
+A new skill needs a lowercase hyphenated name matching its directory, a description of at most 60 characters, and the ownership marker below.
+Files containing credential-like text are refused.
+Workspace skill scripts still cannot be executed through `get_skill_script`.
 
+### Ownership
 
-The reviewer receives only effective eligible skills, honoring configured global allowlists and workspace precedence.
-Workspace descriptions and Markdown receive the same credential-pattern redaction as persisted traces; this does not classify or remove arbitrary personal information.
-Oversized traces retain complete role-bearing message objects and mark shortened text with `[truncated]`.
-Exhausted proposals are discarded without acknowledging newer queued generations, which receive a fresh review budget.
-Failure logs include the phase, exception type, attempt count, exhaustion state and bounded code locations, without exception messages, source lines, local variables or transcript content.
-All configuration fields, defaults and bounds are listed in the [agent configuration reference](configuration/agents.md#automatic-skill-learning).
+A workspace skill belongs to the learner only while its frontmatter carries this marker:
+
+```yaml
+metadata:
+  mindroom:
+    learned: true
+```
+
+Remove the marker to take a learned skill over, and the learner and curator leave it alone from then on.
+Add the marker to hand a skill you wrote to the learner.
+Bundled, plugin, and user skills and workspace skills without the marker are never edited, and new learned skills cannot reuse their names.
+Private agents learn only from and into the requester's private workspace, and shared agents use `<storage>/agents/<agent>/workspace/skills/`.
+
+### History, archive, and notices
+
+Before the learner replaces or removes a file, it saves the previous version under `skills/.history/<skill>/`, keeping the ten newest versions.
+Copy a saved version back to restore it.
+Before each review, learned skills with no use, creation, or learner edit for `archive_after_days` days move to `skills/.archive/`, and nothing is deleted.
+Archived directories are named `<skill>--<timestamp>`; move one back to `skills/<skill>/` to restore it.
+A use is recorded in `skills/.usage.json` whenever the agent loads a workspace skill through the skill tools or reads it as a minimal-mode context document.
+With `notify: true`, a review that changed skills posts an `m.notice` in the conversation, such as ``💾 Skill review: created `deploy-checks` ``.
+Review usage counts against the source conversation as `kind: skill_learning` in the [dashboard usage reports](dashboard.md).
+Learned skills are generated from conversation content, so review them before relying on them for sensitive work.

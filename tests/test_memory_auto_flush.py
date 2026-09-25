@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import mindroom.memory._semantic_file_search as semantic_file_search
+from mindroom.agent_storage import load_agent_session
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -21,7 +22,7 @@ from mindroom.memory import (
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
 )
-from mindroom.memory.auto_flush import _build_existing_memory_context, _load_agent_session
+from mindroom.memory.auto_flush import _build_existing_memory_context
 from mindroom.memory.functions import append_agent_daily_memory
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -301,8 +302,8 @@ async def test_worker_respects_batch_limits(
         messages=[_FakeMessage(role="user", content="remember this important decision")],
     )
     monkeypatch.setattr(
-        "mindroom.memory.auto_flush._load_agent_session",
-        lambda _config, _storage, _agent, _sid, **_kwargs: fake_session,
+        "mindroom.memory.auto_flush.load_agent_session",
+        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._extract_memory_summary",
@@ -360,7 +361,7 @@ async def test_worker_session_load_does_not_block_the_event_loop(
             observed_progress.set()
         release.set()
 
-    monkeypatch.setattr("mindroom.memory.auto_flush._load_agent_session", _blocking_load)
+    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", _blocking_load)
     worker = MemoryAutoFlushWorker(
         storage_path=tmp_path,
         runtime_paths=runtime_paths_for(config),
@@ -415,8 +416,8 @@ async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
         messages=[_FakeMessage(role="user", content="remember this shared agent detail")],
     )
     monkeypatch.setattr(
-        "mindroom.memory.auto_flush._load_agent_session",
-        lambda _config, _storage, _agent, _sid, **_kwargs: fake_session,
+        "mindroom.memory.auto_flush.load_agent_session",
+        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._extract_memory_summary",
@@ -454,8 +455,8 @@ async def test_worker_flush_unscoped_uses_canonical_agent_workspace_memory_path(
         messages=[_FakeMessage(role="user", content="remember this important decision")],
     )
     monkeypatch.setattr(
-        "mindroom.memory.auto_flush._load_agent_session",
-        lambda _config, _storage, _agent, _sid, **_kwargs: fake_session,
+        "mindroom.memory.auto_flush.load_agent_session",
+        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._extract_memory_summary",
@@ -496,8 +497,8 @@ async def test_worker_daily_file_memory_schedules_semantic_refresh_when_semantic
         messages=[_FakeMessage(role="user", content="remember this important decision")],
     )
     monkeypatch.setattr(
-        "mindroom.memory.auto_flush._load_agent_session",
-        lambda _config, _storage, _agent, _sid, **_kwargs: fake_session,
+        "mindroom.memory.auto_flush.load_agent_session",
+        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._extract_memory_summary",
@@ -587,13 +588,19 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
         session_id="s1",
     )
 
-    def _load_session(_config: object, _storage: Path, _agent: str, _sid: str, **_kwargs: object) -> _FakeSession:
+    def _load_session(
+        _agent: str,
+        _config: object,
+        _runtime_paths: object,
+        _sid: str,
+        **_kwargs: object,
+    ) -> _FakeSession:
         return _FakeSession(
             updated_at=session_updated_at,
             messages=[_FakeMessage(role="user", content="important detail")],
         )
 
-    monkeypatch.setattr("mindroom.memory.auto_flush._load_agent_session", _load_session)
+    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", _load_session)
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._extract_memory_summary",
         _fake_extract_memory_summary,
@@ -658,7 +665,13 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
         session_id="s1",
     )
 
-    def _load_session(_config: object, _storage: Path, _agent: str, _sid: str, **_kwargs: object) -> _FakeSession:
+    def _load_session(
+        _agent: str,
+        _config: object,
+        _runtime_paths: object,
+        _sid: str,
+        **_kwargs: object,
+    ) -> _FakeSession:
         return _FakeSession(
             updated_at=session_updated_at,
             messages=[_FakeMessage(role="user", content="no durable memory here")],
@@ -669,7 +682,7 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
         # Simulate unrelated session timestamp movement during extractor execution.
         session_updated_at = 200
 
-    monkeypatch.setattr("mindroom.memory.auto_flush._load_agent_session", _load_session)
+    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", _load_session)
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._extract_memory_summary",
         _fake_no_reply,
@@ -873,8 +886,8 @@ async def test_worker_batch_limits_are_scoped_per_private_requester(
     )
 
     monkeypatch.setattr(
-        "mindroom.memory.auto_flush._load_agent_session",
-        lambda _config, _storage, _agent, _sid, **_kwargs: fake_session,
+        "mindroom.memory.auto_flush.load_agent_session",
+        lambda _agent, _config, _runtime_paths, _sid, **_kwargs: fake_session,
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._extract_memory_summary",
@@ -948,13 +961,13 @@ def test_load_agent_session_passes_execution_identity_for_private_agents(
         captured["storage"] = storage
         return storage
 
-    monkeypatch.setattr("mindroom.memory.auto_flush.create_session_storage", _fake_create_session_storage)
+    monkeypatch.setattr("mindroom.agent_storage.create_session_storage", _fake_create_session_storage)
 
     assert (
-        _load_agent_session(
+        load_agent_session(
+            "mind",
             config,
             runtime_paths_for(config),
-            "mind",
             "session-alice",
             execution_identity=alice_identity,
         )
@@ -978,16 +991,16 @@ def test_load_agent_session_uses_canonical_session_helper(
     def _fake_create_session_storage(*_args: object, **_kwargs: object) -> object:
         return storage
 
-    monkeypatch.setattr("mindroom.memory.auto_flush.create_session_storage", _fake_create_session_storage)
+    monkeypatch.setattr("mindroom.agent_storage.create_session_storage", _fake_create_session_storage)
     monkeypatch.setattr(
-        "mindroom.memory.auto_flush.get_agent_session",
+        "mindroom.agent_storage.get_agent_session",
         lambda actual_storage, session_id: (
             sentinel if actual_storage is storage and session_id == "session-1" else None
         ),
         raising=False,
     )
 
-    assert _load_agent_session(config, runtime_paths_for(config), "general", "session-1") is sentinel
+    assert load_agent_session("general", config, runtime_paths_for(config), "session-1") is sentinel
     storage.close.assert_called_once_with()
 
 
@@ -1118,9 +1131,9 @@ async def test_worker_flush_private_agent_uses_persisted_private_scope(
     )
 
     def _fake_load_session(
-        _config: Config,
-        _storage: Path,
         _agent: str,
+        _config: Config,
+        _runtime_paths: RuntimePaths,
         _sid: str,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
@@ -1128,7 +1141,7 @@ async def test_worker_flush_private_agent_uses_persisted_private_scope(
         seen_execution_identities.append(execution_identity)
         return fake_session
 
-    monkeypatch.setattr("mindroom.memory.auto_flush._load_agent_session", _fake_load_session)
+    monkeypatch.setattr("mindroom.memory.auto_flush.load_agent_session", _fake_load_session)
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._extract_memory_summary",
         _fake_extract_memory_summary,

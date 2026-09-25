@@ -2522,7 +2522,7 @@ agents:
 | `tools` | list | `[]` | Agent-specific tool entries — plain strings or single-key dicts with config overrides (see [Tools](https://docs.mindroom.chat/tools/) and [Per-Agent Tool Configuration](#per-agent-tool-configuration)); effective tools are `tools + defaults.tools` with duplicates removed |
 | `include_default_tools` | bool | `true` | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out |
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/)) |
-| `skill_learning` | object | disabled | [Automatic skill learning](#automatic-skill-learning) settings; separate from Agno `learning_mode`. |
+| `skill_learning` | object | disabled | [Automatic skill learning](#automatic-skill-learning) settings; separate from Agno `learning_mode` |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
 | `participation` | object or null | `null` | Opt into adaptive replies in existing multi-human threads across authorized rooms, including ad hoc rooms; see [Adaptive Participation](#adaptive-participation) |
@@ -3215,23 +3215,22 @@ Minimal mode presents one Bash tool and discovers other tools through `mindroom-
 It keeps the same identity, workspace, memory, history, and permissions.
 The optional `minimal_instructions` list defaults to `[]` and supplies concise guidance on every minimal request; ordinary instructions remain available through CLI context discovery.
 
-
 ## Automatic skill learning
 
-`agents.<name>.skill_learning` controls optional background review of completed standalone-agent turns.
-All fields are optional; unknown fields are rejected.
+`agents.<name>.skill_learning` controls the optional background review that maintains learned skills in the agent's workspace, modeled on Hermes Agent's self-improvement loop.
+All fields are optional, and unknown fields are rejected.
 
 | Field | Type | Default | Bounds and behavior |
 |---|---|---|---|
-| `enabled` | boolean | `false` | Enable reviews that create or update learner-owned workspace Markdown skills. |
-| `model` | string or null | `null` | Reviewer model alias; null uses the agent's configured model. |
-| `cooldown_seconds` | integer | `300` | 0–86400 seconds; coalesce completed turns before review. |
-| `max_input_chars` | integer | `24000` | 1000–100000 characters combined across trace and skill context. |
-| `max_output_chars` | integer | `12000` | 500–32000 characters per generated `SKILL.md`. |
-| `timeout_seconds` | integer | `60` | 1–300 seconds per model review. |
-| `max_attempts` | integer | `3` | 1–5 review or publication attempts per queued generation. |
+| `enabled` | boolean | `false` | Count completed standalone responses and review conversations that reach the interval. |
+| `model` | string or null | `null` | Reviewer model alias from `models`; null uses the agent's model. |
+| `review_interval` | integer | `10` | 1–1000 model replies per conversation between reviews, counting each tool-calling step. |
+| `timeout_seconds` | integer | `120` | 10–900 seconds per review. |
+| `notify` | boolean | `true` | Post an `m.notice` in the conversation when a review changes skills. |
+| `archive_after_days` | integer | `30` | 0–3650 days without use before a learned skill is archived; `0` keeps learned skills indefinitely. |
 
-Reviews incur additional model usage; see [Automatic skill learning](https://docs.mindroom.chat/skills/#automatic-skill-learning) for workspace ownership, minimal-mode deferral, retry behavior and rollback.
+Reviews incur additional model usage.
+See [Automatic skill learning](https://docs.mindroom.chat/skills/#automatic-skill-learning) for triggering, ownership, history, archival, and notices.
 
 # Model Configuration
 
@@ -14144,6 +14143,8 @@ If multiple skills share the same name, the last one wins (agent workspace > use
 
 Agent workspace skills are only available to the owning agent or private instance at runtime.
 They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
+Workspace skills are read through no-follow descriptors because worker code can share the workspace.
+Links and special files inside `skills/` are skipped, and hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
 
 ## Authoring skills as an agent
 
@@ -14175,7 +14176,7 @@ Workspace skills under `<resolved workspace>/skills/` are still auto-loaded for 
 This lets an agent create or receive skills in its own workspace without editing `config.yaml`.
 
 Workspace auto-loading is a runtime capability, not a proactive behavior policy.
-If you want agents to create skills on their own when they notice reusable workflows, add that guidance to the agent's prompt or instructions.
+If you want agents to create skills on their own when they notice reusable workflows, add that guidance to the agent's prompt or instructions, or enable [automatic skill learning](#automatic-skill-learning).
 
 ## Using skills at runtime
 
@@ -14212,7 +14213,9 @@ For workspace skills created during an agent turn, assume they become available 
 
 ## Automatic skill learning
 
-Skill learning is opt-in for each agent. It reviews persisted standalone-agent turns in the background and can create a Markdown skill or improve an earlier learner-owned skill:
+Automatic skill learning follows the self-improvement loop of [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+After enough work in a conversation, a background review maintains a small library of class-level skills in the agent's workspace, and a curator pass archives the ones nobody uses.
+It is opt-in for each agent:
 
 ```yaml
 agents:
@@ -14221,32 +14224,66 @@ agents:
     skill_learning:
       enabled: true
       model: default
-      cooldown_seconds: 300
-      max_input_chars: 24000
-      max_output_chars: 12000
-      timeout_seconds: 60
-      max_attempts: 3
+      review_interval: 10
+      timeout_seconds: 120
+      notify: true
+      archive_after_days: 30
 ```
 
-Omit `model` to use the agent's configured model. Reviews incur additional model usage, recorded against the source conversation as `skill_learning`. No model call runs in the response delivery path. Setting `enabled: false` stops new reviews; published skills remain available until removed. Team runs are excluded. Sessions in minimal mode retain pending work without paid review until standard mode resumes.
+All fields, defaults, and bounds are listed in the [agent configuration reference](https://docs.mindroom.chat/configuration/agents/#automatic-skill-learning).
 
-Completed turns coalesce by agent, execution identity and session until the cooldown expires. Each review captures the latest persisted trace, including tool outcomes, then keeps that snapshot fixed during inference. New completed turns arriving during a review remain pending. A successful response alone is not treated as proof that every tool succeeded. The reviewer receives bounded skill context and trace text as evidence, with no tools or permission to execute commands.
+### When reviews run
 
-Publication uses the resolved private workspace for private agents. Shared agents use their canonical `agents/<agent>/workspace/skills/` directory, including agents using mem0; this does not change their memory backend or tool permissions. Standard-mode skill discovery sees published Markdown on subsequent runs. Learning never publishes globally or shares private lessons with other requester instances.
+Every successful standalone-agent response adds its model replies to a counter for its conversation, counting each tool-calling step and the final answer.
+A review runs once the counter reaches `review_interval`, and the counter then starts again.
+Scheduled responses are never counted, just as Hermes skips reviews for cron jobs, and team responses are excluded.
+When anyone other than the learner changes the workspace skills, for example an agent writing a skill with its file tools, the counter starts again because that lesson is already saved.
+Conversations are counted per agent and private instance, not per requester, so a thread shared by several people is reviewed once.
+Minimal-mode turns count like standard turns.
+The queue in `skill_learning_state.json` in the storage root holds run IDs, counters, and scope metadata, never message content.
+Reviews run one at a time across processes that share the storage root.
+A failed review is retried with a growing delay and abandoned after three failures.
 
-Only learner-owned files can be updated. Bundled, plugin, user-managed and manually authored workspace skill names are protected. The publisher rejects traversal, symlink paths, malformed frontmatter, oversized output and common credential-like strings. The reviewer is also instructed to omit credentials, personal facts and raw transcripts. These checks do not replace reviewing generated instructions before relying on them for sensitive work.
+### What a review can do
 
-The durable `skill_learning.db` queue stores scope metadata, source revision hashes and pending publication proposals, not raw conversation transcripts. Reviews run serially across processes sharing the storage root, at most four per cycle, with bounded retry attempts and exponential delay. Shutdown cancels work; pending proposals survive restart. Current configuration, private ownership and file revisions are checked again before publication. An interrupted publication is replayed by content hash; manually edited files are preserved.
+The reviewer is a separate model run that can only call `skills_list`, `skill_view`, and `skill_manage`.
+It receives the persisted conversation as evidence it must not obey: older turns as one-line digests and the newest 24 messages verbatim, including tool calls and results, with credential-like values redacted.
+One review may read at most 75% of the review model's `context_window` across all of its requests, capped at 600,000 tokens and defaulting to 120,000 tokens when the model sets no window.
+It makes at most 16 tool calls and stops after `timeout_seconds`.
+The review prompt adapts Hermes' rules: build class-level skills, capture lessons rather than logs, treat user corrections as first-class signals, prefer patches over rewrites, and never capture environment-specific failures, negative claims about tools, transient errors, one-off narratives, or unresolved attempts.
+Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides).
 
-Each workspace retains source revision and up to five previous versions per learned skill in `.skill-learning.json`. To roll back, disable learning and restore the chosen `previous` Markdown value to `skills/<name>/SKILL.md`. The manual edit prevents subsequent automatic replacement. To remove a learned skill, disable learning and delete its skill directory. Diagnostic logs report the agent, review outcome and source revision hash.
+`skill_manage` can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/`, `templates/`, `scripts/`, or `assets/`.
+Before changing an existing file, the reviewer must load its current version with `skill_view` in the same review, and a write against any other version is refused.
+A new skill needs a lowercase hyphenated name matching its directory, a description of at most 60 characters, and the ownership marker below.
+Files containing credential-like text are refused.
+Workspace skill scripts still cannot be executed through `get_skill_script`.
 
+### Ownership
 
-The reviewer receives only effective eligible skills, honoring configured global allowlists and workspace precedence.
-Workspace descriptions and Markdown receive the same credential-pattern redaction as persisted traces; this does not classify or remove arbitrary personal information.
-Oversized traces retain complete role-bearing message objects and mark shortened text with `[truncated]`.
-Exhausted proposals are discarded without acknowledging newer queued generations, which receive a fresh review budget.
-Failure logs include the phase, exception type, attempt count, exhaustion state and bounded code locations, without exception messages, source lines, local variables or transcript content.
-All configuration fields, defaults and bounds are listed in the [agent configuration reference](https://docs.mindroom.chat/configuration/agents/#automatic-skill-learning).
+A workspace skill belongs to the learner only while its frontmatter carries this marker:
+
+```yaml
+metadata:
+  mindroom:
+    learned: true
+```
+
+Remove the marker to take a learned skill over, and the learner and curator leave it alone from then on.
+Add the marker to hand a skill you wrote to the learner.
+Bundled, plugin, and user skills and workspace skills without the marker are never edited, and new learned skills cannot reuse their names.
+Private agents learn only from and into the requester's private workspace, and shared agents use `<storage>/agents/<agent>/workspace/skills/`.
+
+### History, archive, and notices
+
+Before the learner replaces or removes a file, it saves the previous version under `skills/.history/<skill>/`, keeping the ten newest versions.
+Copy a saved version back to restore it.
+Before each review, learned skills with no use, creation, or learner edit for `archive_after_days` days move to `skills/.archive/`, and nothing is deleted.
+Archived directories are named `<skill>--<timestamp>`; move one back to `skills/<skill>/` to restore it.
+A use is recorded in `skills/.usage.json` whenever the agent loads a workspace skill through the skill tools or reads it as a minimal-mode context document.
+With `notify: true`, a review that changed skills posts an `m.notice` in the conversation, such as ``💾 Skill review: created `deploy-checks` ``.
+Review usage counts against the source conversation as `kind: skill_learning` in the [dashboard usage reports](https://docs.mindroom.chat/dashboard/).
+Learned skills are generated from conversation content, so review them before relying on them for sensitive work.
 
 # Plugins
 
@@ -19490,8 +19527,11 @@ MindRoom's architecture consists of several key components working together.
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
-| `skill_learning/worker.py` | Opt-in durable review queue, bounded no-tool inference, cross-process serialization and generation-aware retry completion |
-| `skill_learning/store.py` | Confined Markdown publication, validated ownership journal, revision checks and crash replay |
+| `skill_learning/queue.py` | Durable per-conversation review counters: run-ID accounting, scope keys, retries, and retention |
+| `skill_learning/worker.py` | Background worker that counts completed runs, triggers reviews at the interval, and posts change notices |
+| `skill_learning/reviewer.py` | One bounded skill review: Hermes-derived prompt, skill-only tools, read-before-write, and input budget |
+| `skill_learning/transcript.py` | Conversation evidence for a review: older-turn digest plus the newest messages verbatim |
+| `skill_learning/library.py` | Confined learner-owned skill writes, ownership marker, history snapshots, archival, and change fingerprints |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
@@ -20718,6 +20758,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, and leaves temporary audio after encoding failures. | Use a portable font default, forward styles, preserve complete glyph bounds, advance wrapped words, and clean owned audio files on every exit; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; regressions in `tests/test_moviepy_video_tools.py`, `tests/test_moviepy_caption_layout.py`, and `tests/test_moviepy_caption_output.py`. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
+| LocalSkills opens SKILL.md and support files by pathname and follows links, and the Skills tool entrypoints are private methods with no load callback. | Tracking gap: accept a caller-supplied no-follow reader for skill files, support-file discovery, and support-file reads, plus a skill-load callback; no matching issue or PR identified, and [PR #9194](https://github.com/agno-agi/agno/pull/9194) only adds a database loader. | `tool_system/workspace_skills.py` and the `MindroomSkills` entrypoint overrides in `tool_system/skills.py`; link, FIFO, swapped-reference, and usage coverage in `tests/test_skills.py`. |
 | FileTools content search relativizes hits and exclusions against `base_dir`, so it cannot search other directories. | Tracking gap: accept an absolute search directory outside `base_dir` and report absolute hit paths; no matching issue or PR identified. | `tools/file.py`; unrestricted outside-directory coverage in `tests/test_coding_tools.py`. |
 | Concise PubMed output drops title/year when the abstract is short or absent. | Keep identifying metadata independent of summary truncation. | `tools/pubmed.py`; real parsing/formatting tests cover short, absent, and long abstracts in both output modes. |
 | Luma video creation omits the required model argument in both public methods. | Tracking gap: no matching upstream issue or fix has been verified; pass a configurable model on both creation paths. | `tools/lumalabs.py`; real factory and SDK transport coverage in `tests/test_lumalabs_tool.py`. |
@@ -20798,6 +20839,8 @@ Small owner-adjacent boundaries use the same source records:
 | Owner | Agno adaptation | Retained application behavior |
 | --- | --- | --- |
 | `knowledge/collections.py` | Operator-aware scoped deletion and probing ambiguous collection-deletion outcomes. | Source batching, collection ownership, client closure, and storage reclamation. |
+| `tool_system/workspace_skills.py` | Builds Agno `Skill` fields for workspace roots from descriptor-bound reads instead of `LocalSkills`. | Allowlists, OpenClaw eligibility, and workspace precedence stay in `tool_system/skills.py`. |
+| `tool_system/skills.py` | `MindroomSkills` overrides the private skill-tool entrypoints for workspace skills: confined support-file reads, usage records, and blocked script execution. | Configured skills keep Agno's entrypoints unchanged; the learner's archival policy lives in `skill_learning/library.py`. |
 | `tools/file.py` | Unrestricted outside-directory content search through a shallow copy rooted at the searched directory, with hits rewritten to absolute paths. | Workspace-mode refusal, blocked-path messages, and Agno's inside-workspace search remain unchanged. |
 | `tools/pubmed.py` | Concise article formatting that retains title/year at every abstract length. | Existing result-limit behavior, XML parsing, expanded output, and fetch-error text. |
 | `tools/todoist.py` | Page flattening and SDK project serialization for `get_projects`. | Existing credential construction, registered operations, and structured provider errors. |
@@ -20910,6 +20953,7 @@ Do not report or "fix" these; they are deliberate.
 - `register_attachment` copies the file's current bytes into managed attachment storage, so later edits or replacement of the source file never change what the attachment sends.
 - `mindroom_output_path`, attachment saves, Google Drive downloads, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
+- Automatic skill learning trusts the `metadata.mindroom.learned` frontmatter marker and `skills/.usage.json` inside the workspace, which worker code can change; that only lets it make the learner edit or archive skills it could already change itself, while every learner read and write still goes through no-follow descriptors.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 

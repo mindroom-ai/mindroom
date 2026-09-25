@@ -191,6 +191,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `knowledge/refresh_runner.py` | Dispatches one knowledge refresh: subprocess spawn, cancellation cleanup, publish and reconcile decisions |
 | `knowledge/refresh_locks.py` | Process-wide refresh serialization (in-loop and cross-process source-root locks) and active-refresh bookkeeping |
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
+| `tool_system/workspace_skills.py` | No-follow workspace skill discovery, reads, and usage telemetry |
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `scheduling.py` | Cron and natural-language task scheduling |
@@ -209,8 +210,11 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
-| `skill_learning/worker.py` | Opt-in durable review queue, bounded no-tool inference, cross-process serialization and generation-aware retry completion |
-| `skill_learning/store.py` | Confined Markdown publication, validated ownership journal, revision checks and crash replay |
+| `skill_learning/queue.py` | Durable per-conversation review counters: run-ID accounting, scope keys, retries, and retention |
+| `skill_learning/worker.py` | Background worker that counts completed runs, triggers reviews at the interval, and posts change notices |
+| `skill_learning/reviewer.py` | One bounded skill review: Hermes-derived prompt, skill-only tools, read-before-write, and input budget |
+| `skill_learning/transcript.py` | Conversation evidence for a review: older-turn digest plus the newest messages verbatim |
+| `skill_learning/library.py` | Confined learner-owned skill writes, ownership marker, history snapshots, archival, and change fingerprints |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `credentials.py` | Unified credential management (CredentialsManager) |

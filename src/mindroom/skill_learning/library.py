@@ -1,0 +1,330 @@
+"""Learner-owned workspace skill mutations with read-before-write, history, and archival.
+
+Every operation goes through no-follow descriptors below the resolved workspace, because worker code shares it.
+A skill is learner-owned only while its frontmatter carries ``metadata.mindroom.learned: true``; removing that
+marker hands the skill to its human owner, and adding it hands a skill to the learner.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+from yaml import YAMLError
+
+from mindroom.atomic_file import atomic_write_bytes_at
+from mindroom.path_confinement import open_directory_within_root
+from mindroom.redaction import contains_sensitive_text
+from mindroom.tool_system.workspace_skills import (
+    MAX_SKILL_FILE_BYTES,
+    SKILL_FILENAME,
+    SkillUsage,
+    list_entries,
+    load_skill_usage,
+    open_skills_root,
+    parse_skill_markdown,
+    parse_skill_metadata,
+    read_text_at,
+    update_skill_usage,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+_MAX_NAME_CHARS = 64
+_MAX_DESCRIPTION_CHARS = 1024
+# Hermes SKILL_PROMPT_DESC_LIMIT: new skills must fit the one-line skill index every prompt carries.
+_NEW_DESCRIPTION_CHARS = 60
+_MAX_SKILL_MARKDOWN_CHARS = 100_000
+_SUPPORT_DIRECTORIES = frozenset({"references", "templates", "scripts", "assets"})
+_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+_HISTORY_DIRNAME = ".history"
+_ARCHIVE_DIRNAME = ".archive"
+_HISTORY_KEEP = 10
+
+
+class SkillEditError(ValueError):
+    """A refused learner edit, worded for the reviewer model."""
+
+
+@dataclass(frozen=True)
+class SkillFile:
+    """One workspace skill file as the reviewer saw it."""
+
+    content: str
+    digest: str
+    learned: bool
+
+
+def content_digest(content: str) -> str:
+    """Return the revision identity used by read-before-write checks."""
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+def is_learned(frontmatter: dict[str, object], *, path: str) -> bool:
+    """Return whether frontmatter hands this skill to the learner."""
+    metadata = parse_skill_metadata(frontmatter.get("metadata"), path=path) or {}
+    mindroom = metadata.get("mindroom")
+    return isinstance(mindroom, dict) and mindroom.get("learned") is True
+
+
+def _validate_skill_name(name: str) -> None:
+    """Accept only lowercase hyphenated directory names."""
+    if len(name) > _MAX_NAME_CHARS or not _NAME.fullmatch(name):
+        msg = f"Invalid skill name {name!r}: use lowercase letters, digits and single hyphens, at most 64 characters."
+        raise SkillEditError(msg)
+
+
+def _validate_markdown(name: str, content: str, *, new: bool) -> None:
+    if len(content) > _MAX_SKILL_MARKDOWN_CHARS:
+        msg = f"SKILL.md is {len(content)} characters; the limit is {_MAX_SKILL_MARKDOWN_CHARS}. Move depth into references/."
+        raise SkillEditError(msg)
+    if not content.startswith("---"):
+        msg = "SKILL.md must start with YAML frontmatter (---)."
+        raise SkillEditError(msg)
+    try:
+        frontmatter, body = parse_skill_markdown(content)
+    except (TypeError, YAMLError) as exc:
+        msg = f"SKILL.md frontmatter is not a valid YAML mapping: {exc}"
+        raise SkillEditError(msg) from exc
+    description = frontmatter.get("description")
+    if frontmatter.get("name") != name:
+        msg = f"Frontmatter name must be exactly {name!r}."
+        raise SkillEditError(msg)
+    if not isinstance(description, str) or not description.strip():
+        msg = "Frontmatter must include a non-empty description."
+        raise SkillEditError(msg)
+    if len(description) > _MAX_DESCRIPTION_CHARS or (new and len(description.strip()) > _NEW_DESCRIPTION_CHARS):
+        limit = _NEW_DESCRIPTION_CHARS if new else _MAX_DESCRIPTION_CHARS
+        msg = f"Description exceeds {limit} characters; keep one trigger-first sentence and move detail into the body."
+        raise SkillEditError(msg)
+    if not body:
+        msg = "SKILL.md must contain instructions after the frontmatter."
+        raise SkillEditError(msg)
+    if not is_learned(frontmatter, path=name):
+        msg = "Learned skills must keep `metadata: {mindroom: {learned: true}}` in their frontmatter."
+        raise SkillEditError(msg)
+
+
+def _validate_content(relative_path: str, content: str) -> None:
+    if len(content.encode()) > MAX_SKILL_FILE_BYTES:
+        msg = f"{relative_path} exceeds {MAX_SKILL_FILE_BYTES} bytes."
+        raise SkillEditError(msg)
+    if contains_sensitive_text(content):
+        msg = f"{relative_path} contains credential-like text; remove secrets and describe how to obtain them instead."
+        raise SkillEditError(msg)
+
+
+def _split_relative_path(relative_path: str) -> tuple[str | None, str]:
+    """Return ``(support directory, filename)``; SKILL.md has no support directory."""
+    if relative_path == SKILL_FILENAME:
+        return None, SKILL_FILENAME
+    directory, _, filename = relative_path.partition("/")
+    if directory not in _SUPPORT_DIRECTORIES or not filename or "/" in filename or filename.startswith("."):
+        msg = f"file_path must be SKILL.md or one file directly under {', '.join(sorted(_SUPPORT_DIRECTORIES))}/."
+        raise SkillEditError(msg)
+    return directory, filename
+
+
+@contextmanager
+def _open_skill(root_fd: int, name: str) -> Iterator[int]:
+    _validate_skill_name(name)
+    with open_directory_within_root(root_fd, name) as skill_fd:
+        yield skill_fd
+
+
+def read_skill_file(skills_root: Path, name: str, relative_path: str = SKILL_FILENAME) -> SkillFile | None:
+    """Return one workspace skill file and whether its skill is learner-owned, or None when absent."""
+    _split_relative_path(relative_path)
+    try:
+        with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+            return _read_skill_file(skill_fd, name, relative_path)
+    except FileNotFoundError:
+        return None
+
+
+def _read_skill_file(skill_fd: int, name: str, relative_path: str) -> SkillFile | None:
+    markdown = read_text_at(skill_fd, SKILL_FILENAME)
+    content = markdown if relative_path == SKILL_FILENAME else read_text_at(skill_fd, relative_path)
+    if content is None:
+        return None
+    try:
+        frontmatter = parse_skill_markdown(markdown)[0] if markdown is not None else {}
+    except (TypeError, YAMLError):
+        frontmatter = {}
+    return SkillFile(content=content, digest=content_digest(content), learned=is_learned(frontmatter, path=name))
+
+
+def support_file_paths(skills_root: Path, name: str) -> list[str]:
+    """Return every visible support file of one workspace skill as ``directory/filename``."""
+    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+        present = set(list_entries(skill_fd, directories=True)) & _SUPPORT_DIRECTORIES
+        files: list[str] = []
+        for directory in sorted(present):
+            with open_directory_within_root(skill_fd, directory) as support_fd:
+                files.extend(f"{directory}/{filename}" for filename in list_entries(support_fd, directories=False))
+        return files
+
+
+def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: frozenset[str]) -> None:
+    """Create a new learner-owned skill whose name no configured or workspace skill already uses."""
+    _validate_skill_name(name)
+    _validate_markdown(name, content, new=True)
+    _validate_content(SKILL_FILENAME, content)
+    if name in reserved_names:
+        msg = f"A skill named {name!r} already exists; update it or choose a class-level name."
+        raise SkillEditError(msg)
+    now = datetime.now(UTC)
+    # Workspaces of shared agents without file memory exist only once something is written into them.
+    skills_root.parent.mkdir(parents=True, exist_ok=True)
+    with open_skills_root(skills_root, create=True) as root_fd:
+        if name in {entry.lower() for entry in list_entries(root_fd, directories=True)}:
+            msg = f"A workspace skill directory named {name!r} already exists."
+            raise SkillEditError(msg)
+        os.mkdir(name, dir_fd=root_fd)
+        with open_directory_within_root(root_fd, name) as skill_fd:
+            atomic_write_bytes_at(skill_fd, SKILL_FILENAME, content.encode())
+        update_skill_usage(root_fd, name, lambda usage: usage.model_copy(update={"created_at": now}))
+
+
+def write_skill_file(
+    skills_root: Path,
+    name: str,
+    relative_path: str,
+    content: str,
+    *,
+    expected_digest: str | None,
+) -> None:
+    """Replace or add one file of a learner-owned skill that the reviewer read in its current state."""
+    directory, filename = _split_relative_path(relative_path)
+    if directory is None:
+        _validate_markdown(name, content, new=False)
+    _validate_content(relative_path, content)
+    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+        current = _require_writable(skill_fd, name, relative_path, expected_digest)
+        if current is not None:
+            _save_history(root_fd, name, relative_path, current.content)
+        if directory is None:
+            atomic_write_bytes_at(skill_fd, filename, content.encode())
+        else:
+            if directory not in list_entries(skill_fd, directories=True):
+                os.mkdir(directory, dir_fd=skill_fd)
+            with open_directory_within_root(skill_fd, directory) as support_fd:
+                atomic_write_bytes_at(support_fd, filename, content.encode())
+        _record_patch(root_fd, name)
+
+
+def remove_skill_file(skills_root: Path, name: str, relative_path: str, *, expected_digest: str | None) -> None:
+    """Remove one support file of a learner-owned skill after the reviewer read it."""
+    directory, filename = _split_relative_path(relative_path)
+    if directory is None:
+        msg = "SKILL.md cannot be removed; only support files can."
+        raise SkillEditError(msg)
+    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+        current = _require_writable(skill_fd, name, relative_path, expected_digest)
+        if current is None:
+            msg = f"{relative_path} does not exist."
+            raise SkillEditError(msg)
+        _save_history(root_fd, name, relative_path, current.content)
+        with open_directory_within_root(skill_fd, directory) as support_fd:
+            os.unlink(filename, dir_fd=support_fd)
+        _record_patch(root_fd, name)
+
+
+def _require_writable(skill_fd: int, name: str, relative_path: str, expected_digest: str | None) -> SkillFile | None:
+    markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME)
+    if markdown is None or not markdown.learned:
+        msg = (
+            f"Skill {name!r} is not learner-owned. It belongs to its human owner; mention the needed change in "
+            "your reply instead of editing it."
+        )
+        raise SkillEditError(msg)
+    current = _read_skill_file(skill_fd, name, relative_path)
+    if current is not None and current.digest != expected_digest:
+        msg = (
+            f"The current {relative_path} of {name!r} has not been loaded in this review. Call "
+            "skill_view for it, then retry using the content just returned."
+        )
+        raise SkillEditError(msg)
+    return current
+
+
+def _record_patch(root_fd: int, name: str) -> None:
+    now = datetime.now(UTC)
+    update_skill_usage(
+        root_fd,
+        name,
+        lambda usage: usage.model_copy(update={"patch_count": usage.patch_count + 1, "last_patched_at": now}),
+    )
+
+
+def _save_history(root_fd: int, name: str, relative_path: str, content: str) -> None:
+    """Keep the replaced file as plain text so a person can restore it by copying it back."""
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    with open_directory_within_root(root_fd, f"{_HISTORY_DIRNAME}/{name}", create=True) as history_fd:
+        atomic_write_bytes_at(history_fd, f"{stamp}--{relative_path.replace('/', '--')}", content.encode())
+        for stale in list_entries(history_fd, directories=False)[:-_HISTORY_KEEP]:
+            os.unlink(stale, dir_fd=history_fd)
+
+
+def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: datetime) -> list[str]:
+    """Move learner-owned skills without recent activity into ``skills/.archive``; never delete them."""
+    if archive_after_days <= 0 or not skills_root.is_dir():
+        return []
+    archived: list[str] = []
+    with open_skills_root(skills_root) as root_fd:
+        usage = load_skill_usage(root_fd)
+        for name in list_entries(root_fd, directories=True):
+            if not _NAME.fullmatch(name):
+                continue
+            with open_directory_within_root(root_fd, name) as skill_fd:
+                markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME)
+            if markdown is None or not markdown.learned:
+                continue
+            last_activity = usage.get(name, SkillUsage()).last_activity_at()
+            if last_activity is None:
+                # First sight of an adopted skill starts its inactivity clock now, like Hermes' seeded records.
+                update_skill_usage(root_fd, name, lambda record: record.model_copy(update={"created_at": now}))
+                continue
+            if (now - last_activity).days < archive_after_days:
+                continue
+            with open_directory_within_root(root_fd, _ARCHIVE_DIRNAME, create=True) as archive_fd:
+                os.rename(
+                    name,
+                    f"{name}--{now.strftime('%Y%m%dT%H%M%SZ')}",
+                    src_dir_fd=root_fd,
+                    dst_dir_fd=archive_fd,
+                )
+            archived.append(name)
+    return archived
+
+
+def skills_fingerprint(skills_root: Path) -> str:
+    """Hash visible skill files so edits by anyone but the learner reset the review counter."""
+    digest = hashlib.sha256()
+    if not skills_root.is_dir():
+        return digest.hexdigest()
+    with open_skills_root(skills_root) as root_fd:
+        for name in list_entries(root_fd, directories=True):
+            with open_directory_within_root(root_fd, name) as skill_fd:
+                for entry in _visible_files(skill_fd):
+                    digest.update(f"{name}/{entry}\0".encode())
+    return digest.hexdigest()
+
+
+def _visible_files(directory_fd: int, prefix: str = "") -> Iterator[str]:
+    with os.scandir(directory_fd) as entries:
+        for entry in sorted(entries, key=lambda item: item.name):
+            if entry.name.startswith("."):
+                continue
+            info = entry.stat(follow_symlinks=False)
+            yield f"{prefix}{entry.name}:{info.st_size}:{info.st_mtime_ns}"
+            if entry.is_dir(follow_symlinks=False) and not prefix:
+                with open_directory_within_root(directory_fd, entry.name) as child_fd:
+                    yield from _visible_files(child_fd, f"{entry.name}/")

@@ -363,7 +363,7 @@ class AgentConfig(BaseModel):
     )
     skill_learning: SkillLearningConfig = Field(
         default_factory=SkillLearningConfig,
-        description="Opt-in automatic Markdown skill learning in this agent workspace",
+        description="Opt-in background reviews that create and maintain learned skills in this agent's workspace",
     )
     delegate_to: list[str] = Field(
         default_factory=list,
