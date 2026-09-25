@@ -122,14 +122,19 @@ def _simple_frontmatter(text: str) -> dict[str, Any]:
     return fields
 
 
-def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
-    """Split SKILL.md into its frontmatter mapping and instruction body, parsing frontmatter as Agno does."""
+def parse_skill_markdown(content: str, *, loose: bool = False) -> tuple[dict[str, Any], str]:
+    """Split SKILL.md into its frontmatter mapping and instruction body.
+
+    Ownership and edit checks need strict YAML; ``loose`` loads a skill for the agent the way Agno does.
+    """
     match = FRONTMATTER_PATTERN.match(content)
     if match is None:
         return {}, content
     try:
         frontmatter = yaml_io.safe_load(match.group(1)) or {}
     except YAMLError:
+        if not loose:
+            raise
         # Skills Agno loads, such as "description: Use when: deploying", must keep loading from workspaces.
         frontmatter = _simple_frontmatter(match.group(1))
     if not isinstance(frontmatter, dict):
@@ -179,7 +184,7 @@ def load_workspace_skills(skills_root: Path) -> list[Skill]:
             for directory in list_entries(root_fd, directories=True):
                 try:
                     skill = _load_workspace_skill(root_fd, skills_root, directory)
-                except (OSError, ValueError, TypeError, YAMLError) as exc:
+                except (OSError, ValueError, TypeError) as exc:
                     logger.warning(
                         "Skipping unreadable workspace skill",
                         path=str(skills_root / directory),
@@ -199,7 +204,7 @@ def _load_workspace_skill(root_fd: int, skills_root: Path, directory: str) -> Sk
         content = read_text_at(skill_fd, SKILL_FILENAME)
         if content is None:
             return None
-        frontmatter, instructions = parse_skill_markdown(content)
+        frontmatter, instructions = parse_skill_markdown(content, loose=True)
         return Skill(
             name=frontmatter.get("name", directory),
             description=frontmatter.get("description", ""),

@@ -208,7 +208,7 @@ def _queue(
         agent_name="mind",
         session_id=session_id,
         execution_identity=identity,
-        run_id=run_id,
+        run_ids=(run_id,),
     )
 
 
@@ -479,6 +479,21 @@ def test_completed_runs_add_up_and_a_review_subtracts_what_it_covered(tmp_path: 
     assert (_entries(paths)[key]["replies"], _due(config, paths)) == (6, [key])
     queue.settle_review(paths, key, claimed=claimed, outcome="reviewed", now=1.0)
     assert (_entries(paths)[key]["replies"], _due(config, paths)) == (2, [])
+
+
+def test_every_run_of_one_response_counts_once(tmp_path: Path) -> None:
+    """A response that continued in new runs counts all of them, and a run listed twice counts once."""
+    config, paths = _learner(tmp_path, review_interval=10)
+    _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
+    queue.queue_skill_review(
+        config,
+        paths,
+        agent_name="mind",
+        session_id="session",
+        execution_identity=None,
+        run_ids=("r1", "r2", "r2"),
+    )
+    assert _entries(paths)["mind:session"]["replies"] == 4
 
 
 def test_runs_without_model_replies_add_nothing(tmp_path: Path) -> None:
@@ -1208,7 +1223,7 @@ def test_transcript_cannot_close_the_evidence_block() -> None:
 
 @pytest.mark.asyncio
 async def test_unreadable_user_skill_does_not_block_reviews(tmp_path: Path) -> None:
-    """The fingerprint counts an unreadable user skill as present instead of failing every review."""
+    """An unreadable user skill is left out of the catalog instead of failing every review of the workspace."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     locked = _write_skill(_skills_root(config, paths), "locked", HANDWRITTEN).parent
@@ -1342,11 +1357,13 @@ def test_learner_keeps_ownership_when_the_agent_rewrites_its_skill(tmp_path: Pat
     library.write_skill_file(root, "deploy-checks", "references/notes.md", "Notes.", expected_digest=None)
 
 
-def test_pinned_skills_are_left_alone_by_learner_and_curator(tmp_path: Path) -> None:
-    """Pinning a learned skill in its frontmatter stops both automatic edits and archival."""
+@pytest.mark.parametrize("description", ["Use when deploying the web service", "Use when: deploying"])
+def test_pinned_skills_are_left_alone_by_learner_and_curator(tmp_path: Path, description: str) -> None:
+    """Pinning a learned skill stops automatic edits and archival, even when the frontmatter is not strict YAML."""
     root = tmp_path / "skills"
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
-    (root / "deploy-checks/SKILL.md").write_text(LEARNED.replace("learned: true", "pinned: true"))
+    pinned = LEARNED.replace("learned: true", "pinned: true").replace("Use when deploying the web service", description)
+    (root / "deploy-checks/SKILL.md").write_text(pinned)
     with open_skills_root(root) as root_fd:
         update_skill_usage(
             root_fd,
@@ -1359,6 +1376,18 @@ def test_pinned_skills_are_left_alone_by_learner_and_curator(tmp_path: Path) -> 
     with pytest.raises(library.SkillEditError, match="not learner-owned"):
         library.write_skill_file(root, "deploy-checks", "references/x.md", "x", expected_digest=None)
     assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []
+
+
+def test_edits_refuse_frontmatter_that_is_not_strict_yaml(tmp_path: Path) -> None:
+    """Like Hermes' frontmatter check, a learner edit must keep SKILL.md parseable, though loading stays lenient."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    current = library.read_skill_file(root, "deploy-checks")
+    assert current is not None
+    loose = LEARNED.replace("Use when deploying the web service", "Use when: deploying")
+    with pytest.raises(library.SkillEditError, match="not a valid YAML mapping"):
+        library.write_skill_file(root, "deploy-checks", "SKILL.md", loose, expected_digest=current.digest)
+    assert (root / "deploy-checks/SKILL.md").read_text() == LEARNED
 
 
 @pytest.mark.asyncio

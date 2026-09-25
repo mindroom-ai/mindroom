@@ -17,7 +17,7 @@ from __future__ import annotations
 import contextlib
 import json
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.models.response import ToolExecution
@@ -204,6 +204,71 @@ async def test_blocking_continuation_delivers_final_exactly_once_after_last_atte
     assert delivered[0].response_text == "final answer"
     assert events == ["attempt:1", "attempt:2", "deliver_final"]
     assert generation.delivery.event_id == "$response"
+
+
+@pytest.mark.asyncio
+async def test_every_run_of_a_dynamic_tool_response_counts_toward_skill_review(tmp_path: Path) -> None:
+    """Loading a tool continues the response in a new run, and the replies of both runs count toward a review."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    counted: list[tuple[str, ...]] = []
+
+    async def fake_ai_response(
+        *args: object,
+        prompt: str,
+        model_prompt: str | None,
+        current_timestamp_ms: float | None,
+        current_prompt_is_structured: bool,
+        turn_recorder: TurnRecorder | None,
+        run_metadata_collector: dict[str, Any] | None,
+        run_id_callback: Callable[[str], None],
+        **_kwargs: object,
+    ) -> str:
+        async def run_attempt(_run: TurnRunState, _continuation: DynamicContinuationRunState) -> CompletedAttempt:
+            run_id = f"run-{len(counted) + 1}"
+            counted.append(())
+            run_id_callback(run_id)
+            return CompletedAttempt(
+                response_text="final answer",
+                replayable_text="final answer",
+                has_visible_content=True,
+                attempt_run_id=run_id,
+                tool_executions=(_dynamic_tool_execution(),) if run_id == "run-1" else (),
+            )
+
+        return await run_blocking_response_turn(
+            cast("ResponseTurnContext", args[0]),
+            _blocking_adapter(run_attempt),
+            TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
+            continuation=_initial_continuation(
+                prompt=prompt,
+                model_prompt=model_prompt,
+                current_timestamp_ms=current_timestamp_ms,
+                current_prompt_is_structured=current_prompt_is_structured,
+            ),
+        )
+
+    queued: list[tuple[str, ...]] = []
+    with (
+        patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(return_value=_completed_outcome("$response", body="final answer")),
+        ),
+        patch(
+            "mindroom.response_runner.queue_skill_review",
+            side_effect=lambda *_a, **kw: queued.append(kw["run_ids"]),
+        ),
+        patch_response_runner_module(
+            ai_response=fake_ai_response,
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=False),
+        ),
+    ):
+        await coordinator.generate_response(_plain_request(_target()))
+
+    assert [tuple(run_ids) for run_ids in queued] == [("run-1", "run-2")]
 
 
 @pytest.mark.asyncio
