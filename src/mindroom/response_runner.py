@@ -2112,7 +2112,7 @@ class ResponseRunner:
             execution_identity=execution_identity,
         )
         if queue is not None:
-            create_background_task(queue(False), name="skill_learning_register", owner=self)
+            create_background_task(queue(False), name="skill_learning_register", owner=self.deps.runtime)
         return queue
 
     def _skill_review(

@@ -13,7 +13,7 @@ import re
 from typing import TYPE_CHECKING
 
 from mindroom.history_run_visibility import is_model_history_visible_run
-from mindroom.redaction import REDACTION_FAILED, redact_private_keys, redact_sensitive_text
+from mindroom.redaction import redact_private_keys, redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -27,14 +27,11 @@ _CLOSING_TAG = re.compile(r"</\s*conversation\s*>", re.IGNORECASE)
 _TAIL_MESSAGES = 24
 _DIGEST_USER_CHARS = 300
 _DIGEST_ASSISTANT_CHARS = 200
-# One rendered message, a few tool-call steps' worth of evidence.
+# Redaction handles at most 64 KiB per call, so one rendered message stays below it.
 _MAX_MESSAGE_CHARS = 60_000
 _MIN_MESSAGE_CHARS = 2_000
 # Room for the omission note inside a clipped message.
 _CLIP_NOTE_CHARS = 64
-# Redaction handles 64 KiB per call, so longer text is redacted in line chunks with a little preceding context.
-_REDACTION_CHUNK_CHARS = 60_000
-_REDACTION_CONTEXT_CHARS = 256
 
 
 def conversation_messages(session: AgentSession) -> list[Message]:
@@ -73,7 +70,7 @@ def render_transcript(messages: Sequence[Message], *, summary: str | None = None
     message_chars = min(_MAX_MESSAGE_CHARS, max(_MIN_MESSAGE_CHARS, budget_chars // 8))
     verbatim = [_render_message(message, message_chars) for message in recent]
     compacted = (
-        [_clip(_redacted(f"[Summary of earlier turns removed by compaction.]\n{text}"), message_chars)]
+        [_render_text(f"[Summary of earlier turns removed by compaction.]\n{text}", message_chars)]
         if summary and (text := summary.strip())
         else []
     )
@@ -105,16 +102,16 @@ def render_transcript(messages: Sequence[Message], *, summary: str | None = None
 def _digest_line(message: Message) -> str | None:
     if message.role not in {"user", "assistant"}:
         return None
-    # Only the leading lines a digest keeps are redacted, whole, before they are cut to length.
-    text = " ".join(_redacted(_leading_lines(message.get_content_string(), 4 * _DIGEST_USER_CHARS)).split())
+    # A digest line keeps a few hundred characters, so only that much of a long message is normalized.
+    text = " ".join(message.get_content_string()[: 4 * _DIGEST_USER_CHARS].split())
     if message.role == "user":
-        return f"USER: {text[:_DIGEST_USER_CHARS]}" if text else None
+        return redact_sensitive_text(f"USER: {text[:_DIGEST_USER_CHARS]}") if text else None
     parts = []
     if names := _tool_call_names(message):
-        parts.append(f"ASSISTANT[tools: {_redacted(', '.join(names))[:_DIGEST_ASSISTANT_CHARS]}]")
+        parts.append(f"ASSISTANT[tools: {', '.join(names)[:_DIGEST_ASSISTANT_CHARS]}]")
     if text:
         parts.append(f"ASSISTANT: {text[:_DIGEST_ASSISTANT_CHARS]}")
-    return "\n".join(parts) if parts else None
+    return redact_sensitive_text("\n".join(parts)) if parts else None
 
 
 def _render_message(message: Message, limit: int) -> str:
@@ -128,78 +125,24 @@ def _render_message(message: Message, limit: int) -> str:
         arguments = function.get("arguments")
         rendered = arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
         lines.append(f"-> calls {function.get('name', 'unknown tool')}({rendered})")
-    return _clip(_redacted("\n".join(lines)), limit)
+    return _render_text("\n".join(lines), limit)
+
+
+def _render_text(text: str, limit: int) -> str:
+    """Remove private keys from the whole text, keep its start and end, and redact what remains.
+
+    The evidence is a conversation the agent's model already processed, so redaction is best-effort; learned files
+    are what is checked strictly, when they are written.
+    """
+    return redact_sensitive_text(_clip(redact_private_keys(text), limit))
 
 
 def _tool_call_names(message: Message) -> list[str]:
     return [str((call.get("function") or {}).get("name", "?")) for call in message.tool_calls or []]
 
 
-def _redacted(text: str) -> str:
-    """Redact text of any length before anything cuts it, so no cut can hide a secret's recognizable prefix.
-
-    Private keys span lines and go first over the whole text. The other patterns stay within a line, except a
-    prefix such as "Bearer" followed by a line break, so longer text is redacted in line-aligned chunks that each see
-    the preceding non-blank text as context. Redaction fails closed on a secret-named key that ends a line, whose
-    value may follow it, so such a chunk is redone line by line and only the lines that fail are replaced.
-    """
-    lines = redact_private_keys(text).split("\n")
-    redacted: list[str] = []
-    context = ""
-    start = 0
-    while start < len(lines):
-        end, size = start + 1, len(lines[start])
-        while end < len(lines) and size + len(lines[end]) + 1 <= _REDACTION_CHUNK_CHARS:
-            size += len(lines[end]) + 1
-            end += 1
-        chunk = lines[start:end]
-        result = _redact_after(context, "\n".join(chunk))
-        if result is not None:
-            redacted.extend(result.split("\n"))
-            context = _context_after(context, chunk)
-        else:
-            for line in chunk:
-                line_result = _redact_after(context, line)
-                redacted.append(REDACTION_FAILED if line_result is None else line_result)
-                context = _context_after(context, [line])
-        start = end
-    return "\n".join(redacted)
-
-
-def _redact_after(context: str, text: str) -> str | None:
-    """Redact ``text`` as if it followed ``context``, or return None when redaction fails closed."""
-    result = redact_sensitive_text(f"{context}\n{text}" if context else text)
-    if result == REDACTION_FAILED:
-        return None
-    return result.split("\n", 1)[1] if context else result
-
-
-def _context_after(context: str, lines: Sequence[str]) -> str:
-    """Return the last non-blank text before the next line, whitespace collapsed onto one line."""
-    tail: list[str] = []
-    size = 0
-    for line in reversed(lines):
-        if words := line.split():
-            tail.append(" ".join(words))
-            size += len(tail[-1]) + 1
-            if size >= _REDACTION_CONTEXT_CHARS:
-                break
-    if size < _REDACTION_CONTEXT_CHARS and context:
-        tail.append(context)
-    return " ".join(reversed(tail))[-_REDACTION_CONTEXT_CHARS:]
-
-
-def _leading_lines(text: str, chars: int) -> str:
-    """Return whole lines covering at least ``chars`` characters of ``text``."""
-    end = text.find("\n", chars)
-    return text if end == -1 else text[:end]
-
-
 def _clip(text: str, limit: int) -> str:
-    """Keep at most ``limit`` characters of already redacted text from its start and end.
-
-    The start and end are where a command's error or result usually is.
-    """
+    """Keep at most ``limit`` characters from the start and the end, where a command's error or result usually is."""
     if len(text) <= limit:
         return text
     half = (limit - _CLIP_NOTE_CHARS) // 2

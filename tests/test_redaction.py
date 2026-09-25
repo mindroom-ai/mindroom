@@ -1035,6 +1035,15 @@ def test_contains_credential_flags_literal_secrets_but_not_placeholders() -> Non
         "API_KEY=0123456789abcdef0123456789abcdef",
         "-----BEGIN RSA PRIVATE KEY-----\nMIIabc",
         "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF",
+        "password: |\n  Zq8vN3pL7wX2kR9mT4yB6c",
+        "db:\n  password:\n    Zq8vN3pL7wX2kR9mT4yB6c",
+        "api_token: >-\n  # rotated monthly\n  Zq8vN3pL7wX2kR9mT4yB6c",
+    )
+    placeholders += (
+        "password: |\n  <your password>",
+        "token:\n  file: /run/secrets/token",
+        "env:\n  - name: DB_PASSWORD\n    valueFrom:\n      secretKeyRef:\n        name: db",
+        "password:\nnext_setting: Zq8vN3pL7wX2kR9mT4yB6c",
     )
     assert [text for text in placeholders if contains_credential(text)] == []
     assert [text for text in secrets if not contains_credential(text)] == []
