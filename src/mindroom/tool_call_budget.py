@@ -1,4 +1,4 @@
-"""Per-run model-call cap derived from the per-turn tool-call budget."""
+"""Per-run model-call cap derived from the per-turn tool-call budget, and caller-owned request gates."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _GATE_ATTR = "_mindroom_model_call_cap_installed"
+_REQUEST_GATE_ATTR = "_mindroom_request_gate_installed"
 # Every tool-calling request spends at least one budgeted call, so a run within its budget needs at
 # most budget + 1 requests; one more lets the model answer after Agno refuses its first batch.
 _EXTRA_MODEL_REQUESTS = 2
@@ -54,3 +55,8 @@ def install_model_call_cap(model: Model, *, entity_name: str) -> None:
         return allow_request
 
     install_response_request_gate(model, marker=_GATE_ATTR, open_gate=open_run)
+
+
+def install_request_gate(model: Model, allow_request: Callable[[], bool]) -> None:
+    """Ask ``allow_request`` before every model request of this model's runs; a refused request ends the run."""
+    install_response_request_gate(model, marker=_REQUEST_GATE_ATTR, open_gate=lambda _tool_call_limit: allow_request)

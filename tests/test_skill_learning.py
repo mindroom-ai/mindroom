@@ -923,7 +923,7 @@ async def test_review_calls_skill_tools_through_each_real_provider_adapter(tmp_p
 
 @pytest.mark.asyncio
 async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(tmp_path: Path) -> None:
-    """User skills stay read-only, and an exhausted input budget refuses every further tool call."""
+    """User skills stay read-only, and the review ends before a request once its input reached the budget."""
     config, paths = _learner(tmp_path, context_window=12_000)
     config.agents["mind"].skills = ["mindroom-docs"]
     root = _skills_root(config, paths)
@@ -954,8 +954,39 @@ async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(tmp_pat
         )
     assert "configured-owned and read-only" in json.loads(model.requests[1][-1])["error"]
     assert "user-owned and read-only" in json.loads(model.requests[3][-1])["error"]
-    assert "budget is exhausted" in json.loads(model.requests[-1][-1])["error"]
+    assert model.script, "the review should have stopped before its script ran out"
     assert (root / "handwritten/SKILL.md").read_text() == HANDWRITTEN
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_calls_spend_the_input_budget_once_per_request(tmp_path: Path) -> None:
+    """Like Hermes, the budget counts what each request sends, and one reply's tool results share one request."""
+    config, paths = _learner(tmp_path, context_window=40_000)
+    root = _skills_root(config, paths)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    view = ("skill_view", {"name": "deploy-checks"})
+    patch_step = {"action": "patch", "name": "deploy-checks", "old_string": "1. Run the smoke test."}
+    model = _model(
+        [view, view, view],
+        ("skill_manage", {**patch_step, "new_string": "1. Run the smoke test.\n2. Check logs."}),
+    )
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
+    ):
+        await review_conversation(
+            config=config,
+            runtime_paths=paths,
+            agent_name="mind",
+            session_id="session",
+            identity=None,
+            skills_root=root,
+            # Close to the transcript's quarter of the budget, so three separately charged results would exhaust it.
+            messages=[Message(role="user", content="x" * 3_600) for _ in range(8)],
+            summary=None,
+            progress=ReviewProgress(),
+        )
+    assert (root / "deploy-checks/SKILL.md").read_text().endswith("2. Check logs.\n")
 
 
 @pytest.mark.asyncio

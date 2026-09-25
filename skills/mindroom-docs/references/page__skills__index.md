@@ -183,7 +183,7 @@ Each response to a person registers its conversation when it starts, so an appro
 An approved continuation that finishes after a later turn of the same thread was already reviewed is not counted, although its messages still appear in later reviews.
 Counting starts with the first response after learning is enabled, including every attempt of that response, and the queued conversations of an agent that stops learning are forgotten, so replies from before learning was enabled or while it was off never count toward a review.
 A review still reads the whole stored conversation as evidence, including turns from before learning was enabled, as a Hermes review sees the whole session.
-Automated responses from schedules, hooks, and external triggers, and responses another agent asked for, never start a count, just as Hermes skips reviews for cron jobs, so a thread with only such runs is never reviewed; in a thread people also use, those replies are part of the conversation that is counted and reviewed.
+Automated responses from schedules, hooks, and external triggers, including ones the router hands to an agent, and responses another agent asked for, never start a count, just as Hermes skips reviews for cron jobs, so a thread with only such runs is never reviewed; in a thread people also use, those replies are part of the conversation that is counted and reviewed.
 Team responses are excluded.
 When anyone other than the learner changes the workspace skills, for example an agent writing a skill with its file tools, counting starts again after the newest run because that lesson is already saved.
 This includes a change during a conversation's first response, because its first registration records the skills as they were; a change made while a review of another conversation is writing skills in the same workspace is taken as that review's own.
@@ -206,6 +206,7 @@ Hermes replays the full conversation when the review uses the agent's own model 
 Runs that model history hides, such as errored, cancelled, or paused runs, are left out.
 When compaction has replaced older turns with a summary, the review evidence starts with that summary, as a Hermes review sees the compressed conversation.
 One review may read about 75% of the review model's `context_window` across all of its requests, capped at 600,000 tokens and defaulting to 120,000 tokens when the model sets no window.
+Like Hermes, each request counts the whole context it sends, the tool results of one reply go out together in the next request, and the review ends before a request once the total reached the budget.
 The budget is estimated at four characters per token.
 It makes at most 16 tool calls and stops after `timeout_seconds`.
 The review prompt adapts Hermes' rules: build class-level skills, capture lessons rather than logs, treat user corrections as first-class signals, prefer patches over rewrites, and never capture environment-specific failures, negative claims about tools, transient errors, one-off narratives, or unresolved attempts.

@@ -12,6 +12,7 @@ from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
+    RELAYED_SOURCE_KIND_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SCHEDULED_MODEL_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
@@ -340,6 +341,9 @@ def _attachment_parts(
         extra_content[SCHEDULED_HISTORY_LIMIT_KEY] = prepared.dispatch.scheduled_history_budget.limit
     if prepared.dispatch.scheduled_model is not None:
         extra_content[SCHEDULED_MODEL_KEY] = prepared.dispatch.scheduled_model
+    if (automation_source_kind := prepared.dispatch.envelope.origin.automation_source_kind) is not None:
+        # The handoff becomes a trusted relay from the requester, so the target learns this was automation here.
+        extra_content[RELAYED_SOURCE_KIND_KEY] = automation_source_kind
     return message_attachment_ids, trusted_attachment_ids, extra_content
 
 

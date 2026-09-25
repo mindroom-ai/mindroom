@@ -16,6 +16,7 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
     content_owns_per_fire_thread_root,
     per_fire_thread_root_event_id_from_content,
+    relayed_source_kind_from_content,
     source_kind_from_content,
 )
 from mindroom.dispatch_thread_context import (
@@ -352,6 +353,12 @@ class ConversationResolver:
             and original_sender != ""
             and registry.current_entity_name_for_user_id(original_sender) is None
         )
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        relayed_source_kind = (
+            relayed_source_kind_from_content(content)
+            if trusted_human_relay and isinstance(content, dict) and self._sender_is_managed_entity(event.sender)
+            else None
+        )
         return classify_turn_origin(
             transport_sender_id=event.sender,
             requester_id=requester_user_id,
@@ -360,6 +367,7 @@ class ConversationResolver:
             source_kind=source_kind,
             original_sender=original_sender,
             trusted_user_relay=trusted_human_relay,
+            relayed_source_kind=relayed_source_kind,
         )
 
     def pre_hydration_policy_facts(

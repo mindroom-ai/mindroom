@@ -1,5 +1,7 @@
 """Tests for canonical inbound turn-origin policy."""
 
+from dataclasses import replace
+
 import pytest
 
 from mindroom.dispatch_source import (
@@ -10,6 +12,7 @@ from mindroom.dispatch_source import (
     SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
 )
+from mindroom.event_journal.approval_continuations import _origin_from_dict, _origin_to_dict
 from mindroom.turn_origin import (
     TurnIntent,
     classify_turn_origin,
@@ -411,4 +414,26 @@ def test_router_relay_original_sender_preserves_human_requester_or_inherited_hum
             inherited_original_sender_entity_name="alpha",
         )
         is None
+    )
+
+
+def test_approval_snapshots_keep_the_automation_a_router_handoff_carried() -> None:
+    """A paused routed scheduled fire resumes still marked as automation, and older snapshots carry none."""
+    origin = replace(
+        classify_turn_origin(
+            transport_sender_id="@mindroom_router:localhost",
+            requester_id="@user:localhost",
+            sender_entity_name="router",
+            requester_entity_name=None,
+            source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            original_sender="@user:localhost",
+            trusted_user_relay=True,
+        ),
+        relayed_source_kind=SCHEDULED_SOURCE_KIND,
+    )
+    stored = _origin_to_dict(origin)
+    assert _origin_from_dict(stored) == origin
+    assert _origin_from_dict({key: value for key, value in stored.items() if key != "relayed_source_kind"}) == replace(
+        origin,
+        relayed_source_kind=None,
     )
