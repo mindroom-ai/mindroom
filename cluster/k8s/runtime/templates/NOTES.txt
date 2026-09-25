@@ -20,3 +20,7 @@ Supply the configuration file at {{ include "mindroom-runtime.configPath" . }}, 
 Provide either an existing config ConfigMap or a chart-managed config value.
 {{- end }}
 For externally managed PostgreSQL, set eventCache.databaseUrl.existingSecret.
+{{- if and (eq .Values.workers.backend "static_runner") (not .Values.apiAuth.allowUnauthenticatedPrimary) }}
+The primary API requires the generated MINDROOM_API_KEY unless env.extra or env.envFrom sets one:
+  kubectl get secret --namespace {{ .Release.Namespace }} {{ include "mindroom-runtime.fullname" . }}-api-key -o jsonpath='{.data.MINDROOM_API_KEY}' | base64 -d
+{{- end }}
