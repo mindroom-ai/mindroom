@@ -2,7 +2,8 @@
 
 Hermes replays a routed review as older turns collapsed into one-line digests plus the newest messages verbatim.
 MindRoom reviews later from the persisted session, so the transcript is text rather than provider tool messages,
-which keeps it valid for every provider regardless of which tools the reviewer itself declares.
+which keeps it valid for every provider regardless of which tools the reviewer itself declares. Like the messages
+a Hermes review replays after context compression, it opens with the compaction summary of removed turns.
 """
 
 from __future__ import annotations
@@ -53,8 +54,11 @@ def count_model_replies(runs: Iterable[RunOutput]) -> int:
     )
 
 
-def render_transcript(messages: Sequence[Message], *, budget_chars: int) -> str:
-    """Render digest lines for older turns and the newest messages verbatim within ``budget_chars``."""
+def render_transcript(messages: Sequence[Message], *, summary: str | None = None, budget_chars: int) -> str:
+    """Render the compaction summary, digest lines for older turns, and the newest messages within ``budget_chars``.
+
+    The summary is the only record of compacted turns, so it is shortened rather than dropped.
+    """
     tail = _TAIL_MESSAGES
     while len(messages) > tail and messages[-tail].role == "tool":
         # A kept run never starts on a tool result whose call was digested away.
@@ -63,8 +67,14 @@ def render_transcript(messages: Sequence[Message], *, budget_chars: int) -> str:
     digest = [line for message in older if (line := _digest_line(message))]
     message_chars = min(_MAX_MESSAGE_CHARS, max(_MIN_MESSAGE_CHARS, budget_chars // 8))
     verbatim = [_render_message(message, message_chars) for message in recent]
+    compacted = (
+        [redact_sensitive_text(_clip(f"[Summary of earlier turns removed by compaction.]\n{text}", message_chars))]
+        if summary and (text := summary.strip())
+        else []
+    )
 
-    size = sum(len(line) + 1 for line in digest) + sum(len(block) + 2 for block in verbatim)
+    size = sum(len(block) + 2 for block in compacted)
+    size += sum(len(line) + 1 for line in digest) + sum(len(block) + 2 for block in verbatim)
     omitted_digest = 0
     while digest and size > budget_chars:
         size -= len(digest.pop(0)) + 1
@@ -74,7 +84,7 @@ def render_transcript(messages: Sequence[Message], *, budget_chars: int) -> str:
         size -= len(verbatim.pop(0)) + 2
         omitted_messages += 1
 
-    sections: list[str] = []
+    sections = list(compacted)
     if omitted_digest or digest:
         header = "[Earlier conversation digest; older turns are shortened to one line each, recent messages follow.]"
         if omitted_digest:

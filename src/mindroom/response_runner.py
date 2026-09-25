@@ -2091,7 +2091,6 @@ class ResponseRunner:
                 continuation.execution_identity,
                 error_prefix="Approval continuation execution_identity",
             ),
-            attempt_run_ids=(),
         )
 
     def _skill_review(
@@ -2100,13 +2099,8 @@ class ResponseRunner:
         agent_name: str,
         session_id: str,
         execution_identity: ToolExecutionIdentity | None,
-        attempt_run_ids: Sequence[str],
     ) -> Callable[[str], Awaitable[None]]:
-        """Build the handoff that counts a completed response's persisted runs toward a background skill review.
-
-        Dynamic-tool continuations and empty-run retries persist each attempt as its own run, so every attempt
-        of the response is counted, falling back to the final run ID when the response had a single attempt.
-        """
+        """Build the handoff that marks a conversation for counting toward a background skill review."""
 
         async def queue(response_run_id: str) -> None:
             await asyncio.to_thread(
@@ -2116,7 +2110,7 @@ class ResponseRunner:
                 agent_name=agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,
-                run_ids=list(attempt_run_ids) or [response_run_id],
+                run_id=response_run_id,
             )
 
         return queue
@@ -5510,7 +5504,7 @@ class ResponseRunner:
             thread_history=memory_thread_history,
             user_id=request.user_id,
         )
-        # Like Hermes skipping cron reviews, automated runs have no human in the loop to learn from.
+        # Like Hermes skipping cron reviews, automated runs never start a review; they have no human to learn from.
         queue_skill_review = (
             None
             if is_automation_source_kind(request.response_envelope.source_kind)
@@ -5518,7 +5512,6 @@ class ResponseRunner:
                 agent_name=self.deps.agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,
-                attempt_run_ids=attempt_run_ids,
             )
         )
 
