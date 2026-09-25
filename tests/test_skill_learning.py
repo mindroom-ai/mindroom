@@ -28,7 +28,7 @@ from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, resolve_runtime_paths
 from mindroom.model_loading import get_model_instance
 from mindroom.provider_tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -66,11 +66,14 @@ ALICE = ToolExecutionIdentity(
 BOB = replace(ALICE, requester_id="@bob:example.test")
 
 
+_Call = tuple[str, dict[str, object]]
+
+
 @dataclass
 class _ScriptedModel(SyntheticModel):
     """Provider double that plays a fixed tool-call script, then answers."""
 
-    script: list[tuple[str, dict[str, object]]] = field(default_factory=list)
+    script: list[_Call | list[_Call]] = field(default_factory=list)
     requests: list[list[str]] = field(default_factory=list)
     offered_tools: list[set[str]] = field(default_factory=list)
     tool_parameters: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -98,16 +101,19 @@ class _ScriptedModel(SyntheticModel):
         usage = MessageMetrics(input_tokens=7, output_tokens=3, total_tokens=10)
         if not self.script:
             return ModelResponse(content="Done.", response_usage=usage)
-        name, arguments = self.script.pop(0)
-        call = {
-            "id": f"call-{len(self.requests)}",
-            "type": "function",
-            "function": {"name": name, "arguments": json.dumps(arguments)},
-        }
-        return ModelResponse(content="", tool_calls=[call], response_usage=usage)
+        step = self.script.pop(0)
+        calls = [
+            {
+                "id": f"call-{len(self.requests)}-{index}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }
+            for index, (name, arguments) in enumerate(step if isinstance(step, list) else [step])
+        ]
+        return ModelResponse(content="", tool_calls=calls, response_usage=usage)
 
 
-def _model(*script: tuple[str, dict[str, object]]) -> _ScriptedModel:
+def _model(*script: _Call | list[_Call]) -> _ScriptedModel:
     return _ScriptedModel(id="scripted", name="scripted", provider="test", script=list(script))
 
 
@@ -784,8 +790,8 @@ async def test_learner_edits_do_not_reset_other_conversations(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_failed_review_reports_partial_changes_and_retries_later(tmp_path: Path) -> None:
-    """A review that fails after writing still reports its writes and keeps its counter for a backed-off retry."""
+async def test_review_that_fails_after_changing_skills_is_not_repeated(tmp_path: Path) -> None:
+    """Like Hermes' best-effort review, a review that already changed skills is done even when it then fails."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     send = AsyncMock(return_value=object())
@@ -798,8 +804,10 @@ async def test_failed_review_reports_partial_changes_and_retries_later(tmp_path:
         _queue(config, paths, "r1", identity=ALICE)
         await _cycle(config, paths, object())
     (entry,) = _entries(paths).values()
-    assert (entry["failures"], entry["iterations"], entry["pending_run_ids"]) == (1, 2, [])
-    assert send.await_args.args[2]["body"] == "💾 Skill review: created `deploy-checks`"
+    assert (entry["failures"], entry["iterations"], entry["pending_run_ids"]) == (0, 0, [])
+    content = send.await_args.args[2]
+    assert content["body"] == "💾 Skill review: created `deploy-checks`"
+    assert content[SKILL_REVIEW_NOTICE_CONTENT_KEY] == {"changes": {"deploy-checks": "created"}}
 
 
 @pytest.mark.asyncio
@@ -1106,7 +1114,7 @@ async def test_write_running_at_timeout_lands_before_settlement_and_is_announced
         _queue(config, paths, "r1", identity=ALICE)
         await _cycle(config, paths, object())
     entry = _entries(paths)["mind:session"]
-    assert (entry["failures"], entry["iterations"]) == (1, 2)
+    assert (entry["failures"], entry["iterations"]) == (0, 0)
     assert entry["seen_fingerprint"] == library.skills_fingerprint(_skills_root(config, paths, ALICE))
     assert send.await_args.args[2]["body"] == "💾 Skill review: created `deploy-checks`"
 
@@ -1179,3 +1187,59 @@ def test_pinned_skills_are_left_alone_by_learner_and_curator(tmp_path: Path) -> 
     with pytest.raises(library.SkillEditError, match="not learner-owned"):
         library.write_skill_file(root, "deploy-checks", "references/x.md", "x", expected_digest=None)
     assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []
+
+
+@pytest.mark.asyncio
+async def test_skill_edits_sent_in_one_reply_both_land(tmp_path: Path) -> None:
+    """Providers send several tool calls per reply and Agno runs them together; each edit builds on the last."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    root = _skills_root(config, paths)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    patch_step = {"action": "patch", "name": "deploy-checks"}
+    model = _model(
+        ("skill_view", {"name": "deploy-checks"}),
+        [
+            ("skill_manage", {**patch_step, "old_string": "1. Run the smoke test.", "new_string": "1. Run smoke."}),
+            ("skill_manage", {**patch_step, "old_string": "the web service", "new_string": "the web app"}),
+        ],
+    )
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        await review_conversation(
+            config=config,
+            runtime_paths=paths,
+            agent_name="mind",
+            session_id="session",
+            identity=None,
+            skills_root=root,
+            messages=_tool_turn("r1").messages or [],
+            progress=ReviewProgress(),
+        )
+    content = (root / "deploy-checks/SKILL.md").read_text()
+    assert "1. Run smoke." in content
+    assert "the web app" in content
+
+
+def test_restored_or_reused_skill_names_start_over(tmp_path: Path) -> None:
+    """Archival forgets a skill's record, so a restored copy starts a new clock and a reused name is not learned."""
+    root = tmp_path / "skills"
+    now = datetime.now(UTC)
+    for name in ("deploy-checks", "old-habit"):
+        library.create_skill(root, name, LEARNED.replace("deploy-checks", name), reserved_names=frozenset())
+        with open_skills_root(root) as root_fd:
+            update_skill_usage(
+                root_fd,
+                name,
+                lambda usage: usage.model_copy(update={"created_at": now - timedelta(days=90)}),
+            )
+    assert library.archive_unused_skills(root, archive_after_days=30, now=now) == ["deploy-checks", "old-habit"]
+    (archived,) = (root / ".archive").glob("deploy-checks--*")
+    archived.rename(root / "deploy-checks")
+    _write_skill(root, "old-habit", HANDWRITTEN.replace("handwritten", "old-habit"))
+    assert library.archive_unused_skills(root, archive_after_days=30, now=now) == []
+    restored = library.read_skill_file(root, "deploy-checks")
+    reused = library.read_skill_file(root, "old-habit")
+    assert restored is not None
+    assert restored.learned
+    assert reused is not None
+    assert not reused.learned

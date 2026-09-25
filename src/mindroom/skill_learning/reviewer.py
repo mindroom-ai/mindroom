@@ -100,6 +100,9 @@ class _ReviewTools:
     budget_chars: int
     progress: ReviewProgress
     _reads: dict[tuple[str, str], SkillFile] = field(default_factory=dict)
+    # Agno runs the tool calls of one reply concurrently, and each write builds on this review's last read of
+    # the file; like Hermes, which never runs skill_manage in parallel, reads and writes take turns.
+    _turn: asyncio.Lock = field(default_factory=asyncio.Lock)
     _context_chars: int = 0
     _spent_chars: int = 0
 
@@ -140,16 +143,17 @@ class _ReviewTools:
             file_path: Optional support file such as "references/topic.md"; omit it for SKILL.md.
 
         """
-        if self._exhausted():
-            return self._refusal(_BUDGET_EXHAUSTED, name, file_path)
-        entry = self.catalog.get(name)
-        if entry is None:
-            return self._refusal(f"Unknown skill {name!r}; call skills_list.", name, file_path)
-        try:
-            payload = await self._view(entry, file_path)
-        except (OSError, ValueError) as exc:
-            return self._refusal(str(exc), name, file_path)
-        return self._reply(payload, name, file_path)
+        async with self._turn:
+            if self._exhausted():
+                return self._refusal(_BUDGET_EXHAUSTED, name, file_path)
+            entry = self.catalog.get(name)
+            if entry is None:
+                return self._refusal(f"Unknown skill {name!r}; call skills_list.", name, file_path)
+            try:
+                payload = await self._view(entry, file_path)
+            except (OSError, ValueError) as exc:
+                return self._refusal(str(exc), name, file_path)
+            return self._reply(payload, name, file_path)
 
     async def _view(self, entry: _CatalogEntry, file_path: str | None) -> dict[str, object]:
         if entry.directory is None:
@@ -202,40 +206,44 @@ class _ReviewTools:
             replace_all: Replace every occurrence of old_string instead of exactly one.
 
         """
-        arguments = (name, content, old_string, new_string, file_path, file_content)
-        if self._exhausted():
-            return self._refusal(_BUDGET_EXHAUSTED, *arguments)
-        entry = self.catalog.get(name)
-        if action != "create" and entry is None:
-            return self._refusal(f"Unknown skill {name!r}; call skills_list.", *arguments)
-        if action != "create" and entry is not None and (entry.directory is None or not entry.learned):
-            return self._refusal(
-                f"Skill {name!r} is {entry.owner}-owned and read-only; mention the needed change in your reply.",
+        async with self._turn:
+            arguments = (name, content, old_string, new_string, file_path, file_content)
+            if self._exhausted():
+                return self._refusal(_BUDGET_EXHAUSTED, *arguments)
+            entry = self.catalog.get(name)
+            if action != "create" and entry is None:
+                return self._refusal(f"Unknown skill {name!r}; call skills_list.", *arguments)
+            if action != "create" and entry is not None and (entry.directory is None or not entry.learned):
+                return self._refusal(
+                    f"Skill {name!r} is {entry.owner}-owned and read-only; mention the needed change in your reply.",
+                    *arguments,
+                )
+            # An adopted skill may live in a directory named differently from its frontmatter name.
+            directory = name if entry is None or entry.directory is None else entry.directory
+            relative_path = file_path or SKILL_FILENAME
+            try:
+                if action == "create":
+                    await self._create(name, _required(content, "content"))
+                elif action == "patch":
+                    patched = self._patched(directory, relative_path, old_string, new_string, replace_all)
+                    await self._write(name, directory, relative_path, patched)
+                elif action == "edit":
+                    await self._write(name, directory, SKILL_FILENAME, _required(content, "content"))
+                elif action == "write_file":
+                    await self._write(
+                        name,
+                        directory,
+                        _required(file_path, "file_path"),
+                        _required(file_content, "file_content"),
+                    )
+                else:
+                    await self._remove(name, directory, _required(file_path, "file_path"))
+            except (SkillEditError, OSError) as exc:
+                return self._refusal(str(exc), *arguments)
+            return self._reply(
+                {"success": True, "action": action, "name": name, "file_path": relative_path},
                 *arguments,
             )
-        # An adopted skill may live in a directory named differently from its frontmatter name.
-        directory = name if entry is None or entry.directory is None else entry.directory
-        relative_path = file_path or SKILL_FILENAME
-        try:
-            if action == "create":
-                await self._create(name, _required(content, "content"))
-            elif action == "patch":
-                patched = self._patched(directory, relative_path, old_string, new_string, replace_all)
-                await self._write(name, directory, relative_path, patched)
-            elif action == "edit":
-                await self._write(name, directory, SKILL_FILENAME, _required(content, "content"))
-            elif action == "write_file":
-                await self._write(
-                    name,
-                    directory,
-                    _required(file_path, "file_path"),
-                    _required(file_content, "file_content"),
-                )
-            else:
-                await self._remove(name, directory, _required(file_path, "file_path"))
-        except (SkillEditError, OSError) as exc:
-            return self._refusal(str(exc), *arguments)
-        return self._reply({"success": True, "action": action, "name": name, "file_path": relative_path}, *arguments)
 
     async def _in_thread(self, operation: Callable[[], None], *, name: str, action: str) -> None:
         """Run one file change in a thread that finishes even when a timeout cancels the review.

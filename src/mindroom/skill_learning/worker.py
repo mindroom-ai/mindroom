@@ -12,6 +12,7 @@ from agno.run.agent import RunOutput
 
 from mindroom.agent_storage import create_session_storage, load_agent_session
 from mindroom.background_loop import run_until_stopped
+from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, SKIP_MENTIONS_KEY
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
@@ -188,6 +189,10 @@ class SkillLearningWorker:
             logger.exception("Skill review failed", agent=entry.agent, session_id=entry.session)
         # A timeout cancels the review, not the file writes it started; they land before the state is recorded.
         await progress.settled()
+        if progress.changes:
+            # Like Hermes' best-effort review, one that already changed skills is done; rerunning the same
+            # conversation would repeat its edits and notices.
+            outcome = "reviewed"
         await asyncio.to_thread(self._settle, key, skills_root, before, outcome=outcome)
         changes = progress.changes
         logger.info(
@@ -228,7 +233,12 @@ class SkillLearningWorker:
             body,
             thread_event_id=thread_id,
             latest_thread_event_id=thread_id,
-            extra_content={"msgtype": "m.notice"},
+            # The marker keeps the notice out of later model context, like compaction notices.
+            extra_content={
+                "msgtype": "m.notice",
+                SKILL_REVIEW_NOTICE_CONTENT_KEY: {"changes": changes},
+                SKIP_MENTIONS_KEY: True,
+            },
         )
         try:
             delivered = await send_message_result(client, identity.room_id, content)

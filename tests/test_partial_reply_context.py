@@ -13,6 +13,7 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
+    SKILL_REVIEW_NOTICE_CONTENT_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -443,6 +444,12 @@ class TestUnseenMessagesPartialReplies:
                     sender=agent_id,
                     body="Compacting...",
                     content={COMPACTION_NOTICE_CONTENT_KEY: True},
+                ),
+                _make_visible_message(
+                    event_id="e1b",
+                    sender=agent_id,
+                    body="💾 Skill review: created `deploy-checks`",
+                    content={SKILL_REVIEW_NOTICE_CONTENT_KEY: {"changes": {"deploy-checks": "created"}}},
                 ),
                 _make_visible_message(
                     event_id="e2",
