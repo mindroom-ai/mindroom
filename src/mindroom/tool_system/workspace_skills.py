@@ -21,7 +21,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, ValidationError
 from yaml import YAMLError
 
 from mindroom import yaml_io
-from mindroom.atomic_file import atomic_write_bytes_at
+from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
 
@@ -241,7 +241,12 @@ def _parse_usage(record: object) -> SkillUsage | None:
 
 
 def _write_usage_records(root_fd: int, records: dict[str, object]) -> None:
-    atomic_write_bytes_at(root_fd, _USAGE_FILENAME, json.dumps(records, separators=(",", ":")).encode())
+    atomic_write_bytes_at(
+        root_fd,
+        _USAGE_FILENAME,
+        json.dumps(records, separators=(",", ":")).encode(),
+        file_mode=existing_file_mode(root_fd, _USAGE_FILENAME),
+    )
 
 
 def load_skill_usage(root_fd: int) -> dict[str, SkillUsage]:

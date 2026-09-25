@@ -236,6 +236,10 @@ def write_skill_file(
     _validate_content(relative_path, content)
     with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
         markdown, current = _require_writable(root_fd, skill_fd, name, relative_path, expected_digest)
+        if current is not None and current.content == content:
+            # Like Hermes, an unchanged file is refused, so it never reads as an update or resets the skill's age.
+            msg = f"No change was made because the new {relative_path} is identical to the current one."
+            raise SkillEditError(msg)
         if directory is None:
             # An edit keeps the skill's identity, which may differ from its directory for an adopted skill.
             _validate_markdown(markdown.name, content, new=False)
