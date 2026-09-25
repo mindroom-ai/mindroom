@@ -371,33 +371,3 @@ def _archive_inactive(root_fd: int, *, archive_after_days: int, now: datetime) -
             )
         archived.append(name)
     return archived
-
-
-def skills_fingerprint(skills_root: Path) -> str:
-    """Hash visible skill files so edits by anyone but the learner restart review counting."""
-    digest = hashlib.sha256()
-    if not skills_root.is_dir():
-        return digest.hexdigest()
-    with open_skills_root(skills_root) as root_fd:
-        for name in list_entries(root_fd, directories=True):
-            try:
-                with open_directory_within_root(root_fd, name) as skill_fd:
-                    entries = list(_visible_files(skill_fd))
-            except OSError:
-                # An unreadable user skill still counts as present without blocking every review of the workspace.
-                entries = ["<unreadable>"]
-            for entry in entries:
-                digest.update(f"{name}/{entry}\0".encode())
-    return digest.hexdigest()
-
-
-def _visible_files(directory_fd: int, prefix: str = "") -> Iterator[str]:
-    with os.scandir(directory_fd) as entries:
-        for entry in sorted(entries, key=lambda item: item.name):
-            if entry.name.startswith("."):
-                continue
-            info = entry.stat(follow_symlinks=False)
-            yield f"{prefix}{entry.name}:{info.st_size}:{info.st_mtime_ns}"
-            if entry.is_dir(follow_symlinks=False) and not prefix:
-                with open_directory_within_root(directory_fd, entry.name) as child_fd:
-                    yield from _visible_files(child_fd, f"{entry.name}/")

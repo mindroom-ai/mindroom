@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from functools import partial
@@ -9792,8 +9791,8 @@ async def test_completed_response_counts_toward_a_scoped_skill_review(
     assert entry["agent"] == "general"
     assert entry["identity"]["requester_id"] == "@user:localhost"
     assert (entry["worker_key"] is not None) is private
-    assert entry["has_new_runs"]
-    assert entry["reviewed_through"][1] == -1
+    # The run is persisted before post-response effects, so its one model reply is counted at completion.
+    assert entry["replies"] == 1
 
 
 @pytest.mark.asyncio
@@ -9849,64 +9848,30 @@ async def test_approved_continuation_counts_toward_skill_review_unless_automated
         assert queue is None
         return
     assert queue is not None
-    await queue(True)
-    state = json.loads((runner.deps.runtime_paths.storage_root / "skill_learning_state.json").read_text())
-    assert [entry["has_new_runs"] for entry in state["entries"].values()] == [True]
+    counted: list[dict[str, object]] = []
+    with patch(
+        "mindroom.response_runner.queue_skill_review",
+        side_effect=lambda *_args, **kwargs: counted.append(kwargs),
+    ):
+        await queue("run-1")
+    assert [(call["session_id"], call["run_id"]) for call in counted] == [("session-1", "run-1")]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("succeeded", [True, False])
-async def test_only_a_completed_response_makes_its_skill_review_conversation_due(succeeded: bool) -> None:
-    """Post-response effects mark a completed response; registration already happened when the response started."""
-    calls: list[bool] = []
+async def test_only_a_completed_response_counts_toward_its_skill_review(succeeded: bool) -> None:
+    """Post-response effects count a completed response's run, and nothing for a failed one."""
+    calls: list[str] = []
 
-    async def queue(completed: bool) -> None:
-        calls.append(completed)
+    async def queue(run_id: str) -> None:
+        calls.append(run_id)
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(terminal_status="completed" if succeeded else "error", event_id=None),
-        ResponseOutcome(run_succeeded=succeeded),
+        ResponseOutcome(response_run_id="run-1", run_succeeded=succeeded),
         PostResponseEffectsDeps(logger=MagicMock(), queue_skill_review=queue),
     )
-    assert calls == ([True] if succeeded else [])
-
-
-@pytest.mark.asyncio
-async def test_a_response_registers_its_skill_review_conversation_before_it_runs(tmp_path: Path) -> None:
-    """A response that pauses for approval never reaches post-response effects, so it registers as it starts."""
-    bot = _bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    assert bot.client is not None
-    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
-    coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
-    state_path = coordinator.deps.runtime_paths.storage_root / "skill_learning_state.json"
-    model = SyntheticModel(
-        id="synthetic",
-        min_response_chars=30,
-        max_response_chars=30,
-        chars_per_second=0,
-        tool_call_probability=0,
-    )
-    seen_while_running: list[list[bool]] = []
-    real_ainvoke = model.ainvoke
-
-    async def ainvoke(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        await wait_for_background_tasks(owner=coordinator.deps.runtime)
-        entries = json.loads(state_path.read_text())["entries"].values()
-        seen_while_running.append([entry["has_new_runs"] for entry in entries])
-        return await real_ainvoke(*args, **kwargs)
-
-    model.ainvoke = ainvoke
-    with (
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch_response_runner_module(
-            typing_indicator=_noop_typing,
-            should_use_streaming=AsyncMock(return_value=False),
-        ),
-    ):
-        await coordinator.generate_response(_plain_request(_target()))
-    assert seen_while_running[:1] == [[False]]
-    assert [entry["has_new_runs"] for entry in json.loads(state_path.read_text())["entries"].values()] == [True]
+    assert calls == (["run-1"] if succeeded else [])
 
 
 @pytest.mark.asyncio
@@ -9961,7 +9926,7 @@ async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_a_failing_skill_review_registration_never_fails_the_reply(tmp_path: Path) -> None:
+async def test_a_failing_skill_review_count_never_fails_the_reply(tmp_path: Path) -> None:
     """Skill learning is background bookkeeping, so a broken queue file must not cost the user their answer."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
@@ -9986,34 +9951,3 @@ async def test_a_failing_skill_review_registration_never_fails_the_reply(tmp_pat
         await coordinator.generate_response(_plain_request(_target()))
         await wait_for_background_tasks(owner=coordinator.deps.runtime)
     bot.client.room_send.assert_awaited()
-
-
-@pytest.mark.asyncio
-async def test_shutdown_waits_for_a_pending_skill_review_registration(tmp_path: Path) -> None:
-    """Registration runs as a runtime background task, which the bot's shutdown drains."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
-    registered: list[bool] = []
-
-    def slow_queue(*_args: object, completed: bool, **_kwargs: object) -> None:
-        time.sleep(0.3)
-        registered.append(completed)
-
-    with patch("mindroom.response_runner.queue_skill_review", slow_queue):
-        runner._register_skill_review(
-            runner._skill_review(agent_name="general", session_id="session-1", execution_identity=None),
-        )
-        await wait_for_background_tasks(owner=runner.deps.runtime)
-    assert registered == [False]
-
-
-@pytest.mark.asyncio
-async def test_first_skill_review_count_starts_when_the_response_began(tmp_path: Path) -> None:
-    """Every run of the first response counts, including a retry after a discarded empty attempt."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
-    with patch("mindroom.response_runner.time.time", return_value=1_000.5):
-        queue = runner._skill_review(agent_name="general", session_id="session-1", execution_identity=None)
-    await queue(True)
-    state = json.loads((runner.deps.runtime_paths.storage_root / "skill_learning_state.json").read_text())
-    assert [entry["reviewed_through"] for entry in state["entries"].values()] == [[1_000, -1]]

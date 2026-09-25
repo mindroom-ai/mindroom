@@ -166,8 +166,8 @@ async def test_final_approval_links_the_delivered_attempt(
 
 
 @pytest.mark.asyncio
-async def test_each_approved_continuation_refreshes_its_skill_review_conversation(tmp_path: Path) -> None:
-    """Every approved continuation registers its conversation again, which keeps it fresh across chained approvals."""
+async def test_a_completed_approved_continuation_counts_its_run_once(tmp_path: Path) -> None:
+    """The continuation completes the paused run, which counts once, with the replies from before the pause."""
     runner = await _runner_with_source(tmp_path)
     runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
     await _seed_ready_continuation(runner)
@@ -177,10 +177,10 @@ async def test_each_approved_continuation_refreshes_its_skill_review_conversatio
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    registrations: list[bool] = []
+    counted: list[str] = []
 
-    def record(*_args: object, completed: bool, **_kwargs: object) -> None:
-        registrations.append(completed)
+    def record(*_args: object, run_id: str, **_kwargs: object) -> None:
+        counted.append(run_id)
 
     completed = CompletedApprovalRun(
         response_text="Finished after refreshing the tools.",
@@ -192,7 +192,7 @@ async def test_each_approved_continuation_refreshes_its_skill_review_conversatio
     ):
         await runner._run_claimed_approval_lifecycle(claimed, target=target)
         assert await wait_for_background_tasks(5, owner=runner.deps.runtime)
-    assert sorted(registrations) == [False, True]
+    assert counted == ["continued-run"]
 
 
 async def _drain_tasks(*tasks: asyncio.Task[object] | None) -> None:

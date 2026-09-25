@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import time
 from contextlib import asynccontextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -1241,7 +1240,7 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         queue_memory_persistence: Callable[[], None] | None = None,
-        queue_skill_review: Callable[[bool], Awaitable[None]] | None = None,
+        queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build post-response effect deps bound to one request's room."""
@@ -1723,7 +1722,6 @@ class ResponseRunner:
         target: MessageTarget,
     ) -> FinalDeliveryOutcome:
         """Run one claimed pause through the normal stoppable response lifecycle."""
-        self._register_skill_review(self._approval_skill_review(claimed))
         request = self._approval_response_request(claimed, target=target)
         await self._refresh_mid_turn_context_for_approval(request)
         progress = _DeliveryProgress(tracked_event_id=claimed.response_event_id)
@@ -2101,11 +2099,13 @@ class ResponseRunner:
     def _approval_skill_review(
         self,
         continuation: ApprovalContinuation,
-    ) -> Callable[[bool], Coroutine[Any, Any, None]] | None:
+    ) -> Callable[[str], Coroutine[Any, Any, None]] | None:
         """Return the normal skill-review handoff for an agent continuation."""
         if (
             continuation.entity_kind != "agent"
             or not _requested_by_a_person(restore_legacy_approval_origin(continuation), continuation.request_body)
+            # Checked before the stored identity is parsed below, so continuations of agents that do not learn
+            # never depend on that payload.
             or not self._learns_skills(continuation.entity_name)
         ):
             return None
@@ -2118,38 +2118,18 @@ class ResponseRunner:
             ),
         )
 
-    def _register_skill_review(
-        self,
-        queue: Callable[[bool], Coroutine[Any, Any, None]] | None,
-    ) -> Callable[[bool], Coroutine[Any, Any, None]] | None:
-        """Register the conversation of a starting response or continuation in the background, and return ``queue``.
-
-        A response that pauses for approval never reaches post-response effects, so registration happens when it
-        starts and again whenever an approval continues it, keeping the conversation fresh across chained
-        approvals. It runs in the background so it never delays or fails the reply. A first response later calls
-        the returned handoff on completion, with the same start time.
-        """
-        if queue is not None:
-            create_background_task(queue(False), name="skill_learning_register", owner=self.deps.runtime)
-        return queue
-
     def _skill_review(
         self,
         *,
         agent_name: str,
         session_id: str,
         execution_identity: ToolExecutionIdentity | None,
-    ) -> Callable[[bool], Coroutine[Any, Any, None]] | None:
-        """Build the handoff that records a response toward a background skill review, or None without learning.
-
-        Calling it with ``False`` when the response starts registers the conversation, so its first count covers
-        every run of that response, including one that pauses for approval; ``True`` marks a completed response.
-        """
+    ) -> Callable[[str], Coroutine[Any, Any, None]] | None:
+        """Build the handoff that adds a completed response's run to its skill review count, or None without learning."""
         if not self._learns_skills(agent_name):
             return None
-        started_at = int(time.time())
 
-        async def queue(completed: bool) -> None:
+        async def queue(run_id: str) -> None:
             await asyncio.to_thread(
                 queue_skill_review,
                 self.deps.runtime.config,
@@ -2157,8 +2137,7 @@ class ResponseRunner:
                 agent_name=agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,
-                started_at=started_at,
-                completed=completed,
+                run_id=run_id,
             )
 
         return queue
@@ -5557,12 +5536,10 @@ class ResponseRunner:
             user_id=request.user_id,
         )
         queue_skill_review = (
-            self._register_skill_review(
-                self._skill_review(
-                    agent_name=self.deps.agent_name,
-                    session_id=session_id,
-                    execution_identity=execution_identity,
-                ),
+            self._skill_review(
+                agent_name=self.deps.agent_name,
+                session_id=session_id,
+                execution_identity=execution_identity,
             )
             if _requested_by_a_person(request.response_envelope.origin, request.response_envelope.body)
             else None
