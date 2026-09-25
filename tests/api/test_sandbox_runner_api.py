@@ -2634,6 +2634,9 @@ def test_worker_subprocess_env_preserves_parent_path(
     env = sandbox_exec_module.worker_subprocess_env(paths)
 
     assert env["PATH"] == f"{paths.venv_dir}/bin:/usr/local/bin:/usr/bin:/bin"
+    # Temp files go to the worker's disk-backed state mount, not the small /tmp tmpfs.
+    assert env["TMPDIR"] == str(paths.cache_dir / "tmp")
+    assert Path(env["TMPDIR"]).is_relative_to(paths.root)
     assert "GOOGLE_CLOUD_PROJECT" not in env
     assert "GOOGLE_CLOUD_LOCATION" not in env
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
@@ -5477,6 +5480,7 @@ def test_workspace_home_contract_overrides_request_env_for_platform_and_worker_n
             "PIP_CACHE_DIR": "/request-pip-cache",
             "UV_CACHE_DIR": "/request-uv-cache",
             "PYTHONPYCACHEPREFIX": "/request-pycache",
+            "TMPDIR": "/request-tmp",
             "VIRTUAL_ENV": "/request-venv",
         },
     )
@@ -5503,6 +5507,7 @@ def test_workspace_home_contract_overrides_request_env_for_platform_and_worker_n
     assert execution_env["PIP_CACHE_DIR"] == str(worker_paths.cache_dir / "pip")
     assert execution_env["UV_CACHE_DIR"] == str(worker_paths.cache_dir / "uv")
     assert execution_env["PYTHONPYCACHEPREFIX"] == str(worker_paths.cache_dir / "pycache")
+    assert execution_env["TMPDIR"] == str(worker_paths.cache_dir / "tmp")
     assert execution_env["VIRTUAL_ENV"] == str(worker_paths.venv_dir)
 
 
