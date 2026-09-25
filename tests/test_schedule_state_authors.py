@@ -38,7 +38,6 @@ TASK_STATE_PATH = "/_matrix/client/v3/rooms/%21test%3Aserver/state/com.mindroom.
 @pytest.fixture(autouse=True)
 def _reset_scheduler_state() -> Generator[None, None, None]:
     scheduling.clear_deferred_overdue_tasks()
-    scheduling._warn_ignored_task_state.cache_clear()
     yield
     scheduling.clear_deferred_overdue_tasks()
 
@@ -137,19 +136,6 @@ async def test_task_written_by_managed_bot_account_fires(tmp_path: Path, entity_
 
 
 @pytest.mark.asyncio
-async def test_creatorless_task_written_by_router_runs(tmp_path: Path) -> None:
-    """Legacy task state without a creator still runs when MindRoom wrote it."""
-    runtime_paths = schedule_runtime_paths(tmp_path)
-    workflow = _workflow(created_by=None)
-    client = _room_with_task(_pending_content(workflow), sender=SCHEDULE_WRITER_ID)
-
-    execute = await _run_once(client, workflow, runtime_paths)
-
-    execute.assert_awaited_once()
-    assert execute.await_args.args[1].created_by is None
-
-
-@pytest.mark.asyncio
 async def test_creatorless_task_written_by_human_is_ignored_without_cancellation(tmp_path: Path) -> None:
     """Human-written creatorless state is skipped on restore and in a running poll, never canceled."""
     runtime_paths = schedule_runtime_paths(tmp_path)
@@ -235,38 +221,22 @@ async def test_task_polls_read_one_state_event_and_never_full_room_state(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_ignored_state_is_logged_once_per_state_event(tmp_path: Path) -> None:
-    """Periodic room-state scans must not repeat the warning for the same ignored event."""
+@pytest.mark.parametrize(
+    ("body", "detail"),
+    [
+        (_pending_content(_workflow(created_by="@alice:server")), "no HTTP status"),
+        ({"errcode": "M_FORBIDDEN", "error": "You are not in this room"}, "M_FORBIDDEN"),
+    ],
+)
+async def test_non_event_task_state_response_is_a_read_error(
+    tmp_path: Path,
+    body: dict[str, Any],
+    detail: str,
+) -> None:
+    """Content from a server that ignores format=event, or an error body, is never treated as a whole event."""
     runtime_paths = schedule_runtime_paths(tmp_path)
-    content = _pending_content(_workflow(created_by="@victim:server"))
-    client = _room_with_task(content, sender=HUMAN_ID)
-    rewritten = scheduled_task_state_event(TASK_ID, content, room_id=ROOM_ID, sender=HUMAN_ID)
-    rewritten["event_id"] = "$rewritten"
-
-    with capture_logs() as logs:
-        for _ in range(3):
-            assert await scheduling.get_pending_schedule_thread_ids_for_room(client, ROOM_ID, runtime_paths) == set()
-        client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict([rewritten], room_id=ROOM_ID)
-        assert await scheduling.get_pending_schedule_thread_ids_for_room(client, ROOM_ID, runtime_paths) == set()
-
-    warned_event_ids = [
-        entry["event_id"] for entry in logs if entry["event"] == "scheduled_task_state_ignored_unmanaged_author"
-    ]
-    assert warned_event_ids == [f"$state_{TASK_ID}", "$rewritten"]
-
-
-@pytest.mark.asyncio
-async def test_content_only_task_state_response_is_a_read_error(tmp_path: Path) -> None:
-    """A homeserver that ignores format=event must not have its content treated as a whole event."""
-    runtime_paths = schedule_runtime_paths(tmp_path)
-    content = _pending_content(_workflow(created_by="@alice:server"))
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
-    client._send.return_value = nio.RoomGetStateEventResponse(
-        content,
-        "com.mindroom.scheduled.task",
-        TASK_ID,
-        ROOM_ID,
-    )
+    client._send.return_value = nio.RoomGetStateEventResponse(body, "com.mindroom.scheduled.task", TASK_ID, ROOM_ID)
 
-    with pytest.raises(RuntimeError, match="was not returned as a full state event"):
+    with pytest.raises(RuntimeError, match=rf"was not returned as a full state event \({detail}\)"):
         await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)

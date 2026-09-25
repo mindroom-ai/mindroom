@@ -45,6 +45,7 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(
     config = AsyncMock()
 
     recent_past_once = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) - timedelta(minutes=10),
         message="Past",
@@ -53,6 +54,7 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(
         thread_id="$t",
     )
     cron = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="cron",
         cron_schedule=None,  # invalid; should be skipped
         message="Cron",
@@ -62,6 +64,7 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(
     )
 
     valid_cron = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="cron",
         cron_schedule=None,
         message="Cron2",
@@ -101,6 +104,7 @@ async def test_restore_marks_ancient_missed_task_as_failed(tmp_path: Path) -> No
     config = AsyncMock()
 
     ancient_once = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) - timedelta(seconds=_MISSED_TASK_MAX_AGE_SECONDS + 3600),
         message="Ancient",
@@ -148,6 +152,7 @@ async def test_restore_marks_ancient_missed_task_failed_via_admin_when_active_wr
     matrix_admin.put_room_state = AsyncMock(return_value=True)
 
     ancient_once = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) - timedelta(seconds=_MISSED_TASK_MAX_AGE_SECONDS + 3600),
         message="Ancient",
@@ -193,6 +198,7 @@ async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch, 
     config = AsyncMock()
 
     future_once = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(hours=2),
         message="Future",
@@ -227,6 +233,7 @@ async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.
     client = AsyncMock()
     config = AsyncMock()
     workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=10),
         message="Future",

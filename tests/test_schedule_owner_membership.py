@@ -129,12 +129,12 @@ async def test_departed_owner_cancels_persisted_schedule(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("created_by", ["@alice:server", "@bob:server", None])
-async def test_joined_or_unowned_schedule_stays_pending(
-    created_by: str | None,
+@pytest.mark.parametrize("created_by", ["@alice:server", "@bob:server"])
+async def test_joined_schedule_stays_pending(
+    created_by: str,
     owner_membership_runtime_paths: RuntimePaths,
 ) -> None:
-    """Other owners and existing schedules without ownership must remain usable."""
+    """Schedules whose owner is joined must remain usable."""
     client, _, state = _owner_schedule([{"membership": "join"}], created_by=created_by)
 
     task = await scheduling._reconcile_runnable_task_retrying(
@@ -148,8 +148,24 @@ async def test_joined_or_unowned_schedule_stays_pending(
     assert task is not None
     assert state["status"] == "pending"
     client.room_put_state.assert_not_awaited()
-    if created_by is None:
-        assert client.room_get_state_event.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_creatorless_schedule_is_invalid_and_left_untouched(owner_membership_runtime_paths: RuntimePaths) -> None:
+    """A schedule without a recorded creator has no requester to run as, so it is invalid state that is never rewritten."""
+    client, _, state = _owner_schedule([{"membership": "join"}], created_by=None)
+
+    with pytest.raises(RuntimeError, match="has invalid state"):
+        await scheduling._reconcile_runnable_task_retrying(
+            client,
+            "!test:server",
+            "owner_task",
+            config=Config(),
+            runtime_paths=owner_membership_runtime_paths,
+        )
+
+    assert state["status"] == "pending"
+    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio

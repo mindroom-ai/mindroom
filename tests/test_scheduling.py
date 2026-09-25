@@ -54,7 +54,12 @@ from tests.conftest import (
     serve_conversation_reader,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
-from tests.scheduling_helpers import SCHEDULE_WRITER_ID, schedule_runtime_paths, serve_task_state_events
+from tests.scheduling_helpers import (
+    SCHEDULE_WRITER_ID,
+    joined_member_state,
+    schedule_runtime_paths,
+    serve_task_state_events,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -337,6 +342,7 @@ async def test_restore_scheduled_tasks_queues_overdue_one_time_tasks(tmp_path: P
     """Overdue one-time tasks should wait for sync instead of firing during restore."""
     client = AsyncMock()
     overdue_workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) - timedelta(minutes=5),
         message="Send the overdue reminder",
@@ -384,6 +390,7 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync(tmp_p
     client = AsyncMock()
     config = MagicMock()
     overdue_workflow_1 = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) - timedelta(minutes=10),
         message="First overdue reminder",
@@ -392,6 +399,7 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync(tmp_p
         room_id="!test:server",
     )
     overdue_workflow_2 = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) - timedelta(minutes=3),
         message="Second overdue reminder",
@@ -464,6 +472,7 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure(tm
     client = AsyncMock()
     config = MagicMock()
     overdue_workflow_1 = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) - timedelta(minutes=10),
         message="First overdue reminder",
@@ -472,6 +481,7 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure(tm
         room_id="!test:server",
     )
     overdue_workflow_2 = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) - timedelta(minutes=3),
         message="Second overdue reminder",
@@ -545,6 +555,7 @@ async def test_restore_scheduled_tasks_defers_cron_until_sync_ready(tmp_path: Pa
     """Recurring catch-up must wait for Matrix sync readiness."""
     client = AsyncMock()
     cron_workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="cron",
         cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
         message="Run the daily report",
@@ -590,6 +601,7 @@ async def test_restore_scheduled_tasks_does_not_queue_when_nothing_is_overdue(tm
     """Future one-time tasks should still start normally and leave no deferred queue."""
     client = AsyncMock()
     future_workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=15),
         message="Future reminder",
@@ -636,6 +648,7 @@ async def test_restore_scheduled_tasks_uses_canonical_state_parser_for_mixed_rec
     """Restore should skip non-pending and malformed records while restoring valid pending records."""
     client = AsyncMock()
     cron_workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="cron",
         cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
         message="Run the daily report",
@@ -703,6 +716,7 @@ async def test_list_scheduled_tasks_real_implementation(tmp_path: Path) -> None:
 
     # Create workflows
     workflow1 = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
         message="Test message 1",
@@ -712,6 +726,7 @@ async def test_list_scheduled_tasks_real_implementation(tmp_path: Path) -> None:
     )
 
     workflow2 = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=10),
         message="Test message 2",
@@ -721,6 +736,7 @@ async def test_list_scheduled_tasks_real_implementation(tmp_path: Path) -> None:
     )
 
     workflow3 = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(hours=1),
         message="Test message 3",
@@ -730,6 +746,7 @@ async def test_list_scheduled_tasks_real_implementation(tmp_path: Path) -> None:
     )
 
     workflow4 = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(hours=2),
         message="Room-level current-scope task",
@@ -739,6 +756,7 @@ async def test_list_scheduled_tasks_real_implementation(tmp_path: Path) -> None:
     )
 
     workflow5 = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(hours=3),
         message="Future room-level thread root",
@@ -896,6 +914,7 @@ async def test_list_scheduled_tasks_tasks_in_other_threads(tmp_path: Path) -> No
     client = AsyncMock()
 
     workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
         message="Test message",
@@ -962,6 +981,7 @@ async def test_list_scheduled_tasks_invalid_task_data(tmp_path: Path) -> None:
     client = AsyncMock()
 
     valid_workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
         message="Valid task",
@@ -1032,8 +1052,10 @@ async def test_list_scheduled_tasks_invalid_task_data(tmp_path: Path) -> None:
 async def test_run_once_task_stops_when_cancelled_via_matrix_state() -> None:
     """One-time tasks should stop without executing once state is cancelled."""
     client = AsyncMock()
-    config = AsyncMock()
+    client.room_get_state_event.side_effect = joined_member_state
+    config = Config()
     workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=10),
         message="Original message",
@@ -1075,8 +1097,10 @@ async def test_run_once_task_stops_when_cancelled_via_matrix_state() -> None:
 async def test_run_once_task_executes_latest_state_workflow() -> None:
     """One-time tasks should execute using the latest persisted workflow data."""
     client = AsyncMock()
-    config = AsyncMock()
+    client.room_get_state_event.side_effect = joined_member_state
+    config = Config()
     initial_workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) - timedelta(seconds=1),
         message="Old message",
@@ -1085,6 +1109,7 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
         thread_id="$thread123",
     )
     updated_workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) - timedelta(seconds=1),
         message="Updated message",
@@ -1123,8 +1148,9 @@ async def test_run_once_task_retries_transient_state_read_failure(tmp_path: Path
     """An unreadable checkpoint must keep the in-memory schedule retry-owned."""
     client = AsyncMock()
     serve_task_state_events(client)
-    config = AsyncMock()
+    config = Config()
     workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) - timedelta(seconds=1),
         message="Run after retry",
@@ -1142,11 +1168,20 @@ async def test_run_once_task_retries_transient_state_read_failure(tmp_path: Path
         state_key="task_once_retry",
         room_id="!test:server",
     )
-    client.room_get_state_event.side_effect = [
-        nio.RoomGetStateEventError(message="rate limited", status_code="M_LIMIT_EXCEEDED"),
-        state_response,
-        state_response,
-    ]
+    task_reads = iter(
+        [
+            nio.RoomGetStateEventError(message="rate limited", status_code="M_LIMIT_EXCEEDED"),
+            state_response,
+            state_response,
+        ],
+    )
+
+    async def read_state(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == "m.room.member":
+            return joined_member_state(room_id, event_type, state_key)
+        return next(task_reads)
+
+    client.room_get_state_event.side_effect = read_state
     client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
         {"event_id": "$completed"},
         room_id="!test:server",
@@ -1173,7 +1208,7 @@ async def test_run_once_task_retries_transient_state_read_failure(tmp_path: Path
         )
 
     sleep.assert_awaited_once()
-    assert client.room_get_state_event.await_count == 3
+    assert client._send.await_count == 3
     execute.assert_awaited_once()
     failure_notice.assert_not_awaited()
 
@@ -1182,9 +1217,11 @@ async def test_run_once_task_retries_transient_state_read_failure(tmp_path: Path
 async def test_run_once_task_marks_completed_after_success() -> None:
     """One-time tasks should overwrite pending state with completed after firing."""
     client = AsyncMock()
+    client.room_get_state_event.side_effect = joined_member_state
     client.room_put_state = AsyncMock()
-    config = AsyncMock()
+    config = Config()
     workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) - timedelta(seconds=1),
         message="Run once",
@@ -1228,9 +1265,11 @@ async def test_run_once_task_marks_completed_after_success() -> None:
 async def test_run_once_task_marks_failed_after_execution_failure() -> None:
     """One-time tasks should overwrite pending state with failed when firing fails."""
     client = AsyncMock()
+    client.room_get_state_event.side_effect = joined_member_state
     client.room_put_state = AsyncMock()
-    config = AsyncMock()
+    config = Config()
     workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) - timedelta(seconds=1),
         message="Run once",
@@ -1271,11 +1310,13 @@ async def test_run_once_task_marks_failed_after_execution_failure() -> None:
 async def test_run_cron_task_executes_latest_state_workflow(tmp_path: Path) -> None:
     """Recurring tasks should execute using the latest persisted workflow data."""
     client = AsyncMock()
+    client.room_get_state_event.side_effect = joined_member_state
     config = Config()
     client.homeserver = "https://example.org"
     client.user_id = "@router:example.org"
     client.device_id = "TEST_DEVICE"
     initial_workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="cron",
         cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
         message="Old recurring message",
@@ -1284,6 +1325,7 @@ async def test_run_cron_task_executes_latest_state_workflow(tmp_path: Path) -> N
         thread_id="$thread123",
     )
     updated_workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="cron",
         cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
         message="Updated recurring message",
@@ -1328,12 +1370,14 @@ async def test_run_cron_task_executes_latest_state_workflow(tmp_path: Path) -> N
 async def test_run_cron_task_keeps_pending_state_after_success(tmp_path: Path) -> None:
     """Recurring tasks should keep their pending state after firing."""
     client = AsyncMock()
+    client.room_get_state_event.side_effect = joined_member_state
     client.room_put_state = AsyncMock()
     config = Config()
     client.homeserver = "https://example.org"
     client.user_id = "@router:example.org"
     client.device_id = "TEST_DEVICE"
     workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="cron",
         cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
         message="Recurring message",
@@ -1771,6 +1815,7 @@ async def test_get_pending_schedule_thread_ids_excludes_new_threads_and_non_pend
         "message": "Continue work",
         "description": "Continue work",
         "room_id": "!test:server",
+        "created_by": "@user:server",
     }
     response = nio.RoomGetStateResponse.from_dict(
         [
@@ -1851,6 +1896,7 @@ async def test_edit_scheduled_task_reuses_existing_thread(tmp_path: Path) -> Non
     room = MagicMock()
     config = MagicMock()
     workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
         message="Initial message",
@@ -1989,6 +2035,7 @@ async def test_edit_scheduled_task_forwards_history_limit_override(tmp_path: Pat
     client = AsyncMock()
     serve_task_state_events(client)
     workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
         message="Initial message",
@@ -2029,6 +2076,7 @@ async def test_edit_scheduled_task_preserves_new_thread_mode(tmp_path: Path) -> 
     room = MagicMock()
     config = MagicMock()
     workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
         message="Initial message",
@@ -2155,6 +2203,7 @@ async def test_edit_scheduled_task_rejects_non_pending(tmp_path: Path) -> None:
     serve_task_state_events(client)
     room = MagicMock()
     workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
         message="original task",
@@ -2192,6 +2241,7 @@ async def test_save_edited_scheduled_task_preserves_created_at(tmp_path: Path) -
     )
     created_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
     existing_workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime(2026, 2, 1, 10, 0, tzinfo=UTC),
         message="original message",
@@ -2200,6 +2250,7 @@ async def test_save_edited_scheduled_task_preserves_created_at(tmp_path: Path) -
         room_id="!test:server",
     )
     updated_workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime(2026, 2, 1, 11, 0, tzinfo=UTC),
         message="updated message",
@@ -2256,6 +2307,7 @@ async def test_save_edited_scheduled_task_is_state_only(tmp_path: Path) -> None:
         status="pending",
         created_at=created_at,
         workflow=ScheduledWorkflow(
+            created_by="@user:server",
             schedule_type="once",
             execute_at=datetime(2026, 2, 1, 10, 0, tzinfo=UTC),
             message="original message",
@@ -2265,6 +2317,7 @@ async def test_save_edited_scheduled_task_is_state_only(tmp_path: Path) -> None:
         ),
     )
     updated_workflow = ScheduledWorkflow(
+        created_by="@user:server",
         schedule_type="once",
         execute_at=datetime(2026, 2, 1, 11, 0, tzinfo=UTC),
         message="updated message",

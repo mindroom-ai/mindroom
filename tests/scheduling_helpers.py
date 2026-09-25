@@ -65,6 +65,12 @@ def scheduled_task_state_event(
     }
 
 
+def joined_member_state(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:
+    """Report every requested member as joined, for runners that check creator membership."""
+    assert event_type == "m.room.member"
+    return nio.RoomGetStateEventResponse({"membership": "join"}, event_type, state_key, room_id)
+
+
 def serve_task_state_events(client: Any, *, sender: str = SCHEDULE_WRITER_ID) -> AsyncMock:  # noqa: ANN401
     """Answer the scheduler's ``format=event`` task reads from the client's ``room_get_state_event`` mock.
 

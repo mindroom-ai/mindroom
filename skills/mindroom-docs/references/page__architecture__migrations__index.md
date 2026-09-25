@@ -156,7 +156,6 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob scrub and double-JSON decoding; other Agno readers remain dependency-owned. |
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
 | S21 | Isolated | [`legacy_attachments.py`][legacy-attachments] adopts in-place attachment records into verified retained copies; [`attachments.py`][attachments] keeps copying, record publication, and retention cleanup. |
-| S22 | Tiny retained default | [`scheduling.py`][scheduling] runs workflows without `created_by` without a creator-membership check, but only after confirming that a MindRoom bot account wrote the state. |
 
 ## Configuration and credentials
 

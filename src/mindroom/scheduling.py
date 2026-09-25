@@ -9,7 +9,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from functools import lru_cache, partial
+from functools import partial
 from typing import TYPE_CHECKING, Literal, NamedTuple
 from weakref import WeakValueDictionary
 from zoneinfo import ZoneInfo
@@ -106,20 +106,14 @@ def _runtime_authored_task_content(
         return None
     if sender in runtime_account_ids:
         return content
-    _warn_ignored_task_state(room_id, str(event.get("state_key")), str(event.get("event_id")), sender)
-    return None
-
-
-@lru_cache(maxsize=1024)
-def _warn_ignored_task_state(room_id: str, task_id: str, event_id: str, sender: str) -> None:
-    """Warn once per ignored state event; periodic room-state scans would otherwise repeat it."""
     logger.warning(
         "scheduled_task_state_ignored_unmanaged_author",
         room_id=room_id,
-        task_id=task_id,
-        event_id=event_id,
+        task_id=event.get("state_key"),
+        event_id=event.get("event_id"),
         sender=sender,
     )
+    return None
 
 
 class _AgentValidationResult(NamedTuple):
@@ -409,6 +403,8 @@ def _parse_scheduled_task_record(
             logger.exception("Failed to parse scheduled task workflow", room_id=room_id, task_id=task_id)
             return None
     else:
+        return None
+    if not workflow.created_by:
         return None
 
     created_at = _parse_datetime(content.get("created_at"))
@@ -734,7 +730,9 @@ async def _read_scheduled_task_state(
         raise _ScheduledTaskStateReadError(msg)
     event = response.content
     if not isinstance(event.get("sender"), str) or not isinstance(event.get("content"), dict):
-        msg = f"Scheduled task {task_id!r} in room {room_id!r} was not returned as a full state event"
+        transport = response.transport_response
+        error = event.get("errcode") or (f"HTTP {transport.status}" if transport is not None else "no HTTP status")
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} was not returned as a full state event ({error})"
         raise _ScheduledTaskStateReadError(msg)
     return _runtime_authored_task_content(room_id, event, persisted_bot_user_ids(runtime_paths))
 
@@ -785,13 +783,7 @@ async def _scheduled_task_creator_is_joined(
 ) -> bool:
     """Check live membership for the creator or a permitted human alias."""
     creator = task.workflow.created_by
-    # LEGACY_COMPAT: Scheduled workflows without a recorded creator.
-    # Legacy format: Workflow JSON omits created_by in scheduled-task state written by a MindRoom-managed bot account.
-    # Last legacy release: none; schedule_task has recorded created_by since workflow schedules predate v0.1.0, so this is unversioned direct state input.
-    # Handling: Runs without a membership check or ORIGINAL_SENDER; state from any other sender is ignored before this check.
-    # Coverage: tests/test_schedule_state_authors.py::test_creatorless_task_written_by_router_runs, tests/test_schedule_state_authors.py::test_creatorless_task_written_by_human_is_ignored_without_cancellation.
-    if not creator:
-        return True
+    assert creator is not None
     requester_ids = equivalent_requester_ids(creator, config, runtime_paths)
     membership_unknown = False
     for requester_id in sorted(requester_ids, key=lambda user_id: (user_id != creator, user_id)):
