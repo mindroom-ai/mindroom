@@ -108,7 +108,10 @@ def _request_required_desktop_permissions() -> None:
         "(Cmd-Q; closing its windows is not enough), reopen it, then run `mindroom desktop run` again."
     )
     if os.environ.get("TMUX"):
-        msg += " Inside tmux, macOS checks the tmux server instead: run `tmux kill-server` or start the bridge outside tmux."
+        msg += (
+            " This command runs inside tmux, whose existing server does not pick up the new grant: after reopening "
+            "the terminal app, also run `tmux kill-server`, or start the bridge outside tmux."
+        )
     raise DesktopProviderError(msg)
 
 
