@@ -16,7 +16,12 @@ from uuid import uuid4
 import pytest
 
 from mindroom.desktop.command_journal import DesktopCommandJournal
-from mindroom.desktop.native_config import NativeDesktopConfig, load_native_config, native_config_path
+from mindroom.desktop.native_config import (
+    NativeDesktopConfig,
+    load_native_config,
+    native_config_path,
+    save_native_config,
+)
 from mindroom.desktop.native_host import (
     NativeDesktopHost,
     NativeHostDependencies,
@@ -218,6 +223,24 @@ def test_host_configure_start_control_and_shutdown(tmp_path: Path) -> None:
     assert runtime.revoked == 1
     assert runtime.reset == 1
     assert runtime.stopped == 1
+
+
+@pytest.mark.asyncio
+async def test_external_setup_does_not_change_running_authority(tmp_path: Path) -> None:
+    runtime = FakeRuntime()
+    host = NativeDesktopHost(
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None),
+        helper_version="test",
+        dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
+    )
+    await host.handle(_request("configure", expected_revision=0, config=_config_payload()))
+    await host.handle(_request("start"))
+    path = native_config_path(tmp_path)
+    original = load_native_config(path)
+    save_native_config(path, original.with_allowed_apps(["com.example.Other"]), expected_revision=original.revision)
+    assert host.status()["config"]["allowed_app_ids"] == ["com.example.Editor"]
+    await host.handle(_request("stop"))
+    assert host.status()["config"]["allowed_app_ids"] == ["com.example.Other"]
 
 
 def test_host_status_returns_persisted_browser_settings(tmp_path: Path) -> None:

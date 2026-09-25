@@ -445,6 +445,10 @@ def _setup_args(cloud: _CloudSide, local: _LocalComputer, *, code: str, controll
         CONTROLLER_DEVICE,
         "--controller-ed25519",
         cloud.controller_ed25519,
+        "--allow-agent",
+        AGENT,
+        "--allow-app",
+        "com.example.Editor",
         "--cloudflare-access",
         "--storage-path",
         str(local.storage_path),
@@ -532,26 +536,10 @@ def test_desktop_setup_reports_unreachable_controller(tmp_path: Path) -> None:
 
 
 @contextmanager
-def _running_bridge(cloud: _CloudSide, local: _LocalComputer) -> Iterator[list[str]]:
+def _running_bridge(local: _LocalComputer) -> Iterator[list[str]]:
     """Run ``mindroom desktop run`` observe-only, then stop it with Ctrl-C."""
     process = subprocess.Popen(
-        local.command(
-            "run",
-            "--controller-user-id",
-            CONTROLLER,
-            "--controller-device-id",
-            CONTROLLER_DEVICE,
-            "--controller-ed25519",
-            cloud.controller_ed25519,
-            "--allow-requester",
-            REQUESTER,
-            "--allow-agent",
-            AGENT,
-            "--allow-app",
-            "com.example.Editor",
-            "--storage-path",
-            str(local.storage_path),
-        ),
+        local.command("run", "--storage-path", str(local.storage_path)),
         env=local.env(status_only_provider=True),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -616,7 +604,7 @@ def test_desktop_bridge_answers_controller_through_cloudflare_access(tmp_path: P
             # Below the 30 s cloud-loop wait so the router's own timeout message is reported.
             return await router.request(target, command, timeout_seconds=20)
 
-        with _running_bridge(cloud, local) as output:
+        with _running_bridge(local) as output:
             response = cloud.run(request_status())
         homeserver = cloud.homeserver
 

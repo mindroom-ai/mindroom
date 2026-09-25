@@ -88,6 +88,7 @@ def _setup_response(scope: DesktopCommandScope) -> str:
         f"--controller-user-id {shlex.quote(controller.user_id)}",
         f"--controller-device-id {shlex.quote(controller.device_id)}",
         f"--controller-ed25519 {shlex.quote(controller.ed25519)}",
+        f"--allow-agent {shlex.quote(scope.agent_name)}",
     ]
     if cloudflare_access:
         setup_parts.append("--cloudflare-access")
@@ -105,10 +106,10 @@ def _setup_response(scope: DesktopCommandScope) -> str:
     )
     return (
         "🔐 **Desktop pairing started**\n\n"
-        "In the MindRoom macOS app, open Desktop Control and import this setup data. "
+        "In the MindRoom macOS app, open Computer access and import this setup data. "
         "Confirm the displayed controller and choose the applications it may use:\n\n"
         f"```json\n{json.dumps(descriptor.to_content(), indent=2)}\n```\n\n"
-        "For terminal setup, run this command on your computer. It logs in if needed, then claims the pairing:\n\n"
+        "For terminal setup, run this command on your computer. It logs in if needed, claims the pairing, and saves setup for both the terminal and app:\n\n"
         f"```bash\n{setup_command}\n```\n\n"
         "Then return here and run the exact `!desktop confirm ...` command it prints.\n\n"
         "Current Desktop target remains unchanged until confirmation."
@@ -169,7 +170,9 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
     complete_desktop_pairing(scope.runtime_paths, token=token)
     return (
         f"✅ Desktop paired for you and agent `{scope.agent_name}`.\n\n"
-        "Start the local bridge with:\n\n"
+        "Choose and save apps in MindRoom > Computer access, then select Start Observe Only or run "
+        "`mindroom desktop run`. Both use the same saved setup. Stop one before starting the other.\n\n"
+        "To override app access for one terminal run, use:\n\n"
         f"```bash\n{run_command}\n```\n\n"
         "Replace `APPLICATION_ID` with one exact local application ID and repeat `--allow-app` as needed. "
         "Add `--allow-control` for a short local control lease; otherwise the bridge is observe-only. "
