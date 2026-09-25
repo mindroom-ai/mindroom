@@ -46,7 +46,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_auto_resume_relay_body
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.event_journal import (
     ApprovalContinuation,
@@ -870,13 +870,18 @@ class _InboxResponseOwnership:
     proof_task: asyncio.Task[bool] | None = None
 
 
-def _requested_by_a_person(origin: TurnOrigin) -> bool:
+def _requested_by_a_person(origin: TurnOrigin, body: str) -> bool:
     """Whether a turn counts toward skill learning.
 
-    Like Hermes skipping cron reviews, automated runs, including ones the router handed off, and replies to other
-    agents never start a review; they have no human to learn from.
+    Like Hermes skipping cron reviews, automated runs, including ones the router handed off, restart resumes, and
+    replies to other agents never start a review; they have no human to learn from. A resumed run of a person's
+    turn is still counted with the conversation's next response to a person.
     """
-    return origin.requester_kind == SenderKind.USER and origin.automation_source_kind is None
+    return (
+        origin.requester_kind == SenderKind.USER
+        and origin.automation_source_kind is None
+        and not is_auto_resume_relay_body(body)
+    )
 
 
 @dataclass
@@ -2100,7 +2105,7 @@ class ResponseRunner:
         """Return the normal skill-review handoff for an agent continuation."""
         if (
             continuation.entity_kind != "agent"
-            or not _requested_by_a_person(restore_legacy_approval_origin(continuation))
+            or not _requested_by_a_person(restore_legacy_approval_origin(continuation), continuation.request_body)
             or not self._learns_skills(continuation.entity_name)
         ):
             return None
@@ -5559,7 +5564,7 @@ class ResponseRunner:
                     execution_identity=execution_identity,
                 ),
             )
-            if _requested_by_a_person(request.response_envelope.origin)
+            if _requested_by_a_person(request.response_envelope.origin, request.response_envelope.body)
             else None
         )
 

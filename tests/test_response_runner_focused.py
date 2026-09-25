@@ -70,6 +70,7 @@ from mindroom.delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from mindroom.dispatch_source import (
+    AUTO_RESUME_MESSAGE,
     HOOK_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
@@ -9909,9 +9910,9 @@ async def test_a_response_registers_its_skill_review_conversation_before_it_runs
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("requested_by", ["another agent", "a routed schedule"])
+@pytest.mark.parametrize("requested_by", ["another agent", "a routed schedule", "a restart resume"])
 async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_path: Path, requested_by: str) -> None:
-    """Like cron runs in Hermes, another agent's request or a schedule the router handed off has no person to learn from."""
+    """Like cron runs in Hermes, agent requests, routed schedules, and restart resumes have no person to learn from."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert bot.client is not None
@@ -9934,10 +9935,11 @@ async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_pat
                 original_sender="@user:localhost",
                 trusted_user_relay=True,
             ),
-            relayed_source_kind=SCHEDULED_SOURCE_KIND,
+            relayed_source_kind=SCHEDULED_SOURCE_KIND if requested_by == "a routed schedule" else None,
         )
     )
-    request = replace(request, response_envelope=replace(request.response_envelope, origin=origin))
+    body = f"@General {AUTO_RESUME_MESSAGE}" if requested_by == "a restart resume" else request.response_envelope.body
+    request = replace(request, response_envelope=replace(request.response_envelope, origin=origin, body=body))
     model = SyntheticModel(
         id="synthetic",
         min_response_chars=30,
