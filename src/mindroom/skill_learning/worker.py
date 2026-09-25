@@ -6,6 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agno.db.utils import deserialize_run
@@ -211,7 +212,16 @@ class SkillLearningWorker:
         # Every exit, a stop included, waits for the archival and writes it started, which land even after a timeout
         # or a stop cancels the review, so they are recorded as the learner's before the state is settled.
         finish = asyncio.ensure_future(
-            self._finish(key, entry, skills_root, (started_at, before), progress, outcome, through),
+            self._finish(
+                key,
+                entry,
+                skills_root,
+                progress,
+                outcome=outcome,
+                through=through,
+                started_at=started_at,
+                before=before,
+            ),
         )
         while not finish.done():
             try:
@@ -241,17 +251,30 @@ class SkillLearningWorker:
         key: str,
         claimed: QueueEntry,
         skills_root: Path,
-        baseline: tuple[float, str],
         progress: ReviewProgress,
+        *,
         outcome: Literal["reviewed", "failed", "interrupted"],
         through: RunPosition,
+        started_at: float,
+        before: str,
     ) -> Literal["reviewed", "failed", "interrupted"]:
         await progress.settled()
         if progress.changes:
             # Like Hermes' best-effort review, one that already changed skills is done; rerunning the same
             # conversation would repeat its edits and notices.
             outcome = "reviewed"
-        await asyncio.to_thread(self._settle, key, claimed, skills_root, baseline, outcome=outcome, through=through)
+        await asyncio.to_thread(
+            partial(
+                self._settle,
+                key,
+                claimed,
+                skills_root,
+                outcome=outcome,
+                through=through,
+                started_at=started_at,
+                before=before,
+            ),
+        )
         return outcome
 
     def _settle(
@@ -259,13 +282,13 @@ class SkillLearningWorker:
         key: str,
         claimed: QueueEntry,
         skills_root: Path,
-        baseline: tuple[float, str],
         *,
         outcome: Literal["reviewed", "failed", "interrupted"],
         through: RunPosition,
+        started_at: float,
+        before: str,
     ) -> None:
-        """Settle the review; ``baseline`` is when it started and the skills fingerprint it started from."""
-        started_at, before = baseline
+        """Settle the review, which started at ``started_at`` from the skills fingerprint ``before``."""
         try:
             after = skills_fingerprint(skills_root)
         except OSError:
