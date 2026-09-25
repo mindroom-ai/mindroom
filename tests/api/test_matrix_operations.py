@@ -580,7 +580,7 @@ class TestMatrixOperations:
                 return_value=["test_room", "!campground:localhost", "!extra_room:localhost"],
             ),
         ):
-            response = TestClient(main.app).get("/api/matrix/agents/test_agent/rooms")
+            response = TestClient(main.app, base_url="http://localhost").get("/api/matrix/agents/test_agent/rooms")
 
         assert response.status_code == 200
         data = response.json()

@@ -257,7 +257,7 @@ def app_client(test_config: Config) -> Iterator[TestClient]:
 
     with (
         patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-        TestClient(app) as client,
+        TestClient(app, base_url="http://localhost") as client,
     ):
         yield client
 
@@ -364,7 +364,7 @@ def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> Non
         encoding="utf-8",
     )
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         response = client.get("/v1/models")
 
     assert response.status_code == 200
@@ -387,6 +387,7 @@ def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: C
     captured_runtime_paths: list[RuntimePaths | None] = []
 
     def _authenticate_and_swap(
+        _request: Request,
         authorization: str | None,
         runtime_paths: RuntimePaths,
     ) -> JSONResponse | None:
@@ -647,6 +648,7 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
     captured_runtime_paths: list[RuntimePaths | None] = []
 
     def _authenticate_and_swap(
+        _request: Request,
         authorization: str | None,
         runtime_paths: RuntimePaths,
     ) -> JSONResponse | None:
@@ -713,7 +715,7 @@ def test_list_models_tolerate_missing_plugin_path(tmp_path: Path) -> None:
     initialize_api_app(app, runtime_paths)
     assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         response = client.get("/v1/models")
 
     assert response.status_code == 200
@@ -737,7 +739,7 @@ def test_list_models_returns_malformed_yaml_errors(tmp_path: Path) -> None:
     initialize_api_app(app, runtime_paths)
     assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is False
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         response = client.get("/v1/models")
 
     assert response.status_code == 422
@@ -776,7 +778,7 @@ def test_chat_completions_tolerate_missing_plugin_path_during_model_validation(t
     initialize_api_app(app, runtime_paths)
     assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         response = client.post(
             "/v1/chat/completions",
             json={"model": "missing-model", "messages": [{"role": "user", "content": "hi"}]},
@@ -803,7 +805,7 @@ def test_chat_completions_returns_malformed_yaml_errors(tmp_path: Path) -> None:
     initialize_api_app(app, runtime_paths)
     assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is False
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         response = client.post(
             "/v1/chat/completions",
             json={"model": "general", "messages": [{"role": "user", "content": "hi"}]},
@@ -892,7 +894,7 @@ class TestListModels:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app) as client,
+            TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.get("/v1/models")
 
@@ -918,7 +920,7 @@ class TestListModels:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app) as client,
+            TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.get("/v1/models")
 
@@ -944,7 +946,7 @@ class TestListModels:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app) as client,
+            TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.get("/v1/models")
 
@@ -994,7 +996,7 @@ class TestListModels:
         )
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, runtime_paths)),
-            TestClient(app) as client,
+            TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.get("/v1/models")
             assert response.status_code == 200
@@ -1199,7 +1201,7 @@ class TestChatCompletions:
                 "mindroom.ai._run_cached_agent_attempt",
                 new=AsyncMock(return_value=RunOutput(content="Agent reply")),
             ),
-            TestClient(app) as client,
+            TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.post(
                 "/v1/chat/completions",
@@ -1268,7 +1270,7 @@ class TestChatCompletions:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app) as client,
+            TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.post(
                 "/v1/chat/completions",
@@ -1306,7 +1308,7 @@ class TestChatCompletions:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app) as client,
+            TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.post(
                 "/v1/chat/completions",
@@ -1338,7 +1340,7 @@ class TestChatCompletions:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app) as client,
+            TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.post(
                 "/v1/chat/completions",
@@ -1370,7 +1372,7 @@ class TestChatCompletions:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app) as client,
+            TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.post(
                 "/v1/chat/completions",
@@ -2095,6 +2097,59 @@ class TestAuthentication:
             },
         )
         assert response.status_code == 401
+
+    def test_unauthenticated_api_refuses_rebound_hosts_and_other_sites(self, app_client: TestClient) -> None:
+        """Without a key a completion runs an agent for any caller, so no rebound or cross-site page may start one."""
+        body = json.dumps({"model": "general", "messages": [{"role": "user", "content": "Hello"}]})
+        # A text/plain POST is a simple request, which a browser sends cross-site without a preflight.
+        simple = {"Content-Type": "text/plain"}
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.return_value = "Hello!"
+            rebound = app_client.post(
+                "/v1/chat/completions",
+                content=body,
+                headers={**simple, "Host": "attacker.example"},
+            )
+            cross_origin = app_client.post(
+                "/v1/chat/completions",
+                content=body,
+                headers={**simple, "Origin": "https://attacker.example"},
+            )
+            cross_site = app_client.post(
+                "/v1/chat/completions",
+                content=body,
+                headers={**simple, "Sec-Fetch-Site": "cross-site"},
+            )
+            rebound_models = app_client.get("/v1/models", headers={"Host": "attacker.example"})
+
+        statuses = [response.status_code for response in (rebound, cross_origin, cross_site, rebound_models)]
+        assert statuses == [400, 403, 403, 400]
+        assert "MINDROOM_DASHBOARD_ALLOWED_HOSTS" in rebound.json()["error"]["message"]
+        mock_ai.assert_not_awaited()
+
+    def test_unauthenticated_api_serves_local_callers(self, app_client: TestClient) -> None:
+        """API clients, the local UI, and callers on an address keep reaching an unauthenticated `/v1`."""
+        payload = {"model": "general", "messages": [{"role": "user", "content": "Hello"}]}
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.return_value = "Hello!"
+            responses = [
+                app_client.post("/v1/chat/completions", json=payload, headers=headers)
+                for headers in ({}, {"Origin": "http://localhost"}, {"Host": "192.168.1.20:8765"})
+            ]
+
+        assert [response.status_code for response in responses] == [200, 200, 200]
+
+    def test_keyed_api_serves_any_host_and_origin(self, authed_client: TestClient) -> None:
+        """A key authorizes a `/v1` request, so the host and origin it names do not matter."""
+        response = authed_client.get(
+            "/v1/models",
+            headers={
+                "Authorization": "Bearer test-key-1",
+                "Host": "mindroom.internal",
+                "Origin": "https://ui.example.org",
+            },
+        )
+        assert response.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -2871,7 +2926,7 @@ class TestAutoRouting:
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, runtime_paths)),
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
-            TestClient(app) as client,
+            TestClient(app, base_url="http://localhost") as client,
         ):
             mock_route.return_value = None
             response = client.post(
@@ -2979,7 +3034,7 @@ def team_app_client(team_config: Config) -> Iterator[TestClient]:
     initialize_api_app(app, runtime_paths)
     with (
         patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)),
-        TestClient(app) as client,
+        TestClient(app, base_url="http://localhost") as client,
     ):
         yield client
 
@@ -5200,7 +5255,7 @@ def knowledge_app_client(knowledge_config: Config) -> Iterator[TestClient]:
     initialize_api_app(app, runtime_paths)
     with (
         patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
-        TestClient(app) as client,
+        TestClient(app, base_url="http://localhost") as client,
     ):
         yield client
 
@@ -5263,7 +5318,7 @@ class TestKnowledgeIntegration:
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
-            TestClient(app) as client,
+            TestClient(app, base_url="http://localhost") as client,
         ):
             mock_ai.return_value = "Response with keyed knowledge"
             response = client.post(
@@ -5426,7 +5481,7 @@ class TestKnowledgeIntegration:
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
-            TestClient(app) as client,
+            TestClient(app, base_url="http://localhost") as client,
         ):
             mock_ai.return_value = "Merged knowledge response"
             response = client.post(
@@ -5574,7 +5629,7 @@ def test_response_activity_releases_cancelled_openai_request(
         monkeypatch.setattr(openai_compat, "_chat_completions", complete)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app_client.app),
-            base_url="http://test",
+            base_url="http://localhost",
         ) as client:
             task = asyncio.create_task(
                 client.post(
