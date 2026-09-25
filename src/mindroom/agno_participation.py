@@ -40,7 +40,7 @@ _DECISION_INSTRUCTION = (
 )
 # Providers that constrain decisions to this schema must decode the reason first:
 # committing to the action first made a small Gemini model stay silent for open questions.
-# Vertex AI orders undeclared properties alphabetically, so the order is explicit.
+# Vertex AI orders properties alphabetically unless propertyOrdering is set.
 _DECISION_SCHEMA = {
     "type": "object",
     "properties": {

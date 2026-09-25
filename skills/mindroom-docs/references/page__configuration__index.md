@@ -113,6 +113,7 @@ It must return a structured boolean decision; an explicit abstention or invalid 
 No self-reported confidence score is requested or treated as a probability.
 Provider modes whose automatic native tools cannot be disabled are refused for decision calls.
 MindRoom requests JSON output from Gemini judgment models on both the Gemini API and Vertex AI, because Gemini can emit function calls even when a request declares none.
+These judgment requests send no function declarations or function-calling settings; the Vertex AI request shape is not live-verified.
 
 To switch to System One, change the judgment settings and set `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env`:
 

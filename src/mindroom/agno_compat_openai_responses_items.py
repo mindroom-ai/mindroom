@@ -17,8 +17,9 @@ _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 # Reason: Agno 3.0.9 persists only the last reasoning item and can omit reasoning
 # when stored Responses output must later be replayed explicitly.
 # Upstream issue: https://github.com/agno-agi/agno/issues/9960
-# Upstream PR: https://github.com/agno-agi/agno/pull/9968, closed in favour of the merged
-# https://github.com/agno-agi/agno/pull/10075 and https://github.com/agno-agi/agno/pull/10395;
+# Upstream PR: https://github.com/agno-agi/agno/pull/9968, closed in favour of
+# https://github.com/agno-agi/agno/pull/10075 (released in Agno 3.0.11) and
+# https://github.com/agno-agi/agno/pull/10395 (merged, unreleased after 3.0.11);
 # their coverage of every reasoning item is unverified.
 # Remove when: The pinned Agno release preserves complete ordered reasoning beside
 # stored text and function calls during explicit replay.

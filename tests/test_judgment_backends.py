@@ -211,6 +211,7 @@ async def test_llm_gemini_judgment_requires_json_output(
     assert result.decision is True
     assert result.failure is None
     assert "tools" not in requests[0]
+    assert "toolConfig" not in requests[0]
     assert requests[0]["generationConfig"] == {"responseMimeType": "application/json"}
 
 

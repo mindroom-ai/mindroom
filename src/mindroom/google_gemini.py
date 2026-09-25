@@ -53,21 +53,21 @@ def _decision_config(config: object, *, vertexai: bool) -> GenerateContentConfig
         for tool in generation_config.tools or []
         if isinstance(tool, Tool) and tool.function_declarations
     ]
-    generation_config.tools = declaration_tools or None
-    if declaration_tools:
-        generation_config.tool_config = ToolConfig(
-            function_calling_config=FunctionCallingConfig(mode=FunctionCallingConfigMode.NONE),
-        )
-        if vertexai:
-            # The Gemini API accepts Gemini 2.5 JSON output beside declarations only under NONE.
-            # Vertex AI acceptance is unverified, and a rejection would fail every decision.
-            return generation_config
+    # Without declarations, function-calling settings govern nothing and are dropped.
+    function_calling = FunctionCallingConfig(mode=FunctionCallingConfigMode.NONE)
+    tool_config = ToolConfig(function_calling_config=function_calling) if declaration_tools else None
     # Gemini can emit function calls under NONE and even without declarations; JSON output cannot.
+    # The Gemini API accepts Gemini 2.5 JSON output beside declarations only under NONE. Vertex AI
+    # acceptance is unverified, and a rejection would fail every decision, so it gets no JSON there.
+    json_output = not (vertexai and declaration_tools)
+    # The reply's authored output format never shapes a decision.
     return generation_config.model_copy(
         update={
-            "response_mime_type": "application/json",
+            "tools": declaration_tools or None,
+            "tool_config": tool_config,
+            "response_mime_type": "application/json" if json_output else None,
             "response_schema": None,
-            "response_json_schema": decision_response_schema(),
+            "response_json_schema": decision_response_schema() if json_output else None,
         },
     )
 

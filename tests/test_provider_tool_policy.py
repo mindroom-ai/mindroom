@@ -181,24 +181,31 @@ def test_gemini_removes_native_tools_without_mutating_authored_config(source: st
     assert regular.response_mime_type is None
 
 
-def test_gemini_decision_schema_replaces_authored_output_schema() -> None:
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vertexai", [False, True], ids=["gemini_api", "vertex_ai"])
+async def test_gemini_decision_schema_replaces_authored_output_schema(vertexai: bool) -> None:
     """A decision answers in its caller's JSON shape, never in the reply's structured output shape."""
+
+    def unreachable(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError
+
     decision_schema = {"type": "object", "properties": {"decision": {"type": "boolean"}}, "required": ["decision"]}
     authored = GenerateContentConfig(response_mime_type="application/json", response_schema={"type": "STRING"})
-    model = MindRoomGoogleGemini(api_key="test-key", generation_config=authored)
-
-    with without_provider_tools(response_schema=decision_schema):
-        decision = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
-    with without_provider_tools():
-        schemaless = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
-    regular = model.get_request_params(tools=[_function_tool()], tool_choice="auto")["config"]
+    async with gemini_client(unreachable, vertexai=vertexai) as client:
+        model = MindRoomGoogleGemini(id="gemini-2.5-pro", client=client, generation_config=authored)
+        with without_provider_tools(response_schema=decision_schema):
+            decision = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
+        with without_provider_tools():
+            schemaless = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
+        regular = model.get_request_params(tools=[_function_tool()], tool_choice="auto")["config"]
 
     for config in (decision, schemaless):
         assert config.tools[0].function_declarations[0].name == "read_status"
         assert config.tool_config.function_calling_config.mode == "NONE"
-        assert config.response_mime_type == "application/json"
         assert config.response_schema is None
-    assert decision.response_json_schema == decision_schema
+        # Vertex AI never pairs JSON output with declarations, not even an authored JSON format.
+        assert config.response_mime_type == (None if vertexai else "application/json")
+    assert decision.response_json_schema == (None if vertexai else decision_schema)
     assert schemaless.response_json_schema is None
     assert regular.response_schema is not None
     assert regular.tool_config.function_calling_config.mode == "AUTO"
@@ -222,6 +229,8 @@ async def test_vertex_gemini_requests_json_only_without_declarations() -> None:
     assert declared.tool_config.function_calling_config.mode == "NONE"
     assert declared.response_mime_type is None
     assert declared.response_json_schema is None
+    assert undeclared.tools is None
+    assert undeclared.tool_config is None
     assert undeclared.response_mime_type == "application/json"
     assert undeclared.response_json_schema == {"type": "object"}
 
