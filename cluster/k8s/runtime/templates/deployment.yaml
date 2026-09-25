@@ -10,6 +10,9 @@
 {{- $approvedEgressTokenSecretKey := include "mindroom-runtime.approvedEgressTokenSecretKey" . -}}
 {{- $usesConfigMapConfig := include "mindroom-runtime.usesConfigMapConfig" . -}}
 {{- $configPath := include "mindroom-runtime.configPath" . -}}
+{{- $storageRoot := trimSuffix "/" (clean .Values.storage.mountPath) -}}
+{{- $fileConfigStorageSubpath := include "mindroom-runtime.fileConfigStorageSubpath" . -}}
+{{- $generatesApiKey := and (eq .Values.workers.backend "static_runner") (not .Values.apiAuth.allowUnauthenticatedPrimary) -}}
 {{- $workerConfigMapName := include "mindroom-runtime.workerConfigMapName" . -}}
 {{- $workerConfigKey := include "mindroom-runtime.workerConfigKey" . -}}
 {{- $workerConfigPath := include "mindroom-runtime.workerConfigPath" . -}}
@@ -73,7 +76,7 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or (and .Values.stateStorage.enabled .Values.stateStorage.initPermissions.enabled) .Values.initContainers .Values.contentBundles }}
+      {{- if or (and .Values.stateStorage.enabled .Values.stateStorage.initPermissions.enabled) .Values.initContainers .Values.contentBundles (eq .Values.workers.backend "static_runner") }}
       initContainers:
 {{ if and .Values.stateStorage.enabled .Values.stateStorage.initPermissions.enabled }}
         - name: prepare-state-storage
@@ -145,6 +148,25 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{ end }}
         {{ end }}
+        {{- if eq .Values.workers.backend "static_runner" }}
+        # Create the sandbox runner's storage subPaths as the runtime user; kubelet would create missing ones as root.
+        - name: prepare-sandbox-runner-storage
+          image: {{ include "mindroom-runtime.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - mkdir
+            - -p
+            - {{ printf "%s/sandbox-runner" $storageRoot | quote }}
+            - {{ printf "%s/agents" $storageRoot | quote }}
+            - {{ printf "%s/private_instances" $storageRoot | quote }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
+              mountPath: {{ .Values.storage.mountPath }}
+        {{- end }}
       {{- end }}
       containers:
         - name: mindroom
@@ -408,9 +430,16 @@ spec:
             {{- with .Values.env.extra }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- with .Values.env.envFrom }}
+          {{- if or $generatesApiKey .Values.env.envFrom }}
           envFrom:
+            {{- if $generatesApiKey }}
+            # The sidecar shares this pod's network; listed first so a MINDROOM_API_KEY from env.extra or env.envFrom wins.
+            - secretRef:
+                name: {{ $fullname }}-api-key
+            {{- end }}
+            {{- with .Values.env.envFrom }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           {{- if .Values.probes.startup.enabled }}
           startupProbe:
@@ -502,6 +531,12 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
         {{- if eq .Values.workers.backend "static_runner" }}
+        {{- /*
+        The runner executes agent tool code, so it must not see the credential store, Matrix state,
+        the primary's writable config, or the credentials encryption key.
+        It mounts only agent state from the PVC over its own private storage root,
+        and saved tool settings reach it as per-call leases from the primary.
+        */}}
         - name: sandbox-runner
           image: {{ include "mindroom-runtime.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -531,13 +566,6 @@ spec:
                   name: {{ $proxyTokenSecretName }}
                   key: {{ .Values.workers.sandbox.proxyToken.key }}
             {{- end }}
-            {{- if $credentialsEncryptionKeySecretName }}
-            - name: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $credentialsEncryptionKeySecretName }}
-                  key: {{ .Values.workers.sandbox.credentialsEncryptionKey.key }}
-            {{- end }}
           resources:
             {{- toYaml .Values.workers.staticRunner.resources | nindent 12 }}
           {{- with .Values.securityContext }}
@@ -553,6 +581,19 @@ spec:
             {{- end }}
             - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ .Values.storage.mountPath }}
+              subPath: sandbox-runner
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
+              mountPath: {{ printf "%s/agents" $storageRoot | quote }}
+              subPath: agents
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
+              mountPath: {{ printf "%s/private_instances" $storageRoot | quote }}
+              subPath: private_instances
+            {{- with $fileConfigStorageSubpath }}
+            - name: {{ include "mindroom-runtime.storageVolumeName" $ }}
+              mountPath: {{ printf "%s/%s" $storageRoot . | quote }}
+              subPath: {{ . | quote }}
+              readOnly: true
+            {{- end }}
             - name: sandbox-workspace
               mountPath: /app/workspace
         {{- end }}

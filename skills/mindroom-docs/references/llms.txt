@@ -30,6 +30,7 @@
 - [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/)
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/)
 - [Project Management](https://docs.mindroom.chat/tools/project-management/)
+- [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/)
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/)
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/)
 - [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/)

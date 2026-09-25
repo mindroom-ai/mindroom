@@ -95,6 +95,9 @@ platformSsoSecret: ""
 # Supabase (shared auth). Tenant workloads get only the public anon key, never the service-role key.
 supabaseUrl: ""
 supabaseAnonKey: ""
+# Without Supabase, workerBackend=static_runner gives the primary a generated MINDROOM_API_KEY because sidecar tool code can reach its API on localhost.
+# Set true only when other API auth is configured.
+allowUnauthenticatedPrimary: false
 
 trustedUpstreamAuth:
   enabled: "false"

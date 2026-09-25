@@ -68,7 +68,7 @@ if TYPE_CHECKING:
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
-_INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
+INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
 _DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
 _SANDBOX_ALL_EXECUTION_MODES = frozenset({"all", "sandbox_all"})
 _SANDBOX_SELECTIVE_EXECUTION_MODES = frozenset({"selective", "sandbox_selective"})
@@ -200,8 +200,8 @@ def _read_proxy_timeout(runtime_paths: RuntimePaths) -> float:
 def inline_attachment_byte_limit(runtime_paths: RuntimePaths) -> int:
     """Return the hard cap for inline primary-to-worker attachment saves."""
     raw_value = (
-        runtime_paths.env_value(_INLINE_ATTACHMENT_BYTES_ENV)
-        or os.environ.get(_INLINE_ATTACHMENT_BYTES_ENV)
+        runtime_paths.env_value(INLINE_ATTACHMENT_BYTES_ENV)
+        or os.environ.get(INLINE_ATTACHMENT_BYTES_ENV)
         or str(_DEFAULT_INLINE_ATTACHMENT_BYTES)
     )
     try:
@@ -307,13 +307,17 @@ def sandbox_proxy_config(runtime_paths: RuntimePaths) -> _SandboxProxyConfig:
     )
 
 
-def _worker_proxy_client_config(proxy_config: _SandboxProxyConfig) -> WorkerProxyClientConfig:
+def _worker_proxy_client_config(
+    proxy_config: _SandboxProxyConfig,
+    runtime_paths: RuntimePaths,
+) -> WorkerProxyClientConfig:
     return WorkerProxyClientConfig(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         proxy_timeout_seconds=proxy_config.proxy_timeout_seconds,
         credential_lease_ttl_seconds=proxy_config.credential_lease_ttl_seconds,
         credential_policy=proxy_config.credential_policy,
+        lease_tool_credentials=primary_worker_backend_name(runtime_paths) == "static_runner",
     )
 
 
@@ -606,7 +610,7 @@ def save_attachment_to_worker(
         }
 
         data = post_worker_proxy_json(
-            config=_worker_proxy_client_config(proxy_config),
+            config=_worker_proxy_client_config(proxy_config, runtime_paths),
             payload=request_payload,
             worker_handle=worker_handle,
             worker_manager=worker_manager,
@@ -698,7 +702,7 @@ def view_file_from_worker(
                 path = Path(path).relative_to(workspace_root).as_posix()
 
         data = post_worker_proxy_json(
-            config=_worker_proxy_client_config(proxy_config),
+            config=_worker_proxy_client_config(proxy_config, runtime_paths),
             payload={**worker_payload, "path": path},
             worker_handle=worker_handle,
             worker_manager=worker_manager,
@@ -960,7 +964,7 @@ def _call_proxy_sync(
         if portable_tool_init_overrides:
             payload["tool_init_overrides"] = to_json_compatible(portable_tool_init_overrides)
         result = execute_worker_proxy_request(
-            config=_worker_proxy_client_config(proxy_config),
+            config=_worker_proxy_client_config(proxy_config, runtime_paths),
             payload=payload,
             credentials_manager=credentials_manager,
             tool_name=tool_name,
