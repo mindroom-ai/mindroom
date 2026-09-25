@@ -673,7 +673,7 @@ defaults:
     enabled: true
     threshold_percent: 0.8
     # Summary input chunks use the selected compaction model's context window.
-    # Destructive compaction requires a resolved summary input budget greater than 2,000 tokens.
+    # Text compaction requires a resolved summary input budget greater than 2,000 tokens.
     replay_window_tokens: null     # Optional operational cap; does not change the model's real context window
     reserve_tokens: 16384
     timeout_seconds: 600           # Maximum seconds allowed for each compaction summary request
@@ -708,12 +708,12 @@ defaults:
 # Provider environment variables are not injected by this setting.
 # google_vertex_adc is unsupported because isolated workers do not receive ADC files.
 
-# Required compaction is destructive inside the active session.
+# Required compaction summarizes older runs of the active session.
 # It uses one Matrix lifecycle notice that is edited in place.
 # It runs before a reply when raw history exceeds the hard replay budget.
 # It also runs before the next reply after a manual compact_context request.
 # Otherwise MindRoom leaves the stored session unchanged and relies on replay fitting for that reply.
-# It rewrites the stored session summary and removes compacted raw runs from the live session.
+# It rewrites the stored session summary and moves compacted raw runs into the compaction archive.
 # Agno then replays only the summary plus recent runs.
 # Use __MINDROOM_INHERIT__ inside a tool override to clear one inherited authored field
 # while keeping the rest of defaults.tools for that agent.

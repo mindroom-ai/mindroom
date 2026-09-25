@@ -1772,7 +1772,7 @@ defaults:
     enabled: true
     threshold_percent: 0.8
     # Summary input chunks use the selected compaction model's context window.
-    # Destructive compaction requires a resolved summary input budget greater than 2,000 tokens.
+    # Text compaction requires a resolved summary input budget greater than 2,000 tokens.
     replay_window_tokens: null     # Optional operational cap; does not change the model's real context window
     reserve_tokens: 16384
     timeout_seconds: 600           # Maximum seconds allowed for each compaction summary request
@@ -1807,12 +1807,12 @@ defaults:
 # Provider environment variables are not injected by this setting.
 # google_vertex_adc is unsupported because isolated workers do not receive ADC files.
 
-# Required compaction is destructive inside the active session.
+# Required compaction summarizes older runs of the active session.
 # It uses one Matrix lifecycle notice that is edited in place.
 # It runs before a reply when raw history exceeds the hard replay budget.
 # It also runs before the next reply after a manual compact_context request.
 # Otherwise MindRoom leaves the stored session unchanged and relies on replay fitting for that reply.
-# It rewrites the stored session summary and removes compacted raw runs from the live session.
+# It rewrites the stored session summary and moves compacted raw runs into the compaction archive.
 # Agno then replays only the summary plus recent runs.
 # Use __MINDROOM_INHERIT__ inside a tool override to clear one inherited authored field
 # while keeping the rest of defaults.tools for that agent.
@@ -2595,7 +2595,7 @@ Native compaction runs inside ordinary provider requests and stores a provider-s
 The next request replays the latest compatible checkpoint and its following messages.
 Canonical runs remain stored for model switching and portable text compaction.
 See [native compaction eligibility](https://docs.mindroom.chat/configuration/models/#native-compaction) for supported routes and fallback conditions.
-Destructive text compaction runs before the reply when history exceeds the hard replay budget or when explicitly requested.
+Text compaction runs before the reply when history exceeds the hard replay budget or when explicitly requested.
 
 You can tune compaction behavior with these settings:
 
@@ -2609,8 +2609,8 @@ You can tune compaction behavior with these settings:
 When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
-Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
-With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
+Text compaction requires the resolved summary input budget to exceed 2,000 tokens.
+With the default `reserve_tokens`, this makes text compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
 `compaction.fallback_model` must also name a configured model with its own `context_window`; a fallback naming the summary model's alias, or another alias resolving to the same provider and model ID, is ignored because it would resend the refused request to the same model.
 If the current reply needs required compaction to preserve usable history, MindRoom sends `Compacting history...`, compacts before the model call, and edits that same notice with the result.
@@ -2620,7 +2620,10 @@ MindRoom does not run a separate background post-response compaction path.
 It always plans the replay that is safe for the current model call when the active runtime model has a known `context_window`.
 That replay planner can keep configured replay, reduce raw replay, fall back to summary-only replay, or disable persisted replay for the run.
 Portable text compaction rewrites the persisted Agno session in SQLite.
-Older compacted runs are removed from `session.runs` and replaced by the merged `session.summary`, so raw pre-compaction runs are not retained for later audit or debugging.
+Older compacted runs move out of `session.runs` into the conversation database's compaction archive and are replaced in replay by the merged `session.summary`.
+The archive keeps every compacted run and each intermediate summary, so compaction loses no stored history; it only grows, and deleting the conversation removes it.
+Redacting a Matrix event that a compacted run consumed rolls compaction back to just before that run instead of clearing the whole conversation.
+Summaries compacted before the archive existed record no per-run provenance, so redacting an event they may contain still clears that conversation's summaries and live runs.
 
 Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
 `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`).
@@ -3689,7 +3692,7 @@ For starter config generation, use `mindroom config init --provider bedrock_clau
 ## Context Window
 
 Set `context_window` to the model provider's actual limit.
-MindRoom uses it to budget persisted replay and required destructive compaction unless compaction config sets a smaller `replay_window_tokens` cap.
+MindRoom uses it to budget persisted replay and required text compaction unless compaction config sets a smaller `replay_window_tokens` cap.
 MindRoom always applies a final replay-fit step when the active runtime model has a known `context_window`.
 That replay-fit step reduces or disables persisted replay for the current run when needed.
 On `vertexai_claude` models, a known `context_window` also enables a request-time guard inside the provider call.
@@ -3712,8 +3715,8 @@ You can tune compaction behavior with these settings:
 When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
-Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
-With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
+Text compaction requires the resolved summary input budget to exceed 2,000 tokens.
+With the default `reserve_tokens`, this makes text compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
 Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
@@ -3761,7 +3764,7 @@ Native compaction requires automatic compaction to be enabled, all-history repla
 Explicit `compaction.model`, scheduled history limits, bounded replay, unsupported models, and requests already exceeding the hard budget use the portable path.
 Manual `compact_context` always requests portable text compaction.
 Native checkpoints are tied to their provider, model, endpoint, and current portable summary, so changing that route or rewriting the summary rebuilds context from canonical history.
-Native compaction itself never deletes canonical runs; storage therefore continues to grow until portable text compaction removes older runs.
+Native compaction itself never moves canonical runs; replay continues to load them until portable text compaction moves older runs into the compaction archive.
 
 Checkpoints and their following native output are persisted through the existing SQLite run storage and survive restarts.
 The system instructions keep their shared prompt-cache prefix.
@@ -3960,7 +3963,7 @@ When a named team sets these fields, the team scope uses the team-owned policy i
 
 Team-scoped compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, `fallback_model`, and `timeout_seconds`.
 When the active team model has a known `context_window`, MindRoom always computes a final replay plan for the shared team scope and reduces or disables persisted replay for the run when needed.
-Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
+Automatic text compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices.
 Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
 
@@ -3976,8 +3979,8 @@ You can tune team-scoped compaction behavior with these settings:
 When the active team model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
 Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
-Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
-With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
+Text compaction requires the resolved summary input budget to exceed 2,000 tokens.
+With the default `reserve_tokens`, this makes text compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
 `compaction.fallback_model` must also name a configured model with its own `context_window`; a fallback naming the summary model's alias, or another alias resolving to the same provider and model ID, is ignored because it would resend the refused request to the same model.
 Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
@@ -20645,6 +20648,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/config/legacy_fields.py`][config-legacy] | Agent or defaults validation sees a retired field. | Pydantic remains the strict validation boundary and the helper provides directed replacement errors. |
 | [`src/mindroom/tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] | Authored tool override validation sees a retired per-tool field such as `restrict_to_base_dir`. | `tool_system/metadata.py` keeps authored-override validation and raises the directed replacement error the helper names. |
 | [`src/mindroom/legacy_streaming.py`][legacy-streaming] | Streaming replay encounters body-only `[cancelled]` or `[error]` suffixes (each preceded by one space). | Current markers stay in `streaming.py`; `execution_preparation.py` gives recognized structured status precedence and delegates body fallback to the streaming reader. |
+| [`src/mindroom/history/legacy_compaction_state.py`][legacy-compaction-state] | History preparation or redaction cleanup finds v2 state carrying `compacted_run_ids` or last-compaction audit fields, or a replayed summary in a scope without archive generations. | `adopt_legacy_compaction` records one content-free legacy generation with the summary, its possible seen ids, and tombstones, and adopts reappearing keys again only when an older release deleted unarchived runs or cleared the summary; `history/storage.py` drops the retired keys and keeps replay, tombstone pruning, and legacy redaction invalidation. |
 | [`src/mindroom/legacy_revision_replay.py`][legacy-revision-replay] | Turn-record merges and redaction cleanup encounter reconstructed revision provenance from pre-v2026.9.43 summaries. | Current revision facts win, storage mutation stays in `turn_store.py`, and source-only summary ownership applies only to labeled historical replay. |
 | [`src/mindroom/event_journal/legacy_schema.py`][journal-legacy-schema] | A journal lacks Nio-owned `matrix_sync_consumers`, or a current approval generation has executable calls without toolkit origins. | Schema setup preserves history and frozen deliveries while retiring obsolete work; unresumable approvals enter normal failure recovery before another card decision. |
 | [`src/mindroom/config/legacy_access.py`][access-legacy] | Config loading or `mindroom config migrate` finds retired access fields. | Complete-source validation, concrete grants, a backup, and atomic membership-schema publication are retained. |
@@ -20686,6 +20690,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`oauth/legacy_credentials.py`][oauth-legacy-credentials] and [`oauth/credential_store.py`][oauth-store] | [OAuth store tests][oauth-store-tests] cover literal SQLite bindings, publication normalization, the removed JSON reader, reconnect disposition, and inert old files. |
 | [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], [`custom_tools/todo_poke.py`][todo-poke], [`custom_tools/todo.py`][todo-tool], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], [todo poke][todo-poke-tests], [todo tool][todo-builtin-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
 | [`legacy_streaming.py`][legacy-streaming] and [`execution_preparation.py`][execution-preparation] | [Partial-reply][partial-reply-tests] and [streaming][streaming-tests] tests cover bounded historical suffixes, exact stripping order, current structured-status precedence, and interruption classification. |
+| [`history/legacy_compaction_state.py`][legacy-compaction-state] | [Legacy compaction tests][legacy-compaction-state-tests] cover recognition, one-time adoption, tombstone pruning, and summary-only sessions; [compaction redaction tests][compaction-redaction-tests] cover legacy invalidation. |
 | [`legacy_revision_replay.py`][legacy-revision-replay] | [Revision replay][legacy-revision-replay-tests], [turn-store][turn-store-tests], and [handled-turn][handled-turn-tests] tests cover reconstruction, monotonic preservation, historical and modern selection, and cold-reopen cleanup. |
 | [`session_storage_preflight.py`][session-preflight] | [Session recovery tests][session-recovery-tests] cover schema-based archive, locks, rollback recovery, unrelated tables, current corruption, and byte preservation without inventing one release cutoff. |
 | [`legacy_attachments.py`][legacy-attachments] | [Attachment tests][attachment-tests] cover verified adoption and record rewrite, independence from later source swaps, and rejection of planted leaf or ancestor links, changed bytes, and missing digests. |
@@ -20742,7 +20747,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S11 | Removed/superseded | [`thread_export/storage.py`][thread-export] refuses populated markerless roots and marks only empty roots. |
 | S12 | Tiny retained default | [`report_publishing/store.py`][report-store] treats missing `artifact_kind` as `html_file`. |
 | S13 | Tiny retained default | [`scheduling.py`][scheduling] treats missing `history_limit` as the current `None` default. |
-| S14 | Current behavior | [`history/storage.py`][history-storage] reads current v2 compaction state and ignores v1. |
+| S14 | Isolated | [`history/storage.py`][history-storage] reads current v2 compaction state and ignores v1; [`history/legacy_compaction_state.py`][legacy-compaction-state] recognizes state written before compacted runs were archived. |
 | S15 | Current behavior | [`knowledge/candidate_checkpoint.py`][candidate-checkpoint] rebuilds unknown versions and retains current torn-tail recovery. |
 | S16 | Current behavior | [`external_triggers/store.py`][trigger-store] and [`external_triggers/replay_store.py`][replay-store] own current validation and replay deduplication; the only retained historical default supplies an empty `threads` map when that section is absent. |
 | S17 | Current behavior | [Receipts][scheduled-records], [todos][todo-state], [attachments][attachments], and workflows combine sparse fields with current identity and integrity checks. |
@@ -20878,6 +20883,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [kubernetes-worker-backend]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes.py
 [kubernetes-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_kubernetes_worker_backend.py
 [legacy-revision-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_revision_replay.py
+[legacy-compaction-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/legacy_compaction_state.py
 [legacy-streaming]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_streaming.py
 [legacy-approval]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_approval_payloads.py
 [legacy-attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_attachments.py
@@ -20951,6 +20957,8 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [journal-upgrade-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_journal_upgrade_boundary.py
 [knowledge-indexing-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_knowledge_indexing_config.py
 [legacy-revision-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_revision_replay.py
+[legacy-compaction-state-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_compaction_state.py
+[compaction-redaction-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_compaction_redaction.py
 [matrix-agent-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_agent_manager.py
 [matrix-identity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_identity.py
 [memory-flush-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_memory_auto_flush.py
@@ -21055,7 +21063,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Stopping an async run between chunks abandons its suspended model stream until garbage collection, after the run is persisted without the usage that stream already received. | Close in-flight model streams innermost first before terminal cancellation or error persistence; [issue #9489](https://github.com/agno-agi/agno/issues/9489) covers related abandoned-generation bookkeeping, not usage settlement. | `agno_compat_run_messages.py` settles the abandoned request once from received stream data; consumer closure and failure, cancellation-request, and retried-attempt regressions in `tests/test_openai_responses_stream.py`. |
 | OpenAI usage parsing omits cache-write input tokens. | Preserve the SDK counter for Responses and Chat Completions, including older payloads where the field is absent. | `agno_compat_openai_responses.py`, `agno_compat_openai_chat.py`. |
 | Responses guesses inline-file MIME from opaque storage paths before original filenames. | Infer missing MIME from the original filename without mutating attachment metadata; retain binary MIME for compressed attachments stored under opaque paths. No matching upstream issue or PR identified. | `agno_compat_openai_responses.py`; synthetic attachment-to-request regression coverage in `tests/test_openai_models.py`. |
-| Run saves commit internally, with no caller-owned transaction or persistence hook. | Tracking gap: an in-transaction hook is needed to persist application-owned usage atomically; no matching upstream issue or PR identified. | `agno_compat_sqlite.py` copies the Agno 3.0.9 run UPSERT; `usage_storage.py` owns the content-free schema and projection. |
+| Run saves commit internally, with no caller-owned transaction or persistence hook. | Tracking gap: an in-transaction hook is needed to persist application-owned usage and compaction-archive restores atomically; no matching upstream issue or PR identified. | `agno_compat_sqlite.py` copies the Agno 3.0.9 run UPSERT; `usage_storage.py` owns the content-free schema and projection, and `history/archive.py` owns the archive schema. |
 | SQLite journaling is forced, and cache statistics require private access. | Propose configurable pragmas; track public cache counters separately. | `agno_compat_sqlite.py`. |
 | Cancelled runs persist in detached tasks without an awaited drain boundary. | Expose completion for the exact cancelled run before caller-owned history writes. | `agno_compat_session_persistence.py`. |
 | Knowledge insertion lacks caller-controlled error propagation and validation. | Reproduce swallowed vector failures and propose validation before publishing content status. | `agno_compat_knowledge.py`. |
@@ -21089,7 +21097,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `tools/agno_compat_modelslabs.py` | Generation orchestration polls provider job identities, accepts numeric ETAs, retains completed outputs, and distinguishes retryable status failures from terminal rejection while reusing SDK payload and media helpers. | `tools/modelslabs.py` retains tool registration, optional imports, and authored file-type normalization; nonwaiting generation stays upstream. |
 | `custom_tools/agno_compat_moviepy.py` | Portable caption fonts, style forwarding, complete glyph bounds, measured canvas sizing, bottom placement, non-overlapping wrapping, and owned temporary audio cleanup; SDK parsing and temporary-file helpers remain shared. | `tools/moviepy_video_tools.py` selects the adapter lazily; rendering settings and atomic output publication are preserved. |
 | `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store and exact-run cancellation drainage. | `agent_storage.py` and storage lifecycle callers; `ai.py` retains canonical history ownership. |
-| `agno_compat_sqlite.py` | Private pragma listener removal, monotonic run insertion with atomic usage snapshots, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy. |
+| `agno_compat_sqlite.py` | Private pragma listener removal, private run-table access, monotonic run insertion inside owner transactions with atomic usage snapshots, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy; `history/archive.py` shares the deletion and insertion transactions to move runs into and out of the compaction archive. |
 | `agno_compat_session_metrics.py` | Version-guarded Agent/Team accumulator repair, scoped to owned storage. | Loaded run metrics seed transient accounting snapshots; repeated saves add only changed contributions while preserving existing cumulative history. |
 | `agno_compat_run_messages.py` | Version-guarded Agent/Team terminal snapshots, retention and model attribution of metered request messages, and one-time settlement of abandoned async model streams. | `agent_storage.py` installs the patch; provider adapters own reported counters, and `usage_storage.py` retains content-free projection and retry exclusions. Aggregate accounting remains with Agno and the session-metrics repair. |
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
@@ -21265,7 +21273,9 @@ All paths below are relative to `src/mindroom/`.
 | `history/summary_input.py` | Serializing conversation and prior summary into bounded inputs; preserving a progress-making run envelope when shrinking. |
 | `history/message_content.py` | The shared text and media projection used by serialization and token estimation. |
 | `history/summary_call.py` | One cancellable summary call, a typed wall deadline, complete-output validation, and bounded retry policy. |
-| `history/storage.py` | Durable scope state, compacted-run tombstones, and merging chunk progress into the latest session row. |
+| `history/storage.py` | Durable scope state, the replayed summary, archive reconciliation before each run, and generation-precise redaction. |
+| `history/archive.py` | The `<session_table>_compactions` and `<session_table>_compacted_runs` tables: summary generations and archived runs, moved in one transaction with the live run rows. |
+| `history/legacy_compaction_state.py` | Recognizing scope state written when compaction deleted runs, for one-time adoption as a content-free generation. |
 | `history/native.py` | Selecting and configuring native compaction for the resolved history route. |
 | `native_compaction.py` | Provider-neutral checkpoint and native replay data. |
 
@@ -21302,8 +21312,15 @@ Mantle currently needs its existing HTTP transport passed explicitly when copyin
 - Summary overrides preserve effective output-cap precedence while removing thinking from typed fields, request parameters, and raw body parameters.
 - The outer retry policy disables Agno-level retries; Claude and OpenAI summary adapters also disable SDK retries while preserving caller-owned clients and transports.
 - If the saved summary alone exceeds the final history budget, replay preparation raises an explicit budget error before a reply model call; the durable summary and already committed compaction progress remain intact.
-- A chunk commits its summary and compacted-run tombstones before source-run deletion, and merges against the latest durable row.
+- A chunk moves its runs, member runs included, into the archive and records its summary generation in the same transaction that deletes their live rows; nothing compaction touches is lost.
+- The session summary is written after that transaction; before each run, reconciliation restores the latest generation's summary and deletes live runs that are already archived.
 - Earlier committed chunks survive later failure or cancellation; compacted runs cannot silently reappear.
+- Redacting an event represented by an archived run removes that run and everything after it, returns the generation's earlier runs to replay, and replays the previous generation's summary.
+- Content-free legacy generations cannot be split: while one still replays its summary, an event it may contain (its captured seen ids, retained source ownership, or any removed live run) clears it together with every later generation, their archived runs, and all live runs, as before the archive existed.
+- Legacy provenance takes precedence over an archive hit, because every later generation was built on the legacy summary.
+- After any redaction change, the scope's preserved seen ids are exactly those its remaining compacted history represents, so removed messages return as unseen thread context.
+- The archive only grows; redaction and conversation deletion are its only removals.
+- Downgrading to a release without the archive and upgrading again adopts the older release's compaction state once more; runs that release deleted stay lost.
 - Only the affected scope is rewritten; current-turn media and current-turn reasoning retain their existing replay rules.
 
 The history, provider transport, Agno patch, import-boundary, and native compaction tests exercise these contracts.

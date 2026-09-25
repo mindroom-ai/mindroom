@@ -34,9 +34,9 @@ from mindroom.history.compaction import (
 )
 from mindroom.history.replay import estimate_prompt_visible_history_tokens
 from mindroom.history.storage import (
+    archive_compaction_chunk,
     read_scope_state,
-    record_compaction_chunk,
-    write_scope_state,
+    set_force_compaction_state,
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, CompactionSummaryOutputLimitError
 from mindroom.history.summary_input import build_summary_input, messages_for_runs
@@ -107,6 +107,8 @@ async def _rewrite_single_run(
     fallback_summary_input_budget: int | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
 ) -> _CompactionRewriteResult | None:
+    # Compaction archives runs of a stored conversation.
+    seed_session(storage, working_session)
     return await _rewrite_working_session_for_compaction(
         storage=storage,
         persisted_session=working_session,
@@ -337,8 +339,8 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch(
-            "mindroom.history.compaction.record_compaction_chunk",
-            wraps=record_compaction_chunk,
+            "mindroom.history.compaction.archive_compaction_chunk",
+            wraps=archive_compaction_chunk,
         ) as persist_spy,
         patch(
             "mindroom.history.compaction.build_summary_input",
@@ -368,11 +370,11 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     retry_sleep.assert_not_awaited()
     # The second chunk rebuilds its input with the fallback's token estimator.
     assert build_summary_input_spy.call_args_list[-1].kwargs["token_estimator"].keywords["model_id"] == fallback.id
-    assert [call.kwargs["compacted_run_ids"] for call in persist_spy.call_args_list] == [
-        ("run-1",),
-        ("run-2",),
+    assert [[run.run_id for run in call.kwargs["archived_runs"]] for call in persist_spy.call_args_list] == [
+        ["run-1"],
+        ["run-2"],
     ]
-    assert rewrite_result.compacted_run_ids == ("run-1", "run-2")
+    assert rewrite_result.compacted_run_count == 2
     assert rewrite_result.served_by.model is fallback
     assert rewrite_result.served_by.name == "fallback-model"
     assert [event.summary_model for event in progress_events] == ["fallback-model"]
@@ -398,8 +400,8 @@ async def test_rewrite_propagates_fallback_refusal_without_persisting(tmp_path: 
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch(
-            "mindroom.history.compaction.record_compaction_chunk",
-            wraps=record_compaction_chunk,
+            "mindroom.history.compaction.archive_compaction_chunk",
+            wraps=archive_compaction_chunk,
         ) as persist_spy,
         pytest.raises(ModelSafeguardRefusalError),
     ):
@@ -458,8 +460,8 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch(
-            "mindroom.history.compaction.record_compaction_chunk",
-            wraps=record_compaction_chunk,
+            "mindroom.history.compaction.archive_compaction_chunk",
+            wraps=archive_compaction_chunk,
         ) as persist_spy,
     ):
         rewrite_result = await _rewrite_single_run(storage=storage, working_session=working_session)
@@ -470,7 +472,7 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
     assert summary_inputs[1] == summary_inputs[0]
     retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
     assert persist_spy.call_count == 1
-    assert persist_spy.call_args.kwargs["compacted_run_ids"] == ("run-1",)
+    assert [run.run_id for run in persist_spy.call_args.kwargs["archived_runs"]] == ["run-1"]
 
 
 @pytest.mark.parametrize(
@@ -507,8 +509,8 @@ async def test_rewrite_bounds_retry_attempts(
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch(
-            "mindroom.history.compaction.record_compaction_chunk",
-            wraps=record_compaction_chunk,
+            "mindroom.history.compaction.archive_compaction_chunk",
+            wraps=archive_compaction_chunk,
         ) as persist_spy,
         pytest.raises(type(error)),
     ):
@@ -534,8 +536,8 @@ async def test_rewrite_propagates_non_retryable_provider_error_without_persistin
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch(
-            "mindroom.history.compaction.record_compaction_chunk",
-            wraps=record_compaction_chunk,
+            "mindroom.history.compaction.archive_compaction_chunk",
+            wraps=archive_compaction_chunk,
         ) as persist_spy,
         pytest.raises(ModelProviderError, match="invalid request"),
     ):
@@ -555,8 +557,8 @@ async def test_rewrite_propagates_cancellation_without_retrying_or_persisting(tm
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch(
-            "mindroom.history.compaction.record_compaction_chunk",
-            wraps=record_compaction_chunk,
+            "mindroom.history.compaction.archive_compaction_chunk",
+            wraps=archive_compaction_chunk,
         ) as persist_spy,
         pytest.raises(asyncio.CancelledError),
     ):
@@ -588,8 +590,8 @@ async def test_rewrite_propagates_cancellation_during_transient_retry_delay(tmp_
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch(
-            "mindroom.history.compaction.record_compaction_chunk",
-            wraps=record_compaction_chunk,
+            "mindroom.history.compaction.archive_compaction_chunk",
+            wraps=archive_compaction_chunk,
         ) as persist_spy,
     ):
         rewrite_task = asyncio.create_task(_rewrite_single_run(storage=storage, working_session=working_session))
@@ -632,7 +634,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     seed_session(storage, session)
 
     observed: list[tuple[str, list[str], int, int | None, str | None]] = []
@@ -736,7 +738,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
 
 @pytest.mark.asyncio
 async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(tmp_path: Path) -> None:
-    """Every destructive compaction chunk should expose raw messages before persistence."""
+    """Every text compaction chunk should expose raw messages before persistence."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -1021,7 +1023,7 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     seed_session(storage, session)
 
     observed: list[str] = []
@@ -1141,7 +1143,7 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path) -> None:
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     seed_session(storage, session)
 
     observed: list[str] = []
@@ -1541,6 +1543,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
         == []
     )
 
+    seed_session(storage, working_session)
     with patch(
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(return_value=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))),

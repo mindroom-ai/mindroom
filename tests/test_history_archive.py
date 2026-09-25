@@ -9,11 +9,11 @@ from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
-from sqlalchemy.exc import IntegrityError
 
 from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.history import archive
 from tests.conftest import seed_session
+from tests.history_helpers import StoredGeneration, compaction_generations
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -82,10 +82,9 @@ def test_archiving_moves_runs_and_member_runs_out_of_the_live_table(storage: Sql
         "r1-member",
         "r2",
     }
-    generation = archive.latest_generation(storage, session_id="session", scope_key=_SCOPE)
-    assert generation is not None
-    assert generation.summary == "summary one"
-    assert generation.legacy is False
+    assert compaction_generations(storage, _SCOPE, "session") == [
+        StoredGeneration(summary="summary one", summary_model="summary-model", legacy=False),
+    ]
 
 
 def test_archived_event_ids_are_scoped(storage: SqliteDb) -> None:
@@ -140,16 +139,17 @@ def test_clear_to_legacy_keeps_only_content_free_tombstones(storage: SqliteDb) -
         scope_key=_SCOPE,
         summary="legacy summary",
         tombstone_run_ids=["gone"],
+        event_ids=["$legacy"],
     )
     _archive(storage, session, ["r2"], "generation one")
 
     archive.clear_to_legacy(storage, session_id="session", scope_key=_SCOPE, live_run_ids=["r3"])
 
     assert _live_run_ids(storage) == []
-    generation = archive.latest_generation(storage, session_id="session", scope_key=_SCOPE)
-    assert generation is not None
-    assert generation.legacy is True
-    assert generation.summary is None
+    assert compaction_generations(storage, _SCOPE, "session") == [
+        StoredGeneration(summary=None, summary_model=None, legacy=True),
+    ]
+    assert archive.legacy_event_ids(storage, session_id="session", scope_key=_SCOPE) == set()
     assert archive.archived_run_ids(storage, session_id="session", run_ids=["gone", "r2"]) == {"gone"}
 
 
@@ -165,22 +165,21 @@ def test_session_deletion_cascades_to_the_archive(storage: SqliteDb) -> None:
     assert archive.archived_run_ids(storage, session_id="session", run_ids=["r1"]) == set()
 
 
-def test_failed_archive_write_leaves_live_runs_intact(storage: SqliteDb) -> None:
+def test_failed_run_deletion_rolls_back_the_archive_write(storage: SqliteDb, monkeypatch: pytest.MonkeyPatch) -> None:
     """The archive insert and the live-row deletion commit together or not at all."""
     session = _seed(storage, ["r1"])
 
-    with pytest.raises(IntegrityError):
-        archive.archive_runs(
-            storage,
-            session_id="missing-session",
-            scope_key=_SCOPE,
-            summary="summary",
-            summary_model="summary-model",
-            runs=list(session.runs or []),
-            event_ids={},
-        )
+    def fail_deletion(*_args: object) -> None:
+        msg = "process stopped"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(archive, "delete_run_subtrees", fail_deletion)
+    with pytest.raises(RuntimeError, match="process stopped"):
+        _archive(storage, session, ["r1"], "summary")
 
     assert _live_run_ids(storage) == ["r1"]
+    assert archive.latest_generation(storage, session_id="session", scope_key=_SCOPE) is None
+    assert archive.archived_run_ids(storage, session_id="session", run_ids=["r1"]) == set()
 
 
 def test_archive_requires_sqlite_storage() -> None:

@@ -43,14 +43,14 @@ class ResolvedEntityView:
 
     @property
     def compaction_config(self) -> CompactionConfig:
-        """Effective destructive compaction config for this scope."""
+        """Effective text compaction config for this scope."""
         if self.name is None:
             return self._config._default_compaction_config()
         return self._config._entity_compaction_config(self.name)
 
     @property
     def has_authored_compaction_config(self) -> bool:
-        """Whether destructive compaction was explicitly configured for this scope."""
+        """Whether text compaction was explicitly configured for this scope."""
         if self.name is None:
             return self._config._has_authored_default_compaction_config()
         return self._config._has_authored_entity_compaction_config(self.name)

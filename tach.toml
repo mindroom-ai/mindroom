@@ -935,6 +935,7 @@ visibility = ["mindroom.openai_models", "mindroom.openai_response_replay"]
 path = "mindroom.legacy_revision_replay"
 depends_on = []
 visibility = [
+    "mindroom.history.storage",
     "mindroom.turn_record",
     "mindroom.turn_store",
 ]
@@ -2265,19 +2266,26 @@ depends_on = [
     "mindroom.agno_compat_sqlite",
     "mindroom.usage_storage",
 ]
-visibility = ["mindroom.history.storage"]
+visibility = ["mindroom.history.legacy_compaction_state", "mindroom.history.storage"]
 
 [[modules]]
 path = "mindroom.history.storage"
 depends_on = [
     "mindroom.agent_storage",
     "mindroom.history.archive",
+    "mindroom.history.legacy_compaction_state",
     "mindroom.background_tasks",
     "mindroom.constants",
     "mindroom.history_run_visibility",
     "mindroom.history.types",
-    "mindroom.metadata_merge",
+    "mindroom.legacy_revision_replay",
+    "mindroom.logging_config",
 ]
+
+[[modules]]
+path = "mindroom.history.legacy_compaction_state"
+depends_on = ["mindroom.history.archive"]
+visibility = ["mindroom.history.storage"]
 
 [[modules]]
 path = "mindroom.history.types"
@@ -2314,6 +2322,7 @@ visibility = [
 [[modules]]
 path = "mindroom.history.runtime"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.history.compaction",
     "mindroom.history.native",
     "mindroom.history.policy",

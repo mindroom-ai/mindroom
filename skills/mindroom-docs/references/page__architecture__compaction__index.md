@@ -17,7 +17,9 @@ All paths below are relative to `src/mindroom/`.
 | `history/summary_input.py` | Serializing conversation and prior summary into bounded inputs; preserving a progress-making run envelope when shrinking. |
 | `history/message_content.py` | The shared text and media projection used by serialization and token estimation. |
 | `history/summary_call.py` | One cancellable summary call, a typed wall deadline, complete-output validation, and bounded retry policy. |
-| `history/storage.py` | Durable scope state, compacted-run tombstones, and merging chunk progress into the latest session row. |
+| `history/storage.py` | Durable scope state, the replayed summary, archive reconciliation before each run, and generation-precise redaction. |
+| `history/archive.py` | The `<session_table>_compactions` and `<session_table>_compacted_runs` tables: summary generations and archived runs, moved in one transaction with the live run rows. |
+| `history/legacy_compaction_state.py` | Recognizing scope state written when compaction deleted runs, for one-time adoption as a content-free generation. |
 | `history/native.py` | Selecting and configuring native compaction for the resolved history route. |
 | `native_compaction.py` | Provider-neutral checkpoint and native replay data. |
 
@@ -54,8 +56,15 @@ Mantle currently needs its existing HTTP transport passed explicitly when copyin
 - Summary overrides preserve effective output-cap precedence while removing thinking from typed fields, request parameters, and raw body parameters.
 - The outer retry policy disables Agno-level retries; Claude and OpenAI summary adapters also disable SDK retries while preserving caller-owned clients and transports.
 - If the saved summary alone exceeds the final history budget, replay preparation raises an explicit budget error before a reply model call; the durable summary and already committed compaction progress remain intact.
-- A chunk commits its summary and compacted-run tombstones before source-run deletion, and merges against the latest durable row.
+- A chunk moves its runs, member runs included, into the archive and records its summary generation in the same transaction that deletes their live rows; nothing compaction touches is lost.
+- The session summary is written after that transaction; before each run, reconciliation restores the latest generation's summary and deletes live runs that are already archived.
 - Earlier committed chunks survive later failure or cancellation; compacted runs cannot silently reappear.
+- Redacting an event represented by an archived run removes that run and everything after it, returns the generation's earlier runs to replay, and replays the previous generation's summary.
+- Content-free legacy generations cannot be split: while one still replays its summary, an event it may contain (its captured seen ids, retained source ownership, or any removed live run) clears it together with every later generation, their archived runs, and all live runs, as before the archive existed.
+- Legacy provenance takes precedence over an archive hit, because every later generation was built on the legacy summary.
+- After any redaction change, the scope's preserved seen ids are exactly those its remaining compacted history represents, so removed messages return as unseen thread context.
+- The archive only grows; redaction and conversation deletion are its only removals.
+- Downgrading to a release without the archive and upgrading again adopts the older release's compaction state once more; runs that release deleted stay lost.
 - Only the affected scope is rewritten; current-turn media and current-turn reasoning retain their existing replay rules.
 
 The history, provider transport, Agno patch, import-boundary, and native compaction tests exercise these contracts.

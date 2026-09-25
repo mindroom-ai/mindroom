@@ -6,7 +6,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.agent import Agent as AgnoAgent
@@ -26,15 +26,10 @@ from mindroom.constants import (
 )
 from mindroom.history.replay import scope_visible_runs
 from mindroom.history.storage import (
-    invalidate_compacted_replay,
-    prune_reintroduced_runs,
     read_scope_seen_event_ids,
     read_scope_state,
-    record_compaction_chunk,
-    seen_event_ids_for_runs,
     set_force_compaction_state,
     update_scope_seen_event_ids,
-    write_scope_state,
 )
 from mindroom.history.types import (
     HistoryScope,
@@ -81,74 +76,26 @@ def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None
     session = _session("session-1")
 
     assert update_scope_seen_event_ids(session, scope, ["event-1"]) is True
-    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
 
     assert read_scope_seen_event_ids(session, scope) == {"event-1"}
-
-
-def test_invalidate_compacted_replay_clears_summary_and_rebuild_markers(tmp_path: Path) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    other_scope = HistoryScope(kind="team", scope_id="other-team")
-    session = _session("session-1")
-    session.summary = SessionSummary(summary="contains redacted history")
-    update_scope_seen_event_ids(session, scope, ["redacted-event", "old-event"])
-    update_scope_seen_event_ids(session, other_scope, ["other-event"])
-    write_scope_state(
-        session,
-        scope,
-        HistoryScopeState(
-            last_summary_model="summary-model",
-            compacted_run_ids=("run-1",),
-            force_compact_before_next_run=True,
-        ),
-    )
-    write_scope_state(session, other_scope, HistoryScopeState(last_summary_model="other-model"))
-
-    assert invalidate_compacted_replay(session, scope) is True
-
-    assert session.summary is None
-    assert read_scope_seen_event_ids(session, scope) == set()
-    assert read_scope_seen_event_ids(session, other_scope) == {"other-event"}
-    assert read_scope_state(session, scope) == HistoryScopeState(
-        compacted_run_ids=("run-1",),
-        force_compact_before_next_run=True,
-    )
-    assert read_scope_state(session, other_scope) == HistoryScopeState(last_summary_model="other-model")
-
-    session.runs = [_completed_run("run-1")]
-    storage = MagicMock()
-    assert prune_reintroduced_runs(storage, session, read_scope_state(session, scope)) is True
-    assert session.runs == []
-    storage.delete_runs.assert_called_once_with(["run-1"])
 
 
 def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     session = _session("session-1")
-    state = HistoryScopeState(
-        last_summary_model="summary-model",
-        last_compacted_run_count=3,
-    )
 
-    forced_state = set_force_compaction_state(session, scope, state, force=True)
+    forced_state = set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
 
-    assert forced_state == HistoryScopeState(
-        last_summary_model="summary-model",
-        last_compacted_run_count=3,
-        force_compact_before_next_run=True,
-    )
+    assert forced_state == HistoryScopeState(force_compact_before_next_run=True)
     assert read_scope_state(session, scope) == forced_state
 
     cleared_state = set_force_compaction_state(session, scope, forced_state, force=False)
 
-    assert cleared_state == HistoryScopeState(
-        last_summary_model="summary-model",
-        last_compacted_run_count=3,
-        force_compact_before_next_run=False,
-    )
+    assert cleared_state == HistoryScopeState()
     assert read_scope_state(session, scope) == cleared_state
+    assert session.metadata == {}
 
 
 def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Path) -> None:
@@ -203,7 +150,6 @@ def test_seen_event_ids_match_model_history_visibility(is_team: bool) -> None:
     update_scope_seen_event_ids(session, scope, ["preserved-event"])
 
     assert read_scope_seen_event_ids(session, scope) == {"completed-event", "preserved-event", "running-event"}
-    assert seen_event_ids_for_runs(runs) == {"completed-event", "running-event"}
     assert [run.run_id for run in scope_visible_runs(session, scope)] == ["completed", "running"]
 
 
@@ -322,13 +268,10 @@ def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:
     team_scope = HistoryScope(kind="team", scope_id="team-123")
     session = _session("session-1")
 
-    write_scope_state(session, agent_scope, HistoryScopeState(force_compact_before_next_run=True))
-    write_scope_state(session, team_scope, HistoryScopeState(last_summary_model="summary-model"))
+    set_force_compaction_state(session, agent_scope, HistoryScopeState(), force=True)
 
     assert read_scope_state(session, agent_scope).force_compact_before_next_run is True
-    assert read_scope_state(session, agent_scope).last_summary_model is None
     assert read_scope_state(session, team_scope).force_compact_before_next_run is False
-    assert read_scope_state(session, team_scope).last_summary_model == "summary-model"
 
 
 def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
@@ -346,7 +289,7 @@ def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
 
     assert read_scope_state(session, agent_scope).force_compact_before_next_run is False
 
-    write_scope_state(session, agent_scope, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, agent_scope, HistoryScopeState(), force=True)
 
     assert session.metadata == {
         MINDROOM_COMPACTION_METADATA_KEY: {
@@ -385,30 +328,6 @@ def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> Non
 
     assert read_scope_seen_event_ids(session, agent_scope) == {"agent-event"}
     assert read_scope_seen_event_ids(session, team_scope) == {"team-event", "preserved-team-event"}
-
-
-def test_compaction_progress_preserves_newer_seen_event_ids(tmp_path: Path) -> None:
-    config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    persisted_session = _session("session-1")
-    working_session = _session("session-1")
-    latest_session = _session("session-1")
-    update_scope_seen_event_ids(working_session, scope, ["compacted-event"])
-    update_scope_seen_event_ids(latest_session, scope, ["newer-event"])
-    seed_session(storage, latest_session)
-
-    record_compaction_chunk(
-        storage=storage,
-        persisted_session=persisted_session,
-        working_session=working_session,
-        scope=scope,
-        compacted_run_ids=(),
-    )
-
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    assert read_scope_seen_event_ids(persisted, scope) == {"compacted-event", "newer-event"}
 
 
 @pytest.mark.asyncio
@@ -461,7 +380,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     seed_session(storage, session)
 
     with (
@@ -490,6 +409,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
 
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
+    assert persisted.runs == []
     assert read_scope_seen_event_ids(persisted, scope) == {
         "event-1",
         "event-2",

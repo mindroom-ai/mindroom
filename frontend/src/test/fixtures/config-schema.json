@@ -885,11 +885,11 @@
       "type": "object"
     },
     "CompactionConfig": {
-      "description": "Concrete destructive compaction configuration.",
+      "description": "Concrete text compaction configuration.",
       "properties": {
         "enabled": {
           "default": true,
-          "description": "Whether to allow automatic pre-reply destructive compaction for this history scope",
+          "description": "Whether to allow automatic pre-reply text compaction for this history scope",
           "title": "Enabled",
           "type": "boolean"
         },
@@ -987,7 +987,7 @@
       "type": "object"
     },
     "CompactionOverrideConfig": {
-      "description": "Optional per-scope overrides for destructive compaction.\n\nAn authored null clears the value inherited from defaults, except for ``enabled``, where it turns compaction off.",
+      "description": "Optional per-scope overrides for text compaction.\n\nAn authored null clears the value inherited from defaults, except for ``enabled``, where it turns compaction off.",
       "properties": {
         "enabled": {
           "anyOf": [
@@ -999,7 +999,7 @@
             }
           ],
           "default": null,
-          "description": "Whether to allow automatic pre-reply destructive compaction for this history scope",
+          "description": "Whether to allow automatic pre-reply text compaction for this history scope",
           "title": "Enabled"
         },
         "threshold_tokens": {
@@ -1229,7 +1229,7 @@
             "fallback_model": null,
             "timeout_seconds": 600.0
           },
-          "description": "Default destructive compaction policy (set to null or enabled=false to disable automatic pre-reply compaction)"
+          "description": "Default text compaction policy (set to null or enabled=false to disable automatic pre-reply compaction)"
         },
         "num_history_runs": {
           "anyOf": [

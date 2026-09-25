@@ -172,7 +172,7 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
             static_prompt_tokens=0,
         ).execution_plan
         assert before.replay_window_tokens == 4000
-        assert not before.destructive_compaction_available
+        assert not before.text_compaction_available
 
         new = old.model_copy(deep=True)
         new.models["default"].context_window = 64000
@@ -204,7 +204,7 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
             ).execution_plan
             assert after.replay_window_tokens == 64000
             assert after.compaction_context_window == 64000
-            assert after.destructive_compaction_available
+            assert after.text_compaction_available
 
 
 @pytest.mark.asyncio
@@ -266,4 +266,4 @@ async def test_context_window_reload_preserves_explicit_replay_cap(runtime: _Mul
     plan = _history_plan(runtime.config, "general")
     assert plan.replay_window_tokens == 3000
     assert plan.compaction_context_window == 64000
-    assert plan.destructive_compaction_available
+    assert plan.text_compaction_available

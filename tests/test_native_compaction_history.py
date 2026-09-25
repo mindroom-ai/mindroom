@@ -35,7 +35,7 @@ from mindroom.history.runtime import (
     resolve_agent_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.storage import write_scope_state
+from mindroom.history.storage import set_force_compaction_state
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.native_compaction import record_native_checkpoint
 from mindroom.openai_models import MindRoomOpenAIResponses
@@ -766,7 +766,7 @@ async def test_native_activation_respects_history_policy(
     session = _session("session", runs=[_completed_run("old")])
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     if case == "manual":
-        write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+        set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     db = SqliteDb(db_file=str(tmp_path / "history.db"))
     seed_session(db, session)
     agent = _agent(model=model, db=db)

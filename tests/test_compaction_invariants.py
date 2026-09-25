@@ -1,6 +1,6 @@
 """Tests for the four history-compaction invariants.
 
-1. Compacted runs never reappear (``mindroom.history.storage``).
+1. Compacted runs stay archived and never reappear in replay (``mindroom.history.storage``).
 2. Chunk progress survives interruption (``mindroom.history.storage``).
 3. Summary calls get exactly one model configuration path (``mindroom.history.summary_call``).
 4. Retry on provider failure is deterministic (``mindroom.history.summary_call``).
@@ -41,15 +41,15 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.error_handling import ModelSafeguardRefusalError
+from mindroom.history import archive
 from mindroom.history.compaction import SummaryModel, _generate_compaction_summary_with_retry, compact_scope_history
 from mindroom.history.storage import (
-    compacted_run_ids_with,
-    prune_reintroduced_runs,
+    archive_compaction_chunk,
     read_scope_state,
-    record_compaction_chunk,
+    reconcile_compaction_state,
     remove_runs_by_id,
+    set_force_compaction_state,
     update_scope_state_on_latest,
-    write_scope_state,
 )
 from mindroom.history.summary_call import (
     DEFAULT_SUMMARY_RETRY_POLICY,
@@ -73,6 +73,7 @@ from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.token_budget import estimate_compaction_input_tokens
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test, seed_session
+from tests.history_helpers import latest_summary_model
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 _HISTORY_SETTINGS = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
@@ -228,26 +229,30 @@ def _agent(db: object) -> Agent:
     )
 
 
-# --- Invariant 1: compacted runs never reappear ------------------------------
+# --- Invariant 1: compacted runs stay archived and never reappear -------------
+
+
+def _archive_directly(storage: object, session: AgentSession, run_ids: list[str], summary: str) -> None:
+    """Commit one archive generation without the session-row summary write that follows it."""
+    archive.archive_runs(
+        storage,  # type: ignore[arg-type]
+        session_id=session.session_id,
+        scope_key=_SCOPE.key,
+        summary=summary,
+        summary_model="summary-model",
+        runs=[run for run in session.runs or [] if run.run_id in run_ids],
+        event_ids={},
+    )
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_prunes_reintroduced_compacted_runs(tmp_path: Path) -> None:
-    """Compacted-run tombstones win over a later stale session write (#1094)."""
+async def test_prepare_history_for_run_prunes_resurrected_archived_runs(tmp_path: Path) -> None:
+    """Archive membership wins over a later stale write that resurrects a compacted run (#1094)."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session([_completed_run("run-1"), _completed_run("run-2")])
-    write_scope_state(
-        session,
-        _SCOPE,
-        HistoryScopeState(
-            last_compacted_at="2026-01-01T00:00:00Z",
-            last_summary_model="summary-model",
-            last_compacted_run_count=1,
-            compacted_run_ids=("run-1",),
-        ),
-    )
-    seed_session(storage, session)
+    session = seed_session(storage, _session([_completed_run("run-1"), _completed_run("run-2")]))
+    _archive_directly(storage, session, ["run-1"], "summary")
+    seed_session(storage, _session([_completed_run("run-1"), _completed_run("run-2")]))
 
     prepared = await prepare_history_for_run_for_test(
         agent=_agent(db=storage),
@@ -258,40 +263,69 @@ async def test_prepare_history_for_run_prunes_reintroduced_compacted_runs(tmp_pa
         config=config,
         execution_identity=None,
         storage=storage,
-        session=session,
     )
 
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs or []] == ["run-2"]
+    assert archive.archived_run_ids(storage, session_id="session-1", run_ids=["run-1", "run-2"]) == {"run-1"}
     assert prepared.replay_plan is not None
     storage.close()
 
 
-def test_prune_reintroduced_runs_removes_tombstoned_runs_and_descendants() -> None:
-    session = _session(
-        [
-            _completed_run("kept"),
-            _completed_run("compacted"),
-            RunOutput(run_id="child", parent_run_id="compacted", status=RunStatus.completed),
-        ],
-    )
-    state = HistoryScopeState(compacted_run_ids=("compacted",))
-    storage = MagicMock()
+def test_reconcile_removes_resurrected_runs_with_their_member_runs(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    runs = [
+        _completed_run("compacted"),
+        RunOutput(run_id="child", agent_id="test_agent", parent_run_id="compacted", status=RunStatus.completed),
+        _completed_run("kept"),
+    ]
+    session = seed_session(storage, _session(runs))
+    _archive_directly(storage, session, ["compacted", "child"], "summary")
+    resurrected = seed_session(storage, _session(runs))
 
-    assert prune_reintroduced_runs(storage, session, state) is True
+    reconcile_compaction_state(storage, resurrected, _SCOPE)
+
+    assert [run.run_id for run in resurrected.runs or []] == ["kept"]
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs or []] == ["kept"]
+    storage.close()
+
+
+def test_reconcile_is_a_no_op_for_a_scope_without_archive(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = seed_session(storage, _session([_completed_run("kept")]))
+
+    with patch.object(storage, "upsert_session", wraps=storage.upsert_session) as upsert_spy:
+        reconcile_compaction_state(storage, session, _SCOPE)
+
+    upsert_spy.assert_not_called()
     assert [run.run_id for run in session.runs or []] == ["kept"]
-    storage.delete_runs.assert_called_once_with(["compacted", "child"])
+    assert session.summary is None
+    storage.close()
 
 
-def test_prune_reintroduced_runs_is_a_no_op_without_resurrected_runs() -> None:
-    session = _session([_completed_run("kept")])
-    storage = MagicMock()
+def test_reconcile_restores_the_latest_generation_summary(tmp_path: Path) -> None:
+    """An interrupted summary write or a stale session write cannot detach replay from the archive."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = seed_session(storage, _session([_completed_run("run-1"), _completed_run("run-2")]))
+    _archive_directly(storage, session, ["run-1"], "archived summary")
+    stale = get_agent_session(storage, "session-1")
+    assert stale is not None
+    stale.summary = SessionSummary(summary="stale summary", updated_at=datetime.now(UTC))
+    storage.upsert_session(stale)
 
-    assert prune_reintroduced_runs(storage, session, HistoryScopeState(compacted_run_ids=("gone",))) is False
-    assert prune_reintroduced_runs(storage, session, HistoryScopeState()) is False
-    assert [run.run_id for run in session.runs or []] == ["kept"]
-    storage.delete_runs.assert_not_called()
+    reconcile_compaction_state(storage, stale, _SCOPE)
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "archived summary"
+    storage.close()
 
 
 def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: Path) -> None:
@@ -299,13 +333,12 @@ def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: P
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     stale_session = _session([_completed_run("run-1")])
-    write_scope_state(stale_session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, stale_session)
 
     concurrent_session = get_agent_session(storage, "session-1")
     assert concurrent_session is not None
-    concurrent_state = HistoryScopeState(force_compact_before_next_run=True, compacted_run_ids=("older-run",))
-    write_scope_state(concurrent_session, _SCOPE, concurrent_state)
+    concurrent_state = HistoryScopeState(force_compact_before_next_run=True)
+    set_force_compaction_state(concurrent_session, _SCOPE, HistoryScopeState(), force=True)
     concurrent_session.runs = [*(concurrent_session.runs or []), _completed_run("run-2")]
     seed_session(storage, concurrent_session)
 
@@ -313,13 +346,12 @@ def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: P
 
     def clear_force(latest: HistoryScopeState) -> HistoryScopeState:
         seen_states.append(latest)
-        return HistoryScopeState(force_compact_before_next_run=False, compacted_run_ids=latest.compacted_run_ids)
+        return HistoryScopeState(force_compact_before_next_run=False)
 
     returned_state = update_scope_state_on_latest(storage, stale_session, _SCOPE, clear_force)
 
     assert seen_states == [concurrent_state]
     assert returned_state.force_compact_before_next_run is False
-    assert returned_state.compacted_run_ids == ("older-run",)
     persisted_session = get_agent_session(storage, "session-1")
     assert persisted_session is not None
     assert read_scope_state(persisted_session, _SCOPE) == returned_state
@@ -331,8 +363,8 @@ def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(tmp_pat
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     stale_session = _session([_completed_run("run-1")])
-    persisted_state = HistoryScopeState(compacted_run_ids=("older-run",))
-    write_scope_state(stale_session, _SCOPE, persisted_state)
+    persisted_state = HistoryScopeState(force_compact_before_next_run=True)
+    set_force_compaction_state(stale_session, _SCOPE, HistoryScopeState(), force=True)
     seed_session(storage, stale_session)
 
     concurrent_session = get_agent_session(storage, "session-1")
@@ -361,39 +393,24 @@ def test_remove_runs_by_id_removes_descendants() -> None:
     assert [run.run_id for run in pruned_runs] == ["unrelated"]
 
 
-def test_compacted_run_ids_with_caps_tombstones_to_newest_ids() -> None:
-    existing_ids = tuple(f"old-{index}" for index in range(1_024))
-
-    compacted_run_ids = compacted_run_ids_with(
-        HistoryScopeState(compacted_run_ids=existing_ids),
-        ["new-1", "new-2"],
-    )
-
-    assert len(compacted_run_ids) == 1_024
-    assert compacted_run_ids[:2] == ("old-2", "old-3")
-    assert compacted_run_ids[-2:] == ("new-1", "new-2")
-    assert "old-0" not in compacted_run_ids
-
-
-def test_write_scope_state_round_trips_capped_tombstones() -> None:
+def test_scope_state_writes_keep_other_scopes_verbatim() -> None:
+    """Writing one scope must not rewrite state another scope has not adopted yet."""
+    other_scope = HistoryScope(kind="team", scope_id="other")
     session = _session([])
+    session.metadata = {
+        MINDROOM_COMPACTION_METADATA_KEY: {
+            "version": 2,
+            "states": {other_scope.key: {"compacted_run_ids": ["old"], "last_compacted_at": "2026-01-01T00:00:00Z"}},
+        },
+    }
 
-    write_scope_state(
-        session,
-        _SCOPE,
-        HistoryScopeState(compacted_run_ids=tuple(f"run-{index}" for index in range(1_026))),
-    )
+    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
 
     metadata = session.metadata or {}
-    raw_compaction = metadata[MINDROOM_COMPACTION_METADATA_KEY]
-    assert isinstance(raw_compaction, dict)
-    raw_state = raw_compaction["states"][_SCOPE.key]
-    assert isinstance(raw_state, dict)
-    serialized_run_ids = raw_state["compacted_run_ids"]
-    assert isinstance(serialized_run_ids, list)
-    assert len(serialized_run_ids) == 1_024
-    assert serialized_run_ids[-2:] == ["run-1024", "run-1025"]
-    assert read_scope_state(session, _SCOPE).compacted_run_ids == tuple(serialized_run_ids)
+    assert metadata[MINDROOM_COMPACTION_METADATA_KEY]["states"] == {
+        other_scope.key: {"compacted_run_ids": ["old"], "last_compacted_at": "2026-01-01T00:00:00Z"},
+        _SCOPE.key: {"force_compact_before_next_run": True},
+    }
 
 
 # --- Invariant 2: chunk progress survives interruption ------------------------
@@ -410,7 +427,7 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
             _completed_run("run-2", marker="RUN2-MARKER", padding=16_000),
         ],
     )
-    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
     seed_session(storage, session)
     first_pass_inputs: list[str] = []
 
@@ -447,9 +464,8 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
     assert interrupted.summary is not None
     assert interrupted.summary.summary == "summary chunk 1"
     assert [run.run_id for run in interrupted.runs or []] == ["run-2"]
-    interrupted_state = read_scope_state(interrupted, _SCOPE)
-    assert interrupted_state.compacted_run_ids == ("run-1",)
-    assert interrupted_state.force_compact_before_next_run is True
+    assert archive.archived_run_ids(storage, session_id="session-1", run_ids=["run-1", "run-2"]) == {"run-1"}
+    assert read_scope_state(interrupted, _SCOPE).force_compact_before_next_run is True
     assert "RUN1-MARKER" in first_pass_inputs[0]
 
     # A stale writer resurrects the already-compacted run before the restart.
@@ -489,14 +505,40 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
     assert persisted.summary is not None
     assert persisted.summary.summary == "summary chunk 2"
     assert persisted.runs == []
-    final_state = read_scope_state(persisted, _SCOPE)
-    assert set(final_state.compacted_run_ids) == {"run-1", "run-2"}
-    assert final_state.force_compact_before_next_run is False
+    assert archive.archived_run_ids(storage, session_id="session-1", run_ids=["run-1", "run-2"]) == {"run-1", "run-2"}
+    assert read_scope_state(persisted, _SCOPE).force_compact_before_next_run is False
     # The restart consumed the partial summary and never re-summarized run-1.
     assert len(restart_inputs) == 1
     assert "summary chunk 1" in restart_inputs[0]
     assert "RUN2-MARKER" in restart_inputs[0]
     assert "RUN1-MARKER" not in restart_inputs[0]
+    storage.close()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_summary_write_is_repaired_before_replay(tmp_path: Path) -> None:
+    """A chunk whose archive committed but whose session summary never landed still replays its summary."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = seed_session(storage, _session([_completed_run("run-1"), _completed_run("run-2")]))
+    _archive_directly(storage, session, ["run-1"], "archived summary")
+
+    await prepare_history_for_run_for_test(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+    )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "archived summary"
+    assert [run.run_id for run in persisted.runs or []] == ["run-2"]
     storage.close()
 
 
@@ -1418,7 +1460,7 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
         }
         runs.append(run)
     session = _session(runs)
-    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
     seed_session(storage, session)
     summary_inputs: list[str] = []
 
@@ -1470,7 +1512,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
             _completed_run("run-2", marker="RUN2-MARKER", padding=16_000),
         ],
     )
-    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
     seed_session(storage, session)
 
     attempts: list[str] = []
@@ -1708,7 +1750,7 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
             _completed_run("run-2", marker="RUN2-MARKER", padding=16_000),
         ],
     )
-    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
     seed_session(storage, session)
     primary = FakeModel(id="summary-model", provider="fake")
     fallback = FakeModel(id="fallback-model-id", provider="fake")
@@ -1754,7 +1796,7 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == "recovered summary"
-    assert read_scope_state(persisted, _SCOPE).last_summary_model == "fallback-model-id"
+    assert latest_summary_model(storage, _SCOPE) == "fallback-model-id"
     storage.close()
 
 
@@ -1766,7 +1808,7 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER")])
-    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
     seed_session(storage, session)
     attempts: list[str] = []
 
@@ -1812,7 +1854,7 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=4_000)])
-    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
     seed_session(storage, session)
     summary_input_budget = 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1
     attempts: list[str] = []
@@ -1868,7 +1910,7 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
 
 @pytest.mark.asyncio
 async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_fact_loss(tmp_path: Path) -> None:
-    """A degenerate plan is unavailable and cannot repeatedly select a destructive rewrite."""
+    """A degenerate plan is unavailable and cannot repeatedly select a compaction rewrite."""
     summary_input_budget = COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1
     config, runtime_paths = _make_config(
         tmp_path,
@@ -1878,7 +1920,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     previous_summary = ("word " * 975) + "TAIL-FACT-MUST-SURVIVE"
     session = _session([_completed_run("run-1", marker="RUN1-MARKER")])
     session.summary = SessionSummary(summary=previous_summary, updated_at=datetime.now(UTC))
-    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
     seed_session(storage, session)
     generate_summary = AsyncMock()
 
@@ -1953,7 +1995,7 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=16_000)])
-    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
     seed_session(storage, session)
     attempts: list[str] = []
 
@@ -2011,7 +2053,7 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=4_000)])
-    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
     seed_session(storage, session)
 
     attempts: list[str] = []
@@ -2056,33 +2098,34 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
     storage.close()
 
 
-def test_compaction_chunk_interrupted_after_tombstones_is_repaired_by_the_next_prune(tmp_path: Path) -> None:
-    """Tombstones land before the run deletes; if the deletes never happen, the next run prunes instead of replaying."""
+def test_compaction_chunk_interrupted_before_the_summary_write_is_repaired_by_reconcile(tmp_path: Path) -> None:
+    """The archive commits before the session summary; a lost summary write is restored from the archive."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = seed_session(storage, _session([_completed_run("old"), _completed_run("kept")]))
-    working_session = deepcopy(session)
-    working_session.runs = [_completed_run("kept")]
+    archived_runs = [run for run in session.runs or [] if run.run_id == "old"]
 
     with (
-        patch.object(storage, "delete_runs", side_effect=RuntimeError("process stopped")),
+        patch.object(storage, "upsert_session", side_effect=RuntimeError("process stopped")),
         pytest.raises(RuntimeError, match="process stopped"),
     ):
-        record_compaction_chunk(
+        archive_compaction_chunk(
             storage=storage,
-            persisted_session=session,
-            working_session=working_session,
+            session=session,
             scope=_SCOPE,
-            compacted_run_ids=("old",),
+            summary=SessionSummary(summary="chunk summary", updated_at=datetime.now(UTC)),
+            summary_model="summary-model",
+            archived_runs=archived_runs,
         )
 
     reloaded = get_agent_session(storage, "session-1")
     assert reloaded is not None
-    assert [run.run_id for run in reloaded.runs or []] == ["old", "kept"]
-    assert read_scope_state(reloaded, _SCOPE).compacted_run_ids == ("old",)
+    assert [run.run_id for run in reloaded.runs or []] == ["kept"]
+    assert reloaded.summary is None
 
-    assert prune_reintroduced_runs(storage, reloaded, read_scope_state(reloaded, _SCOPE)) is True
+    reconcile_compaction_state(storage, reloaded, _SCOPE)
     repaired = get_agent_session(storage, "session-1")
     storage.close()
     assert repaired is not None
-    assert [run.run_id for run in repaired.runs or []] == ["kept"]
+    assert repaired.summary is not None
+    assert repaired.summary.summary == "chunk summary"
