@@ -6,6 +6,7 @@ import base64
 import json
 import threading
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import aiohttp
@@ -18,7 +19,12 @@ from mindroom.desktop.cloudflare_access import (
     CloudflareAccessTokenProvider,
     cloudflare_access_headers,
 )
+from mindroom.desktop.session import DesktopMatrixSession, _open_owned_session
 from mindroom.matrix.client_session import MindRoomAsyncClient, matrix_client_config
+from tests.conftest import test_runtime_paths as make_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _jwt(*, expires_at: int, marker: str) -> str:
@@ -148,6 +154,47 @@ async def test_nio_refreshes_access_header_for_each_transport_attempt(monkeypatc
     assert sent_tokens == ["first-token", "second-token"]
     assert provider.token_threads
     assert all(thread_id != event_loop_thread for thread_id in provider.token_threads)
+
+
+@pytest.mark.asyncio
+async def test_desktop_device_client_prepares_access_header_before_first_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pairing and bridge requests fetch the Access JWT instead of failing on an empty cache."""
+    provider = _TestTokenProvider("device-token")
+    session = DesktopMatrixSession(
+        homeserver="https://matrix.example.org",
+        user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        access_token="matrix-access-token",  # noqa: S106
+    )
+    owner = await _open_owned_session(
+        session,
+        runtime_paths=make_runtime_paths(tmp_path),
+        allow_create=True,
+        http_headers=CloudflareAccessHeaders(provider),
+    )
+    sent_tokens: list[str] = []
+
+    async def request(*_args: object, **kwargs: object) -> object:
+        request_headers = kwargs["headers"]
+        assert isinstance(request_headers, dict)
+        sent_tokens.append(request_headers["cf-access-token"])
+        return SimpleNamespace(status=200)
+
+    try:
+        owner.client.client_session = SimpleNamespace(request=request)  # type: ignore[assignment]
+        monkeypatch.setattr(owner.client, "create_matrix_response", AsyncMock(return_value=object()))
+        monkeypatch.setattr(owner.client, "receive_response", AsyncMock())
+
+        await owner.client._send(nio.WhoamiResponse, "GET", "/whoami")
+    finally:
+        owner.client.client_session = None
+        await owner.close()
+
+    assert sent_tokens == ["device-token"]
+    assert provider.token_threads
 
 
 @pytest.mark.asyncio
