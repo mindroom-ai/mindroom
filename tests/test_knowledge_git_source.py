@@ -2167,6 +2167,38 @@ async def test_run_git_timeout_kills_subprocess_and_raises_runtime_error(
     assert signalled_groups == [(12345, signal.SIGKILL)]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="process groups require POSIX")
+@pytest.mark.asyncio
+async def test_run_git_tolerates_a_group_holding_only_the_exited_leader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A group holding only the unreaped leader needs no kill, and macOS answers EPERM for it."""
+    manager = _git_manager(tmp_path)
+
+    class _SuccessfulProcess:
+        pid = 12345
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"ok", b""
+
+        async def wait(self) -> int:
+            return 0
+
+    async def _fake_create_subprocess_exec(*_args: object, **kwargs: object) -> _SuccessfulProcess:
+        assert kwargs["start_new_session"] is True
+        return _SuccessfulProcess()
+
+    def _refuse_zombie_group(_process_group_id: int, _signal: signal.Signals) -> None:
+        raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_git_source_module.os, "killpg", _refuse_zombie_group)
+
+    assert await manager.git_source._run_git(["status"]) == "ok"
+
+
 @pytest.mark.asyncio
 async def test_run_git_preserves_index_lock_and_does_not_retry(
     tmp_path: Path,

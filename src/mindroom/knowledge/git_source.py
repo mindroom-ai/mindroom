@@ -126,6 +126,10 @@ async def _terminate_git_process(
             group_signalled = True
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # macOS refuses to signal a group whose only member is the exited
+            # but not yet reaped leader, so nothing is left to kill.
+            pass
     with suppress(ProcessLookupError):
         await process.wait()
     if group_signalled and owned_process_group_id is not None:
