@@ -59,6 +59,8 @@ class WorkerProxyClientConfig:
     proxy_timeout_seconds: float
     credential_lease_ttl_seconds: int
     credential_policy: Mapping[str, tuple[str, ...]]
+    # The shared static runner has no credential store, so every call leases the tool's own saved settings.
+    lease_tool_credentials: bool
 
 
 def to_json_compatible(value: object) -> object:
@@ -375,7 +377,7 @@ def _credential_services_for_call(
     config: WorkerProxyClientConfig,
 ) -> list[str]:
     selectors = ("*", tool_name, f"{tool_name}.{function_name}")
-    services: list[str] = []
+    services: list[str] = [tool_name] if config.lease_tool_credentials else []
     for selector in selectors:
         for service in config.credential_policy.get(selector, ()):
             if service not in services:

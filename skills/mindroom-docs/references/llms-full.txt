@@ -10754,6 +10754,10 @@ get_pull_request("mindroom-ai/mindroom", 123)
 `todo` exposes `plan()`, `add_todo()`, `list_todos()`, `update_todo()`, `apply_template()`, and `list_templates()`.
 Todo items are scoped to the current Matrix room and resolved thread, so separate threads can carry independent plans.
 Each item can have a priority, dependency list, status, and assigned agent name.
+Assigning work to an agent, or changing work assigned to an agent, is refused unless the requester may address that agent in the current room under its `access` policy.
+Each item records the requester who wrote its title, human or agent, and other changes keep that attribution.
+Items written before requesters were recorded have no attribution until their next change, which records the current requester.
+Reassigning an item without rewriting its title also requires that its recorded requester may address the new agent.
 State is stored under `mindroom_data/todo/` and survives restarts.
 Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
 
@@ -10768,6 +10772,9 @@ A failed send is recorded like any other attempt, so the retry waits out the cha
 Future persisted timestamps beyond the relevant cooldown or backstop window are treated as elapsed so clock skew cannot mute valid work indefinitely.
 Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
 Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
+Work written by a human is poked on that human's behalf, with one poke per human, so the assigned agent applies its normal reply access and tool authorization to that human.
+Work written by an agent, team, router, or the internal user, which access policies never restrict, shares one poke with items written before requesters were recorded, and that poke dispatches as the assigned agent's own internal turn as every poke did before.
+Work from a human the assigned agent may not currently reply to in that room, or from any other requester such as a configured bot account, is not poked, and each such item is logged once.
 
 | Environment variable | Default | Behavior |
 | --- | --- | --- |
@@ -19940,6 +19947,14 @@ Agents can join existing rooms, create new rooms with AI-generated topics, respo
 
 Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_rooms_exist()` (public). DM rooms can be detected with `async is_dm_room(client, room_id) -> bool`.
 
+Any account on a shared homeserver can publish, repoint, or delete a managed alias such as `#lobby:<server>`, so a resolved alias alone never makes a room managed.
+A room already recorded in `matrix_state.yaml` for its key stays in use, and an alias that now resolves elsewhere only logs `managed_alias_points_elsewhere`.
+When the alias of a recorded room is deleted, the router points it back at that room, and replaces the room with a new aliased one only when the router can no longer read the room or is no longer joined to it.
+An unrecorded key adopts its alias target only when the router created that room, with no additional room version 12 creators, and the router itself set the alias as the room's canonical alias.
+Otherwise the router logs `managed_alias_target_refused`, never joins that room, and creates and records a fresh room without the alias, which later passes keep using.
+If the alias lookup or a state read fails transiently, a recorded room stays in use and an unrecorded key is retried on the next pass.
+A fresh room without the alias that is lost before its record is saved, for example by a crash, stays unrecorded, and the next pass creates another.
+
 ## Threading (MSC3440)
 
 MindRoom emits thread replies following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md), using `m.relates_to` with `rel_type: m.thread`.
@@ -20134,6 +20149,7 @@ matrix_space:
 ```
 
 When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
+The Space alias follows the same adoption rules as managed room aliases, so a Space held by another account is replaced by a fresh Space without the alias.
 The Space name is reconciled on each startup to match the configured value.
 Startup and config updates write child links without automatically granting human users root Space admin power.
 Concrete users from effective managed-room `invite_users` policies are invited to the root Space without receiving Space admin power.
@@ -20627,7 +20643,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] | [Tool metadata tests][tool-metadata-tests] cover the directed `restrict_to_base_dir` rejection for the `file`, `coding`, and `python` tools. |
 | [`legacy_private_storage.py`][private-legacy] and [`legacy_private_storage_aliases.py`][private-legacy-aliases] | [Private-storage tests][private-storage-tests] cover verified owner relocation, content preservation, historical aliases, and tamper rejection. |
 | [`oauth/legacy_credentials.py`][oauth-legacy-credentials] and [`oauth/credential_store.py`][oauth-store] | [OAuth store tests][oauth-store-tests] cover literal SQLite bindings, publication normalization, the removed JSON reader, reconnect disposition, and inert old files. |
-| [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
+| [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], [`custom_tools/todo_poke.py`][todo-poke], [`custom_tools/todo.py`][todo-tool], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], [todo poke][todo-poke-tests], [todo tool][todo-builtin-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
 | [`legacy_streaming.py`][legacy-streaming] and [`execution_preparation.py`][execution-preparation] | [Partial-reply][partial-reply-tests] and [streaming][streaming-tests] tests cover bounded historical suffixes, exact stripping order, current structured-status precedence, and interruption classification. |
 | [`legacy_revision_replay.py`][legacy-revision-replay] | [Revision replay][legacy-revision-replay-tests], [turn-store][turn-store-tests], and [handled-turn][handled-turn-tests] tests cover reconstruction, monotonic preservation, historical and modern selection, and cold-reopen cleanup. |
 | [`session_storage_preflight.py`][session-preflight] | [Session recovery tests][session-recovery-tests] cover schema-based archive, locks, rollback recovery, unrelated tables, current corruption, and byte preservation without inventing one release cutoff. |
@@ -20693,6 +20709,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob scrub and double-JSON decoding; other Agno readers remain dependency-owned. |
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
 | S21 | Isolated | [`legacy_attachments.py`][legacy-attachments] adopts in-place attachment records into verified retained copies; [`attachments.py`][attachments] keeps copying, record publication, and retention cleanup. |
+| S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] pokes a todo item without `requester_id` as the assignee's own internal turn under its unchanged dedup key, and [`custom_tools/todo.py`][todo-tool] records the current requester on the item's next write. |
 
 ## Configuration and credentials
 
@@ -20862,7 +20879,9 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [thread-models]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/thread_models.py
 [thread-tags]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/thread_tags.py
 [turn-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/turn_store.py
+[todo-poke]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/custom_tools/todo_poke.py
 [todo-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/custom_tools/todo_state.py
+[todo-tool]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/custom_tools/todo.py
 [tool-metadata]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/metadata.py
 [tool-legacy-overrides]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/legacy_tool_overrides.py
 [trigger-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/store.py
@@ -20904,6 +20923,8 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [sso-cookie-tests]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/tests/test_sso_cookie_attrs.py
 [streaming-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_streaming_behavior.py
 [sync-continuity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_sync_continuity_store.py
+[todo-builtin-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_todo_builtin.py
+[todo-poke-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_todo_poke.py
 [trigger-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_external_trigger_replay_store.py
 [turn-store-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_turn_store.py
 [usage-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_usage_stats_storage.py
@@ -22972,10 +22993,12 @@ services:
       - ./mindroom_data:/app/mindroom_data
     environment:
       - MINDROOM_WORKER_BACKEND=static_runner
-      - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-runner:8766
+      - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
       - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
+    networks:
+      - mindroom-network
 
   sandbox-runner:
     image: ghcr.io/mindroom-ai/mindroom:latest
@@ -22988,12 +23011,35 @@ services:
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_CONFIG_PATH=/app/config.yaml
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
+    networks:
+      - sandbox-network
+
+  # Forwards only the runner port, so the runner shares no network with MindRoom.
+  sandbox-relay:
+    image: busybox:1.36
+    user: "65534:65534"
+    cap_drop:
+      - ALL
+    sysctls:
+      net.ipv4.ip_forward: 0
+    command: ["tcpsvd", "-c", "256", "-C", "128", "0.0.0.0", "8766", "nc", "sandbox-runner", "8766"]
+    networks:
+      - mindroom-network
+      - sandbox-network
 
 volumes:
   sandbox-workspace:
+
+networks:
+  mindroom-network:
+  sandbox-network:
 ```
 
 Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
+Do not attach the runner to a network shared with MindRoom, its homeserver, or databases, because tool code could then call the MindRoom API or read those services directly.
+Cap connections per address in the relay (`-C`), because tool code can connect to the relay too and could otherwise use up every slot MindRoom needs.
+Disabling IP forwarding in the relay is defense in depth: a non-root runner cannot send raw packets, but a runner started as root could route them through the relay into the MindRoom network.
+Set `MINDROOM_API_KEY` as well, because the runner keeps outbound access and can still reach MindRoom through ports published on the host or its public URL.
 
 > [!IMPORTANT]
 > The `sandbox-workspace` Docker volume is created as root by default.
@@ -23005,6 +23051,7 @@ Do not mount the full `mindroom_data` tree into the runner because it contains c
 
 Key differences from the primary MindRoom runtime:
 - **No `env_file`** — runner has no API keys, no Matrix credentials
+- **Separate network** — only the relay reaches the runner, and the runner shares no Docker network with MindRoom or its datastores
 - **Scratch workspace** — a dedicated volume for worker-local files (caches, virtualenvs)
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the scratch workspace for tool registry and cache files
 
@@ -23023,15 +23070,29 @@ This is the `workerBackend: static_runner` Helm mode.
 See `cluster/k8s/instance/templates/deployment-mindroom.yaml` for the full manifest.
 The sidecar gets:
 
-- An `emptyDir` volume for worker-local scratch files and caches.
-- Access to the same shared storage that holds agent data directories.
+- Its own storage root at the primary's storage path, backed by the storage PVC's `sandbox-runner` directory, for worker-local files, virtualenvs, and caches.
+- The storage PVC's `agents` and `private_instances` directories mounted read-write at their usual paths, so agent workspaces persist and stay shared with the primary runtime.
 - Read-only access to config for plugin tool registration.
-- The configured credentials-encryption key so it can consume encrypted credential leases.
+  With the runtime chart's `config.source: file`, this is the read-only storage subtree holding the config file, the same subtree dedicated Kubernetes workers mount.
+- The sandbox proxy token that authenticates requests from the primary runtime.
+
+The sidecar does not mount the rest of the storage PVC, so tool code cannot read the credential store, Matrix encryption keys and access tokens, or other primary state, and cannot modify the config the primary loads.
+It never receives the credentials-encryption key.
+The primary leases each proxied tool's saved settings to the sidecar per call, as described in [Credential leases](#credential-leases).
+A `prepare-sandbox-runner-storage` init container creates the three storage directories as the runtime user before the containers start.
+The runtime chart rejects a file-sourced config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
+A file-sourced config directly in the storage root is mounted as a single read-only file, so it must exist before the pod starts; otherwise kubelet creates a directory in its place.
+
+Upgrading an existing release keeps agent data in place because the sidecar mounts the same PVC directories.
+Files that earlier sidecar versions wrote elsewhere on the PVC, such as worker virtualenvs under `workers/` and caches in the storage root used as `HOME`, remain on disk but are no longer visible to the sidecar, which recreates worker virtualenvs on first use.
 
 > [!WARNING]
-> The Kubernetes `static_runner` sidecar is not a secrets or filesystem isolation boundary.
-> It can read the full shared storage mount, including persisted credential data, and tools running in the sidecar may access its environment.
-> Use dedicated Kubernetes workers when agent-scoped filesystem and credential isolation are required.
+> The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
+> All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, learning data, and memory.
+> The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication with `requireJwt`.
+> Without Supabase authentication, both charts give the primary a generated `MINDROOM_API_KEY` so tool code cannot use the API over `localhost`.
+> Header-only trusted-upstream authentication is still forgeable from the sidecar.
+> Use dedicated Kubernetes workers when per-agent filesystem and credential isolation are required.
 
 ### Kubernetes dedicated workers (`workerBackend: kubernetes`)
 
@@ -23466,6 +23527,9 @@ A **credential lease** supplies short-lived credential values as constructor con
 Selected services follow the call's scoped credential policy and, where applicable, the worker-grantable shared-service allowlist.
 Only fields declared by the receiving toolkit are applied as constructor configuration; unrelated credential fields are ignored.
 The lease holds its values in memory until consumed or expired, and the proxy requests one use with the configured TTL.
+With the `static_runner` backend, the primary also leases the called tool's own saved settings on every call because a containerized shared runner has no access to the credential store.
+Services selected by the policy override those values.
+Dedicated Docker and Kubernetes workers keep reading tool settings from their own worker credential stores.
 
 Leases do not export API keys into shell environments, configure Git authentication, or install SSH keys.
 For shell authentication, explicitly configure [environment passthrough](#shell-env-and-path) or the [workspace env hook](#workspace-env-hook-mindroomworker-envsh) as needed.
@@ -23484,7 +23548,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   This explicit worker-pool policy applies even when Computer is disabled, regardless of which tools an agent selects.
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their prior launch settings and compatible identities.
-- With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
+- With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
@@ -24000,8 +24064,12 @@ Both modes store agent data in the same per-agent directory structure.
 `workerBackend: static_runner` is the default.
 The primary runtime talks to a shared sidecar over `localhost`.
 This keeps the deployment simple, but all proxied tool calls share the same runner process.
-The runner reads and writes the same agent storage directories as the main process.
-When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value so the primary runtime and static runner sidecar receive the same key.
+The runner reads and writes the same agent storage directories as the main process by mounting only the storage PVC's `agents` and `private_instances` directories over its own `sandbox-runner` directory.
+It cannot see the credential store, Matrix state, or other primary runtime state, and it never receives the credential encryption key.
+The primary leases each proxied tool's saved settings to the runner per call.
+Because the runner shares the pod network, the charts give the primary a generated `MINDROOM_API_KEY` unless Supabase authentication or an explicit opt-out is configured.
+When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value; only the primary runtime receives it.
+See [Kubernetes shared sidecar](https://docs.mindroom.chat/deployment/sandbox-proxy/#kubernetes-shared-sidecar-workerbackend-static_runner) for the exact mounts and remaining limits.
 
 ### Dedicated Worker Mode
 

@@ -104,6 +104,12 @@
 
 {{- define "mindroom.staticRunnerContainer" -}}
 {{- $values := .values -}}
+{{- /*
+The runner executes agent tool code, so it must not see the tenant credential store, Matrix state,
+the live config the primary hot-reloads, or the credentials encryption key.
+It mounts only agent state from the PVC over its own private storage root,
+and saved tool settings reach it as per-call leases from the primary.
+*/ -}}
 - name: sandbox-runner
   image: {{ $values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
   imagePullPolicy: {{ $values.mindroom_image_pull_policy | default "Always" }}
@@ -118,11 +124,6 @@
       secretKeyRef:
         name: {{ include "mindroom.instanceSecretName" $values }}
         key: sandbox_proxy_token
-  - name: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
-    valueFrom:
-      secretKeyRef:
-        name: {{ include "mindroom.instanceSecretName" $values }}
-        key: credentials_encryption_key
   - name: MINDROOM_CONFIG_PATH
     value: "/app/config.yaml"
   - name: MINDROOM_STORAGE_PATH
@@ -136,6 +137,13 @@
     readOnly: true
   - name: storage
     mountPath: {{ $values.storagePath }}
+    subPath: sandbox-runner
+  - name: storage
+    mountPath: {{ $values.storagePath }}/agents
+    subPath: agents
+  - name: storage
+    mountPath: {{ $values.storagePath }}/private_instances
+    subPath: private_instances
   - name: sandbox-workspace
     mountPath: /app/workspace
   resources:

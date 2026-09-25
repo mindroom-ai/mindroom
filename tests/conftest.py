@@ -44,6 +44,7 @@ from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
 import mindroom.approval_manager as approval_manager_module
 import mindroom.bot  # noqa: F401
+import mindroom.custom_tools.todo as todo_tool_module
 import mindroom.handled_turns as handled_turns_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
@@ -2993,6 +2994,10 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
                 )
                 stack.enter_context(
                     patch("mindroom.delegation.lifecycle.is_sender_allowed_for_responder", new=allow_sender),
+                )
+                # The module is imported at collection, so it binds the real check before this bypass starts.
+                stack.enter_context(
+                    patch.object(todo_tool_module, "is_sender_allowed_for_responder", new=allow_sender),
                 )
             yield
 

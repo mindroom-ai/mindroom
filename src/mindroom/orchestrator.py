@@ -464,6 +464,7 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
+            agent_reply_memberships=self.agent_reply_memberships,
         )
         self._thread_export_runner = WorkspaceThreadExportRunner(
             WorkspaceThreadExportDeps(
