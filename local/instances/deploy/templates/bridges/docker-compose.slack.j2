@@ -6,7 +6,7 @@ services:
       - {{ instance_name }}_mindroom-network
       - mynetwork
     ports:
-      - "127.0.0.1:{{ port }}:29317"
+      - "{{ port }}:29317"
     restart: unless-stopped
     volumes:
       - {{ data_dir }}/data:/data

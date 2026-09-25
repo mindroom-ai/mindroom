@@ -17,8 +17,7 @@ services:
       - ${DATA_DIR}/mindroom_data:/app/mindroom_data
       - ${DATA_DIR}/logs:/app/logs
     ports:
-      # Loopback only: remote access goes through Traefik (and Authelia when enabled).
-      - "127.0.0.1:${MINDROOM_PORT:-8765}:8765"
+      - "${MINDROOM_PORT:-8765}:8765"
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MINDROOM_STORAGE_PATH=/app/mindroom_data

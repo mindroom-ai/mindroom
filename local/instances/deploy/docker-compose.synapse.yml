@@ -55,7 +55,7 @@ services:
       # DATA_DIR should be set in the .env file
       - ${DATA_DIR}/synapse:/data
     ports:
-      - "127.0.0.1:${MATRIX_PORT:-8448}:8008"
+      - "${MATRIX_PORT:-8448}:8008"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8008/_matrix/client/versions"]
       interval: 10s
