@@ -12,11 +12,11 @@ import stat
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import json5
 from agno.skills.skill import Skill
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import AfterValidator, BaseModel, ConfigDict, TypeAdapter, ValidationError
 from yaml import YAMLError
 
 from mindroom import yaml_io
@@ -37,17 +37,25 @@ _USAGE_FILENAME = ".usage.json"
 _USAGE_LOCK = threading.Lock()
 
 
+def _as_utc(moment: datetime) -> datetime:
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
+# Hand-written or worker-written telemetry may omit the offset, which would break comparisons with aware times.
+_UtcDatetime = Annotated[datetime, AfterValidator(_as_utc)]
+
+
 class SkillUsage(BaseModel):
     """Provenance and activity for one workspace skill directory; worker-writable, so it never grants access."""
 
     model_config = ConfigDict(extra="forbid")
 
     created_by: Literal["learner"] | None = None
-    created_at: datetime | None = None
+    created_at: _UtcDatetime | None = None
     use_count: int = 0
-    last_used_at: datetime | None = None
+    last_used_at: _UtcDatetime | None = None
     patch_count: int = 0
-    last_patched_at: datetime | None = None
+    last_patched_at: _UtcDatetime | None = None
 
     def last_activity_at(self) -> datetime | None:
         """Return the newest creation, use, or learner edit."""

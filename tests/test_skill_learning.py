@@ -452,9 +452,13 @@ def _count(
     key: str,
     claimed: queue.QueueEntry,
     *runs: tuple[int, int],
-    fingerprint: str = "a",
+    fingerprint: str | None = None,
 ) -> int:
-    """Record a count of runs given as ``(run_index, replies)`` created in one second; return pending replies."""
+    """Record a count of runs given as ``(run_index, replies)`` created in one second; return pending replies.
+
+    Without ``fingerprint``, the skills are as they were when the conversation registered.
+    """
+    assert claimed.seen_fingerprint is not None
     return queue.record_count(
         paths,
         key,
@@ -462,7 +466,7 @@ def _count(
         replies=[((0, index), replies) for index, replies in runs],
         interval=2,
         skills_root="root",
-        fingerprint=fingerprint,
+        fingerprint=fingerprint or claimed.seen_fingerprint,
     )
 
 
@@ -539,6 +543,8 @@ def test_learner_changes_move_every_conversation_forward(tmp_path: Path) -> None
     claimed = dict(queue.claim_due_reviews(config, paths, now=1.0))
     for key in ("mind:session", "mind:other"):
         _count(paths, key, claimed[key], (0, 1))
+    before = claimed["mind:session"].seen_fingerprint
+    assert before is not None
     queue.settle_review(
         paths,
         "mind:session",
@@ -546,10 +552,19 @@ def test_learner_changes_move_every_conversation_forward(tmp_path: Path) -> None
         outcome="reviewed",
         now=1.0,
         through=(0, 0),
-        learner_change=("a", "b"),
+        learner_change=(before, "b"),
     )
     assert _count(paths, "mind:other", claimed["mind:other"], (0, 1), (3, 1), fingerprint="b") == 2
     assert _count(paths, "mind:other", claimed["mind:other"], (0, 1), (3, 1), fingerprint="c") == 0
+
+
+def test_a_starting_response_leaves_the_last_completed_scope_in_place(tmp_path: Path) -> None:
+    """Only completed responses choose whose scope a review reports usage and notices under."""
+    config, paths = _learner(tmp_path)
+    _queue(config, paths, identity=ALICE)
+    before = _entries(paths)["mind:session"]
+    _queue(config, paths, identity=BOB, completed=False)
+    assert _entries(paths)["mind:session"] == before
 
 
 def test_queue_drops_entries_of_disabled_agents(tmp_path: Path) -> None:
@@ -1120,6 +1135,20 @@ async def test_stop_interrupts_a_running_review_and_the_next_start_runs_it(tmp_p
     assert _marker_index(next(iter(_entries(paths).values()))) == 0
 
 
+def test_usage_timestamps_without_an_offset_read_as_utc(tmp_path: Path) -> None:
+    """Hand-written telemetry without a UTC offset still ages its skill instead of failing every review."""
+    root = tmp_path / "skills"
+    now = datetime.now(UTC)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    usage = {
+        "created_by": "learner",
+        "created_at": (now - timedelta(days=45)).replace(tzinfo=None).isoformat(),
+        "last_used_at": (now - timedelta(days=40)).isoformat(),
+    }
+    (root / ".usage.json").write_text(json.dumps({"deploy-checks": usage}))
+    assert library.archive_unused_skills(root, archive_after_days=30, now=now) == ["deploy-checks"]
+
+
 def test_archival_skips_unreadable_user_skills(tmp_path: Path) -> None:
     """A user skill the learner cannot read must not stop archival, and with it every review of the workspace."""
     root = tmp_path / "skills"
@@ -1433,6 +1462,24 @@ async def test_first_count_starts_at_the_response_that_enabled_counting(tmp_path
         assert model.requests == []
         _seed(config, paths, *history, _tool_turn("r1"), _tool_turn("r2"))
         _queue(config, paths, started_at=now)
+        await _cycle(config, paths)
+    assert len(model.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_skill_saved_during_the_first_response_restarts_counting(tmp_path: Path) -> None:
+    """The first registration records the skills, so the agent saving one itself resets counting like Hermes."""
+    config, paths = _learner(tmp_path)
+    _queue(config, paths, completed=False)
+    _write_skill(_skills_root(config, paths), "handwritten", HANDWRITTEN)
+    _seed(config, paths, _tool_turn("r1"))
+    model = _model()
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        _queue(config, paths)
+        await _cycle(config, paths)
+        assert model.requests == []
+        _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
+        _queue(config, paths)
         await _cycle(config, paths)
     assert len(model.requests) == 1
 

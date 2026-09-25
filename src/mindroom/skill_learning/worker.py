@@ -19,7 +19,6 @@ from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.skill_learning.library import archive_unused_skills, skills_fingerprint
 from mindroom.skill_learning.queue import (
     NO_RUN,
@@ -27,12 +26,12 @@ from mindroom.skill_learning.queue import (
     QueueEntry,
     RunPosition,
     claim_due_reviews,
+    conversation_skills_root,
     record_count,
     settle_review,
 )
 from mindroom.skill_learning.reviewer import ReviewProgress, review_conversation
 from mindroom.skill_learning.transcript import conversation_messages, count_model_replies
-from mindroom.tool_system.skills import agent_workspace_skills_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -133,15 +132,13 @@ class SkillLearningWorker:
 
     async def _count(self, config: Config, key: str, entry: QueueEntry) -> tuple[int, RunPosition, Path]:
         """Return the model replies since the conversation's marker, its newest run position, and its skills root."""
-        runtime = await asyncio.to_thread(
-            resolve_agent_runtime,
-            entry.agent,
+        skills_root = await asyncio.to_thread(
+            conversation_skills_root,
             config,
             self.runtime_paths,
+            entry.agent,
             entry.execution_identity(),
         )
-        workspace_root = runtime.workspace.root if runtime.workspace is not None else None
-        skills_root = agent_workspace_skills_root(self.runtime_paths, entry.agent, workspace_root=workspace_root)
         runs = await asyncio.to_thread(_conversation_runs, config, self.runtime_paths, entry)
         fingerprint = await asyncio.to_thread(skills_fingerprint, skills_root)
         replies = await asyncio.to_thread(
