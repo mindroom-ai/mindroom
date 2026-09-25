@@ -40,7 +40,7 @@ DRIVE_ID = "b!drive-1"
 ITEM_ID = "01ITEM"
 DOCUMENT_ID = f"{DRIVE_ID}:{ITEM_ID}"
 SHARE_URL = "https://contoso.sharepoint.com/:x:/s/finance/EabcDEF?e=xyz"
-WEB_URL = "https://contoso.sharepoint.com/sites/finance/Shared%20Documents/FY27/Forecast.xlsx"
+WEB_URL = "https://contoso.sharepoint.com/sites/finance/_layouts/15/Doc.aspx?sourcedoc=%7BA1B2%7D&file=Forecast.xlsx&action=default"
 ROOM_ID = "!room:example.org"
 THREAD_ID = "$thread"
 
