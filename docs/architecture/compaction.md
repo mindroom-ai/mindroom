@@ -67,7 +67,7 @@ Mantle currently needs its existing HTTP transport passed explicitly when copyin
 - Content-free legacy generations cannot be split: while one still replays its summary, an event it may contain (its captured seen ids or retained source ownership) clears it together with every later generation, their archived runs, and all live runs, as before the archive existed.
 - A live run removed for any other event only retires the scope's summaries, because legacy provenance may be incomplete; live runs stay, and archived runs stay stored without counting as compacted history.
 - Legacy provenance takes precedence over an archive hit, because every later generation was built on the legacy summary.
-- After any redaction change, the scope's metadata seen ids are dropped and the derived ids follow the remaining history, so removed messages return as unseen thread context.
+- After any redaction change, the scope's metadata seen ids are dropped and the derived ids follow the remaining history, so removed messages return as unseen thread context unless a stale whole-row write restores those metadata ids (see below).
 - The archive only grows; redaction and conversation deletion are its only removals.
 - State written by releases before the archive is adopted once, when the conversation database opens and before any response loads it; the archive tables' presence marks it done.
 - Downgrading to a release without the archive is unsupported: older releases neither maintain nor redact the archive, and compaction state they write is never adopted again.
