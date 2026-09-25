@@ -378,6 +378,16 @@ def test_transcript_digests_older_turns_and_keeps_recent_evidence_verbatim() -> 
     assert len(small) < 3_500
 
 
+def test_long_tool_output_keeps_its_start_and_end() -> None:
+    """A clipped tool result keeps the command's opening lines and the error or summary at its end."""
+    output = "collected 900 items\n" + "PASSED\n" * 20_000 + "FAILED test_deploy.py::test_rollback - KeyError"
+    transcript = render_transcript([Message(role="tool", content=output, tool_name="shell")], budget_chars=40_000)
+    assert "collected 900 items" in transcript
+    assert transcript.endswith("FAILED test_deploy.py::test_rollback - KeyError")
+    assert "characters omitted ..." in transcript
+    assert transcript.count("characters omitted") == 1
+
+
 def test_model_replies_count_only_model_visible_runs() -> None:
     """Each assistant message is one model request; history copies and runs hidden from history do not count."""
     errored = _tool_turn("r4")
