@@ -58,7 +58,7 @@ class _NativeBridgeRuntimeProtocol(Protocol):
     def reset_emergency_stop(self) -> dict[str, object]: ...
     def decide_shell(self, command_id: str, *, approved: bool, auto_approve_seconds: int) -> dict[str, object]: ...
     def grant_shell(self, duration_seconds: int) -> dict[str, object]: ...
-    async def revoke_shell(self) -> dict[str, object]: ...
+    def revoke_shell(self) -> dict[str, object]: ...
     async def connect_browser(self) -> None: ...
     async def disconnect_browser(self) -> None: ...
 
@@ -487,7 +487,7 @@ class NativeDesktopHost:
             _expect_keys(parameters, set())
             runtime = self._require_runtime()
             try:
-                await runtime.revoke_shell()
+                runtime.revoke_shell()
             except ValueError as exc:
                 raise NativeProtocolError("shell_denied", str(exc)) from exc
             return {"status": self.status()}
@@ -723,9 +723,9 @@ class NativeBridgeRuntime:
         """Enable bounded local auto-approval."""
         return self._required_bridge().grant_local_shell(duration_seconds)
 
-    async def revoke_shell(self) -> dict[str, object]:
-        """Revoke local shell authority and cancel current work."""
-        return await self._required_bridge().revoke_local_shell()
+    def revoke_shell(self) -> dict[str, object]:
+        """Revoke local shell authority now and stop current work in the background."""
+        return self._required_bridge().revoke_local_shell()
 
     async def connect_browser(self) -> None:
         """Connect the configured installed-profile extension."""

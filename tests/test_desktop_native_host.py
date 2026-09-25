@@ -9,7 +9,11 @@ import asyncio
 import io
 import json
 import os
+import shlex
+import signal
+import sys
 import time
+from contextlib import suppress
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -42,6 +46,7 @@ from mindroom.desktop.shell import DesktopShell
 from mindroom.file_locks import advisory_file_lock, file_lock_is_held
 
 if TYPE_CHECKING:
+    from collections.abc import Buffer
     from pathlib import Path
 
 
@@ -111,7 +116,7 @@ class FakeRuntime:
         self.shell_calls.append(("grant_shell", {"duration_seconds": duration_seconds}))
         return self.status()
 
-    async def revoke_shell(self) -> dict[str, object]:
+    def revoke_shell(self) -> dict[str, object]:
         self.shell_calls.append(("revoke_shell", {}))
         return self.status()
 
@@ -659,6 +664,84 @@ async def test_native_shell_grant_is_local_bounded_and_revocable(bridge_transpor
     assert bridge_transport.await_args.kwargs["content"]["result"]["cancelled"] is True
     assert not (tmp_path / "after-revoke").exists()
     await host.shutdown()
+
+
+class _RecordingOutput(io.BytesIO):
+    """Record each native response with the shell's active command at the moment it is written."""
+
+    def __init__(self, shell: DesktopShell) -> None:
+        super().__init__()
+        self.shell = shell
+        self.responses: list[tuple[dict[str, object], object]] = []
+
+    def write(self, data: Buffer, /) -> int:
+        for line in bytes(data).splitlines():
+            message = json.loads(line)
+            if message["type"] == "response":
+                self.responses.append((message, self.shell.status()["active_request_id"]))
+        return super().write(data)
+
+
+@pytest.mark.asyncio
+async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
+    bridge_transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    host = await _shell_host(tmp_path)
+    runtime = _attach_shell_runtime(host, tmp_path)
+    shell, bridge = runtime._shell, runtime._bridge
+    await host.handle(_request("grant_shell", duration_seconds=60))
+    script = (
+        "import os, pathlib, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "pathlib.Path('child.pid').write_text(str(os.getpid())); "
+        "time.sleep(30)"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} >/dev/null 2>&1 & wait"
+    event = _shell_event(command, tmp_path)
+    await bridge.on_to_device_event(event)
+    execution = asyncio.create_task(bridge.execute_pending())
+    pid_file = tmp_path / "child.pid"
+    try:
+        for _ in range(400):
+            if pid_file.exists() and pid_file.read_text():
+                break
+            await asyncio.sleep(0.005)
+        child = int(pid_file.read_text())
+        output = _RecordingOutput(shell)
+        records = b"".join(
+            json.dumps({"v": 1, "request_id": str(uuid4()), "action": action, "parameters": {}}).encode() + b"\n"
+            for action in ("revoke_shell", "status", "stop")
+        )
+        await asyncio.wait_for(
+            serve_native_stream(host, input_stream=io.BytesIO(records), output_stream=output),
+            timeout=5,
+        )
+        await asyncio.wait_for(execution, timeout=1)
+        (revoked, revoke_active), (status, status_active), (stopped, _) = output.responses
+        # Both replies precede the end of termination: the TERM-resistant child still holds the command open.
+        assert (revoke_active, status_active) == ("shell-1", "shell-1")
+        assert revoked["ok"] is True
+        assert status["result"]["status"]["shell"]["auto_approve_remaining_seconds"] == 0.0
+        assert stopped["ok"] is True
+        assert stopped["result"]["status"]["bridge"]["state"] == "stopped"
+        restarted = _attach_shell_runtime(host, tmp_path)._bridge
+        await restarted.on_to_device_event(event)
+        await restarted.deliver_pending()
+        assert bridge_transport.await_args.kwargs["content"]["result"]["cancelled"] is True
+        await host.shutdown()
+        for _ in range(400):
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.005)
+        else:
+            pytest.fail("TERM-resistant child survived revoke and stop")
+    finally:
+        if pid_file.exists() and pid_file.read_text():
+            with suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
 
 
 @pytest.mark.parametrize(

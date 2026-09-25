@@ -177,6 +177,7 @@ class DesktopBridge:
     _active_action: str | None = field(default=None, init=False)
     _control_revoked: bool = field(default=False, init=False)
     _control_lease_deadline: float | None = field(default=None, init=False)
+    _shell_revocations: set[asyncio.Task[None]] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         """Pair each enabled capability with its provider and convert the lease label to a local deadline."""
@@ -415,9 +416,14 @@ class DesktopBridge:
         self._running_shell().grant(duration_seconds)
         return self.local_status()
 
-    async def revoke_local_shell(self) -> dict[str, object]:
-        """Clear the shell lease, reject pending approval, and stop an active command."""
-        await self._enabled_shell().revoke()
+    def revoke_local_shell(self) -> dict[str, object]:
+        """Clear the shell lease and reject pending approval now; an active command stops in the background."""
+        # Eager start applies the revocation before returning, so no later command can use the old lease;
+        # only waiting for the active process group to stop continues after this call.
+        revocation = asyncio.Task(self._enabled_shell().revoke(), loop=asyncio.get_running_loop(), eager_start=True)
+        if not revocation.done():
+            self._shell_revocations.add(revocation)
+            revocation.add_done_callback(self._shell_revocations.discard)
         return self.local_status()
 
     def _enabled_shell(self) -> DesktopShell:

@@ -826,7 +826,7 @@ async def test_local_shell_controls_require_enabled_running_shell() -> None:
         with pytest.raises(ValueError, match="shell access is disabled"):
             control()
     with pytest.raises(ValueError, match="shell access is disabled"):
-        await gui_only.revoke_local_shell()
+        gui_only.revoke_local_shell()
     assert gui_only.local_status()["shell"] == {
         "enabled": False,
         "pending": None,
@@ -836,7 +836,7 @@ async def test_local_shell_controls_require_enabled_running_shell() -> None:
     gui_only.close()
     bridge = _local_bridge(shell=_local_shell())
     assert bridge.grant_local_shell(60)["shell"]["auto_approve_remaining_seconds"] > 59
-    assert (await bridge.revoke_local_shell())["shell"]["auto_approve_remaining_seconds"] == 0.0
+    assert bridge.revoke_local_shell()["shell"]["auto_approve_remaining_seconds"] == 0.0
     await bridge.stop()
     with pytest.raises(ValueError, match="stopping"):
         bridge.grant_local_shell(60)
