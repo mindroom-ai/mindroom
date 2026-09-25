@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
+import threading
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -17,8 +21,14 @@ from mindroom.desktop.accessibility import (
     AccessibilityState,
     DesktopApp,
     DesktopRect,
+    MacAccessibilityBackend,
 )
-from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy, _DesktopBridgeStoppedError
+from mindroom.desktop.bridge import (
+    DesktopBridge,
+    DesktopBridgePolicy,
+    _DesktopBridgeStoppedError,
+    _run_macos_application_events,
+)
 from mindroom.desktop.command_journal import DesktopCommandJournalError
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.playwright_mcp import (
@@ -311,6 +321,152 @@ async def _handle(bridge: DesktopBridge, event: AuthenticatedToDeviceEvent) -> N
     await bridge.on_to_device_event(event)
     await bridge.execute_pending()
     await bridge.deliver_pending()
+
+
+@pytest.mark.asyncio
+async def test_bridge_refreshes_macos_apps_during_worker_launch(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launched app and its activation become visible while native work waits."""
+    launch_requested = threading.Event()
+    launch_published = threading.Event()
+    activation_requested = threading.Event()
+    activation_published = threading.Event()
+    application = SimpleNamespace(
+        bundleIdentifier=lambda: APP_ID,
+        localizedName=lambda: "Editor",
+        isActive=activation_published.is_set,
+        activateWithOptions_=lambda _options: activation_requested.set() or True,
+    )
+    workspace = SimpleNamespace(runningApplications=lambda: [application] if launch_published.is_set() else [])
+
+    def pump(mode: str, seconds: float, _return_after_source: bool) -> None:
+        assert threading.current_thread() is threading.main_thread()
+        assert mode == "default"
+        assert 0 <= seconds <= 0.01
+        if launch_requested.is_set():
+            launch_published.set()
+        if activation_requested.is_set():
+            activation_published.set()
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "objc", SimpleNamespace(autorelease_pool=nullcontext))
+    monkeypatch.setitem(
+        sys.modules,
+        "CoreFoundation",
+        SimpleNamespace(CFRunLoopRunInMode=pump, kCFRunLoopDefaultMode="default"),
+    )
+    appkit = SimpleNamespace(NSWorkspace=SimpleNamespace(sharedWorkspace=lambda: workspace))
+    monkeypatch.setitem(sys.modules, "AppKit", appkit)
+    monkeypatch.setitem(sys.modules, "ApplicationServices", SimpleNamespace())
+    monkeypatch.setattr(
+        "mindroom.desktop.accessibility._request_application_activation",
+        lambda _app: launch_requested.set(),
+    )
+    monkeypatch.setattr("mindroom.desktop.accessibility._LAUNCH_ATTEMPTS", 6)
+    backend = MacAccessibilityBackend(frozenset({APP_ID}), lambda: (1920, 1080))
+    provider = FakeProvider()
+    monkeypatch.setattr(provider, "launch_app", backend.launch_app)
+    bridge = DesktopBridge(object(), provider, _policy(allow_control=True), clock=lambda: NOW_SECONDS)
+    responded = asyncio.Event()
+    transport.side_effect = lambda *_args, **_kwargs: responded.set()
+    worker = asyncio.create_task(bridge.run())
+    try:
+        await bridge.on_to_device_event(_event(_command("launch_app")))
+        await asyncio.wait_for(responded.wait(), timeout=2)
+        assert _response(transport).ok
+        assert _response(transport).result.get("action_completed") is True
+        assert backend.list_apps() == [DesktopApp(APP_ID, "Editor", True)]
+        assert activation_published.is_set()
+    finally:
+        await bridge.stop()
+        await asyncio.wait_for(worker, timeout=1)
+        bridge.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown", ["stop", "cancel", "worker_failure"])
+async def test_bridge_stops_macos_event_pump_with_workers(
+    monkeypatch: pytest.MonkeyPatch,
+    shutdown: str,
+) -> None:
+    """No Cocoa callback continues after normal, cancelled, or failed bridge exit."""
+    pumped = asyncio.Event()
+    ticks = 0
+
+    def pump(_mode: str, _seconds: float, _return_after_source: bool) -> None:
+        nonlocal ticks
+        ticks += 1
+        pumped.set()
+
+    async def fail_worker(_bridge: DesktopBridge) -> None:
+        await pumped.wait()
+        msg = "worker failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "objc", SimpleNamespace(autorelease_pool=nullcontext))
+    monkeypatch.setitem(
+        sys.modules,
+        "CoreFoundation",
+        SimpleNamespace(CFRunLoopRunInMode=pump, kCFRunLoopDefaultMode="default"),
+    )
+    if shutdown == "worker_failure":
+        monkeypatch.setattr(DesktopBridge, "_deliver_loop", fail_worker)
+    bridge = DesktopBridge(object(), FakeProvider(), _policy(), clock=lambda: NOW_SECONDS)
+    worker = asyncio.create_task(bridge.run())
+    try:
+        await asyncio.wait_for(pumped.wait(), timeout=1)
+        if shutdown == "stop":
+            await bridge.stop()
+            await asyncio.wait_for(worker, timeout=1)
+        elif shutdown == "cancel":
+            worker.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await worker
+        else:
+            with pytest.raises(ExceptionGroup) as exc_info:
+                await worker
+            assert [str(error) for error in exc_info.value.exceptions] == ["worker failed"]
+        final_ticks = ticks
+        await asyncio.sleep(0.1)
+        assert ticks == final_ticks
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_bridge_runs_without_cocoa_on_other_platforms(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Portable desktop actions and shutdown do not require macOS frameworks."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setitem(sys.modules, "CoreFoundation", None)
+    bridge = DesktopBridge(object(), FakeProvider(), _policy(), clock=lambda: NOW_SECONDS)
+    responded = asyncio.Event()
+    transport.side_effect = lambda *_args, **_kwargs: responded.set()
+    worker = asyncio.create_task(bridge.run())
+    try:
+        await bridge.on_to_device_event(_event(_command("list_apps")))
+        await asyncio.wait_for(responded.wait(), timeout=1)
+        assert _response(transport).result["apps"] == [{"id": APP_ID, "name": "Editor", "running": True}]
+    finally:
+        await bridge.stop()
+        await asyncio.wait_for(worker, timeout=1)
+        bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_macos_application_events_reject_background_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker event loop cannot silently pump the wrong Cocoa run loop."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "CoreFoundation", None)
+    with pytest.raises(RuntimeError, match="main thread"):
+        await asyncio.to_thread(asyncio.run, _run_macos_application_events())
 
 
 @pytest.mark.asyncio

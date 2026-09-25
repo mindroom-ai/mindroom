@@ -60,29 +60,42 @@ The initialization actions explicitly target `~/.mindroom`.
 Computer access uses the bundled Desktop Helper and does not require the local-agent runtime or background service.
 Open **Computer access** to manage its session independently.
 
-1. In a private chat with your Desktop-enabled agent, send `!desktop setup` and copy its JSON setup data.
-2. In **Computer access**, choose the allowed applications and select **Continue Setup**.
-3. Paste the copied data into the **Setup data** field under **Setup or reconnect** and select **Import Setup**.
-4. Review the controller fingerprint, requester, and agent, then sign in or use the saved Matrix device.
-5. Confirm the displayed identities and select **Save Setup**, then confirm the saved identities again and select **Claim Pairing**.
-6. Send the displayed `!desktop confirm ...` command back to the same chat.
-7. Check macOS permissions and start observation.
+The connection summary and four steps stay at the top of the section: **Connect**, **Apps**, **Permissions**, and **Start**.
+Each step shows a green check when complete and a short status below its name. Unsaved app choices, an empty app list, or missing permissions show an amber indicator. Start is checked only while access is running.
+A new setup shows **Not connected**. A saved setup shows **Connection saved · Access off** and opens the next incomplete step; **Connected** means observation or control is running.
 
-For a homeserver behind Cloudflare Access, complete the Terminal authentication flow shown in chat first.
+1. In a private chat with your Desktop-enabled agent, send `!desktop setup` and copy its JSON setup data.
+2. In **Connect**, paste it into **Setup data** and select **Import Setup**.
+3. Review the controller fingerprint, requester, and agent. The app reuses a matching saved Matrix login; otherwise choose **Sign In with Browser**, or expand the password option.
+4. Confirm the displayed identities and select **Save and Connect**.
+5. Copy the displayed confirmation command into the same agent chat. After the agent confirms pairing, select **I’ve Confirmed in Chat**.
+6. In **Apps**, search and check the applications to allow, then select **Save App Access** above the list. Search accepts partial names and reordered words, such as `chr goo` for Google Chrome.
+7. In **Permissions**, allow Accessibility and Screen Recording for this copy of MindRoom. Restart the app if macOS requires it, then select **Check Again**.
+8. Select **Start Observe Only**. The summary changes to **Connected** and offers **Stop Access**.
+
+Setup stays disabled until you acknowledge the chat confirmation. If the app closes before that step, request fresh setup data and repeat Connect; the saved login remains available.
+For homeservers behind Cloudflare Access, the app opens the organization sign-in flow when needed. This requires `cloudflared` installed on the Mac; missing-helper errors explain how to install it.
+
+The terminal `mindroom desktop setup` command saves the same connection used by the app.
+An already open app refreshes that setup automatically while computer access is stopped, preserving unsaved edits.
+After confirming pairing in chat, choose and save allowed apps here, then start observation from either the app or `mindroom desktop run`.
+Stop the bridge in the interface that started it before starting it in the other interface.
+Terminal setup can also save app choices with repeated `--allow-app` options; omitting them preserves choices for the same controller.
+Both interfaces default to `~/.mindroom`; a terminal `--config` or `--storage-path` override creates a separate setup.
 The existing native helper owns authentication, pairing, permissions, browser sessions, and control leases.
 
-The session card explains unavailable Start and Stop buttons and provides shortcuts to the next required step.
-If you select apps before saving a connection, **Continue Setup** opens the connection form; **Save Setup** saves your selected apps with that connection.
+The summary always names the next required action. The **Start** step explains any remaining blocker and links to its step.
+You can inspect any step without scrolling through the other steps. App choices made before connecting are retained through setup.
 Once setup is saved, **Save App Access** updates app selections independently.
 
 Permission status applies to the running copy of MindRoom.
-If System Settings already shows MindRoom enabled but the app reports **Not granted to this copy**, quit and reopen MindRoom first.
+If System Settings already shows MindRoom enabled but the app reports **Not allowed yet**, quit and reopen MindRoom first.
 Replacing the signed release with a local build can invalidate the saved approval while leaving the old entry enabled.
 In that case, reinstall the signed release or remove the old permission entry and approve the current copy in System Settings, then select **Check Again**.
 
 Observation and control are separate choices.
 **Grant Control…** shows the saved identities, allowed applications, and duration for explicit confirmation.
-**Revoke Now** immediately removes input authority while observation continues; **Stop** ends the bridge session.
+**Revoke Now** immediately removes input authority while observation continues; **Stop Access** ends the bridge session.
 Control expires according to the helper's bounded lease and is never renewed automatically at app launch or restart.
 The menu also provides an immediate control-revoke action while a lease is active.
 Optional browser settings and redacted diagnostics are available in expandable sections.

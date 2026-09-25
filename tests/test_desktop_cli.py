@@ -273,7 +273,12 @@ def test_desktop_setup_logs_in_only_when_needed(
             session_path,
             DesktopMatrixSession("https://matrix.example.org/", "@alice:example.org", "DESKTOP", "saved-token"),
         )
-    login = MagicMock()
+    login = MagicMock(
+        side_effect=lambda **_: save_desktop_session(
+            session_path,
+            DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "saved-token"),
+        ),
+    )
     pair = MagicMock()
     monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
     monkeypatch.setattr(desktop_cli, "desktop_login", login)
@@ -283,6 +288,8 @@ def test_desktop_setup_logs_in_only_when_needed(
         desktop_app,
         [
             "setup",
+            "--allow-agent",
+            "computer",
             "--user-id",
             "@alice:example.org",
             "--homeserver",
@@ -333,6 +340,8 @@ def test_desktop_setup_rejects_saved_session_for_another_account(
         desktop_app,
         [
             "setup",
+            "--allow-agent",
+            "computer",
             "--user-id",
             "@alice:example.org",
             "--homeserver",
@@ -377,6 +386,8 @@ def test_desktop_setup_compares_saved_session_with_default_homeserver(
         desktop_app,
         [
             "setup",
+            "--allow-agent",
+            "computer",
             "--code",
             "short-code",
             "--controller-user-id",

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import cast
 
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
+from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.device_identity import PinnedMatrixDevice
 
 _TOP_LEVEL_KEYS = frozenset(
@@ -227,28 +228,35 @@ def save_native_config(
     """Compare, increment, and durably replace native configuration."""
     if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
         raise NativeConfigError("invalid_request", "Native desktop expected_revision must be a non-negative integer.")
-    try:
-        current_revision = load_native_config(path).revision
-    except NativeConfigError as exc:
-        if exc.code not in {"configuration_missing", "configuration_repair_required"}:
-            raise
-        current_revision = exc.revision
-    if current_revision != expected_revision:
-        raise NativeConfigError("revision_conflict", "Native desktop configuration changed; reload it and try again.")
-    if config.revision != expected_revision:
-        raise NativeConfigError("revision_conflict", "Native desktop configuration revision does not match the edit.")
-    saved = replace(config, revision=current_revision + 1)
     create_directory_durable(path.parent, mode=0o700)
-    write_json_file_durable(
-        path,
-        saved.to_payload(),
-        strict_atomic_replace=True,
-        indent=2,
-        sort_keys=True,
-        trailing_newline=True,
-    )
-    path.chmod(0o600)
-    return saved
+    with advisory_file_lock(path.with_suffix(".lock")):
+        try:
+            current_revision = load_native_config(path).revision
+        except NativeConfigError as exc:
+            if exc.code not in {"configuration_missing", "configuration_repair_required"}:
+                raise
+            current_revision = exc.revision
+        if current_revision != expected_revision:
+            raise NativeConfigError(
+                "revision_conflict",
+                "Native desktop configuration changed; reload it and try again.",
+            )
+        if config.revision != expected_revision:
+            raise NativeConfigError(
+                "revision_conflict",
+                "Native desktop configuration revision does not match the edit.",
+            )
+        saved = replace(config, revision=current_revision + 1)
+        write_json_file_durable(
+            path,
+            saved.to_payload(),
+            strict_atomic_replace=True,
+            indent=2,
+            sort_keys=True,
+            trailing_newline=True,
+        )
+        path.chmod(0o600)
+        return saved
 
 
 def _mapping(raw: object, label: str) -> dict[str, object]:

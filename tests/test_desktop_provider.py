@@ -25,6 +25,12 @@ from mindroom.desktop.provider import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _default_to_fake_pointer_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep generic fake-PyAutoGUI tests off the host's real macOS input backend."""
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "linux")
+
+
 class FakeImage:
     """Minimal Pillow-like image exposing crop and resize geometry."""
 

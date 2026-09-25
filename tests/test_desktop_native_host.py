@@ -9,6 +9,7 @@ import asyncio
 import io
 import json
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -16,16 +17,22 @@ from uuid import uuid4
 import pytest
 
 from mindroom.desktop.command_journal import DesktopCommandJournal
-from mindroom.desktop.native_config import NativeDesktopConfig, load_native_config, native_config_path
+from mindroom.desktop.native_config import (
+    NativeDesktopConfig,
+    load_native_config,
+    native_config_path,
+    save_native_config,
+)
 from mindroom.desktop.native_host import (
     NativeDesktopHost,
     NativeHostDependencies,
     serve_native_stream,
     supervise_native_tasks,
 )
-from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest
+from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest, parse_native_request
 from mindroom.desktop.protocol import DesktopCommand
 from mindroom.desktop.session import DesktopMatrixSession, save_desktop_session
+from mindroom.file_locks import advisory_file_lock, file_lock_is_held
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -220,6 +227,24 @@ def test_host_configure_start_control_and_shutdown(tmp_path: Path) -> None:
     assert runtime.stopped == 1
 
 
+@pytest.mark.asyncio
+async def test_external_setup_does_not_change_running_authority(tmp_path: Path) -> None:
+    runtime = FakeRuntime()
+    host = NativeDesktopHost(
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None),
+        helper_version="test",
+        dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
+    )
+    await host.handle(_request("configure", expected_revision=0, config=_config_payload()))
+    await host.handle(_request("start"))
+    path = native_config_path(tmp_path)
+    original = load_native_config(path)
+    save_native_config(path, original.with_allowed_apps(["com.example.Other"]), expected_revision=original.revision)
+    assert host.status()["config"]["allowed_app_ids"] == ["com.example.Editor"]
+    await host.handle(_request("stop"))
+    assert host.status()["config"]["allowed_app_ids"] == ["com.example.Other"]
+
+
 def test_host_status_returns_persisted_browser_settings(tmp_path: Path) -> None:
     executable = tmp_path / "browser"
     executable.touch()
@@ -383,6 +408,292 @@ def test_app_only_save_preserves_browser_config_when_paths_disappear(tmp_path: P
     saved = load_native_config(native_config_path(tmp_path))
     assert saved.allowed_app_ids == ()
     assert saved.to_payload()["browser"] == payload["browser"]
+
+
+def _setup_edit_host(tmp_path: Path) -> NativeDesktopHost:
+    payload = _config_payload()
+    payload.update(enabled=False, capture={"max_screenshot_width": 1200, "jpeg_quality": 65})
+    payload["browser"] = {
+        "enabled": True,
+        "executable_path": str(tmp_path / "removed-browser"),
+        "user_data_dir": str(tmp_path / "removed-profile"),
+        "timeout_seconds": 45,
+    }
+    save_native_config(
+        native_config_path(tmp_path),
+        NativeDesktopConfig.from_payload(payload, validate_browser_paths=False),
+        expected_revision=0,
+    )
+    save_desktop_session(
+        tmp_path / "desktop_bridge" / "matrix_session.json",
+        DesktopMatrixSession("https://example.org", "@me:example.org", "LOCAL", "secret-token"),
+    )
+    return NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+
+
+def _setup_edit_parameters(action: str) -> dict[str, object]:
+    if action == "finish_setup":
+        return {
+            "expected_revision": 1,
+            "expected_session": {
+                "homeserver": "https://example.org",
+                "user_id": "@me:example.org",
+                "device_id": "LOCAL",
+            },
+        }
+    return {"expected_revision": 1, "browser": {"enabled": False, "executable_path": None, "user_data_dir": None}}
+
+
+def test_finish_setup_enables_only_reviewed_config_under_session_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _setup_edit_host(tmp_path)
+    path = native_config_path(tmp_path)
+    original = load_native_config(path).to_payload()
+    session_path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    original_session = session_path.read_bytes()
+    published = False
+
+    def save_with_session_lock(
+        path: Path,
+        config: NativeDesktopConfig,
+        *,
+        expected_revision: int,
+    ) -> NativeDesktopConfig:
+        nonlocal published
+        assert file_lock_is_held(session_path.with_suffix(".lock")), "Session replacement must be excluded during save"
+        saved = save_native_config(path, config, expected_revision=expected_revision)
+        assert file_lock_is_held(session_path.with_suffix(".lock")), "Keep the session locked through publication"
+        published = True
+        return saved
+
+    monkeypatch.setattr("mindroom.desktop.native_host.save_native_config", save_with_session_lock)
+    request = parse_native_request(
+        json.dumps(
+            {
+                "v": 1,
+                "request_id": str(uuid4()),
+                "action": "finish_setup",
+                "parameters": _setup_edit_parameters("finish_setup"),
+            },
+        ).encode(),
+    )
+
+    result = asyncio.run(host.handle(request))
+
+    assert published
+    assert load_native_config(path).to_payload() == original | {"revision": 2, "enabled": True}
+    assert session_path.read_bytes() == original_session
+    assert result["status"]["config"]["enabled"] is True
+
+
+@pytest.mark.parametrize("field", ["homeserver", "user_id", "device_id"])
+def test_finish_setup_rejects_changed_session_without_enabling(tmp_path: Path, field: str) -> None:
+    host = _setup_edit_host(tmp_path)
+    path = native_config_path(tmp_path)
+    original = path.read_bytes()
+    parameters = _setup_edit_parameters("finish_setup")
+    cast("dict[str, str]", parameters["expected_session"])[field] = "different"
+
+    with pytest.raises(NativeProtocolError) as caught:
+        asyncio.run(host.handle(_request("finish_setup", **parameters)))
+
+    assert caught.value.code == "session_conflict"
+    assert path.read_bytes() == original
+
+
+def test_finish_setup_rechecks_identity_after_waiting_for_session_replacement(tmp_path: Path) -> None:
+    host = _setup_edit_host(tmp_path)
+    path = native_config_path(tmp_path)
+    original = path.read_bytes()
+    session_path = tmp_path / "desktop_bridge" / "matrix_session.json"
+
+    async def replace_while_finishing() -> None:
+        with advisory_file_lock(session_path.with_suffix(".lock")):
+            finish = asyncio.create_task(
+                host.handle(_request("finish_setup", **_setup_edit_parameters("finish_setup"))),
+            )
+            await asyncio.sleep(0)
+            assert not finish.done(), "Finishing setup must wait for the in-progress session replacement"
+            replacement = DesktopMatrixSession("https://example.org", "@me:example.org", "REPLACED", "new-token")
+            session_path.write_text(json.dumps(replacement.to_payload()))
+        with pytest.raises(NativeProtocolError) as caught:
+            await asyncio.wait_for(finish, timeout=2)
+        assert caught.value.code == "session_conflict"
+
+    asyncio.run(replace_while_finishing())
+
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("kind", ["missing", "invalid"])
+def test_finish_setup_requires_valid_saved_session(tmp_path: Path, kind: str) -> None:
+    host = _setup_edit_host(tmp_path)
+    path = native_config_path(tmp_path)
+    original = path.read_bytes()
+    session_path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    if kind == "missing":
+        session_path.unlink()
+    else:
+        session_path.write_text("invalid session")
+
+    with pytest.raises(NativeProtocolError) as caught:
+        asyncio.run(host.handle(_request("finish_setup", **_setup_edit_parameters("finish_setup"))))
+
+    assert caught.value.code == "session_missing"
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("identity", [None, {}, {"homeserver": "https://example.org"}, "LOCAL"])
+def test_finish_setup_requires_exact_session_identity(tmp_path: Path, identity: object) -> None:
+    host = _setup_edit_host(tmp_path)
+    path = native_config_path(tmp_path)
+    original = path.read_bytes()
+
+    with pytest.raises(NativeProtocolError) as caught:
+        asyncio.run(host.handle(_request("finish_setup", expected_revision=1, expected_session=identity)))
+
+    assert caught.value.code == "invalid_request"
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("invalid", [None, "", "  ", 123])
+def test_finish_setup_requires_nonempty_session_identity_fields(tmp_path: Path, invalid: object) -> None:
+    host = _setup_edit_host(tmp_path)
+    parameters = _setup_edit_parameters("finish_setup")
+    cast("dict[str, object]", parameters["expected_session"])["device_id"] = invalid
+
+    with pytest.raises(NativeProtocolError) as caught:
+        asyncio.run(host.handle(_request("finish_setup", **parameters)))
+
+    assert caught.value.code == "invalid_request"
+    assert load_native_config(native_config_path(tmp_path)).enabled is False
+
+
+@pytest.mark.parametrize("action", ["finish_setup", "set_browser_config"])
+def test_setup_edits_reject_stale_revision_without_mutating_config(tmp_path: Path, action: str) -> None:
+    host = _setup_edit_host(tmp_path)
+    path = native_config_path(tmp_path)
+    current = load_native_config(path)
+    save_native_config(path, replace(current, allowed_app_ids=("com.example.Other",)), expected_revision=1)
+    original = path.read_bytes()
+
+    with pytest.raises(NativeProtocolError) as caught:
+        asyncio.run(host.handle(_request(action, **_setup_edit_parameters(action))))
+
+    assert caught.value.code == "revision_conflict"
+    assert path.read_bytes() == original
+
+
+def test_finish_setup_rejects_config_changed_during_session_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _setup_edit_host(tmp_path)
+    path = native_config_path(tmp_path)
+    original = load_native_config(path)
+
+    def save_after_external_edit(
+        path: Path,
+        config: NativeDesktopConfig,
+        *,
+        expected_revision: int,
+    ) -> NativeDesktopConfig:
+        save_native_config(path, replace(original, allowed_app_ids=()), expected_revision=original.revision)
+        return save_native_config(path, config, expected_revision=expected_revision)
+
+    monkeypatch.setattr("mindroom.desktop.native_host.save_native_config", save_after_external_edit)
+
+    with pytest.raises(NativeProtocolError) as caught:
+        asyncio.run(host.handle(_request("finish_setup", **_setup_edit_parameters("finish_setup"))))
+
+    assert caught.value.code == "revision_conflict"
+    assert load_native_config(path) == replace(original, revision=2, allowed_app_ids=())
+
+
+def test_browser_save_preserves_disabled_setup_and_all_unedited_settings(tmp_path: Path) -> None:
+    host = _setup_edit_host(tmp_path)
+    path = native_config_path(tmp_path)
+    original = load_native_config(path).to_payload()
+    executable = tmp_path / "browser"
+    executable.touch()
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    browser = {"enabled": True, "executable_path": str(executable), "user_data_dir": str(profile)}
+    request = parse_native_request(
+        json.dumps(
+            {
+                "v": 1,
+                "request_id": str(uuid4()),
+                "action": "set_browser_config",
+                "parameters": {"expected_revision": 1, "browser": browser},
+            },
+        ).encode(),
+    )
+
+    result = asyncio.run(host.handle(request))
+
+    assert load_native_config(path).to_payload() == original | {
+        "revision": 2,
+        "browser": browser | {"timeout_seconds": 45},
+    }
+    assert result["status"]["config"]["enabled"] is False
+
+
+def test_browser_save_allows_disabling_unchanged_missing_paths(tmp_path: Path) -> None:
+    host = _setup_edit_host(tmp_path)
+    config = load_native_config(native_config_path(tmp_path))
+    browser = cast("dict[str, object]", config.to_payload()["browser"])
+    browser.pop("timeout_seconds")
+    browser["enabled"] = False
+
+    asyncio.run(host.handle(_request("set_browser_config", expected_revision=1, browser=browser)))
+
+    assert load_native_config(native_config_path(tmp_path)) == replace(
+        config,
+        revision=2,
+        browser=replace(config.browser, enabled=False),
+    )
+
+
+@pytest.mark.parametrize("field", ["executable_path", "user_data_dir"])
+@pytest.mark.parametrize("invalid", ["missing", "wrong_kind", "relative"])
+def test_browser_save_validates_changed_paths(tmp_path: Path, field: str, invalid: str) -> None:
+    host = _setup_edit_host(tmp_path)
+    path = native_config_path(tmp_path)
+    original = path.read_bytes()
+    changed = tmp_path / "changed"
+    if invalid == "wrong_kind":
+        if field == "executable_path":
+            changed.mkdir()
+        else:
+            changed.touch()
+    browser = {"enabled": False, "executable_path": None, "user_data_dir": None}
+    browser[field] = "relative" if invalid == "relative" else str(changed)
+
+    with pytest.raises(NativeProtocolError) as caught:
+        asyncio.run(host.handle(_request("set_browser_config", expected_revision=1, browser=browser)))
+
+    assert caught.value.code == "invalid_request"
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("action", ["finish_setup", "set_browser_config"])
+def test_setup_edits_require_saved_configuration_and_stopped_runtime(tmp_path: Path, action: str) -> None:
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+    with pytest.raises(NativeProtocolError) as caught:
+        asyncio.run(host.handle(_request(action, **_setup_edit_parameters(action))))
+    assert caught.value.code == "configuration_missing"
+    host = _setup_edit_host(tmp_path)
+    original = native_config_path(tmp_path).read_bytes()
+    host._runtime = FakeRuntime()
+
+    with pytest.raises(NativeProtocolError) as caught:
+        asyncio.run(host.handle(_request(action, **_setup_edit_parameters(action))))
+
+    assert caught.value.code == "busy"
+    assert native_config_path(tmp_path).read_bytes() == original
 
 
 @pytest.mark.parametrize("journal_kind", ["malformed", "directory", "symlink"])

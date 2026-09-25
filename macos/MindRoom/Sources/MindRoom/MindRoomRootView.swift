@@ -20,8 +20,8 @@ struct MindRoomRootView: View {
                             case .localAgents:
                                 LocalAgentsView(runner: runner)
                             case .computerAccess:
-                                DesktopControlView(store: desktop) { section in
-                                    withAnimation { proxy.scrollTo(section, anchor: .top) }
+                                DesktopControlView(store: desktop) {
+                                    withAnimation { proxy.scrollTo(AppSection.computerAccess, anchor: .top) }
                                 }.id(AppSection.computerAccess)
                             case .settings:
                                 AppSettingsView(runner: runner)
@@ -143,10 +143,10 @@ struct MindRoomRootView: View {
                 }
             }
             AppSectionCard {
-                sectionHeading("Computer access", status: desktop.desktopStatusLabel)
+                sectionHeading("Computer access", status: desktop.connectionStatusLabel)
                 Text("Let agents running elsewhere see and use selected apps on this Mac.")
                     .foregroundStyle(.secondary)
-                Button(desktop.status.config.state == "ready" ? "Manage Access" : "Set Up Computer Access") {
+                Button(desktop.status.hasSavedConnection && !desktop.needsPairing ? "Manage Access" : "Set Up Computer Access") {
                     navigation.section = .computerAccess
                 }
             }
