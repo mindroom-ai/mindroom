@@ -3195,6 +3195,75 @@ class TestDoctor:
         assert requested_urls.count("https://generativelanguage.googleapis.com/v1beta/models?key=sk-google") == 1
         assert not any("gateway.example" in url for url in requested_urls)
 
+    def test_doctor_finishes_when_the_credential_store_cannot_be_opened(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Key lookups fall back to config and env, so a read-only storage dir does not stop later checks."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n    provider: openai\n    id: gpt-6-astra\n"
+            "  own:\n    provider: openai\n    id: gpt-6-astra\n    api_key: sk-own\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n  llm:\n    provider: openai\n    config:\n      model: gpt-5.6-luna\n",
+        )
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        probes = self._record_provider_probes(monkeypatch)
+        storage.chmod(0o555)
+        try:
+            result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+        finally:
+            storage.chmod(0o755)
+
+        assert not isinstance(result.exception, PermissionError), result.output
+        assert "Could not sync env credentials into the store" in result.output
+        assert "model own uses its own API key from config (not validated)" in result.output
+        assert probes == [("https://api.openai.com/v1/models", "Bearer sk-env")]
+        assert "Memory LLM: openai/gpt-5.6-luna uses OPENAI_API_KEY (not validated)" in result.output
+        assert "Storage not writable" in result.output
+
+    @pytest.mark.parametrize(
+        ("provider", "env", "expected"),
+        [
+            ("groq", {"GROQ_API_KEY": "sk-groq"}, "- Memory LLM: groq/some-model uses GROQ_API_KEY (not validated)"),
+            ("groq", {}, "! Memory LLM (groq): GROQ_API_KEY not set"),
+            ("litellm", {}, "- Memory LLM: litellm/some-model not validated"),
+        ],
+        ids=["env-key-set", "env-key-missing", "no-env-key"],
+    )
+    def test_memory_llm_check_reports_mem0_env_keys(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        provider: str,
+        env: dict[str, str],
+        expected: str,
+    ) -> None:
+        """Mem0 clients other than openai and anthropic read their own env key, which doctor reports."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            f"memory:\n  llm:\n    provider: {provider}\n    config:\n      model: some-model\n",
+        )
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        self._record_provider_probes(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+
+        assert result.exit_code == 0
+        assert expected in result.output.replace("[dim]", "").replace("[/dim]", "")
+
     def test_doctor_never_sends_generic_embedder_keys_to_the_configured_host(
         self,
         tmp_path: Path,

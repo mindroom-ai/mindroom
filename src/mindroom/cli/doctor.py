@@ -15,14 +15,17 @@ import typer
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider
 from mindroom.credentials_sync import (
+    ResolvedApiKey,
     get_api_key_for_provider,
     get_memory_llm_api_key,
     get_model_api_key,
+    get_secret_from_env,
     sync_env_to_credentials,
 )
 from mindroom.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embedding_errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings import create_sentence_transformers_embedder
+from mindroom.google_adc import populate_vertexai_claude_runtime_kwargs
 from mindroom.matrix.health import (
     MSC4186_UNSTABLE_FEATURE,
     matrix_versions_url,
@@ -365,8 +368,6 @@ def _validate_vertexai_claude_connection(
     runtime_paths: RuntimePaths,
 ) -> tuple[bool | None, str]:
     """Validate the configured Vertex AI Claude model with the runtime request path."""
-    from mindroom.google_adc import populate_vertexai_claude_runtime_kwargs  # noqa: PLC0415
-
     extra_kwargs = dict(model_config.extra_kwargs or {})
     # Build the client settings exactly as model loading does, so the probe reaches the same endpoint.
     try:
@@ -413,6 +414,17 @@ def _get_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
         if model.provider == "ollama" and model.host:
             return model.host
     return runtime_paths.env_value("OLLAMA_HOST", default=OLLAMA_HOST_DEFAULT) or OLLAMA_HOST_DEFAULT
+
+
+def _read_credential_store[T](read: Callable[[], T], fallback: T) -> T:
+    """Read the credential store, or return the fallback when it cannot be opened.
+
+    The env sync step already reported the store failure, and the remaining checks must still run.
+    """
+    try:
+        return read()
+    except (OSError, ValueError):
+        return fallback
 
 
 def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
@@ -529,7 +541,11 @@ def _check_api_key_provider(
     for model_name, model_config in sorted(config.models.items()):
         if env_key_for_provider(model_config.provider) != env_key:
             continue
-        model_api_key = get_model_api_key(model_name, model_config, runtime_paths)
+        configured_api_key = model_config.configured_api_key()
+        model_api_key = _read_credential_store(
+            lambda name=model_name, model=model_config: get_model_api_key(name, model, runtime_paths),
+            None if configured_api_key is None else ResolvedApiKey(configured_api_key, "config"),
+        )
         if model_api_key is None:
             shared_key_models.append(model_config)
         else:
@@ -540,7 +556,10 @@ def _check_api_key_provider(
     if not shared_key_models:
         return 0, 0, 0
 
-    api_key = get_api_key_for_provider(provider, runtime_paths=runtime_paths)
+    api_key = _read_credential_store(
+        lambda: get_api_key_for_provider(provider, runtime_paths=runtime_paths),
+        get_secret_from_env(env_key, runtime_paths=runtime_paths),
+    )
     if not api_key:
         console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
         return 0, 0, 1
@@ -629,15 +648,21 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
 
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
-    api_key = get_memory_llm_api_key(llm_provider, config.memory.llm.config, runtime_paths)
-    if api_key is None:
-        if env_key:
-            console.print(f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set")
-            return 0, 0, 1
-        return 0, 0, 0
+    llm_settings = config.memory.llm.config
+    api_key = _read_credential_store(lambda: get_memory_llm_api_key(llm_provider, llm_settings, runtime_paths), None)
     # Mem0 resolves its endpoint from its own config and process env, which MindRoom does not
     # share, so doctor reports the key source instead of guessing where Mem0 would send it.
-    source = "its own API key" if api_key.source == "config" else f"the shared {llm_provider} key"
+    if api_key is not None:
+        source = "its own API key" if api_key.source == "config" else f"the shared {llm_provider} key"
+    elif env_key and runtime_paths.process_env.get(env_key):
+        # Mem0's other clients (groq, gemini, deepseek, ...) read this key from the process env themselves.
+        source = env_key
+    elif env_key:
+        console.print(f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set")
+        return 0, 0, 1
+    else:
+        console.print(f"[dim]-[/dim] Memory LLM: {llm_provider}/{llm_model} not validated")
+        return 0, 0, 0
     console.print(f"[dim]-[/dim] Memory LLM: {llm_provider}/{llm_model} uses {source} (not validated)")
     return 0, 0, 0
 

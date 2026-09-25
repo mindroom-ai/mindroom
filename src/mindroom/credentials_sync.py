@@ -45,7 +45,7 @@ _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY = "mindroom-keyless-placeholder"
 
 
 @dataclass(frozen=True)
-class _ResolvedApiKey:
+class ResolvedApiKey:
     """One resolved API key and where it came from."""
 
     value: str
@@ -430,7 +430,7 @@ def get_model_api_key(
     model_name: str,
     model_config: ModelConfig,
     runtime_paths: RuntimePaths,
-) -> _ResolvedApiKey | None:
+) -> ResolvedApiKey | None:
     """Return the key set for one model, which replaces the provider's shared key.
 
     A key saved for the model in the dashboard wins over ``api_key`` or
@@ -438,27 +438,27 @@ def get_model_api_key(
     """
     stored_api_key = get_api_key_for_service(f"model:{model_name}", runtime_paths)
     if stored_api_key:
-        return _ResolvedApiKey(stored_api_key, "dashboard")
+        return ResolvedApiKey(stored_api_key, "dashboard")
     configured_api_key = model_config.configured_api_key()
-    return None if configured_api_key is None else _ResolvedApiKey(configured_api_key, "config")
+    return None if configured_api_key is None else ResolvedApiKey(configured_api_key, "config")
 
 
 def get_memory_llm_api_key(
     provider: str,
     llm_settings: Mapping[str, Any],
     runtime_paths: RuntimePaths,
-) -> _ResolvedApiKey | None:
+) -> ResolvedApiKey | None:
     """Return the key the Mem0 LLM uses: an explicit ``memory.llm.config.api_key``, else the provider's shared key.
 
     Only ``openai`` and ``anthropic`` fall back to a shared key.
     """
     # The memory LLM config model normalizes api_key to a trimmed string or absence.
     if explicit_api_key := llm_settings.get("api_key"):
-        return _ResolvedApiKey(explicit_api_key, "config")
+        return ResolvedApiKey(explicit_api_key, "config")
     if provider in {"openai", "anthropic"} and (
         shared_api_key := get_api_key_for_provider(provider, runtime_paths=runtime_paths)
     ):
-        return _ResolvedApiKey(shared_api_key, "shared")
+        return ResolvedApiKey(shared_api_key, "shared")
     return None
 
 
