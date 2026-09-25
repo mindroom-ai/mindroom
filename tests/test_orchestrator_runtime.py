@@ -5227,13 +5227,14 @@ async def test_background_workers_follow_config_across_reloads(tmp_path: Path) -
     orchestrator.config = config
     await orchestrator._sync_background_workers()
     assert not orchestrator._skill_learning.running
+    assert not list(tmp_path.glob("skill_learning*")), "a deployment that never learns gets no queue files"
     config.agents["general"].skill_learning.enabled = True
     await orchestrator._sync_background_workers()
     assert orchestrator._skill_learning.running
     first = orchestrator._skill_learning._task
     await orchestrator._sync_background_workers()
     assert orchestrator._skill_learning._task is first
-    queue_skill_review(config, paths, agent_name="general", session_id="s", execution_identity=None, run_id="r1")
+    queue_skill_review(config, paths, agent_name="general", session_id="s", execution_identity=None, started_at=0)
     config.agents["general"].skill_learning.enabled = False
     await orchestrator._sync_background_workers()
     assert first is not None

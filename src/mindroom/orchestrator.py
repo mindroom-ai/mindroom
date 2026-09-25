@@ -581,12 +581,11 @@ class _MultiAgentOrchestrator:
                 config_provider=lambda: self.config,
             ),
         )
-        learning = config is not None and skill_learning_enabled(config)
-        if config is not None and not learning:
-            # Conversations kept while no agent learns would count the whole pause once learning returns.
+        if config is not None:
+            # Conversations of agents that stopped learning would otherwise count the whole pause once it returns.
             await asyncio.to_thread(drop_retired_reviews, config, self.runtime_paths, now=time.time())
         await self._skill_learning.sync(
-            enabled=learning,
+            enabled=config is not None and skill_learning_enabled(config),
             factory=lambda: SkillLearningWorker(
                 runtime_paths=self.runtime_paths,
                 config_provider=lambda: self.config,

@@ -61,10 +61,9 @@ class QueueEntry(BaseModel):
     session: str
     worker_key: str | None
     identity: dict[str, object] | None
-    # The first count places the marker just before the response that created the entry, so enabling learning
-    # never reviews a conversation's older history.
-    first_run_id: str | None = None
-    reviewed_through: RunPosition | None = None
+    # A new entry starts at the second its first response began, so enabling learning never reviews older history
+    # and every attempt of that response, including one retried after a discarded empty run, counts.
+    reviewed_through: RunPosition
     has_new_runs: bool = True
     skills_root: str | None = None
     seen_fingerprint: str | None = None
@@ -121,9 +120,9 @@ def queue_skill_review(
     agent_name: str,
     session_id: str,
     execution_identity: ToolExecutionIdentity | None,
-    run_id: str,
+    started_at: int,
 ) -> None:
-    """Mark one conversation for counting after a person's response completed, without storing content."""
+    """Mark one conversation for counting after a person's response that began at ``started_at`` completed."""
     agent = config.agents.get(agent_name)
     if agent is None or not agent.skill_learning.enabled:
         return
@@ -138,7 +137,7 @@ def queue_skill_review(
             session=session_id,
             worker_key=worker_key,
             identity=identity,
-            first_run_id=run_id,
+            reviewed_through=(started_at, -1),
             last_seen_at=now,
         )
         state.entries[key] = entry.model_copy(update={"identity": identity, "has_new_runs": True, "last_seen_at": now})
@@ -161,9 +160,11 @@ def _entry_is_current(config: Config, entry: QueueEntry, now: float) -> bool:
 def drop_retired_reviews(config: Config, runtime_paths: RuntimePaths, *, now: float) -> list[tuple[str, QueueEntry]]:
     """Drop entries of disabled agents, stale conversations, and changed scopes, and return the others.
 
-    The orchestrator also calls this while no agent learns, so re-enabling learning never reviews the time it was
-    off. Scope resolution happens outside the lock that completed responses also take.
+    The orchestrator also calls this on every config change, so learning turned off and on again never reviews the
+    time it was off. Scope resolution happens outside the lock that completed responses also take.
     """
+    if not (runtime_paths.storage_root / _STATE_FILENAME).exists():
+        return []
     with _locked(runtime_paths):
         state = _read(runtime_paths)
     current = sorted(
@@ -195,16 +196,14 @@ def record_count(
     *,
     claimed: QueueEntry,
     replies: Sequence[tuple[RunPosition, int]],
-    start: RunPosition,
     interval: int,
     skills_root: str,
     fingerprint: str,
 ) -> int:
     """Place the conversation's marker and return the model replies after it.
 
-    ``replies`` holds each visible run's position and model replies, oldest first, and ``start`` is the position
-    just before the response that created the entry. Hermes resets its counter when the agent saves a skill
-    itself; here counting restarts after the newest run when anyone other than the learner changed the workspace
+    ``replies`` holds each visible run's position and model replies, oldest first. Hermes resets its counter when
+    the agent saves a skill itself; here counting restarts after the newest run when anyone other than the learner changed the workspace
     skills since this conversation last looked. The comparison uses the stored state, which reviews of other
     conversations move forward when the learner itself changes skills.
     """
@@ -214,13 +213,10 @@ def record_count(
         entry = state.entries.get(key)
         if entry is None:
             return 0
-        if entry.seen_fingerprint not in {None, fingerprint}:
-            reviewed_through = newest
-        else:
-            reviewed_through = start if entry.reviewed_through is None else entry.reviewed_through
+        foreign_change = entry.seen_fingerprint not in {None, fingerprint}
+        reviewed_through = newest if foreign_change else entry.reviewed_through
         pending = sum(count for position, count in replies if position > reviewed_through)
         update: dict[str, object] = {
-            "first_run_id": None,
             "reviewed_through": reviewed_through,
             "skills_root": skills_root,
             "seen_fingerprint": fingerprint,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from contextlib import asynccontextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -1224,7 +1225,7 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         queue_memory_persistence: Callable[[], None] | None = None,
-        queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
+        queue_skill_review: Callable[[], Awaitable[None]] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build post-response effect deps bound to one request's room."""
@@ -2080,7 +2081,7 @@ class ResponseRunner:
             for index, turn in enumerate(continuation.memory_thread_history)
         )
 
-    def _approval_skill_review(self, continuation: ApprovalContinuation) -> Callable[[str], Awaitable[None]] | None:
+    def _approval_skill_review(self, continuation: ApprovalContinuation) -> Callable[[], Awaitable[None]] | None:
         """Return the normal skill-review handoff for a completed agent continuation."""
         if continuation.entity_kind != "agent" or is_automation_source_kind(continuation.source_kind):
             return None
@@ -2091,7 +2092,6 @@ class ResponseRunner:
                 continuation.execution_identity,
                 error_prefix="Approval continuation execution_identity",
             ),
-            attempt_run_ids=(),
         )
 
     def _skill_review(
@@ -2100,15 +2100,14 @@ class ResponseRunner:
         agent_name: str,
         session_id: str,
         execution_identity: ToolExecutionIdentity | None,
-        attempt_run_ids: Sequence[str],
-    ) -> Callable[[str], Awaitable[None]]:
+    ) -> Callable[[], Awaitable[None]]:
         """Build the handoff that marks a conversation for counting toward a background skill review.
 
-        Dynamic-tool continuations and empty-run retries persist each attempt as its own run, so a conversation's
-        first count starts at the response's first attempt, or at its final run when it had a single attempt.
+        It is built before the response runs, so a conversation's first count covers every run of that response.
         """
+        started_at = int(time.time())
 
-        async def queue(response_run_id: str) -> None:
+        async def queue() -> None:
             await asyncio.to_thread(
                 queue_skill_review,
                 self.deps.runtime.config,
@@ -2116,7 +2115,7 @@ class ResponseRunner:
                 agent_name=agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,
-                run_id=attempt_run_ids[0] if attempt_run_ids else response_run_id,
+                started_at=started_at,
             )
 
         return queue
@@ -5518,7 +5517,6 @@ class ResponseRunner:
                 agent_name=self.deps.agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,
-                attempt_run_ids=attempt_run_ids,
             )
         )
 

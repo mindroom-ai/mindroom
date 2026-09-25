@@ -144,24 +144,17 @@ class SkillLearningWorker:
         skills_root = agent_workspace_skills_root(self.runtime_paths, entry.agent, workspace_root=workspace_root)
         runs = await asyncio.to_thread(_conversation_runs, config, self.runtime_paths, entry)
         fingerprint = await asyncio.to_thread(skills_fingerprint, skills_root)
-        positions = [NO_RUN, *(position for position, _run in runs)]
-        # The count starts just before the response that created the entry; without it, at the newest run.
-        start = next(
-            (positions[number] for number, (_position, run) in enumerate(runs) if run.run_id == entry.first_run_id),
-            positions[-1],
-        )
         replies = await asyncio.to_thread(
             record_count,
             self.runtime_paths,
             key,
             claimed=entry,
             replies=[(position, count_model_replies([run])) for position, run in runs],
-            start=start,
             interval=config.agents[entry.agent].skill_learning.review_interval,
             skills_root=str(skills_root),
             fingerprint=fingerprint,
         )
-        return replies, positions[-1], skills_root
+        return replies, runs[-1][0] if runs else NO_RUN, skills_root
 
     async def _review(
         self,
@@ -209,10 +202,12 @@ class SkillLearningWorker:
                     timeout=settings.timeout_seconds,
                 )
         except asyncio.CancelledError:
-            # Shutdown keeps the conversation due for a retry but still records the learner's partial writes;
-            # a bookkeeping error here must not replace the cancellation.
+            # Shutdown lets started writes land so they count as the learner's, then keeps an unchanged review due
+            # for the next start; a bookkeeping error here must not replace the cancellation.
             try:
-                self._settle(key, entry, skills_root, before, outcome="interrupted", through=through)
+                await asyncio.shield(progress.settled())
+                outcome_on_stop = "reviewed" if progress.changes else "interrupted"
+                self._settle(key, entry, skills_root, before, outcome=outcome_on_stop, through=through)
             except Exception:
                 logger.exception("Could not record an interrupted skill review", agent=entry.agent)
             raise
