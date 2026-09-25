@@ -22,7 +22,6 @@ from mindroom.skill_learning.library import (
     SkillFile,
     content_digest,
     create_skill,
-    learner_owns,
     read_skill_file,
     remove_skill_file,
     support_file_paths,
@@ -33,9 +32,6 @@ from mindroom.tool_call_budget import install_model_call_cap, install_request_ga
 from mindroom.tool_system.skills import build_agent_skills, list_skill_listings
 from mindroom.tool_system.workspace_skills import (
     SKILL_FILENAME,
-    SkillUsage,
-    load_skill_usage,
-    open_skills_root,
     parse_skill_markdown,
 )
 
@@ -367,11 +363,6 @@ def _skill_catalog(
 ) -> tuple[dict[str, _CatalogEntry], frozenset[str]]:
     """Return the agent's effective skills and every name a new skill must not shadow."""
     skills = build_agent_skills(agent_name, config, runtime_paths, workspace_skills_root=skills_root)
-    try:
-        with open_skills_root(skills_root) as root_fd:
-            usage = load_skill_usage(root_fd)
-    except FileNotFoundError:
-        usage = {}
     catalog: dict[str, _CatalogEntry] = {}
     for skill in skills.get_all_skills() if skills is not None else []:
         source = Path(skill.source_path)
@@ -380,8 +371,10 @@ def _skill_catalog(
             name=skill.name,
             description=skill.description,
             directory=source.name if in_workspace else None,
+            # The strict read the edit checks use, so the catalog never offers a skill that edits then refuse.
             learned=in_workspace
-            and learner_owns({"metadata": skill.metadata}, usage.get(source.name, SkillUsage()), path=str(source)),
+            and (current := read_skill_file(skills_root, source.name)) is not None
+            and current.learned,
             instructions=skill.instructions,
         )
     reserved = {name.lower() for name in catalog} | {listing.name.lower() for listing in list_skill_listings()}

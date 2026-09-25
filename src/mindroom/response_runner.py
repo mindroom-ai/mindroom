@@ -1587,16 +1587,10 @@ class ResponseRunner:
         *,
         request: ResponseRequest,
         target: MessageTarget,
-        run_id_collector: list[str] | None = None,
     ) -> tuple[FinalDeliveryOutcome, ApprovalContinuation]:
         """Run and classify one claimed continuation for either lifecycle entry path."""
         if claimed.cli_call is None:
-            return await self._deliver_claimed_approval(
-                claimed,
-                request=request,
-                target=target,
-                run_id_collector=run_id_collector,
-            )
+            return await self._deliver_claimed_approval(claimed, request=request, target=target)
         progress = _DeliveryProgress(tracked_event_id=claimed.response_event_id)
         async with self._cli_approval_handler_scope(
             request=request,
@@ -1615,7 +1609,6 @@ class ResponseRunner:
                 request=request,
                 target=target,
                 cli_approval_handler=handler,
-                run_id_collector=run_id_collector,
             )
             progress.settle(outcome)
             return outcome, current
@@ -1627,7 +1620,6 @@ class ResponseRunner:
         request: ResponseRequest,
         target: MessageTarget,
         cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None,
-        run_id_collector: list[str] | None = None,
     ) -> tuple[FinalDeliveryOutcome, ApprovalContinuation]:
         """Deliver execution output against the latest native continuation generation."""
         tool_trace: list[ToolTraceEntry] = []
@@ -1662,7 +1654,6 @@ class ResponseRunner:
                 tool_trace_collector=tool_trace,
                 progress=progress,
                 cli_approval_handler=cli_approval_handler,
-                run_id_collector=run_id_collector,
             )
         if isinstance(result, CompletedApprovalRun):
             current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
@@ -1743,7 +1734,6 @@ class ResponseRunner:
             request=request,
         )
         post_effect_continuation = claimed
-        continued_run_ids = [claimed.run_id]
 
         async def continue_response(_message_id: str | None) -> None:
             nonlocal post_effect_continuation
@@ -1752,7 +1742,6 @@ class ResponseRunner:
                     claimed,
                     request=request,
                     target=target,
-                    run_id_collector=continued_run_ids,
                 )
             except (asyncio.CancelledError, Exception):
                 delivery = await run_coroutine_until_complete(
@@ -1800,7 +1789,6 @@ class ResponseRunner:
                 post_effect_continuation,
                 target=target,
                 final=final,
-                run_ids=continued_run_ids,
             ),
             post_response_deps=lambda: self._approval_post_response_deps(claimed),
         )
@@ -1808,7 +1796,6 @@ class ResponseRunner:
         if outcome is None:
             msg = "Approval continuation ended without a terminal lifecycle outcome"
             raise RuntimeError(msg)
-        await self._count_paused_skill_review_runs(outcome, self._approval_skill_review(claimed), continued_run_ids)
         if outcome.terminal_status == "completed":
             if not await self.deps.approval_store.finish_approval_continuation(claimed.approval_id):
                 msg = "Approval continuation final delivery was not durably acknowledged"
@@ -1994,7 +1981,6 @@ class ResponseRunner:
                 claimed,
                 target=target,
                 final=final,
-                run_ids=(claimed.run_id,),
             ),
             post_response_deps=lambda: self._approval_post_response_deps(claimed),
         )
@@ -2060,16 +2046,17 @@ class ResponseRunner:
         *,
         target: MessageTarget,
         final: FinalDeliveryOutcome,
-        run_ids: Sequence[str],
     ) -> ResponseOutcome:
-        """Build normal post-response facts for one resumed native run and the runs it continued into."""
+        """Build normal post-response facts for one resumed native run."""
         execution_identity = parse_tool_execution_identity_payload(
             continuation.execution_identity,
             error_prefix="Approval continuation execution_identity",
         )
         return ResponseOutcome(
             response_run_id=final.response_run_id or continuation.run_id,
-            response_run_ids=tuple(dict.fromkeys(filter(None, (*run_ids, final.response_run_id)))),
+            # The resumed run and the final one it may have moved into after a tool reload; a run in between is
+            # left uncounted, which only delays a review.
+            response_run_ids=tuple(dict.fromkeys(filter(None, (continuation.run_id, final.response_run_id)))),
             session_id=continuation.session_id,
             session_type=SessionType.TEAM if continuation.entity_kind == "team" else SessionType.AGENT,
             execution_identity=execution_identity,
@@ -2157,23 +2144,6 @@ class ResponseRunner:
             )
 
         return queue
-
-    async def _count_paused_skill_review_runs(
-        self,
-        outcome: FinalDeliveryOutcome | None,
-        queue: Callable[[Sequence[str]], Coroutine[Any, Any, None]] | None,
-        run_ids: Sequence[str],
-    ) -> None:
-        """Count the runs a response finished before pausing for approval, which never reaches post-response effects.
-
-        The paused run itself counts nothing yet; the continuation that completes it counts it.
-        """
-        if outcome is None or outcome.terminal_status != "suspended" or queue is None or not run_ids:
-            return
-        try:
-            await queue(run_ids)
-        except Exception:
-            self.deps.logger.exception("Failed to count a paused response toward skill review", run_ids=list(run_ids))
 
     def _learns_skills(self, agent_name: str) -> bool:
         agent = self.deps.runtime.config.agents.get(agent_name)
@@ -2273,7 +2243,6 @@ class ResponseRunner:
         tool_trace_collector: list[ToolTraceEntry],
         progress: ProgressPublisher | None,
         cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None,
-        run_id_collector: list[str] | None = None,
     ) -> CompletedApprovalRun | PausedAttempt:
         execution_identity = parse_tool_execution_identity_payload(
             continuation.execution_identity,
@@ -2362,21 +2331,13 @@ class ResponseRunner:
                         request,
                         response_run_id=continuation.run_id,
                     ),
-                    run_id_callback=partial(self._note_continued_run_id, continuation, run_id_collector),
+                    run_id_callback=lambda run_id: self.deps.stop_manager.update_run_id(
+                        continuation.response_event_id,
+                        run_id,
+                    ),
                     progress=progress,
                 )
         return response_text
-
-    def _note_continued_run_id(
-        self,
-        continuation: ApprovalContinuation,
-        run_id_collector: list[str] | None,
-        run_id: str,
-    ) -> None:
-        """Track the run a continuation is in, which a dynamic tool change replaces with a new one."""
-        self.deps.stop_manager.update_run_id(continuation.response_event_id, run_id)
-        if run_id_collector is not None:
-            run_id_collector.append(run_id)
 
     def _build_turn_recorder(
         self,
@@ -5665,7 +5626,7 @@ class ResponseRunner:
             progress=progress,
             history_scope=history_scope,
         ) as runtime:
-            event_id = await self._run_and_settle_locked_response(
+            return await self._run_and_settle_locked_response(
                 request,
                 target=resolved_target,
                 lifecycle=lifecycle,
@@ -5693,5 +5654,3 @@ class ResponseRunner:
                 show_tool_calls=runtime.show_tool_calls,
                 participation=participation,
             )
-        await self._count_paused_skill_review_runs(progress.delivery_outcome, queue_skill_review, attempt_run_ids)
-        return event_id

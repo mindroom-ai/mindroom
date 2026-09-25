@@ -129,8 +129,8 @@ def queue_skill_review(
 ) -> None:
     """Add the model replies of a person's response to its conversation's count, without its content.
 
-    ``run_ids`` are every run the response produced, for example one more after it loaded a tool. A run paused for
-    approval counts nothing yet; the approved continuation that completes it counts it with all of its replies.
+    ``run_ids`` are the response's runs, for example one more after it loaded a tool. A run paused for approval
+    counts nothing yet; the approved continuation that completes it counts it with all of its replies.
     """
     agent = config.agents.get(agent_name)
     if agent is None or not agent.skill_learning.enabled:

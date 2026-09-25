@@ -183,9 +183,10 @@ All fields, defaults, and bounds are listed in the [agent configuration referenc
 
 Like Hermes' `creation_nudge_interval`, each conversation keeps a count of model replies, one for each tool-calling step and one for the final answer.
 Each successful standalone-agent response to a person in Matrix adds the replies of its runs when it completes, including every run it continued in, for example after loading a tool.
-A response that pauses for approval adds the runs it finished before the pause, and the approved continuation adds the paused run, including its replies from before the pause, once it completes it.
+An approved continuation adds the paused run it completes, including its replies from before the pause, and the run it ends in.
+A few runs go uncounted, which only delays a review: runs a response finished before pausing for approval, runs between two tool reloads after an approval, and the earlier steps of a minimal-mode command approval resumed after a restart, which count as one reply.
 A review runs once the count reaches `review_interval`, and it subtracts the replies it covered, so replies that arrive while it runs count toward the next review.
-Replies are counted only as responses finish or pause while learning is on, so replies from before learning was enabled or while it was off never count, and the queued conversations of an agent that stops learning are forgotten on the next config change.
+Replies are counted only as responses finish while learning is on, so replies from before learning was enabled or while it was off never count, and the queued conversations of an agent that stops learning are forgotten on the next config change.
 Compaction and redaction never change a count, because replies are counted when their response completes.
 A review still reads the whole stored conversation as evidence, including turns from before learning was enabled, as a Hermes review sees the whole session.
 Automated responses from schedules, hooks, and external triggers, including ones the router hands to an agent, responses another agent asked for, and runs resumed after a restart never count, just as Hermes skips reviews for cron jobs; they still appear in the evidence when people also use the thread.
