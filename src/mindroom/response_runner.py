@@ -1707,6 +1707,7 @@ class ResponseRunner:
         target: MessageTarget,
     ) -> FinalDeliveryOutcome:
         """Run one claimed pause through the normal stoppable response lifecycle."""
+        self._register_skill_review(self._approval_skill_review(claimed))
         request = self._approval_response_request(claimed, target=target)
         await self._refresh_mid_turn_context_for_approval(request)
         progress = _DeliveryProgress(tracked_event_id=claimed.response_event_id)
@@ -2081,9 +2082,16 @@ class ResponseRunner:
             for index, turn in enumerate(continuation.memory_thread_history)
         )
 
-    def _approval_skill_review(self, continuation: ApprovalContinuation) -> Callable[[bool], Awaitable[None]] | None:
-        """Return the normal skill-review handoff for a completed agent continuation."""
-        if continuation.entity_kind != "agent" or is_automation_source_kind(continuation.source_kind):
+    def _approval_skill_review(
+        self,
+        continuation: ApprovalContinuation,
+    ) -> Callable[[bool], Coroutine[Any, Any, None]] | None:
+        """Return the normal skill-review handoff for an agent continuation."""
+        if (
+            continuation.entity_kind != "agent"
+            or is_automation_source_kind(continuation.source_kind)
+            or not self._learns_skills(continuation.entity_name)
+        ):
             return None
         return self._skill_review(
             agent_name=continuation.entity_name,
@@ -2101,16 +2109,26 @@ class ResponseRunner:
         session_id: str,
         execution_identity: ToolExecutionIdentity | None,
     ) -> Callable[[bool], Coroutine[Any, Any, None]] | None:
-        """Register a starting response's conversation and return the handoff that marks it completed.
-
-        A response that pauses for approval never reaches post-response effects, so registration happens here, in
-        the background so it never delays or fails the reply; the completion call carries the same start time.
-        """
-        queue = self._skill_review(
-            agent_name=agent_name,
-            session_id=session_id,
-            execution_identity=execution_identity,
+        """Register a starting response's conversation and return the handoff that marks it completed."""
+        return self._register_skill_review(
+            self._skill_review(
+                agent_name=agent_name,
+                session_id=session_id,
+                execution_identity=execution_identity,
+            ),
         )
+
+    def _register_skill_review(
+        self,
+        queue: Callable[[bool], Coroutine[Any, Any, None]] | None,
+    ) -> Callable[[bool], Coroutine[Any, Any, None]] | None:
+        """Register the conversation of a starting response or continuation in the background, and return ``queue``.
+
+        A response that pauses for approval never reaches post-response effects, so registration happens when it
+        starts and again whenever an approval continues it, keeping the conversation fresh across chained
+        approvals. It runs in the background so it never delays or fails the reply; the completion call carries
+        the same start time.
+        """
         if queue is not None:
             create_background_task(queue(False), name="skill_learning_register", owner=self.deps.runtime)
         return queue
@@ -2127,8 +2145,7 @@ class ResponseRunner:
         Calling it with ``False`` when the response starts registers the conversation, so its first count covers
         every run of that response, including one that pauses for approval; ``True`` marks a completed response.
         """
-        agent = self.deps.runtime.config.agents.get(agent_name)
-        if agent is None or not agent.skill_learning.enabled:
+        if not self._learns_skills(agent_name):
             return None
         started_at = int(time.time())
 
@@ -2145,6 +2162,10 @@ class ResponseRunner:
             )
 
         return queue
+
+    def _learns_skills(self, agent_name: str) -> bool:
+        agent = self.deps.runtime.config.agents.get(agent_name)
+        return agent is not None and agent.skill_learning.enabled
 
     def _approval_memory_persistence(self, continuation: ApprovalContinuation) -> Callable[[], None] | None:
         """Return the normal agent-memory handoff for a completed continuation."""

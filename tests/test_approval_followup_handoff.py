@@ -12,6 +12,7 @@ import nio
 import pytest
 from agno.models.response import ToolExecution
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.event_journal import (
     ApprovalCall,
@@ -162,6 +163,36 @@ async def test_final_approval_links_the_delivered_attempt(
 
     expected_run_id = terminal_run_id if isinstance(terminal_run_id, str) and terminal_run_id else "run-1"
     persist_event_id.assert_awaited_once_with(expected_run_id, "$original-response")
+
+
+@pytest.mark.asyncio
+async def test_each_approved_continuation_refreshes_its_skill_review_conversation(tmp_path: Path) -> None:
+    """Chained approvals of one response keep its conversation fresh, so the finished run still counts."""
+    runner = await _runner_with_source(tmp_path)
+    runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    await _seed_ready_continuation(runner)
+    target = _target(thread_id="$thread", reply_to_event_id="$source")
+    claimed = await runner.deps.approval_store.claim_approval_continuation(
+        "approval-1",
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    registrations: list[bool] = []
+
+    def record(*_args: object, completed: bool, **_kwargs: object) -> None:
+        registrations.append(completed)
+
+    completed = CompletedApprovalRun(
+        response_text="Finished after refreshing the tools.",
+        metadata_content={AI_RUN_METADATA_KEY: {"run_id": "continued-run", "status": "completed"}},
+    )
+    with (
+        patch("mindroom.response_runner.queue_skill_review", side_effect=record),
+        patch.object(runner, "_continue_entity_call", new=AsyncMock(return_value=completed)),
+    ):
+        await runner._run_claimed_approval_lifecycle(claimed, target=target)
+        assert await wait_for_background_tasks(5, owner=runner.deps.runtime)
+    assert sorted(registrations) == [False, True]
 
 
 async def _drain_tasks(*tasks: asyncio.Task[object] | None) -> None:

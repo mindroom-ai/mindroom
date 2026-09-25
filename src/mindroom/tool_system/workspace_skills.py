@@ -49,7 +49,7 @@ _UtcDatetime = Annotated[datetime, AfterValidator(_as_utc)]
 class SkillUsage(BaseModel):
     """Provenance and activity for one workspace skill directory; worker-writable, so it never grants access."""
 
-    # Like Hermes, fields a person or another tool added survive rewrites of the record.
+    # Fields a person or another tool added survive rewrites of the record.
     model_config = ConfigDict(extra="allow")
 
     created_by: Literal["learner"] | None = None
@@ -227,7 +227,7 @@ def _usage_records(root_fd: int) -> dict[str, object]:
 
 
 def _parse_usage(record: object) -> SkillUsage | None:
-    """Parse one record like Hermes, dropping only fields that do not validate, so ownership and the rest stay."""
+    """Parse one record, dropping only fields that do not validate, so ownership and the rest stay."""
     if not isinstance(record, dict):
         return None
     try:
