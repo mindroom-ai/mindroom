@@ -190,7 +190,7 @@ This includes a change during a conversation's first response, because its first
 Conversations are counted per agent and private instance, not per requester, so a thread shared by several people is reviewed once.
 Minimal-mode turns count like standard turns.
 The queue in `skill_learning_state.json` in the storage root holds each conversation's review marker, retry state, and scope metadata, never message content.
-A conversation with nothing left to review is forgotten after 30 days without a response, or after the longest configured `tool_approval` timeout when that is longer, so a response waiting for approval keeps its place.
+A conversation with nothing left to review is forgotten 30 days plus the longest configured `tool_approval` timeout after its last response or approved continuation began, so a response waiting for approval keeps its place.
 Reviews run one at a time across processes that share the storage root.
 A failed review, including a provider error, is retried with a growing delay and abandoned after three failures, and a later count that finds nothing to review clears the failures.
 A review that already changed skills before failing or timing out counts as done, like Hermes' best-effort review, so it never repeats its edits.
@@ -243,7 +243,7 @@ Before each review, learned skills with no use, creation, or learner edit for `a
 Archived directories are named `<skill>--<timestamp>`; move one back to `skills/<skill>/` to restore it.
 Archiving or deleting a skill forgets its record in `skills/.usage.json`, so a restored skill starts a new inactivity period and a new skill under the same name belongs to whoever wrote it.
 A use is recorded in `skills/.usage.json` whenever the agent loads a workspace skill through the skill tools or reads it as a minimal-mode context document.
-Like Hermes, a field that cannot be read is dropped without affecting the rest of its record or other records, a record that is not an object is ignored and kept as written, fields added by hand survive updates, and a timestamp without an offset is read as UTC.
+A field that cannot be read is dropped without affecting the rest of its record or other records, a record that is not an object is ignored and left in place until its own skill's record is next updated, fields added by hand survive updates, and a timestamp without an offset is read as UTC.
 Rewrites keep a file's existing permissions.
 Archival is logged rather than announced, because other conversations may share the workspace.
 With `notify: true`, a review that changed skills posts an `m.notice` in the conversation naming only the skills that review changed, such as ``💾 Skill review: created `deploy-checks` ``; a review stopped by shutdown after changing skills posts none.

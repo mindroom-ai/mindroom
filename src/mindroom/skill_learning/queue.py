@@ -192,10 +192,14 @@ def queue_skill_review(
 
 
 def _stale_seconds(config: Config) -> float:
-    """Keep idle conversations at least as long as a response may wait for approval, so its continuation counts."""
+    """Extend the idle limit by the longest approval wait, so a response or continuation that pauses still counts.
+
+    Registration refreshes a conversation when a response starts and when an approval continues it; the pause that
+    follows can last as long as its approval timeout.
+    """
     approval = config.tool_approval
     waits = [approval.timeout_days, *(rule.timeout_days for rule in approval.rules if rule.timeout_days is not None)]
-    return max(_STALE_SECONDS, max(waits) * 86400)
+    return _STALE_SECONDS + max(waits) * 86400
 
 
 def _entry_is_current(config: Config, entry: QueueEntry, now: float, stale_seconds: float) -> bool:

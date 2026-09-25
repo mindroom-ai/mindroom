@@ -1199,16 +1199,17 @@ def test_one_malformed_usage_record_never_erases_the_others(tmp_path: Path) -> N
 
 
 def test_conversations_outlast_their_longest_approval_wait(tmp_path: Path) -> None:
-    """A response may wait longer than the 30-day idle limit for approval, and its conversation must still be there."""
+    """The idle limit grows by the longest approval timeout, so a response that paused late still has its place."""
     config, paths = _learner(tmp_path)
     day = 86400.0
     with patch("mindroom.skill_learning.queue.time.time", return_value=0.0):
         _queue(config, paths, completed=False)
-    assert queue.drop_retired_reviews(config, paths, now=45 * day) == []
+    assert [key for key, _entry in queue.drop_retired_reviews(config, paths, now=36 * day)] == ["mind:session"]
+    assert queue.drop_retired_reviews(config, paths, now=38 * day) == []
     with patch("mindroom.skill_learning.queue.time.time", return_value=0.0):
         _queue(config, paths, completed=False)
     config.tool_approval.rules.append(ApprovalRuleConfig(match="deploy", action="require_approval", timeout_days=60))
-    assert [key for key, _entry in queue.drop_retired_reviews(config, paths, now=45 * day)] == ["mind:session"]
+    assert [key for key, _entry in queue.drop_retired_reviews(config, paths, now=89 * day)] == ["mind:session"]
 
 
 def test_archival_skips_unreadable_user_skills(tmp_path: Path) -> None:
