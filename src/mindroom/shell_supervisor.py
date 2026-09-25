@@ -128,6 +128,8 @@ async def _handle_run(
     if handle_payload is not None and background_script_supervision_supported():
         command_argv = [
             sys.executable,
+            "-P",
+            "-s",
             "-m",
             "mindroom.parent_death_exec",
             str(os.getpid()),

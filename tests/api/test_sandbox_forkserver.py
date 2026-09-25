@@ -423,14 +423,20 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
         assert response.ok is True
         assert response.result == "explicit-value"
 
-        # Spawn-per-call parity: `python -m` puts the request cwd on sys.path,
-        # so python-tool code can import modules saved into its workspace.
+        # Python-tool code can import modules saved into its workspace, which
+        # only follows installed modules on sys.path.
         (workdir / "helper.py").write_text('VALUE = "helper-value"\n', encoding="utf-8")
         response = sandbox_runner_module._execute_request_subprocess_sync(
             sandbox_runner_module.SandboxRunnerExecuteRequest(
                 tool_name="python",
                 function_name="run_python_code",
-                args=["import helper\nresult = helper.VALUE", "result"],
+                args=[
+                    "import os, sys\n"
+                    "import helper\n"
+                    "cwd = os.getcwd()\n"
+                    "result = f'{helper.VALUE}|{sys.path[-1] == cwd}|{cwd in sys.path[:-1]}'",
+                    "result",
+                ],
                 kwargs={},
                 execution_env={"MINDROOM_AGENT_WORKSPACE": str(workdir)},
             ),
@@ -438,11 +444,46 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
             config,
         )
         assert response.ok is True
-        assert response.result == "helper-value"
+        assert response.result == "helper-value|True|False"
     finally:
         manager.shutdown()
 
     assert len(spawned) == 1
+
+
+def test_forkserver_template_ignores_package_planted_in_its_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A `mindroom` package in the template's cwd must not replace the installed runtime."""
+    runtime_paths, config = _forkserver_runtime(tmp_path)
+    planted_cwd = tmp_path / "planted-cwd"
+    (planted_cwd / "mindroom").mkdir(parents=True)
+    marker = tmp_path / "planted-package-ran"
+    (planted_cwd / "mindroom" / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(planted_cwd)
+    manager = _SandboxForkserver()
+    monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: manager)
+    try:
+        response = sandbox_runner_module._execute_request_subprocess_sync(
+            sandbox_runner_module.SandboxRunnerExecuteRequest(
+                tool_name="calculator",
+                function_name="add",
+                args=[1, 2],
+                kwargs={},
+            ),
+            runtime_paths,
+            config,
+        )
+    finally:
+        manager.shutdown()
+
+    assert response.ok is True, response.error
+    assert '"result": 3' in str(response.result)
+    assert not marker.exists()
 
 
 def test_forkserver_timeout_maps_to_worker_failure(

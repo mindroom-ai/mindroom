@@ -325,7 +325,7 @@ class TestEmptyDirectoryIncludes:
         """The dashboard receives the include warning when only the root was read."""
         main.initialize_api_app(main.app, empty_include_runtime_paths)
         assert config_lifecycle.load_config_into_app(empty_include_runtime_paths, main.app) is True
-        client = TestClient(main.app)
+        client = TestClient(main.app, base_url="http://localhost")
 
         response = client.post("/api/config/load")
 
@@ -1176,7 +1176,7 @@ class TestIncludeAwareSnapshots:
         """/api/config/load exposes the includes flag so clients can warn before a save."""
         main.initialize_api_app(main.app, split_runtime_paths)
         assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app) is True
-        client = TestClient(main.app)
+        client = TestClient(main.app, base_url="http://localhost")
 
         response = client.post("/api/config/load")
 

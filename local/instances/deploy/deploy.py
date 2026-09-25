@@ -48,6 +48,10 @@ DEFAULT_TRAEFIK_WEB_ENTRYPOINT = "websecure"
 DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT = "matrix-fed"
 DEFAULT_TRAEFIK_CERTRESOLVER = "porkbun"
 PERMISSION_REPAIR_IMAGE = "busybox:1.36"
+# Random per-instance secrets kept in the instance env file.
+# start and restart add missing runtime secrets to env files written by older versions.
+RUNTIME_SECRET_NAMES = ("MINDROOM_API_KEY", "MINDROOM_SANDBOX_PROXY_TOKEN")
+SYNAPSE_SECRET_NAMES = ("POSTGRES_PASSWORD", "REDIS_PASSWORD")
 
 
 # Pydantic Models
@@ -219,10 +223,15 @@ def _prepare_matrix_config(
 
         # Render template with variables
         if matrix_type == MatrixType.SYNAPSE:
+            env_file = ENV_DIR / f"{instance.name}.env"
+            _ensure_env_secrets(env_file, SYNAPSE_SECRET_NAMES)
+            env_values = _read_env_values(env_file)
             content = template.render(
                 matrix_server_name=matrix_server_name,
                 postgres_host=f"{instance.name}-postgres",
+                postgres_password=env_values["POSTGRES_PASSWORD"],
                 redis_host=f"{instance.name}-redis",
+                redis_password=env_values["REDIS_PASSWORD"],
                 macaroon_secret_key=secrets.token_hex(32),
             )
         else:
@@ -326,8 +335,20 @@ def _require_instance_env_file(name: str) -> Path:
     raise typer.Exit(1)
 
 
-def _load_traefik_settings(env_file: Path) -> TraefikSettings:
-    """Read optional Traefik label overrides from the instance env file."""
+def _env_file_value(raw_value: str) -> str:
+    """Parse one env-file value like Compose: quotes delimit it, and ` #` starts an unquoted comment."""
+    value = raw_value.strip()
+    if value[:1] in {"'", '"'} and (end := value.find(value[0], 1)) != -1:
+        return value[1:end]
+    if value.startswith("#"):
+        # Compose reads `KEY= # note` as "# note"; treat such a placeholder as unset rather than as a secret.
+        return ""
+    comment = value.find(" #")
+    return (value if comment == -1 else value[:comment]).rstrip()
+
+
+def _read_env_values(env_file: Path) -> dict[str, str]:
+    """Read KEY=VALUE assignments from an instance env file; later assignments win, as in Compose."""
     values: dict[str, str] = {}
     if env_file.exists():
         for raw_line in env_file.read_text().splitlines():
@@ -335,8 +356,26 @@ def _load_traefik_settings(env_file: Path) -> TraefikSettings:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            values[key.strip()] = value.strip().strip("'\"")
+            values[key.strip().removeprefix("export ").strip()] = _env_file_value(value)
+    return values
 
+
+def _ensure_env_secrets(env_file: Path, names: tuple[str, ...]) -> list[str]:
+    """Append a random value for each named secret the env file leaves empty and return the generated names."""
+    values = _read_env_values(env_file)
+    generated = [name for name in names if not values.get(name)]
+    if generated:
+        content = env_file.read_text()
+        suffix = "" if not content or content.endswith("\n") else "\n"
+        # Hex values stay safe as command-line arguments, URLs, and YAML scalars.
+        with env_file.open("a") as f:
+            f.write(suffix + "".join(f"{name}={secrets.token_hex(32)}\n" for name in generated))
+    return generated
+
+
+def _load_traefik_settings(env_file: Path) -> TraefikSettings:
+    """Read optional Traefik label overrides from the instance env file."""
+    values = _read_env_values(env_file)
     return TraefikSettings(
         web_entrypoint=values.get("TRAEFIK_WEB_ENTRYPOINT", DEFAULT_TRAEFIK_WEB_ENTRYPOINT),
         matrix_entrypoint=values.get("TRAEFIK_MATRIX_ENTRYPOINT", DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT),
@@ -422,8 +461,8 @@ def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str
             raise ValueError(msg)
         return _get_matrix_services(instance.matrix_type).strip()
 
-    # Start full stack: MindRoom + sandbox runner + matrix + auth
-    services = ["mindroom", "sandbox-runner"]
+    # Start full stack: MindRoom + sandbox runner and its relay + matrix + auth
+    services = ["mindroom", "sandbox-runner", "sandbox-relay"]
 
     if instance.matrix_type == MatrixType.SYNAPSE:
         services.extend(["postgres", "redis", "synapse", "wellknown"])
@@ -504,9 +543,11 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
                 f.write("MATRIX_ALLOW_REGISTRATION=true\n")
                 f.write("MATRIX_ALLOW_FEDERATION=true\n")
             elif matrix_type == MatrixType.SYNAPSE:
-                f.write("POSTGRES_PASSWORD=synapse_password\n")
                 f.write("SYNAPSE_REGISTRATION_ENABLED=true\n")
                 f.write("SYNAPSE_ALLOW_PUBLIC_ROOMS=true\n")
+
+    synapse_secret_names = SYNAPSE_SECRET_NAMES if matrix_type == MatrixType.SYNAPSE else ()
+    _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES + synapse_secret_names)
 
 
 def _ensure_external_network(name: str) -> bool:
@@ -594,6 +635,7 @@ def _print_running_instance_access(
         console.print(f"  [dim]Matrix local:[/dim] http://localhost:{instance.matrix_port}")
     else:
         console.print(f"  [dim]MindRoom local:[/dim] http://localhost:{instance.mindroom_port}")
+        console.print(f"  [dim]Dashboard API key:[/dim] MINDROOM_API_KEY in envs/{instance.name}.env")
         if instance.matrix_type is not None:
             console.print(f"  [dim]Matrix local:[/dim] http://localhost:{instance.matrix_port}")
 
@@ -762,6 +804,9 @@ def _bring_up_instance(
         _require_authelia_account_setup(instance)
 
     env_file = _require_instance_env_file(name)
+    generated_secrets = _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES)
+    if generated_secrets:
+        console.print(f"[yellow]i[/yellow] Added {', '.join(generated_secrets)} to {env_file}")
     _sync_matrix_host_overrides(registry.instances)
     _ensure_instance_env_file_reference(env_file)
 
@@ -1023,6 +1068,7 @@ def _print_instance_info(instance: Instance, matrix_type: MatrixType | None, aut
     console.print(f"  [dim]Data dir:[/dim] {instance.data_dir}")
     console.print(f"  [dim]Domain:[/dim] {instance.domain}")
     console.print(f"  [dim]Env file:[/dim] envs/{instance.name}.env")
+    console.print("  [dim]Dashboard API key:[/dim] MINDROOM_API_KEY in the env file")
     if matrix_type:
         matrix_name = "Tuwunel (lightweight)" if matrix_type == MatrixType.TUWUNEL else "Synapse (full)"
         console.print(f"  [dim]Matrix:[/dim] [green]{matrix_name}[/green]")

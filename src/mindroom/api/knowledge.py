@@ -17,6 +17,7 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_listing import git_checkout_present, include_knowledge_relative_path
 from mindroom.knowledge.file_listing import list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files
 from mindroom.knowledge.file_listing import list_knowledge_files as list_managed_knowledge_files
+from mindroom.knowledge.indexing_config import knowledge_git_dir
 from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_credentials
 from mindroom.knowledge.refresh_locks import is_refresh_active_for_binding
 from mindroom.knowledge.refresh_runner import (
@@ -99,6 +100,7 @@ async def _list_file_info(
     config: Config,
     base_id: str,
     root: Path,
+    runtime_paths: RuntimePaths,
 ) -> _FileListInfo:
     files: list[dict[str, Any]] = []
     total_size = 0
@@ -107,7 +109,7 @@ async def _list_file_info(
     if not resolved_root.is_dir():
         return _FileListInfo(files=files, total_size=total_size)
 
-    managed_paths, error = await _list_managed_file_paths(config, base_id, resolved_root)
+    managed_paths, error = await _list_managed_file_paths(config, base_id, resolved_root, runtime_paths)
     if error is not None:
         return _FileListInfo(files=[], total_size=0, degraded=True, error=error)
     for file_path in sorted(managed_paths):
@@ -131,7 +133,12 @@ async def _list_file_info(
     return _FileListInfo(files=files, total_size=total_size)
 
 
-async def _count_managed_files(config: Config, base_id: str, root: Path) -> _FileCountInfo:
+async def _count_managed_files(
+    config: Config,
+    base_id: str,
+    root: Path,
+    runtime_paths: RuntimePaths,
+) -> _FileCountInfo:
     """Count managed files without stating each one.
 
     The base list and per-base status report only a count. Collecting per-file
@@ -143,13 +150,18 @@ async def _count_managed_files(config: Config, base_id: str, root: Path) -> _Fil
     if not resolved_root.is_dir():
         return _FileCountInfo(count=0)
 
-    managed_paths, error = await _list_managed_file_paths(config, base_id, resolved_root)
+    managed_paths, error = await _list_managed_file_paths(config, base_id, resolved_root, runtime_paths)
     if error is not None:
         return _FileCountInfo(count=0, degraded=True, error=error)
     return _FileCountInfo(count=len(managed_paths))
 
 
-async def _list_managed_file_paths(config: Config, base_id: str, root: Path) -> tuple[set[Path], str | None]:
+async def _list_managed_file_paths(
+    config: Config,
+    base_id: str,
+    root: Path,
+    runtime_paths: RuntimePaths,
+) -> tuple[set[Path], str | None]:
     base_config = config.knowledge_bases[base_id]
     if base_config.git is None:
         return set(await asyncio.to_thread(list_managed_knowledge_files, config, base_id, root)), None
@@ -159,6 +171,7 @@ async def _list_managed_file_paths(config: Config, base_id: str, root: Path) -> 
             config,
             base_id,
             root,
+            knowledge_git_dir(runtime_paths.storage_root, root),
             timeout_seconds=_DASHBOARD_GIT_FILE_LIST_TIMEOUT_SECONDS,
         )
     except (RuntimeError, ValueError) as exc:
@@ -384,7 +397,7 @@ async def _git_status(
     repo_present = await asyncio.to_thread(
         git_checkout_present,
         root,
-        timeout_seconds=_DASHBOARD_GIT_FILE_LIST_TIMEOUT_SECONDS,
+        knowledge_git_dir(runtime_paths.storage_root, root),
     )
     return {
         "repo_url": redact_url_credentials(git_config.repo_url),
@@ -605,7 +618,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
     for base_id in sorted(config.knowledge_bases):
         base_config = config.knowledge_bases[base_id]
         root = _knowledge_root(config, base_id, runtime_paths)
-        file_info = await _count_managed_files(config, base_id, root)
+        file_info = await _count_managed_files(config, base_id, root, runtime_paths)
         index_status = await _index_status(config, base_id, runtime_paths)
         git_status = await _git_status(
             config,
@@ -650,7 +663,7 @@ async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]
     """List all managed files currently present in one knowledge base folder."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
-    file_info = await _list_file_info(config, base_id, root)
+    file_info = await _list_file_info(config, base_id, root, runtime_paths)
 
     return {
         "base_id": base_id,
@@ -761,7 +774,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     root = _knowledge_root(config, base_id, runtime_paths)
     base_config = config.knowledge_bases[base_id]
     index_status = await _index_status(config, base_id, runtime_paths)
-    file_info = await _count_managed_files(config, base_id, root)
+    file_info = await _count_managed_files(config, base_id, root, runtime_paths)
     git_status = await _git_status(
         config,
         base_id,

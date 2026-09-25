@@ -190,8 +190,12 @@ Both modes store agent data in the same per-agent directory structure.
 `workerBackend: static_runner` is the default.
 The primary runtime talks to a shared sidecar over `localhost`.
 This keeps the deployment simple, but all proxied tool calls share the same runner process.
-The runner reads and writes the same agent storage directories as the main process.
-When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value so the primary runtime and static runner sidecar receive the same key.
+The runner reads and writes the same agent storage directories as the main process by mounting only the storage PVC's `agents` and `private_instances` directories over its own `sandbox-runner` directory.
+It cannot see the credential store, Matrix state, or other primary runtime state, and it never receives the credential encryption key.
+The primary leases each proxied tool's saved settings to the runner per call.
+Because the runner shares the pod network, the charts give the primary a generated `MINDROOM_API_KEY` unless Supabase authentication or an explicit opt-out is configured.
+When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value; only the primary runtime receives it.
+See [Kubernetes shared sidecar](https://docs.mindroom.chat/deployment/sandbox-proxy/#kubernetes-shared-sidecar-workerbackend-static_runner) for the exact mounts and remaining limits.
 
 ### Dedicated Worker Mode
 
@@ -208,7 +212,7 @@ The hosted instance worker-manager Role does not grant broad Secret API access i
 > [!WARNING]
 > **Filesystem isolation depends on `worker_scope`.**
 > With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's storage directory — this is the strongest isolation available.
-> With `user`, the worker can see all agents' storage because it shares one runtime across multiple agents for a single user.
+> With `user`, the worker can see the storage of every non-private `worker_scope: user` agent because it shares one runtime across those agents for a single user; it never mounts agents on other scopes.
 > Use `user_agent` for per-agent filesystem isolation.
 
 ### Knowledge Source Visibility

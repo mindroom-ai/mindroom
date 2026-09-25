@@ -38,6 +38,9 @@
 {{- fail "matrix.registrationToken cannot be set when matrix.managedAccountAuth=appservice" -}}
 {{- end -}}
 {{- $configSource := include "mindroom-runtime.configSource" . -}}
+{{- if and (eq .Values.workers.backend "static_runner") (has (include "mindroom-runtime.fileConfigStorageSubpath" .) (list "agents" "private_instances" "sandbox-runner")) -}}
+{{- fail "workers.backend=static_runner requires a file-sourced config.path outside the agents, private_instances, and sandbox-runner directories of storage.mountPath; the sandbox-runner sidecar can write those directories" -}}
+{{- end -}}
 {{- if not (kindIs "string" .Values.config.bootstrapBundleRevision) -}}
 {{- fail "config.bootstrapBundleRevision must be a string" -}}
 {{- end -}}

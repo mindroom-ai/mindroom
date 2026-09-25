@@ -9,7 +9,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -541,6 +541,27 @@ async def test_launch_persists_backend_admitted_after_global_launch_gate(
     assert run.worker_backend_locator == replacement_backend.cleanup_locator
     assert stale_backend.specs == []
     assert len(replacement_backend.specs) == 1
+
+
+@pytest.mark.asyncio
+async def test_local_launch_keeps_workspace_code_out_of_the_shim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shim runs from the workspace, so neither its cwd nor its `HOME` may reach `sys.path`."""
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+    launched_argv: list[list[str]] = []
+
+    async def launch_local(*_args: object, **kwargs: object) -> ShellRunResult:
+        launched_argv.append(list(cast("list[str]", kwargs["argv"])))
+        return ShellRunResult(message="Started background process", handle=str(kwargs["handle"]))
+
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
+
+    await manager.run(_context(tmp_path, mode="local"), source="print('ok')\n")
+
+    assert [argv[:5] for argv in launched_argv] == [[sys.executable, "-P", "-s", "-m", "mindroom.script_runs.shim"]]
 
 
 @pytest.mark.asyncio

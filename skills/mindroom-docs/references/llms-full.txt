@@ -1562,8 +1562,9 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
 | `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling; it does **not** change the API server bind port, which uses `mindroom run --api-port`. | `8765` |
 | `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
+| `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra host names that requests without a credential may address and that their browser `Origin` may name, for an unauthenticated dashboard or `/v1` API; loopback names, IP addresses, and the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_BASE_URL`, `MINDROOM_URL`, and `MINDROOM_SCRIPT_GATEWAY_URL` are always allowed | _(none)_ |
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
-| `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses | _(unset)_ |
+| `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses; without dashboard authentication, origins outside `MINDROOM_DASHBOARD_ALLOWED_HOSTS` are still refused | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
@@ -1583,7 +1584,7 @@ Raising it delays both watchdog cancellation and liveness failure only while dur
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `OPENAI_COMPAT_API_KEYS` | Comma-separated API keys for authenticating `/v1/*` requests | _(none — locked without this or the flag below)_ |
-| `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED` | Set to `true` to allow unauthenticated `/v1/*` access (local dev only) | _(unset — locked)_ |
+| `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED` | Set to `true` to allow unauthenticated `/v1/*` access (local dev only); such requests must address an allowed host (see `MINDROOM_DASHBOARD_ALLOWED_HOSTS`) and must not come from another site's page | _(unset — locked)_ |
 
 See [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/) for the full auth matrix.
 
@@ -2836,8 +2837,12 @@ Isolation depends on the worker backend:
 
 - **Kubernetes dedicated workers** (`shared`, `user_agent`, unscoped): the runtime can only see its own agent's storage directory plus its worker-local scratch space.
   This is the strongest isolation available today.
-- **Kubernetes dedicated workers** (`user`): the runtime can see all agents' storage, because `user` mode intentionally shares one runtime across multiple agents for a single user.
+- **Kubernetes dedicated workers** (`user`): the runtime can see the storage of every non-private agent that resolves to `worker_scope: user`, plus that user's own private-instance namespace, because `user` mode intentionally shares one runtime across that user's agents.
+  It never mounts agents on `shared`, `user_agent`, or unscoped execution, so their sessions, memory, and workspaces stay out of reach.
+  It still mounts every `worker_scope: user` agent, including that agent's sessions from other requesters, even when this requester may not use all of them.
   Treat this as a shared workstation.
+  A `user`-scope tool call whose `base_dir` points at an agent on another scope fails with HTTP 400 (`base_dir must stay inside the allowed state roots or worker root`).
+  Adding, removing, or re-scoping a `worker_scope: user` agent changes every user worker's mounts, so Kubernetes and Docker recreate those workers on their next use.
 - **Shared-runner and local backends**: no hard filesystem boundary today, regardless of scope.
 
 Use `user_agent` if you need per-agent filesystem isolation.
@@ -4895,6 +4900,7 @@ list_files()
 - `safe_globals` and `safe_locals` are exposed directly from the upstream constructor and are mainly useful for advanced programmatic wiring, not typical hand-written YAML.
 - If you need runtime-scoped environment isolation, rely on worker-routed execution instead of assuming in-process Python emulation is a security boundary.
 - Worker-routed `python` execution also receives `.mindroom/worker-env.sh` overlay env via `os.environ` (e.g., `PIP_INDEX_URL`). See "Workspace env hook" in `docs/deployment/sandbox-proxy.md`.
+- Worker-routed `python` code and background scripts can import modules saved in the workspace, but installed and standard-library modules take precedence over same-named workspace files, and user site-packages under the workspace `HOME` are not loaded.
 - Workspace identity, worker cache, and virtualenv env names remain controlled by MindRoom, so hooks cannot redirect `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, or `VIRTUAL_ENV`.
 
 ## [`coding`]
@@ -10753,6 +10759,10 @@ get_pull_request("mindroom-ai/mindroom", 123)
 `todo` exposes `plan()`, `add_todo()`, `list_todos()`, `update_todo()`, `apply_template()`, and `list_templates()`.
 Todo items are scoped to the current Matrix room and resolved thread, so separate threads can carry independent plans.
 Each item can have a priority, dependency list, status, and assigned agent name.
+Assigning work to an agent, or changing work assigned to an agent, is refused unless the requester may address that agent in the current room under its `access` policy.
+Each item records the requester who wrote its title, human or agent, and other changes keep that attribution.
+Items written before requesters were recorded have no attribution until their next change, which records the current requester.
+Reassigning an item without rewriting its title also requires that its recorded requester may address the new agent.
 State is stored under `mindroom_data/todo/` and survives restarts.
 Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
 
@@ -10767,6 +10777,9 @@ A failed send is recorded like any other attempt, so the retry waits out the cha
 Future persisted timestamps beyond the relevant cooldown or backstop window are treated as elapsed so clock skew cannot mute valid work indefinitely.
 Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
 Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
+Work written by a human is poked on that human's behalf, with one poke per human, so the assigned agent applies its normal reply access and tool authorization to that human.
+Work written by an agent, team, router, or the internal user, which access policies never restrict, shares one poke with items written before requesters were recorded, and that poke dispatches as the assigned agent's own internal turn as every poke did before.
+Work from a human the assigned agent may not currently reply to in that room, or from any other requester such as a configured bot account, is not poked, and each such item is logged once.
 
 | Environment variable | Default | Behavior |
 | --- | --- | --- |
@@ -16552,11 +16565,26 @@ MindRoom writes `repo_url` into the checkout's `origin` remote, so a network for
 
 Refused, with an error naming the reason: relative and home-relative paths (`./repo.git`, `../repo.git`, `~/repo.git`, `repo.git`), URLs with an empty authority (`https:///org/repo.git`), URLs whose separator is percent-encoded or written as a lookalike codepoint, and anything embedding a second URL.
 
-**Do not embed credentials in `repo_url`.** A password in a well-formed URL is stripped before the remote is written, so it never reaches `.git/config` — but it is still in your config file, and still handed to Git for every command.
+**Do not embed credentials in `repo_url`.** A password in a well-formed URL is stripped before the remote is written, so it never reaches the repository config — but it is still in your config file, and still handed to Git for every command.
 A password MindRoom cannot strip with confidence is refused outright rather than written: that covers forms where the scheme has been dropped, such as `oauth2:TOKEN@gitlab.com:org/repo.git` or `x-access-token:TOKEN@github.com/org/repo.git`.
 Use `credentials_service` instead: those credentials are passed to Git for the duration of one command and are never written to disk.
 
 If a checkout already holds a credential-bearing remote from before this check existed, the refusal cannot clean it — delete the checkout directory so the next sync clones afresh.
+
+#### Checkout layout
+
+The knowledge folder holds the checked-out files only.
+Its Git directory lives at `<storage>/knowledge_git/<folder>_<path digest>`, outside every state root a worker mounts, and every knowledge Git command names it explicitly, so a `.git` written into the folder is never read, followed, or indexed.
+Git runs programs that repository metadata names (`core.fsmonitor`, hooks, filters, credential helpers), and a Git-backed base may live where agent tools and worker containers can write every file.
+Knowledge Git commands also disable those programs, read no system or global Git configuration, and receive a minimal environment without MindRoom secrets; configure proxies, CA bundles and SSH through environment variables or `~/.ssh/config`, and credentials through `credentials_service`.
+
+Bases that share a folder share one Git directory, keyed by the resolved folder path.
+Changing a base's `path` starts a new repository in the new folder, which must be empty; delete the old directory under `<storage>/knowledge_git/` to reclaim its space.
+Deleting only the knowledge folder restores its files from the Git directory on the next sync; delete both to clone afresh.
+
+A checkout created by an earlier release has its `.git` inside the knowledge folder.
+The first sync after upgrading moves that directory aside and hard-links its objects, refs, index, and LFS files into a Git directory created fresh, with a new config that keeps only the repository format, so nothing is copied, fetched, or re-embedded and nothing else from the old `.git`, such as hooks and `info/`, carries over.
+The sync fails with an error instead when that `.git` is a link or a `gitdir:` file, or when it is on a different filesystem or mount from `<storage>`; follow the error to move it, or delete the folder so the next sync clones afresh.
 
 ### Sync Behavior
 
@@ -16564,7 +16592,7 @@ If a checkout already holds a credential-bearing remote from before this check e
 - Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
 - Explicit dashboard/API reindex or sync runs Git sync first for Git-backed bases.
 - Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
-- MindRoom disables implicit LFS smudge during clone, checkout, and reset for every Git-backed knowledge base.
+- MindRoom disables implicit LFS smudge during checkout and reset for every Git-backed knowledge base.
 - When `lfs: true`, MindRoom explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - When sync realigns the checkout to a different fetched revision, it forcibly checks out and resets tracked files, discarding tracked edits and restoring tracked deletions.
 - If local HEAD already equals the fetched revision, sync skips that reset, so ordinary tracked edits or deletions can remain; LFS hydration is a separate step.
@@ -16668,7 +16696,7 @@ MindRoom reads the key when needed and mints a repository-scoped installation to
 The control-plane runtime caches that token until shortly before GitHub's reported expiry.
 Scheduled refresh children receive the cached token and expiry only through their stdin request pipe, then pass the token only to Git.
 The handoff includes the non-secret App, installation, repository, and key-path identity, and a child ignores the token if its current credentials no longer match.
-MindRoom never copies the token into the checkout config, credential store, refresh-child launch environment, metadata, or logs.
+MindRoom never copies the token into the repository config, credential store, refresh-child launch environment, metadata, or logs.
 
 ## Embedder Configuration
 
@@ -19339,6 +19367,10 @@ Dashboard configuration access follows deployment authentication.
 Standalone deployments check `MINDROOM_API_KEY` when configured; Supabase deployments validate the user's token and enforce the instance account ID when configured.
 Without an API key, standalone dashboard and configuration API access is unauthenticated.
 Set `MINDROOM_API_KEY` before exposing a standalone instance outside a trusted local environment.
+An unauthenticated dashboard only serves its pages and dashboard API to requests addressed to `localhost`, a `*.localhost` name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_BASE_URL`, `MINDROOM_URL`, and `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`, so a DNS-rebinding page cannot reach it through the browser.
+It also refuses browser requests whose `Origin` is not the requested host, a loopback page, or an allowed host name, and refuses changes marked `Sec-Fetch-Site: cross-site`.
+Opening an unauthenticated dashboard by any other host name, such as `myserver.local`, requires adding that name to `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
+Requests authenticated by an API key, a platform session, or trusted upstream auth are not restricted by host or origin, and neither are routes with their own authorization, such as health probes, webhooks, computer sessions, and `/v1` with `OPENAI_COMPAT_API_KEYS`.
 These operator authentication checks are independent of the Matrix `administrators` list.
 
 With trusted upstream auth and no `MINDROOM_CONNECTIONS_AGENT`, every gateway-authenticated user can read and change dashboard configuration, regardless of `administrators`.
@@ -19481,6 +19513,8 @@ OPENAI_COMPAT_ALLOW_UNAUTHENTICATED=true
 ```
 
 Without either of these, the API returns 401 on all requests.
+Unauthenticated access only answers requests addressed to a loopback name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_BASE_URL`, `MINDROOM_URL`, and `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`, and refuses browser requests from other sites.
+A client that reaches an unauthenticated `/v1` by another host name, such as `http://host.docker.internal:8765/v1`, needs that name in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`; with `OPENAI_COMPAT_API_KEYS` set, any host name works.
 
 ### 2. Start MindRoom
 
@@ -20633,7 +20667,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`tool_system/legacy_tool_overrides.py`][tool-legacy-overrides] | [Tool metadata tests][tool-metadata-tests] cover the directed `restrict_to_base_dir` rejection for the `file`, `coding`, and `python` tools. |
 | [`legacy_private_storage.py`][private-legacy] and [`legacy_private_storage_aliases.py`][private-legacy-aliases] | [Private-storage tests][private-storage-tests] cover verified owner relocation, content preservation, historical aliases, and tamper rejection. |
 | [`oauth/legacy_credentials.py`][oauth-legacy-credentials] and [`oauth/credential_store.py`][oauth-store] | [OAuth store tests][oauth-store-tests] cover literal SQLite bindings, publication normalization, the removed JSON reader, reconnect disposition, and inert old files. |
-| [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
+| [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], [`custom_tools/todo_poke.py`][todo-poke], [`custom_tools/todo.py`][todo-tool], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], [todo poke][todo-poke-tests], [todo tool][todo-builtin-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
 | [`legacy_streaming.py`][legacy-streaming] and [`execution_preparation.py`][execution-preparation] | [Partial-reply][partial-reply-tests] and [streaming][streaming-tests] tests cover bounded historical suffixes, exact stripping order, current structured-status precedence, and interruption classification. |
 | [`legacy_revision_replay.py`][legacy-revision-replay] | [Revision replay][legacy-revision-replay-tests], [turn-store][turn-store-tests], and [handled-turn][handled-turn-tests] tests cover reconstruction, monotonic preservation, historical and modern selection, and cold-reopen cleanup. |
 | [`session_storage_preflight.py`][session-preflight] | [Session recovery tests][session-recovery-tests] cover schema-based archive, locks, rollback recovery, unrelated tables, current corruption, and byte preservation without inventing one release cutoff. |
@@ -20699,6 +20733,8 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob scrub and double-JSON decoding; other Agno readers remain dependency-owned. |
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
 | S21 | Isolated | [`legacy_attachments.py`][legacy-attachments] adopts in-place attachment records into verified retained copies; [`attachments.py`][attachments] keeps copying, record publication, and retention cleanup. |
+| S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] pokes a todo item without `requester_id` as the assignee's own internal turn under its unchanged dedup key, and [`custom_tools/todo.py`][todo-tool] records the current requester on the item's next write. |
+| S23 | Isolated | [`knowledge/legacy_git_checkout.py`][knowledge-legacy-git] moves a checkout's in-tree `.git` aside and hard-links only its repository files into a fresh MindRoom-owned Git directory under a new config; [`knowledge/git_source.py`][knowledge-git-source] keeps initialization, sync, and the current layout. |
 
 ## Configuration and credentials
 
@@ -20817,8 +20853,10 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [journal-open]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal_open.py
 [journal-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_schema.py
 [knowledge-collections]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/collections.py
+[knowledge-git-source]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/git_source.py
 [knowledge-index]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/index_metadata.py
 [knowledge-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_metadata.py
+[knowledge-legacy-git]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_git_checkout.py
 [knowledge-settings]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/indexing_config.py
 [kubernetes-worker-backend]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes.py
 [kubernetes-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_kubernetes_worker_backend.py
@@ -20868,7 +20906,9 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [thread-models]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/thread_models.py
 [thread-tags]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/thread_tags.py
 [turn-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/turn_store.py
+[todo-poke]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/custom_tools/todo_poke.py
 [todo-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/custom_tools/todo_state.py
+[todo-tool]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/custom_tools/todo.py
 [tool-metadata]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/metadata.py
 [tool-legacy-overrides]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/legacy_tool_overrides.py
 [trigger-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/store.py
@@ -20910,6 +20950,8 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [sso-cookie-tests]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/tests/test_sso_cookie_attrs.py
 [streaming-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_streaming_behavior.py
 [sync-continuity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_sync_continuity_store.py
+[todo-builtin-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_todo_builtin.py
+[todo-poke-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_todo_poke.py
 [trigger-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_external_trigger_replay_store.py
 [turn-store-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_turn_store.py
 [usage-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_usage_stats_storage.py
@@ -21171,6 +21213,7 @@ Do not report or "fix" these; they are deliberate.
 - `mindroom_output_path`, attachment saves, Google Drive downloads, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
+- A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 
 ## Reviewing security findings
@@ -22978,10 +23021,12 @@ services:
       - ./mindroom_data:/app/mindroom_data
     environment:
       - MINDROOM_WORKER_BACKEND=static_runner
-      - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-runner:8766
+      - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
       - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
+    networks:
+      - mindroom-network
 
   sandbox-runner:
     image: ghcr.io/mindroom-ai/mindroom:latest
@@ -22994,12 +23039,35 @@ services:
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_CONFIG_PATH=/app/config.yaml
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
+    networks:
+      - sandbox-network
+
+  # Forwards only the runner port, so the runner shares no network with MindRoom.
+  sandbox-relay:
+    image: busybox:1.36
+    user: "65534:65534"
+    cap_drop:
+      - ALL
+    sysctls:
+      net.ipv4.ip_forward: 0
+    command: ["tcpsvd", "-c", "256", "-C", "128", "0.0.0.0", "8766", "nc", "sandbox-runner", "8766"]
+    networks:
+      - mindroom-network
+      - sandbox-network
 
 volumes:
   sandbox-workspace:
+
+networks:
+  mindroom-network:
+  sandbox-network:
 ```
 
 Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
+Do not attach the runner to a network shared with MindRoom, its homeserver, or databases, because tool code could then call the MindRoom API or read those services directly.
+Cap connections per address in the relay (`-C`), because tool code can connect to the relay too and could otherwise use up every slot MindRoom needs.
+Disabling IP forwarding in the relay is defense in depth: a non-root runner cannot send raw packets, but a runner started as root could route them through the relay into the MindRoom network.
+Set `MINDROOM_API_KEY` as well, because the runner keeps outbound access and can still reach MindRoom through ports published on the host or its public URL.
 
 > [!IMPORTANT]
 > The `sandbox-workspace` Docker volume is created as root by default.
@@ -23011,6 +23079,7 @@ Do not mount the full `mindroom_data` tree into the runner because it contains c
 
 Key differences from the primary MindRoom runtime:
 - **No `env_file`** — runner has no API keys, no Matrix credentials
+- **Separate network** — only the relay reaches the runner, and the runner shares no Docker network with MindRoom or its datastores
 - **Scratch workspace** — a dedicated volume for worker-local files (caches, virtualenvs)
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the scratch workspace for tool registry and cache files
 
@@ -23029,15 +23098,29 @@ This is the `workerBackend: static_runner` Helm mode.
 See `cluster/k8s/instance/templates/deployment-mindroom.yaml` for the full manifest.
 The sidecar gets:
 
-- An `emptyDir` volume for worker-local scratch files and caches.
-- Access to the same shared storage that holds agent data directories.
+- Its own storage root at the primary's storage path, backed by the storage PVC's `sandbox-runner` directory, for worker-local files, virtualenvs, and caches.
+- The storage PVC's `agents` and `private_instances` directories mounted read-write at their usual paths, so agent workspaces persist and stay shared with the primary runtime.
 - Read-only access to config for plugin tool registration.
-- The configured credentials-encryption key so it can consume encrypted credential leases.
+  With the runtime chart's `config.source: file`, this is the read-only storage subtree holding the config file, the same subtree dedicated Kubernetes workers mount.
+- The sandbox proxy token that authenticates requests from the primary runtime.
+
+The sidecar does not mount the rest of the storage PVC, so tool code cannot read the credential store, Matrix encryption keys and access tokens, or other primary state, and cannot modify the config the primary loads.
+It never receives the credentials-encryption key.
+The primary leases each proxied tool's saved settings to the sidecar per call, as described in [Credential leases](#credential-leases).
+A `prepare-sandbox-runner-storage` init container creates the three storage directories as the runtime user before the containers start.
+The runtime chart rejects a file-sourced config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
+A file-sourced config directly in the storage root is mounted as a single read-only file, so it must exist before the pod starts; otherwise kubelet creates a directory in its place.
+
+Upgrading an existing release keeps agent data in place because the sidecar mounts the same PVC directories.
+Files that earlier sidecar versions wrote elsewhere on the PVC, such as worker virtualenvs under `workers/` and caches in the storage root used as `HOME`, remain on disk but are no longer visible to the sidecar, which recreates worker virtualenvs on first use.
 
 > [!WARNING]
-> The Kubernetes `static_runner` sidecar is not a secrets or filesystem isolation boundary.
-> It can read the full shared storage mount, including persisted credential data, and tools running in the sidecar may access its environment.
-> Use dedicated Kubernetes workers when agent-scoped filesystem and credential isolation are required.
+> The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
+> All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, learning data, and memory.
+> The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication with `requireJwt`.
+> Without Supabase authentication, both charts give the primary a generated `MINDROOM_API_KEY` so tool code cannot use the API over `localhost`.
+> Header-only trusted-upstream authentication is still forgeable from the sidecar.
+> Use dedicated Kubernetes workers when per-agent filesystem and credential isolation are required.
 
 ### Kubernetes dedicated workers (`workerBackend: kubernetes`)
 
@@ -23462,6 +23545,8 @@ If you don't want a value to reach tools, don't export it.
 - Hook failures do not poison the worker; only the requesting tool call fails.
 
 This hook works identically for static sidecar, dedicated Docker, and dedicated Kubernetes worker backends because it runs inside the sandbox runner per request.
+The runner starts its own Python processes (tool children, the forkserver template, background-script shims, supervised process wrappers, and package installs) with `python -P -s`.
+That keeps the workspace working directory off `sys.path` and skips user site-packages under a workspace `HOME`, so a workspace file named like a MindRoom or installed module cannot replace it inside those processes.
 It is not a true container startup hook — it does not change pod templates, recreate Deployments, or alter Helm values.
 For an example, see `docs/tools/execution-and-coding.md`.
 
@@ -23472,6 +23557,9 @@ A **credential lease** supplies short-lived credential values as constructor con
 Selected services follow the call's scoped credential policy and, where applicable, the worker-grantable shared-service allowlist.
 Only fields declared by the receiving toolkit are applied as constructor configuration; unrelated credential fields are ignored.
 The lease holds its values in memory until consumed or expired, and the proxy requests one use with the configured TTL.
+With the `static_runner` backend, the primary also leases the called tool's own saved settings on every call because a containerized shared runner has no access to the credential store.
+Services selected by the policy override those values.
+Dedicated Docker and Kubernetes workers keep reading tool settings from their own worker credential stores.
 
 Leases do not export API keys into shell environments, configure Git authentication, or install SSH keys.
 For shell authentication, explicitly configure [environment passthrough](#shell-env-and-path) or the [workspace env hook](#workspace-env-hook-mindroomworker-envsh) as needed.
@@ -23490,8 +23578,8 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
   This explicit worker-pool policy applies even when Computer is disabled, regardless of which tools an agent selects.
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
   With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their prior launch settings and compatible identities.
-- With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
-- With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
+- With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
+- With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode mounts the directories of every non-private `worker_scope: user` agent plus the user's own private-instance namespace, since it shares one runtime across those agents, and never mounts agents on other scopes.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
 ### Sandbox-runner API endpoints
@@ -24006,8 +24094,12 @@ Both modes store agent data in the same per-agent directory structure.
 `workerBackend: static_runner` is the default.
 The primary runtime talks to a shared sidecar over `localhost`.
 This keeps the deployment simple, but all proxied tool calls share the same runner process.
-The runner reads and writes the same agent storage directories as the main process.
-When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value so the primary runtime and static runner sidecar receive the same key.
+The runner reads and writes the same agent storage directories as the main process by mounting only the storage PVC's `agents` and `private_instances` directories over its own `sandbox-runner` directory.
+It cannot see the credential store, Matrix state, or other primary runtime state, and it never receives the credential encryption key.
+The primary leases each proxied tool's saved settings to the runner per call.
+Because the runner shares the pod network, the charts give the primary a generated `MINDROOM_API_KEY` unless Supabase authentication or an explicit opt-out is configured.
+When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value; only the primary runtime receives it.
+See [Kubernetes shared sidecar](https://docs.mindroom.chat/deployment/sandbox-proxy/#kubernetes-shared-sidecar-workerbackend-static_runner) for the exact mounts and remaining limits.
 
 ### Dedicated Worker Mode
 
@@ -24024,7 +24116,7 @@ The hosted instance worker-manager Role does not grant broad Secret API access i
 > [!WARNING]
 > **Filesystem isolation depends on `worker_scope`.**
 > With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's storage directory — this is the strongest isolation available.
-> With `user`, the worker can see all agents' storage because it shares one runtime across multiple agents for a single user.
+> With `user`, the worker can see the storage of every non-private `worker_scope: user` agent because it shares one runtime across those agents for a single user; it never mounts agents on other scopes.
 > Use `user_agent` for per-agent filesystem isolation.
 
 ### Knowledge Source Visibility
