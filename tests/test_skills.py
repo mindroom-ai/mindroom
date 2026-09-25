@@ -580,6 +580,28 @@ def test_workspace_loader_skips_links_and_special_files(tmp_path: Path) -> None:
     assert (skill.scripts, skill.references) == (["check.sh"], [])
 
 
+def test_a_linked_workspace_skills_root_is_never_followed(tmp_path: Path) -> None:
+    """Worker code can replace the skills directory with a link to another workspace; the primary never follows it."""
+    storage = tmp_path / "storage"
+    other_skills = _write_skill(
+        tmp_path / "other" / "skills",
+        "private-notes",
+        "Another requester's notes",
+    ).parent.parent
+    workspace_root = agent_workspace_root_path(storage, "code")
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "skills").symlink_to(other_skills, target_is_directory=True)
+    skills = build_agent_skills(
+        "code",
+        _base_config([]),
+        _runtime_paths(storage),
+        skill_roots=[tmp_path / "global"],
+        env_vars={},
+        credential_keys=set(),
+    )
+    assert skills is None
+
+
 def test_workspace_support_reads_refuse_swapped_links(tmp_path: Path) -> None:
     """A reference replaced by a link after loading is refused instead of read through the link."""
     storage = tmp_path / "storage"

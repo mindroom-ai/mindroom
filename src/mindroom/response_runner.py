@@ -2102,22 +2102,6 @@ class ResponseRunner:
             ),
         )
 
-    def _start_skill_review(
-        self,
-        *,
-        agent_name: str,
-        session_id: str,
-        execution_identity: ToolExecutionIdentity | None,
-    ) -> Callable[[bool], Coroutine[Any, Any, None]] | None:
-        """Register a starting response's conversation and return the handoff that marks it completed."""
-        return self._register_skill_review(
-            self._skill_review(
-                agent_name=agent_name,
-                session_id=session_id,
-                execution_identity=execution_identity,
-            ),
-        )
-
     def _register_skill_review(
         self,
         queue: Callable[[bool], Coroutine[Any, Any, None]] | None,
@@ -2126,8 +2110,8 @@ class ResponseRunner:
 
         A response that pauses for approval never reaches post-response effects, so registration happens when it
         starts and again whenever an approval continues it, keeping the conversation fresh across chained
-        approvals. It runs in the background so it never delays or fails the reply; the completion call carries
-        the same start time.
+        approvals. It runs in the background so it never delays or fails the reply. A first response later calls
+        the returned handoff on completion, with the same start time.
         """
         if queue is not None:
             create_background_task(queue(False), name="skill_learning_register", owner=self.deps.runtime)
@@ -5560,10 +5544,12 @@ class ResponseRunner:
         queue_skill_review = (
             None
             if is_automation_source_kind(request.response_envelope.source_kind)
-            else self._start_skill_review(
-                agent_name=self.deps.agent_name,
-                session_id=session_id,
-                execution_identity=execution_identity,
+            else self._register_skill_review(
+                self._skill_review(
+                    agent_name=self.deps.agent_name,
+                    session_id=session_id,
+                    execution_identity=execution_identity,
+                ),
             )
         )
 

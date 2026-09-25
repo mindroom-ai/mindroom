@@ -210,7 +210,8 @@ def _entry_is_current(config: Config, entry: QueueEntry, now: float, stale_secon
         return False
     try:
         return _scope_worker_key(config, entry.agent, entry.execution_identity()) == entry.worker_key
-    except ValueError:
+    except (TypeError, ValueError):
+        # A malformed or no longer resolvable scope retires only its own entry.
         return False
 
 

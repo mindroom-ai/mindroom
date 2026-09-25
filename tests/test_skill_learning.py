@@ -1381,6 +1381,19 @@ async def test_write_running_at_timeout_lands_before_settlement_and_is_announced
     assert send.await_args.args[2]["body"] == "💾 Skill review: created `deploy-checks`"
 
 
+def test_a_malformed_scope_retires_only_its_own_conversation(tmp_path: Path) -> None:
+    """One hand-edited entry must not stop startup, config reloads, or learning in every other conversation."""
+    config, paths = _learner(tmp_path)
+    _queue(config, paths, identity=ALICE)
+    _queue(config, paths, "other", identity=ALICE)
+    state_path = paths.storage_root / "skill_learning_state.json"
+    state = json.loads(state_path.read_text())
+    state["entries"]["mind:other"]["identity"] = {"channel": "matrix"}
+    state_path.write_text(json.dumps(state))
+    assert [key for key, _entry in queue.claim_due_reviews(config, paths, now=1.0)] == ["mind:session"]
+    assert set(_entries(paths)) == {"mind:session"}
+
+
 def test_pruning_keeps_an_entry_that_received_a_run_meanwhile(tmp_path: Path) -> None:
     """An entry judged stale is kept when a run arrives between the snapshot and the removal."""
     config, paths = _learner(tmp_path)

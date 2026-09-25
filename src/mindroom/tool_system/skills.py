@@ -83,7 +83,10 @@ class _MindroomSkillsLoader(SkillLoader):
         allowlist_set = set(self.allowlist or [])
 
         skills_by_name: dict[str, Skill] = {}
-        for root in _unique_paths(self.roots):
+        # Resolving a workspace root would follow a link that worker code put in place of it; its no-follow reads
+        # refuse one instead.
+        roots = self.roots if self.workspace else _unique_paths(self.roots)
+        for root in roots:
             for skill in load_workspace_skills(root) if self.workspace else _load_root_skills(root):
                 normalized = _normalize_skill(skill)
                 if normalized is None:
