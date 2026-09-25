@@ -1484,14 +1484,15 @@ def test_clipping_keeps_secrets_split_by_the_cut_redacted() -> None:
     def render(content: str) -> str:
         return render_transcript([Message(role="tool", content=content, tool_name="shell")], budget_chars=80_000)
 
-    probe = render("x" * 100_000)
+    filler = "\n".join(["x" * 99] * 1_000)
+    probe = render(filler)
     head_len = probe.index("\n[... ") - len(heading)
     tail_len = len(probe) - probe.index(" ...]\n") - len(" ...]\n")
     secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
     for prefix in ("GITHUB_TOKEN=", "Authorization: Bearer ", ""):
         for offset in range(-45, 45, 3):
-            near_head = "x" * max(0, head_len + offset - len(prefix) - 1) + " " + prefix + secret + " " + "z" * 100_000
-            near_tail = "z" * 100_000 + " " + prefix + secret + " " + "x" * max(0, tail_len - offset)
+            near_head = "x" * max(0, head_len + offset - len(prefix) - 1) + " " + prefix + secret + "\n" + filler
+            near_tail = filler + "\n" + prefix + secret + " " + "x" * max(0, tail_len - offset)
             for content in (near_head, near_tail):
                 assert secret[6:24] not in render(content), (prefix, offset)
 
@@ -1552,3 +1553,56 @@ async def test_a_stop_during_archival_or_bookkeeping_still_records_the_learners_
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=10)
     assert _entries(paths)["mind:other"]["seen_fingerprint"] == library.skills_fingerprint(root)
     assert not (root / "old-habit").exists()
+
+
+def test_evidence_is_redacted_whole_before_any_cut() -> None:
+    """Secrets longer than any margin, secrets whose prefix sits on the previous line, and digest cuts stay hidden."""
+    jwt = "eyJ" + "a" * 980
+    long_secret = "z" * 50_000 + "\nAuthorization: Bearer " + jwt + "\n" + "x" * 50_000
+    clipped = render_transcript([Message(role="tool", content=long_secret, tool_name="shell")], budget_chars=80_000)
+    assert "a" * 40 not in clipped
+
+    token = "Zq8vN3pL7wX2kR9mT4yB6cD1fG5hJ0aa"  # noqa: S105 - synthetic, recognizable only through its prefix
+    for slack in range(0, 45, 4):
+        # The prefix line ends one 60,000-character redaction chunk and the token starts the next.
+        pad = "y" * (60_000 - len("Authorization: Bearer") - 1 - slack)
+        text = f"{pad}\nAuthorization: Bearer\n{token}\ndone"
+        rendered = render_transcript([Message(role="tool", content=text, tool_name="shell")], budget_chars=10_000_000)
+        assert token not in rendered, slack
+
+    older = [Message(role="user", content="x " * 139 + "postgresql://app:S3cr3tPassw0rd@db:5432/app and more")]
+    recent = [Message(role="user", content="recent")] * 24
+    assert "S3cr3" not in render_transcript([*older, *recent], budget_chars=100_000)
+
+    unredactable = render_transcript(
+        [Message(role="tool", content="k" * 70_000, tool_name="shell")],
+        budget_chars=80_000,
+    )
+    assert "kkkk" not in unredactable
+
+
+@pytest.mark.asyncio
+async def test_a_skills_root_that_cannot_be_fingerprinted_still_settles_the_review(tmp_path: Path) -> None:
+    """Worker code can replace the skills root after a review wrote, and the review must still settle as done."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
+    real_fingerprint = worker_module.skills_fingerprint
+    calls = 0
+
+    def fingerprint(root: Path) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            msg = "skills root was replaced"
+            raise OSError(msg)
+        return real_fingerprint(root)
+
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch.object(worker_module, "skills_fingerprint", fingerprint),
+    ):
+        _queue(config, paths)
+        await _cycle(config, paths)
+    (entry,) = _entries(paths).values()
+    assert (entry["failures"], entry["has_new_runs"], _marker_index(entry)) == (0, False, 0)

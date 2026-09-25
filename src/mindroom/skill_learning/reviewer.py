@@ -85,9 +85,15 @@ class ReviewProgress:
     changes: dict[str, str] = field(default_factory=dict)
     writes: set[asyncio.Future[Any]] = field(default_factory=set)
 
-    def track[T](self, operation: Awaitable[T]) -> Awaitable[T]:
+    def track[T](
+        self,
+        operation: Awaitable[T],
+        on_done: Callable[[asyncio.Future[T]], None] | None = None,
+    ) -> Awaitable[T]:
         """Run file work that a cancelled review must not abandon halfway."""
         future = asyncio.ensure_future(operation)
+        if on_done is not None:
+            future.add_done_callback(on_done)
         self.writes.add(future)
         return asyncio.shield(future)
 
@@ -256,15 +262,12 @@ class _ReviewTools:
 
         The change is recorded when the write lands, so a notice after a timeout still names it.
         """
-        future = asyncio.ensure_future(asyncio.to_thread(operation))
 
         def record(done: asyncio.Future[None]) -> None:
             if not done.cancelled() and done.exception() is None:
                 self.progress.changes.setdefault(name, action)
 
-        future.add_done_callback(record)
-        self.progress.writes.add(future)
-        await asyncio.shield(future)
+        await self.progress.track(asyncio.to_thread(operation), on_done=record)
 
     async def _create(self, name: str, content: str) -> None:
         await self._in_thread(

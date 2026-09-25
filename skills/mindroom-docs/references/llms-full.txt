@@ -14237,7 +14237,7 @@ All fields, defaults, and bounds are listed in the [agent configuration referenc
 After each successful standalone-agent response to a person in Matrix, including an approved continuation, the background worker counts the model replies stored in that conversation since its last review, counting each tool-calling step and the final answer.
 A review runs once that count reaches `review_interval`, and counting then starts after the newest run the review saw.
 The count is read from the stored runs rather than kept as a separate tally, so it cannot drift from the conversation, and runs that compaction or redaction deletes do not hide later runs.
-Every finished response to a person, including one that failed or paused for approval, fixes where a new conversation's counting starts, so an approved continuation counts even when its request opened the conversation.
+Each response to a person registers its conversation when it starts, so an approved continuation counts even when its request opened the conversation.
 An approved continuation that finishes after a later turn of the same thread was already reviewed is not counted, although its messages still appear in later reviews.
 Counting starts with the first response after learning is enabled, including every attempt of that response, and the queued conversations of an agent that stops learning are forgotten, so the time learning was off is never reviewed.
 Automated responses from schedules, hooks, and external triggers never start a count, just as Hermes skips reviews for cron jobs, so a thread with only automated runs is never reviewed; in a thread people also use, automated replies are part of the conversation that is counted and reviewed.
@@ -14254,8 +14254,8 @@ Shutdown interrupts a running review, which runs again after the next start unle
 ### What a review can do
 
 The reviewer is a separate model run that can only call `skills_list`, `skill_view`, and `skill_manage`.
-It receives the persisted conversation as evidence it must not obey: the newest 24 messages verbatim, including tool calls and results, and each older message shortened to one line, with credential-like values redacted.
-Older tool results are left out, and a very long message keeps its start and end, with private keys removed from the whole message and secrets redacted across each cut.
+It receives the persisted conversation as evidence it must not obey: the newest 24 messages verbatim, including tool calls and results, and each older message shortened to a digest line, with credential-like values redacted.
+Older tool results are left out, and a very long message keeps its start and end; every message is redacted whole before it is shortened, and a single line too long to redact is replaced.
 Hermes replays the full conversation when the review uses the agent's own model and shortens older turns only for a different model, to limit the cost of a review without a warm prompt cache; MindRoom reviews later from stored history, so every review is such a review and always shortens older turns.
 Runs that model history hides, such as errored, cancelled, or paused runs, are left out.
 When compaction has replaced older turns with a summary, the review evidence starts with that summary, as a Hermes review sees the compressed conversation.

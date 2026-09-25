@@ -123,11 +123,11 @@ def queue_skill_review(
     started_at: int,
     completed: bool,
 ) -> None:
-    """Record a person's finished response, which began at ``started_at``, without storing content.
+    """Record a person's response, which began at ``started_at``, without storing content.
 
-    The conversation's first finished response fixes where counting starts, even when it failed or paused for
-    approval, so the approved continuation of a paused run still counts. Only a completed response makes the
-    conversation due.
+    The response runner registers each response as it starts, so the first one fixes where counting starts even
+    when it later fails or pauses for approval, and the approved continuation of a paused run still counts. Only a
+    completed response makes the conversation due.
     """
     agent = config.agents.get(agent_name)
     if agent is None or not agent.skill_learning.enabled:
