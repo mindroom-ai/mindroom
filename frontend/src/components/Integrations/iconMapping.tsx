@@ -58,6 +58,7 @@ import {
   SiSpotify,
   SiYoutube,
   SiShopify,
+  SiAtlassian,
   SiClickup,
   SiGooglecalendar,
   SiGoogledocs,
@@ -78,6 +79,7 @@ import { TbBrain } from "react-icons/tb";
 import { WiDaySunny } from "react-icons/wi";
 import { AwsRedshift } from "./awsIcons";
 import {
+  PanelsTopLeft,
   MessageSquare,
   LayoutList,
   Mic,
@@ -174,6 +176,7 @@ export const iconMap: Record<
   SiSpotify,
   SiYoutube,
   SiShopify,
+  SiAtlassian,
   SiClickup,
   SiGooglecalendar,
   SiGoogledocs,
@@ -192,6 +195,7 @@ export const iconMap: Record<
   TbBrain,
   WiDaySunny,
   AwsRedshift,
+  PanelsTopLeft,
   MessageSquare,
   LayoutList,
   Mic,

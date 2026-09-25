@@ -38,6 +38,22 @@ def _config_with_runtime_paths(tmp_path, **config_data: object) -> Config:  # no
     )
 
 
+def _router_created_space_state(config: Config) -> nio.RoomGetStateResponse:
+    alias = f"#{managed_space_alias_localpart(runtime_paths_for(config))}:localhost"
+    return nio.RoomGetStateResponse(
+        [
+            {"type": "m.room.create", "state_key": "", "sender": "@router:localhost", "content": {}},
+            {
+                "type": "m.room.canonical_alias",
+                "state_key": "",
+                "sender": "@router:localhost",
+                "content": {"alias": alias},
+            },
+        ],
+        "!space:localhost",
+    )
+
+
 def test_matrix_space_defaults() -> None:
     """Matrix Space config should default to enabled with the standard name."""
     config = Config()
@@ -452,7 +468,6 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_
     """Existing root Spaces should be resolved by alias and reused."""
     client = AsyncMock()
     client.homeserver = "http://localhost:8008"
-    client.room_get_state.return_value = nio.RoomGetStateResponse([], "!space:localhost")
     client.rooms = {}
     client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
         room_alias="#_mindroom_root_space:localhost",
@@ -465,6 +480,8 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True, "name": "Workspace"},
     )
+    client.user_id = "@router:localhost"
+    client.room_get_state.return_value = _router_created_space_state(config)
 
     with (
         patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
@@ -511,7 +528,6 @@ async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join(tm
     """A private existing root Space should not be reused if the router cannot join it."""
     client = AsyncMock()
     client.homeserver = "http://localhost:8008"
-    client.room_get_state.return_value = nio.RoomGetStateResponse([], "!space:localhost")
     client.rooms = {}
     client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
         room_alias="#_mindroom_root_space:localhost",
@@ -524,6 +540,8 @@ async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join(tm
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True, "name": "Workspace"},
     )
+    client.user_id = "@router:localhost"
+    client.room_get_state.return_value = _router_created_space_state(config)
 
     with (
         patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
