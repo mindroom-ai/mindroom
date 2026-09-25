@@ -36,7 +36,7 @@ from mindroom.provider_tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.skill_learning import library, queue
 from mindroom.skill_learning import worker as worker_module
-from mindroom.skill_learning.reviewer import ReviewProgress, review_conversation
+from mindroom.skill_learning.reviewer import ReviewProgress, _skill_catalog, review_conversation
 from mindroom.skill_learning.transcript import count_model_replies, render_transcript
 from mindroom.skill_learning.worker import SkillLearningWorker
 from mindroom.synthetic_model import SyntheticModel
@@ -1376,6 +1376,20 @@ def test_pinned_skills_are_left_alone_by_learner_and_curator(tmp_path: Path, des
     with pytest.raises(library.SkillEditError, match="not learner-owned"):
         library.write_skill_file(root, "deploy-checks", "references/x.md", "x", expected_digest=None)
     assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []
+
+
+def test_the_reviewer_catalog_uses_the_strict_ownership_check(tmp_path: Path) -> None:
+    """A pinned skill with loose frontmatter is offered as read-only, matching what edits would decide."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    loose = LEARNED.replace("learned: true", "pinned: true").replace(
+        "Use when deploying the web service",
+        "Use when: deploying",
+    )
+    (root / "deploy-checks/SKILL.md").write_text(loose)
+    catalog, _reserved = _skill_catalog(config, paths, "mind", root)
+    assert not catalog["deploy-checks"].learned
 
 
 def test_edits_refuse_frontmatter_that_is_not_strict_yaml(tmp_path: Path) -> None:

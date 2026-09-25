@@ -9926,36 +9926,6 @@ async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_a_response_that_pauses_for_approval_counts_the_runs_it_finished(tmp_path: Path) -> None:
-    """A paused response never reaches post-response effects, so its runs count when it pauses; the paused one adds 0."""
-    bot = _bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
-    counted: list[tuple[str, ...]] = []
-
-    async def pause_after_a_reload(*_args: object, attempt_run_id_collector: list[str], **_kwargs: object) -> Any:  # noqa: ANN401
-        attempt_run_id_collector.extend(["loaded-run", "paused-run"])
-        return _ResponseGenerationOutcome(
-            delivery=FinalDeliveryOutcome(terminal_status="suspended", event_id="$waiting", is_visible_response=True),
-            run_succeeded=False,
-        )
-
-    with (
-        patch.object(coordinator, "_process_and_respond", new=pause_after_a_reload),
-        patch(
-            "mindroom.response_runner.queue_skill_review",
-            side_effect=lambda *_args, **kwargs: counted.append(tuple(kwargs["run_ids"])),
-        ),
-        patch_response_runner_module(
-            typing_indicator=_noop_typing,
-            should_use_streaming=AsyncMock(return_value=False),
-        ),
-    ):
-        await coordinator.generate_response(_plain_request(_target()))
-    assert counted == [("loaded-run", "paused-run")]
-
-
-@pytest.mark.asyncio
 async def test_a_failing_skill_review_count_never_fails_the_reply(tmp_path: Path) -> None:
     """Skill learning is background bookkeeping, so a broken queue file must not cost the user their answer."""
     bot = _bot(tmp_path)

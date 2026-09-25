@@ -75,7 +75,7 @@ def content_digest(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
 
 
-def learner_owns(frontmatter: dict[str, object], usage: SkillUsage, *, path: str) -> bool:
+def _learner_owns(frontmatter: dict[str, object], usage: SkillUsage, *, path: str) -> bool:
     """Return whether the learner created or was handed this skill and nobody pinned it."""
     mindroom = (parse_skill_metadata(frontmatter.get("metadata"), path=path) or {}).get("mindroom")
     flags = mindroom if isinstance(mindroom, dict) else {}
@@ -121,7 +121,7 @@ def _validate_markdown(name: str, content: str, *, new: bool) -> None:
     if not body:
         msg = "SKILL.md must contain instructions after the frontmatter."
         raise SkillEditError(msg)
-    if new and not learner_owns(frontmatter, SkillUsage(), path=name):
+    if new and not _learner_owns(frontmatter, SkillUsage(), path=name):
         msg = "A new learned skill needs `metadata: {mindroom: {learned: true}}` in its frontmatter."
         raise SkillEditError(msg)
 
@@ -184,7 +184,7 @@ def _read_skill_file(skill_fd: int, name: str, relative_path: str, usage: SkillU
     return SkillFile(
         content=content,
         digest=content_digest(content),
-        learned=learner_owns(frontmatter, usage, path=name),
+        learned=_learner_owns(frontmatter, usage, path=name),
         name=skill_name if isinstance(skill_name, str) else name,
     )
 

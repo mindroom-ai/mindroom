@@ -166,8 +166,8 @@ async def test_final_approval_links_the_delivered_attempt(
 
 
 @pytest.mark.asyncio
-async def test_a_completed_approved_continuation_counts_every_run_it_continued(tmp_path: Path) -> None:
-    """The continuation completes the paused run and any run a tool reload started, and counts each once."""
+async def test_a_completed_approved_continuation_counts_its_runs_once(tmp_path: Path) -> None:
+    """The continuation counts the paused run it completes and the final run it may have moved into."""
     runner = await _runner_with_source(tmp_path)
     runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
     await _seed_ready_continuation(runner)
@@ -187,24 +187,13 @@ async def test_a_completed_approved_continuation_counts_every_run_it_continued(t
         metadata_content={AI_RUN_METADATA_KEY: {"run_id": "continued-run", "status": "completed"}},
     )
 
-    async def continue_with_reloads(
-        continuation: ApprovalContinuation,
-        *,
-        run_id_collector: list[str] | None = None,
-        **_kwargs: object,
-    ) -> CompletedApprovalRun:
-        assert run_id_collector is not None
-        for run_id in ("reloaded-run", "continued-run"):
-            runner._note_continued_run_id(continuation, run_id_collector, run_id)
-        return completed
-
     with (
         patch("mindroom.response_runner.queue_skill_review", side_effect=record),
-        patch.object(runner, "_continue_entity_call", new=continue_with_reloads),
+        patch.object(runner, "_continue_entity_call", new=AsyncMock(return_value=completed)),
     ):
         await runner._run_claimed_approval_lifecycle(claimed, target=target)
         assert await wait_for_background_tasks(5, owner=runner.deps.runtime)
-    assert counted == [("run-1", "reloaded-run", "continued-run")]
+    assert counted == [("run-1", "continued-run")]
 
 
 async def _drain_tasks(*tasks: asyncio.Task[object] | None) -> None:
@@ -264,10 +253,9 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(
         tool_trace_collector: list[ToolTraceEntry],
         progress: ProgressPublisher | None,
         cli_approval_handler: object = None,
-        run_id_collector: list[str] | None = None,
     ) -> CompletedApprovalRun | PausedAttempt:
         assert cli_approval_handler is None
-        del request, tool_trace_collector, progress, run_id_collector
+        del request, tool_trace_collector, progress
         generations.append(continuation.generation)
         assert continuation.continuation_count == 2
         if checkpoint == "chained" and len(generations) == 1:
@@ -351,10 +339,9 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
         tool_trace_collector: list[ToolTraceEntry],
         progress: ProgressPublisher | None,
         cli_approval_handler: object = None,
-        run_id_collector: list[str] | None = None,
     ) -> PausedAttempt:
         assert cli_approval_handler is None
-        del continuation, request, target, tool_trace_collector, progress, run_id_collector
+        del continuation, request, target, tool_trace_collector, progress
         order.append("first batch")
         batch_started.set()
         await release_batch.wait()
