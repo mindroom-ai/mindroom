@@ -41,6 +41,11 @@ def test_parse_native_request_accepts_app_selection_update() -> None:
     assert request.action == "set_allowed_apps"
 
 
+@pytest.mark.parametrize("action", ["set_local_access", "decide_shell", "grant_shell", "revoke_shell"])
+def test_parse_native_request_accepts_local_access_actions(action: str) -> None:
+    assert parse_native_request(_request(action=action)).action == action
+
+
 @pytest.mark.parametrize(
     ("line", "code"),
     [

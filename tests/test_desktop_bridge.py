@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
@@ -30,6 +31,7 @@ from mindroom.desktop.bridge import (
     _run_macos_application_events,
 )
 from mindroom.desktop.command_journal import DesktopCommandJournalError
+from mindroom.desktop.filesystem import DesktopFilesystem
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.playwright_mcp import (
     BrowserImage,
@@ -44,10 +46,8 @@ from mindroom.desktop.protocol import (
     EncryptedDesktopMedia,
 )
 from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProviderError, ScreenCapture
+from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellRequest
 from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 NOW_SECONDS = 10.0
 APP_ID = "com.example.Editor"
@@ -321,6 +321,526 @@ async def _handle(bridge: DesktopBridge, event: AuthenticatedToDeviceEvent) -> N
     await bridge.on_to_device_event(event)
     await bridge.execute_pending()
     await bridge.deliver_pending()
+
+
+ALICE = "@alice:example.org"
+BOB = "@bob:example.org"
+PRIVATE_COMMAND = "printf private-shell-text >> marker"
+
+
+@pytest.fixture
+def selected_root(tmp_path: Path) -> Path:
+    """Create one selected folder with a text file, a subfolder, and a link that escapes it."""
+    root = tmp_path / "selected"
+    (root / "docs").mkdir(parents=True)
+    (root / "note.txt").write_text("private text", encoding="utf-8")
+    (root / "docs" / "readme.md").write_text("# Notes\n", encoding="utf-8")
+    (tmp_path / "outside.txt").write_text("outside secret", encoding="utf-8")
+    (root / "link").symlink_to(tmp_path / "outside.txt")
+    return root.resolve()
+
+
+def _local_bridge(
+    *,
+    filesystem: DesktopFilesystem | None = None,
+    shell: DesktopShell | None = None,
+    journal_path: Path | None = None,
+) -> DesktopBridge:
+    """Build a bridge with only folder and shell capabilities and no GUI provider."""
+    roots = tuple(Path(str(folder["path"])) for folder in filesystem.list_folders()["folders"]) if filesystem else ()
+    policy = replace(
+        _policy(),
+        allowed_requester_ids=frozenset({ALICE, BOB}),
+        allowed_app_ids=frozenset(),
+        allowed_file_roots=roots,
+        shell_enabled=shell is not None,
+    )
+    return DesktopBridge(
+        client=object(),
+        provider=None,
+        policy=policy,
+        filesystem=filesystem,
+        shell=shell,
+        clock=lambda: NOW_SECONDS,
+        journal_path=journal_path,
+    )
+
+
+def _local_shell() -> DesktopShell:
+    return DesktopShell(clock=lambda: NOW_SECONDS)
+
+
+def _root_id(filesystem: DesktopFilesystem) -> str:
+    return str(filesystem.list_folders()["folders"][0]["id"])
+
+
+async def _wait_for_pending_shell(bridge: DesktopBridge) -> dict[str, object]:
+    for _ in range(200):
+        pending = bridge.local_status()["shell"]["pending"]
+        if pending is not None:
+            return pending
+        await asyncio.sleep(0.005)
+    pytest.fail("shell approval never became pending")
+
+
+@pytest.mark.asyncio
+async def test_file_only_bridge_lists_and_reads_selected_folder_without_gui(
+    transport: AsyncMock,
+    selected_root: Path,
+) -> None:
+    """Folder reads work through the remote channel without any GUI provider or app selection."""
+    files = DesktopFilesystem((selected_root,))
+    bridge = _local_bridge(filesystem=files)
+    root_id = _root_id(files)
+
+    await _handle(bridge, _event(_command("list_folders")))
+    assert _response(transport).result["folders"] == [{"id": root_id, "name": "selected", "path": str(selected_root)}]
+    await _handle(
+        bridge,
+        _event(_command("list_directory", request_id="r2", sequence=2, parameters={"root_id": root_id})),
+    )
+    assert _response(transport).result["entries"] == [
+        {"name": "docs", "type": "directory"},
+        {"name": "link", "type": "symlink"},
+        {"name": "note.txt", "type": "file"},
+    ]
+    assert _response(transport).result["truncated"] is False
+    await _handle(
+        bridge,
+        _event(
+            _command("list_directory", request_id="r3", sequence=3, parameters={"root_id": root_id, "path": "docs"}),
+        ),
+    )
+    assert _response(transport).result["entries"] == [{"name": "readme.md", "type": "file"}]
+    await _handle(
+        bridge,
+        _event(
+            _command(
+                "read_file",
+                request_id="r4",
+                sequence=4,
+                parameters={"root_id": root_id, "path": "note.txt", "offset": 8},
+            ),
+        ),
+    )
+    assert _response(transport).result["text"] == "text"
+    assert _response(transport).result["eof"] is True
+    await _handle(bridge, _event(_command("status", request_id="r5", sequence=5)))
+    status = _response(transport).result
+    assert status["gui_available"] is False
+    assert status["bridge"]["gui_available"] is False
+    assert status["bridge"]["file_roots"] == [{"id": root_id, "name": "selected", "path": str(selected_root)}]
+    assert status["bridge"]["shell"] == {
+        "enabled": False,
+        "pending": False,
+        "auto_approve_remaining_seconds": 0.0,
+        "active_request_id": None,
+    }
+    await _handle(bridge, _event(_command("list_apps", request_id="r6", sequence=6)))
+    assert _response(transport).result == {"apps": [], "metrics": _response(transport).result["metrics"]}
+    await _handle(bridge, _event(_command("get_app_state", request_id="r7", sequence=7)))
+    assert _response(transport).error == "Desktop command must target an application in the local allowlist."
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_long_local_paths_reach_folder_reads_and_shell_cwd(transport: AsyncMock, tmp_path: Path) -> None:
+    """Paths inside selected folders and working directories are not limited to identifier length."""
+    nested = Path(*["d" * 60] * 5)
+    root = (tmp_path / "selected").resolve()
+    (root / nested).mkdir(parents=True)
+    (root / nested / "note.txt").write_text("deep", encoding="utf-8")
+    files = DesktopFilesystem((root,))
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(filesystem=files, shell=shell)
+    read = _command("read_file", parameters={"root_id": _root_id(files), "path": str(nested / "note.txt")})
+    await _handle(bridge, _event(read))
+    assert _response(transport).result["text"] == "deep"
+    run = _command("run_shell", request_id="r2", sequence=2, parameters={"command": "pwd", "cwd": str(root / nested)})
+    await _handle(bridge, _event(run))
+    assert _response(transport).result["stdout"] == f"{root / nested}\n"
+    bridge.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "parameters"),
+    [
+        ("list_directory", {"path": ".."}),
+        ("list_directory", {"path": "link"}),
+        ("read_file", {"path": "link"}),
+        ("read_file", {"path": "../outside.txt"}),
+        ("read_file", {"path": "/etc/hosts"}),
+        ("read_file", {"root_id": "unknown", "path": "note.txt"}),
+    ],
+)
+async def test_file_reads_stay_inside_selected_folder(
+    transport: AsyncMock,
+    selected_root: Path,
+    action: str,
+    parameters: dict[str, object],
+) -> None:
+    """Parent paths, absolute paths, unknown roots, and links never return outside bytes."""
+    files = DesktopFilesystem((selected_root,))
+    bridge = _local_bridge(filesystem=files)
+    await _handle(bridge, _event(_command(action, parameters={"root_id": _root_id(files), **parameters})))
+    response = _response(transport)
+    assert not response.ok
+    assert "outside secret" not in json.dumps(response.to_content())
+    bridge.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("requester_id", "agent_name"), [("@eve:example.org", "computer"), (ALICE, "other")])
+async def test_denied_callers_get_no_file_bytes_or_shell_process(
+    transport: AsyncMock,
+    selected_root: Path,
+    tmp_path: Path,
+    requester_id: str,
+    agent_name: str,
+) -> None:
+    """Caller policy rejects file and shell work before either local provider runs."""
+    files = DesktopFilesystem((selected_root,))
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(filesystem=files, shell=shell)
+    caller = {"requester_id": requester_id, "agent_name": agent_name}
+    await _handle(
+        bridge,
+        _event(_command("read_file", parameters={"root_id": _root_id(files), "path": "note.txt"}, **caller)),
+    )
+    denied_read = _response(transport)
+    await _handle(
+        bridge,
+        _event(
+            _command(
+                "run_shell",
+                request_id="r2",
+                sequence=2,
+                parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path)},
+                **caller,
+            ),
+        ),
+    )
+    denied_shell = _response(transport)
+    for response in (denied_read, denied_shell):
+        assert response.error == "Desktop command requester or agent is not allowed by local policy."
+        assert response.result == {}
+    assert "private text" not in json.dumps(denied_read.to_content())
+    assert not (tmp_path / "marker").exists()
+    assert bridge.local_status()["shell"]["active_request_id"] is None
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_disabled_local_capability_is_rejected_before_provider(
+    transport: AsyncMock,
+    selected_root: Path,
+    tmp_path: Path,
+) -> None:
+    """A folder-only bridge has no shell, and a shell-only bridge has no folder reads."""
+    files_only = _local_bridge(filesystem=DesktopFilesystem((selected_root,)))
+    await _handle(files_only, _event(_command("run_shell", parameters={"command": PRIVATE_COMMAND})))
+    assert _response(transport).error == "Local shell access is disabled."
+    files_only.close()
+    shell_only = _local_bridge(shell=_local_shell())
+    await _handle(shell_only, _event(_command("list_folders")))
+    assert _response(transport).error == "Local file access is disabled."
+    assert shell_only.local_status()["shell"]["pending"] is None
+    shell_only.close()
+    assert not (tmp_path / "marker").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "parameters", "error"),
+    [
+        ("list_folders", {"observation": "both"}, "Unexpected desktop parameters: observation."),
+        ("list_directory", {"offset": 0}, "Unexpected desktop parameters: offset."),
+        ("read_file", {"path": "note.txt", "app": APP_ID}, "Unexpected desktop parameters: app."),
+        ("read_file", {"path": "note.txt", "offset": "8"}, "Desktop parameter offset must be an integer."),
+        ("run_shell", {"command": PRIVATE_COMMAND, "app": APP_ID}, "Unexpected desktop parameters: app."),
+        (
+            "run_shell",
+            {"command": PRIVATE_COMMAND, "observation": "both"},
+            "Unexpected desktop parameters: observation.",
+        ),
+        (
+            "run_shell",
+            {"command": PRIVATE_COMMAND, "timeout_seconds": "5"},
+            "Desktop parameter timeout_seconds must be an integer.",
+        ),
+        ("run_shell", {"command": ""}, "Desktop parameter command must be a non-empty string."),
+    ],
+)
+async def test_local_actions_reject_unrelated_or_malformed_parameters(
+    transport: AsyncMock,
+    selected_root: Path,
+    tmp_path: Path,
+    action: str,
+    parameters: dict[str, object],
+    error: str,
+) -> None:
+    """Strict parameters are checked before any read or approval request exists."""
+    files = DesktopFilesystem((selected_root,))
+    shell = _local_shell()
+    bridge = _local_bridge(filesystem=files, shell=shell)
+    if action in {"list_directory", "read_file"}:
+        parameters = {"root_id": _root_id(files), **parameters}
+    await _handle(
+        bridge,
+        _event(
+            _command(action, parameters={**parameters, "cwd": str(tmp_path)} if action == "run_shell" else parameters),
+        ),
+    )
+    assert _response(transport).error == error
+    assert shell.status()["pending"] is None
+    assert not (tmp_path / "marker").exists()
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_run_shell_defaults_to_local_home_and_requires_local_approval(transport: AsyncMock) -> None:
+    """Omitted cwd resolves locally, and a local rejection starts no process."""
+    bridge = _local_bridge(shell=_local_shell())
+    await bridge.on_to_device_event(_event(_command("run_shell", parameters={"command": PRIVATE_COMMAND})))
+    execution = asyncio.create_task(bridge.execute_pending())
+    pending = await _wait_for_pending_shell(bridge)
+    assert pending == {
+        "request_id": "request-1",
+        "requester_id": ALICE,
+        "agent_name": "computer",
+        "command": PRIVATE_COMMAND,
+        "cwd": str(Path.home()),
+        "expires_at_ms": 11_000,
+    }
+    bridge.decide_local_shell("request-1", approved=False, auto_approve_seconds=0)
+    await execution
+    await bridge.deliver_pending()
+    assert _response(transport).error == "Shell command denied locally."
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_local_approval_runs_shell_once_and_restart_never_replays(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """Only the exact pending ID starts the process, and redelivery returns the saved receipt."""
+    journal = tmp_path / "commands.sqlite3"
+    bridge = _local_bridge(shell=_local_shell(), journal_path=journal)
+    command = _command("run_shell", parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path)})
+    await bridge.on_to_device_event(_event(command))
+    execution = asyncio.create_task(bridge.execute_pending())
+    await _wait_for_pending_shell(bridge)
+    with pytest.raises(DesktopShellError):
+        bridge.decide_local_shell("another-request", approved=True, auto_approve_seconds=0)
+    assert not (tmp_path / "marker").exists()
+    bridge.decide_local_shell("request-1", approved=True, auto_approve_seconds=0)
+    await execution
+    await bridge.deliver_pending()
+    completed = _response(transport)
+    assert completed.result["exit_code"] == 0
+    assert (tmp_path / "marker").read_text() == "private-shell-text"
+    with pytest.raises(DesktopShellError):
+        bridge.decide_local_shell("request-1", approved=True, auto_approve_seconds=0)
+    await _handle(bridge, _event(command))
+    assert _response(transport).to_content() == completed.to_content()
+    await bridge.stop()
+    bridge.close()
+
+    restarted = _local_bridge(shell=_local_shell(), journal_path=journal)
+    restarted.recover_interrupted()
+    await _handle(restarted, _event(command))
+    assert _response(transport).to_content() == completed.to_content()
+    assert restarted.local_status()["shell"]["pending"] is None
+    assert (tmp_path / "marker").read_text() == "private-shell-text"
+    restarted.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["pending", "running"])
+async def test_stop_settles_shell_work_promptly_without_replay(
+    transport: AsyncMock,
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    """Stop closes the shell before draining, so neither approval nor a process holds it open."""
+    journal = tmp_path / "commands.sqlite3"
+    started = tmp_path / "started"
+    expected_runs = "started" if phase == "running" else None
+    shell = _local_shell()
+    if phase == "running":
+        shell.grant(60)
+    bridge = _local_bridge(shell=shell, journal_path=journal)
+    command = _command("run_shell", parameters={"command": "printf started >> started; sleep 30", "cwd": str(tmp_path)})
+    await bridge.on_to_device_event(_event(command))
+    execution = asyncio.create_task(bridge.execute_pending())
+    if phase == "pending":
+        await _wait_for_pending_shell(bridge)
+    else:
+        for _ in range(200):
+            if started.exists():
+                break
+            await asyncio.sleep(0.005)
+    assert (started.read_text() if started.exists() else None) == expected_runs
+    await asyncio.wait_for(bridge.stop(), timeout=3)
+    await execution
+    await bridge.deliver_pending()
+    stopped = _response(transport)
+    assert stopped.result["cancelled"] is True
+    bridge.close()
+
+    restarted = _local_bridge(shell=_local_shell(), journal_path=journal)
+    restarted.recover_interrupted()
+    await _handle(restarted, _event(command))
+    assert _response(transport).to_content() == stopped.to_content()
+    assert restarted.local_status()["shell"]["pending"] is None
+    assert (started.read_text() if started.exists() else None) == expected_runs
+    restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_other_callers_see_shell_state_without_pending_command(transport: AsyncMock, tmp_path: Path) -> None:
+    """Remote status and receipts expose no pending command text to another allowed caller."""
+    shell = _local_shell()
+    bridge = _local_bridge(shell=shell)
+    command = _command("run_shell", parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path)})
+    await bridge.on_to_device_event(_event(command))
+    execution = asyncio.create_task(bridge.execute_pending())
+    await _wait_for_pending_shell(bridge)
+    receipt = _command(
+        "request_status",
+        request_id="query",
+        sequence=2,
+        requester_id=BOB,
+        parameters={"request_id": "request-1"},
+    )
+    await bridge.on_to_device_event(_event(receipt))
+    await bridge.deliver_pending()
+    assert _response(transport).result == {"request_id": "request-1", "state": "not_found"}
+    bridge.decide_local_shell("request-1", approved=False, auto_approve_seconds=0)
+    await execution
+
+    # The executor serializes remote commands, so hold approval outside it to observe status meanwhile.
+    held = DesktopShellRequest("held", ALICE, "computer", PRIVATE_COMMAND, str(tmp_path), 11_000)
+    pending = asyncio.create_task(shell.execute(held))
+    await _wait_for_pending_shell(bridge)
+    await _handle(bridge, _event(_command("status", request_id="status", sequence=3, requester_id=BOB)))
+    status = _response(transport)
+    assert status.result["bridge"]["shell"] == {
+        "enabled": True,
+        "pending": True,
+        "auto_approve_remaining_seconds": 0.0,
+        "active_request_id": None,
+    }
+    assert "private-shell-text" not in json.dumps(status.to_content())
+    assert bridge.local_status()["shell"]["pending"]["command"] == PRIVATE_COMMAND
+    shell.decide("held", approved=False)
+    with pytest.raises(DesktopShellError):
+        await pending
+    assert not (tmp_path / "marker").exists()
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_shell_command_reports_unknown_outcome_after_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transport: AsyncMock,
+) -> None:
+    """A shell command started before a crash is reported as uncertain and never rerun."""
+    journal = tmp_path / "commands.sqlite3"
+    shell = _local_shell()
+    shell.grant(60)
+    bridge = _local_bridge(shell=shell, journal_path=journal)
+    command = _command("run_shell", parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path)})
+    monkeypatch.setattr(bridge, "_execute_safely", AsyncMock(side_effect=asyncio.CancelledError))
+    with pytest.raises(asyncio.CancelledError):
+        await _handle(bridge, _event(command))
+    bridge.close()
+
+    restarted_shell = _local_shell()
+    restarted_shell.grant(60)
+    restarted = _local_bridge(shell=restarted_shell, journal_path=journal)
+    await _handle(restarted, _event(command))
+    response = _response(transport)
+    assert response.result["action_outcome"] == "unknown"
+    assert "do not repeat it automatically" in str(response.result["warning"])
+    assert not (tmp_path / "marker").exists()
+    restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_bridge_without_apps_never_starts_gui_event_pump(
+    transport: AsyncMock,
+    selected_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Folder-only runs must work headless, without Cocoa or other GUI calls."""
+
+    async def forbidden_pump() -> None:
+        pytest.fail("GUI event pump started without application access")
+
+    monkeypatch.setattr("mindroom.desktop.bridge._run_macos_application_events", forbidden_pump)
+    bridge = _local_bridge(filesystem=DesktopFilesystem((selected_root,)))
+    responded = asyncio.Event()
+    transport.side_effect = lambda *_args, **_kwargs: responded.set()
+    worker = asyncio.create_task(bridge.run())
+    try:
+        await bridge.on_to_device_event(_event(_command("list_folders")))
+        await asyncio.wait_for(responded.wait(), timeout=1)
+        assert _response(transport).ok
+    finally:
+        await bridge.stop()
+        await asyncio.wait_for(worker, timeout=1)
+        bridge.close()
+
+
+def test_local_capabilities_require_matching_policy_and_providers(selected_root: Path) -> None:
+    """A bridge needs one capability, and every enabled capability needs its own provider."""
+    with pytest.raises(ValueError, match="at least one local capability"):
+        replace(_policy(), allowed_app_ids=frozenset())
+    files = DesktopFilesystem((selected_root,))
+    no_gui = replace(_policy(), allowed_app_ids=frozenset(), allowed_file_roots=(selected_root,))
+    for arguments, message in (
+        ({"provider": FakeProvider(), "policy": no_gui, "filesystem": files}, "GUI provider"),
+        ({"provider": None, "policy": no_gui}, "filesystem provider"),
+        ({"provider": None, "policy": replace(no_gui, shell_enabled=True), "filesystem": files}, "shell provider"),
+        ({"provider": FakeProvider(), "policy": _policy(), "shell": _local_shell()}, "shell provider"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            DesktopBridge(client=object(), **arguments)
+    files.close()
+
+
+@pytest.mark.asyncio
+async def test_local_shell_controls_require_enabled_running_shell() -> None:
+    """Local decisions and grants need an enabled shell on a bridge that is still accepting work."""
+    gui_only = DesktopBridge(client=object(), provider=FakeProvider(), policy=_policy(), clock=lambda: NOW_SECONDS)
+    for control in (
+        lambda: gui_only.decide_local_shell("request-1", approved=True, auto_approve_seconds=0),
+        lambda: gui_only.grant_local_shell(60),
+    ):
+        with pytest.raises(ValueError, match="shell access is disabled"):
+            control()
+    with pytest.raises(ValueError, match="shell access is disabled"):
+        await gui_only.revoke_local_shell()
+    assert gui_only.local_status()["shell"] == {
+        "enabled": False,
+        "pending": None,
+        "auto_approve_remaining_seconds": 0.0,
+        "active_request_id": None,
+    }
+    gui_only.close()
+    bridge = _local_bridge(shell=_local_shell())
+    assert bridge.grant_local_shell(60)["shell"]["auto_approve_remaining_seconds"] > 59
+    assert (await bridge.revoke_local_shell())["shell"]["auto_approve_remaining_seconds"] == 0.0
+    await bridge.stop()
+    with pytest.raises(ValueError, match="stopping"):
+        bridge.grant_local_shell(60)
+    bridge.close()
 
 
 @pytest.mark.asyncio
@@ -618,6 +1138,9 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
         "emergency_stop_latched": False,
         "allowed_app_count": 1,
         "browser_enabled": False,
+        "gui_available": True,
+        "file_roots": [],
+        "shell": {"enabled": False, "pending": False, "auto_approve_remaining_seconds": 0.0, "active_request_id": None},
         "control_lease_expires_at_ms": 20_000,
         "observation_modes": ["tree", "screenshot", "both"],
         "durable_commands": True,

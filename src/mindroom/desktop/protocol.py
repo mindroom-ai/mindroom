@@ -40,6 +40,10 @@ type DesktopAction = Literal[
     "keypress",
     "browser_observe",
     "browser_control",
+    "list_folders",
+    "list_directory",
+    "read_file",
+    "run_shell",
 ]
 
 DESKTOP_CONTROL_ACTIONS = frozenset(
@@ -60,10 +64,22 @@ DESKTOP_CONTROL_ACTIONS = frozenset(
     },
 )
 DESKTOP_BROWSER_ACTIONS = frozenset({"browser_observe", "browser_control"})
+DESKTOP_FILE_ACTIONS = frozenset({"list_folders", "list_directory", "read_file"})
+DESKTOP_SHELL_ACTIONS = frozenset({"run_shell"})
 DESKTOP_APP_ACTIONS = frozenset(
     {"get_app_state", "screenshot", *(DESKTOP_CONTROL_ACTIONS - DESKTOP_BROWSER_ACTIONS)},
 )
-_DESKTOP_ACTIONS = frozenset({"status", "request_status", "list_apps", *DESKTOP_APP_ACTIONS, *DESKTOP_BROWSER_ACTIONS})
+_DESKTOP_ACTIONS = frozenset(
+    {
+        "status",
+        "request_status",
+        "list_apps",
+        *DESKTOP_APP_ACTIONS,
+        *DESKTOP_BROWSER_ACTIONS,
+        *DESKTOP_FILE_ACTIONS,
+        *DESKTOP_SHELL_ACTIONS,
+    },
+)
 
 
 type DesktopObservationMode = Literal["tree", "screenshot", "both"]
@@ -433,11 +449,13 @@ __all__ = [
     "DESKTOP_BROWSER_ACTIONS",
     "DESKTOP_COMMAND_EVENT_TYPE",
     "DESKTOP_CONTROL_ACTIONS",
+    "DESKTOP_FILE_ACTIONS",
     "DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE",
     "DESKTOP_PAIRING_CLAIM_EVENT_TYPE",
     "DESKTOP_PROTOCOL_VERSION",
     "DESKTOP_RESPONSE_EVENT_TYPE",
     "DESKTOP_SAFE_KEYS",
+    "DESKTOP_SHELL_ACTIONS",
     "MAX_COMMAND_TTL_MS",
     "MAX_SCREENSHOT_BYTES",
     "DesktopAction",
