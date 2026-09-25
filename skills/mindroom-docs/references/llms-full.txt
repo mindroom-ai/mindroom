@@ -23182,6 +23182,10 @@ Untrusted code-execution tools may still share the runner container's process na
 For dedicated Kubernetes workers, the exposed environment contains only that worker's derived runner token, not the shared control-plane token.
 This leaves same-worker token exposure as a local containment risk, while per-worker credentials and NetworkPolicy limit cross-worker blast radius.
 
+The sandbox-runner startup manifest lives in `.runtime` inside the worker's state root, which dedicated workers mount read-only on both backends, like `.shared_credentials`, so tool code cannot rewrite it before the runner restarts.
+The runner reads the manifest once at startup and keeps it in memory, so the primary rewriting it for a replacement Kubernetes pod never changes a runner that is still serving.
+Docker workers are recreated whenever their launch configuration, mounts, or environment change, including any change to the tool validation snapshot such as a tool or plugin config edit, and Kubernetes worker pods roll on the same changes; either ends the worker's tmux sessions, background shells, and computer sessions.
+
 For the full Helm-side deployment guidance, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/).
 
 ### Host machine + Docker sandbox container
@@ -23590,13 +23594,17 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
 
   Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
 - Credential leases are single-use by default and expire after 60 seconds.
+- Dedicated Docker and Kubernetes worker containers mount the root filesystem read-only, with a private writable `/tmp` (a 1 GiB tmpfs on Docker, an `emptyDir` on Kubernetes).
+  The image keeps `/app` writable by the runtime user so trusted primaries can install tool extras, but in a worker that would let tool code replace runner code or dependencies that the runner imports later or boots from after a restart.
+  Worker tools install their extras into the worker's own virtualenv on the state mount instead.
+  Shared sandbox runners, such as the `static_runner` sidecar and the Compose sandbox service, are not dedicated workers and are unchanged.
 - Kubernetes worker containers drop all capabilities, disable privilege escalation, and inherit the pod's
   `RuntimeDefault` seccomp policy. The optional main-container Localhost profile needed by runtimes that block
   Chromium's namespace sandbox is documented in [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/#browser-and-container-sandboxing).
 - With `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer`, dedicated Docker workers drop all capabilities, set `no-new-privileges`, and use the packaged Chromium-compatible seccomp profile.
   This explicit worker-pool policy applies even when Computer is disabled, regardless of which tools an agent selects.
   Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
-  With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their prior launch settings and compatible identities.
+  With Computer disabled and `runtime_default` selected, ordinary Docker workers keep their prior capability and seccomp settings and compatible launch identities.
 - With `workerBackend: static_runner`, the Kubernetes sidecar mounts only the storage PVC's `agents`, `private_instances`, and its own `sandbox-runner` directories plus read-only config, and it does not receive the credentials-encryption key.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode mounts the directories of every non-private `worker_scope: user` agent plus the user's own private-instance namespace, since it shares one runtime across those agents, and never mounts agents on other scopes.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.

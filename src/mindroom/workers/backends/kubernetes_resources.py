@@ -69,6 +69,7 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     SANDBOX_RUNNER_CONTAINER_NAME,
     WORKER_CONFIG_VOLUME_NAME,
     WORKER_STORAGE_VOLUME_NAME,
+    WORKER_TMP_VOLUME_NAME,
 )
 
 if TYPE_CHECKING:
@@ -162,7 +163,6 @@ test -s "{token_path}"
 
 _CONTAINER_NAME = SANDBOX_RUNNER_CONTAINER_NAME
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
-_DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
 _CREDENTIALS_ENCRYPTION_KEY_SECRET_SUFFIX = "credentials-encryption-key"  # noqa: S105
 
@@ -1399,8 +1399,13 @@ class KubernetesResourceManager:
                         "requests": resource_requests,
                         "limits": resource_limits,
                     },
+                    # The image's /app tree stays writable by the runtime user for
+                    # trusted primaries, so worker pods mount the root filesystem
+                    # read-only: tool code must not replace runner code the runner
+                    # imports later. Only volumes and the /tmp emptyDir stay writable.
                     "securityContext": {
                         "allowPrivilegeEscalation": False,
+                        "readOnlyRootFilesystem": True,
                         "capabilities": {"drop": ["ALL"]},
                         **(
                             {"seccompProfile": dict(self.config.seccomp_profile)}
@@ -1507,7 +1512,9 @@ class KubernetesResourceManager:
         include_agent_vault: bool,
     ) -> list[dict[str, object]]:
         dedicated_root = f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")
-        venv_path = f"{dedicated_root}/venv"
+        # No PATH or VIRTUAL_ENV here: the long-lived runner resolves uv, node,
+        # chromium, and Xvnc from the image, never from the worker-writable venv.
+        # Tool subprocesses get the worker venv from worker_subprocess_env.
         env: list[dict[str, object]] = [
             {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"], "value": "true"},
             {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], "value": "forkserver"},
@@ -1518,8 +1525,6 @@ class KubernetesResourceManager:
             },
             {"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path},
             {"name": "MINDROOM_STORAGE_PATH", "value": dedicated_root},
-            {"name": "VIRTUAL_ENV", "value": venv_path},
-            {"name": "PATH", "value": f"{venv_path}/bin:{_DEFAULT_CONTAINER_PATH}"},
             {
                 "name": SHARED_CREDENTIALS_PATH_ENV,
                 "value": f"{dedicated_root}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
@@ -1676,6 +1681,7 @@ class KubernetesResourceManager:
             private_agent_names=private_agent_names,
             state_scope_worker_key=state_scope_worker_key,
         )
+        mounts.append({"name": WORKER_TMP_VOLUME_NAME, "mountPath": "/tmp"})  # noqa: S108
         if self.config.config_map_name is None:
             mounts.extend(self._file_config_storage_mounts())
         if self.config.config_map_name is not None:
@@ -1749,6 +1755,7 @@ class KubernetesResourceManager:
                 "name": WORKER_STORAGE_VOLUME_NAME,
                 "persistentVolumeClaim": {"claimName": self.config.storage_pvc_name},
             },
+            {"name": WORKER_TMP_VOLUME_NAME, "emptyDir": {}},
         ]
         if self.config.config_map_name is not None:
             volumes.append(
@@ -1866,18 +1873,21 @@ class KubernetesResourceManager:
             },
         )
         # The worker root is writable so tools can persist state, but the primary keeps
-        # mirroring credentials into `.shared_credentials` on every ensure. Mounting that
-        # directory read-only stops worker code from deleting it or replacing it with a
-        # link into the deployment-wide credential store.
-        mirror_subpath = f"{state_subpath}/{WORKER_SHARED_CREDENTIALS_DIRNAME}"
-        mounts.append(
-            {
+        # mirroring credentials into `.shared_credentials` on every ensure and writes the
+        # startup manifest the runner boots from into `.runtime`. Mounting those
+        # directories read-only stops worker code from rewriting them or replacing them
+        # with links elsewhere.
+        for read_only_subpath in (
+            f"{state_subpath}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
+            str(constants.sandbox_startup_manifest_path(Path(state_subpath)).parent),
+        ):
+            read_only_mount: dict[str, object] = {
                 "name": WORKER_STORAGE_VOLUME_NAME,
-                "mountPath": f"{self.config.storage_mount_path}/{mirror_subpath}",
-                "subPath": mirror_subpath,
+                "mountPath": f"{self.config.storage_mount_path}/{read_only_subpath}",
+                "subPath": read_only_subpath,
                 "readOnly": True,
-            },
-        )
+            }
+            mounts.append(read_only_mount)
         validate_unique_worker_visible_paths(
             (str(mount["mountPath"]) for mount in mounts),
             worker_key=worker_key,
