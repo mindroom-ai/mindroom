@@ -59,7 +59,7 @@ EDIT_ARGUMENTS: dict[str, Any] = {
             "range": "Assumptions!B4:B5",
             "before": [[0.08], [142]],
             "after": [[0.12], [142]],
-            "number_format": [["0%"], ["0"]],
+            "number_format": [["0%"], [None]],
         },
         {
             "range": "'Summary Sheet'!B2",

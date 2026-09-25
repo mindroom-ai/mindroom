@@ -206,6 +206,7 @@ class FakeGraph:
     upload_sessions: dict[str, tuple[str, str, str]] = field(default_factory=dict)
     patch_transform: Callable[[list[list[Any]]], list[list[Any]]] | None = None
     format_transform: Callable[[str], str] | None = None
+    upload_response: Handler | None = None
     requests: list[httpx.Request] = field(default_factory=list)
 
     @classmethod
@@ -325,6 +326,8 @@ class FakeGraph:
         if request.method == "DELETE":
             self.upload_sessions.pop(session, None)
             return httpx.Response(204)
+        if self.upload_response is not None:
+            return self.upload_response(request)
         drive_id, folder_id, name = self.upload_sessions[session]
         assert request.headers["content-range"] == f"bytes 0-{len(request.content) - 1}/{len(request.content)}"
         children = self.folder_children.setdefault(folder_id, {})

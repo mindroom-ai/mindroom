@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import quote
@@ -38,7 +39,9 @@ _MAX_OUTLINE_TABLES = 20
 _MAX_OUTLINE_NAMES = 100
 _CELL_PATTERN = re.compile(r"\$?([A-Za-z]{1,3})\$?([0-9]{1,7})")
 _SHEET_NAME_FORBIDDEN = frozenset("[]:*?/\\")
-_NUMBER_PATTERN = re.compile(r"[+-]?(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
+_NUMBER_PATTERN = re.compile(
+    r"[+-]?(?:[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]*)?|[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?",
+)
 _MONTH = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
     r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?"
@@ -61,7 +64,8 @@ _CONVERTED_TEXT_PATTERNS = (
 _FORMULA_PREFIXES = ("+", "-", "@")
 _FORMULA_STRING_LITERAL = re.compile(r'("(?:[^"]|"")*")')
 # Microsoft recommends one request at a time per workbook; this serializes edits within this process.
-_DOCUMENT_LOCKS: dict[str, asyncio.Lock] = {}
+# Entries vanish once no edit holds or awaits a document's lock.
+_DOCUMENT_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,6 +487,11 @@ class EditReceipt:
         return any(edit.outcome == "applied" for edit in self.edits)
 
     @property
+    def written(self) -> bool:
+        """Return whether this call changed the workbook, as opposed to finding edits already applied."""
+        return any(edit.outcome == "applied" and not edit.already_applied for edit in self.edits)
+
+    @property
     def outcome_unknown(self) -> bool:
         """Return whether a failed write may still have landed."""
         return any(edit.error is not None and edit.error.get("outcome_unknown") is True for edit in self.edits)
@@ -579,15 +588,19 @@ async def _current(token: str, path: str) -> dict[str, object]:
     return graph_object(await graph_json(token, "GET", path, params={"$select": "formulas,numberFormat"}))
 
 
+def _stored_as_requested(plan: _EditPlan, stored: dict[str, object]) -> bool:
+    """Return whether a range holds the edit's formulas and every requested number format."""
+    formats_match = plan.number_format is None or _formats_match(_grid(stored.get("numberFormat")), plan.number_format)
+    return _grids_equal(_grid(stored.get("formulas")), plan.after) and formats_match
+
+
 def _record_write(plan: _EditPlan, outcome: _EditOutcome, stored: dict[str, object]) -> None:
     """Mark an edit applied and verify what Excel stored against what was requested."""
-    formulas = _grid(stored.get("formulas"))
     outcome.outcome = "applied"
     outcome.cells_changed = _changed_cell_count(plan.before, plan.after)
-    formats_match = plan.number_format is None or _formats_match(_grid(stored.get("numberFormat")), plan.number_format)
-    outcome.verified = _grids_equal(formulas, plan.after) and formats_match
+    outcome.verified = _stored_as_requested(plan, stored)
     if not outcome.verified:
-        outcome.written = formulas
+        outcome.written = _grid(stored.get("formulas"))
 
 
 async def _write(token: str, path: str, plan: _EditPlan, outcome: _EditOutcome) -> bool:
@@ -610,11 +623,16 @@ async def _write(token: str, path: str, plan: _EditPlan, outcome: _EditOutcome) 
             outcome.outcome = "failed"
             outcome.error["outcome_unknown"] = True
             return False
-        if _grids_equal(_grid(current.get("formulas")), plan.after):
+        if _stored_as_requested(plan, current):
             _record_write(plan, outcome, current)
         else:
             outcome.outcome = "failed"
             outcome.current = _grid(current.get("formulas"))
+            if plan.number_format is not None and _formats_match(
+                _grid(current.get("numberFormat")),
+                plan.number_format,
+            ):
+                outcome.error["number_format_written"] = True
         return False
     _record_write(plan, outcome, written)
     return True
@@ -635,15 +653,16 @@ async def apply_edits(token: str, ref: DocumentRef, plans: Sequence[_EditPlan], 
         writable: list[tuple[_EditPlan, str, _EditOutcome]] = []
         for plan in plans:
             path = _range_path(ref, worksheet_ids[plan.target.sheet], plan.target.address)
-            current = _grid((await _current(token, path)).get("formulas"))
+            stored = await _current(token, path)
+            current = _grid(stored.get("formulas"))
             outcome = _EditOutcome(range=plan.target.label, outcome="not_attempted")
             receipt.edits.append(outcome)
-            if _grids_equal(current, plan.before):
-                writable.append((plan, path, outcome))
-            elif _grids_equal(current, plan.after):
+            if _stored_as_requested(plan, stored):
                 outcome.outcome = "applied"
                 outcome.already_applied = True
                 outcome.verified = True
+            elif _grids_equal(current, plan.before):
+                writable.append((plan, path, outcome))
             else:
                 outcome.outcome = "conflict"
                 outcome.current = current

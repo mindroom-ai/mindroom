@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import nio
 import pytest
 
@@ -15,6 +16,7 @@ from mindroom.oauth.microsoft import microsoft_365_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import tool_execution_identity
 from tests.conftest import make_matrix_client_mock
 from tests.microsoft_graph_test_support import (
     ALICE,
@@ -32,6 +34,7 @@ from tests.microsoft_graph_test_support import (
     FakeGraph,
     bearer,
     drive_item,
+    execution_identity,
     folder_item,
     graph_error,
     publish_grant,
@@ -43,8 +46,6 @@ from tests.microsoft_graph_test_support import (
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import httpx
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
@@ -552,3 +553,85 @@ async def test_failed_edit_explains_later_edits_were_not_attempted(
     assert result["code"] == "failed"
     assert result["message"] == "The first write failed and later edits were not attempted; check each edit's outcome."
     assert context.client.room_send.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_calls_follow_the_active_requester_not_the_constructing_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A toolkit built for Alice never lends Alice's grant to Bob as the active requester."""
+    paths, manager, graph = _setup(tmp_path, monkeypatch)
+    with tool_execution_identity(execution_identity(BOB)):
+        result = json.loads(await _tool(paths, manager).read_office_document(DOCUMENT_ID, "Assumptions!B4"))
+
+    assert result["oauth_connection_required"] is True
+    assert graph.requests == []
+
+
+@pytest.mark.asyncio
+async def test_connect_redeems_the_sharing_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Share lookups redeem the link, so later workbook calls keep access as opening the link would."""
+    paths, manager, graph = _setup(tmp_path, monkeypatch)
+    await _tool(paths, manager).connect_office_document(SHARE_URL)
+
+    [share] = [request for request in graph.requests if request.url.path.startswith("/v1.0/shares/")]
+    assert share.headers["prefer"] == "redeemSharingLink"
+
+
+@pytest.mark.asyncio
+async def test_replayed_edit_that_already_landed_posts_no_second_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When every range already holds the new content, the receipt is applied and no card repeats."""
+    paths, manager, graph = _setup(tmp_path, monkeypatch)
+    graph.workbooks[(DRIVE_ID, ITEM_ID)].sheet("Assumptions").set("B4", [[0.12]])
+    context = _context(paths)
+    with tool_runtime_context(context):
+        result = json.loads(await _tool(paths, manager).edit_office_document(DOCUMENT_ID, [_growth_edit()], "x"))
+
+    assert result["status"] == "ok"
+    assert result["edits"][0]["already_applied"] is True
+    assert context.client.room_send.await_count == 0
+    assert graph.paths("PATCH") == []
+
+
+@pytest.mark.asyncio
+async def test_upload_session_refusal_is_not_a_reconnect_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 401 from the preauthenticated upload URL means an expired session, not a rejected account."""
+    paths, manager, graph = _setup(tmp_path, monkeypatch)
+    graph.me_folders["MindRoom"] = folder_item("FOLDER-MindRoom")
+    graph.upload_response = lambda _request: graph_error(401, "unauthenticated", "Expired.")
+    result = json.loads(
+        await _tool(paths, manager, workspace=_workspace_with(tmp_path)).save_office_document("Forecast.xlsx"),
+    )
+
+    assert result["code"] == "upload_failed"
+    assert "oauth_connection_required" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "upload_url",
+    ["http://contoso-my.sharepoint.com/up/x", "https://user:pw@contoso-my.sharepoint.com/up/x"],
+)
+async def test_unsafe_upload_session_urls_are_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    upload_url: str,
+) -> None:
+    """Only plain HTTPS upload URLs receive the workbook bytes."""
+    paths, manager, graph = _setup(tmp_path, monkeypatch)
+    graph.me_folders["MindRoom"] = folder_item("FOLDER-MindRoom")
+    session = f"/drives/{DRIVE_ID}/items/FOLDER-MindRoom:/Forecast.xlsx:/createUploadSession"
+    graph.overrides[("POST", session)] = lambda _request: httpx.Response(200, json={"uploadUrl": upload_url})
+    result = json.loads(
+        await _tool(paths, manager, workspace=_workspace_with(tmp_path)).save_office_document("Forecast.xlsx"),
+    )
+
+    assert result["code"] == "invalid_response"
+    assert not [request for request in graph.requests if request.method == "PUT"]

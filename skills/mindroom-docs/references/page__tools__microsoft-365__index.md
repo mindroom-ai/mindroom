@@ -43,14 +43,15 @@ Each edit names a range, its `before` formulas as read, its `after` formulas, an
 
 `edit_office_document` always requires approval, even when `tool_approval.default` is `auto_approve`, because the agent issuing it may have read untrusted document content.
 The approval card shows every range with its before and after content, and each call needs its own approval.
-In MindRoom Chat, the card renders as a before/after table.
+In MindRoom Chat, the card renders the target document ID and a before/after table of changed cells; for very large edits whose arguments move to a separate attachment, Chat shows the raw arguments instead.
+A replayed approval whose edits had already landed posts no second card.
 Where native approval is unavailable, such as the OpenAI-compatible API, the edit function is not offered.
 
 After approval, the tool reads every range again.
 A range whose content differs from `before` is a conflict: nothing is written, and the result shows the current content so the agent can read again and propose new edits.
 With `skip_conflicts: true`, only ranges that still match are written, which makes undo safe: swap `before` and `after` of the applied edits, and cells a person changed since are kept.
 A range that already holds `after` counts as applied without writing again, so a replayed approval never writes twice.
-Writes run one at a time, stop at the first failure, and read each result back to verify it.
+Writes run one at a time, stop at the first failure, and verify each write against the content Graph reports it stored.
 After a failed or timed-out write, the tool reads the range again; when that read also fails, the result reports an unknown outcome instead of claiming nothing was written.
 
 Formulas start with `=`, and constants are written as themselves.

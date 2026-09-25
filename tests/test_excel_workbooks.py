@@ -120,6 +120,7 @@ def test_validate_grid_requires_the_range_shape_and_scalar_cells() -> None:
         ("$1,200.50", True),
         ("(15)", True),
         ("1e3", True),
+        ("1,234.5", True),
         ("2026-09-25", True),
         ("9/25/2026", True),
         ("1/2", True),
@@ -156,6 +157,7 @@ def test_validate_grid_requires_the_range_shape_and_scalar_cells() -> None:
         ("Novel", False),
         ("Maybe", False),
         ("1_000", False),
+        ("E5", False),
         ("\u0661\u0662\u0663", False),
         ("Revenue grows 12% YoY.", False),
         ("555-1234", False),
@@ -617,3 +619,44 @@ def test_apply_edits_verifies_lowercase_formulas_excel_uppercases(monkeypatch: p
     assert receipt.verified
     replay = _run(lambda: apply_edits(ALICE_TOKEN, REF, parse_edits([edit]), skip_conflicts=False))
     assert replay.edits[0].already_applied
+
+
+def test_apply_edits_does_not_count_a_failed_format_only_write_as_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A format change whose write fails is failed even though the formulas already match."""
+    graph = FakeGraph.with_forecast().install(monkeypatch)
+    path = _assumptions_b4_path()
+
+    def bad_format(request: httpx.Request) -> httpx.Response:
+        if request.method == "PATCH":
+            return graph_error(400, "invalidArgument", "Invalid number format.")
+        return graph._route(request, path)
+
+    graph.overrides[("GET", path)] = bad_format
+    graph.overrides[("PATCH", path)] = bad_format
+    plans = parse_edits([{**_growth_edit(after=0.08), "number_format": [["0.0%"]]}])
+    receipt = _run(lambda: apply_edits(ALICE_TOKEN, REF, plans, skip_conflicts=False))
+    assert receipt.status == "failed"
+    assert not receipt.applied
+
+
+def test_apply_edits_requires_formats_before_counting_an_edit_already_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Matching formulas with a different format still get the format written."""
+    graph = FakeGraph.with_forecast().install(monkeypatch)
+    plans = parse_edits([{**_growth_edit(after=0.08), "number_format": [["0.0%"]]}])
+    receipt = _run(lambda: apply_edits(ALICE_TOKEN, REF, plans, skip_conflicts=False))
+    assert receipt.written
+    assert not receipt.edits[0].already_applied
+    assert graph.workbooks[(DRIVE_ID, ITEM_ID)].sheet("Assumptions").formats[(4, 2)] == "0.0%"
+
+
+def test_graph_client_bounds_streamed_bodies_without_a_declared_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A body with no Content-Length is still cut off once it passes the bound."""
+    graph = FakeGraph().install(monkeypatch)
+    graph.overrides[("GET", "/me")] = lambda _request: httpx.Response(
+        200,
+        stream=httpx.ByteStream(b'{"value": "' + b"x" * 64 + b'"}'),
+    )
+    monkeypatch.setattr(microsoft_graph_client, "_MAX_JSON_RESPONSE_BYTES", 10)
+    with pytest.raises(GraphError) as raised:
+        _run(lambda: graph_json(ALICE_TOKEN, "GET", "/me"))
+    assert raised.value.code == "response_too_large"

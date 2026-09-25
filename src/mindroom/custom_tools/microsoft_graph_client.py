@@ -283,14 +283,30 @@ async def graph_json(
     *,
     params: Mapping[str, str] | None = None,
     json_body: object = None,
+    headers: Mapping[str, str] | None = None,
 ) -> object:
     """Send one bearer request to a Graph v1.0 path and return its decoded JSON."""
     return await _send(
         method,
         f"{_GRAPH_ROOT}{path}",
-        headers={"Authorization": f"Bearer {access_token}"},
+        headers={**(headers or {}), "Authorization": f"Bearer {access_token}"},
         params=params,
         json_body=json_body,
+    )
+
+
+async def resolve_share(access_token: str, url_share_id: str, select: str) -> object:
+    """Return the driveItem a sharing link names, redeeming the link as opening it in a browser would.
+
+    Without ``redeemSharingLink``, Graph guarantees access only for this one request, so later
+    workbook calls on an organization link the user never opened could be refused.
+    """
+    return await graph_json(
+        access_token,
+        "GET",
+        graph_path("shares", url_share_id, "driveItem"),
+        params={"$select": select},
+        headers={"Prefer": "redeemSharingLink"},
     )
 
 
@@ -319,6 +335,9 @@ async def graph_upload_new(access_token: str, folder: DocumentRef, name: str, co
             content=content,
             deadline_seconds=_UPLOAD_DEADLINE_SECONDS,
         )
+    except GraphAccessRejectedError:
+        # The session URL carries its own authorization; a 401 means the session expired, not the account.
+        raise GraphError(code="upload_failed", message="The upload session was refused; retry the save.") from None
     except GraphError as exc:
         if exc.code == "conflict":
             # Release the uploaded bytes now instead of when the session expires.

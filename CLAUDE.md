@@ -161,6 +161,12 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `oauth/reset.py` | OAuth reset target resolution and requester-bound browser intents |
 | `oauth/reset_execution.py` | MCP retirement and durable reset execution |
 | `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |
+| `oauth/requester_access.py` | Requester-only OAuth token resolution, refresh, and reconnect prompts shared by requester-scoped toolkits |
+| `oauth/microsoft.py` | Microsoft 365 OAuth provider with tenant endpoints and Graph scope normalization |
+| `custom_tools/microsoft_graph_client.py` | Bounded, error-scrubbing Microsoft Graph requests, share resolution, and never-replace upload sessions |
+| `custom_tools/excel_workbooks.py` | Excel outlines, bounded range reads, and conflict-checked, verified range edits over Graph |
+| `custom_tools/microsoft_365.py` | Connected OneDrive and SharePoint workbooks: connect, save, read, and human-approved edits with document cards |
+| `custom_tools/conversation_notices.py` | Thread-aware notices that tools post into their current conversation |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | Agent creation and configuration |

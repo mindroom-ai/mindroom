@@ -128,7 +128,8 @@ The web URL reveals a file's name and location to room members, which is inheren
 ## MindRoom Chat
 
 - Document cards render with the file type, name, location, revision, change summary, verification state, and **Open in Excel** (`ms-excel:ofe|u|<file_url>`) and **Open in browser** (`web_url`) actions.
-- Approval cards for `edit_office_document` render a before/after table per range above the existing raw-argument disclosure and approval controls, and tolerate malformed arguments by falling back to the raw view.
+- Approval cards for `edit_office_document` render the document ID and a before/after table per range above the existing raw-argument disclosure and approval controls, and fall back to the raw view for malformed, truncated, or attachment-backed arguments.
+- Share lookups send `Prefer: redeemSharingLink`, as opening the link in a browser would, so later workbook calls keep access.
 - A committed fixture generated from the real backend toolkit pins the card contract, like the Chat UI action fixture.
 
 ## Failure handling

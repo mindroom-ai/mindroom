@@ -31,6 +31,7 @@ from mindroom.custom_tools.microsoft_graph_client import (
     graph_object,
     graph_path,
     graph_upload_new,
+    resolve_share,
     share_id,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
@@ -372,13 +373,7 @@ class Microsoft365Tools(Toolkit):
             return self._error(exc)
 
         async def connect(token: str) -> dict[str, object]:
-            item = await graph_json(
-                token,
-                "GET",
-                graph_path("shares", encoded_share, "driveItem"),
-                params={"$select": _ITEM_FIELDS},
-            )
-            document = _ConnectedDocument._from_item(item)
+            document = _ConnectedDocument._from_item(await resolve_share(token, encoded_share, _ITEM_FIELDS))
             outline = await workbook_outline(token, document.ref)
             card = await self._post_card("connected", document)
             return {"document": document.summary(), "outline": outline, **card}
@@ -428,8 +423,7 @@ class Microsoft365Tools(Toolkit):
     async def _upload_folder(self, token: str, folder_share: str | None) -> DocumentRef:
         """Return the target folder: a linked folder, or the user's OneDrive MindRoom folder, created if missing."""
         if folder_share is not None:
-            share_path = graph_path("shares", folder_share, "driveItem")
-            return _folder_ref(await graph_json(token, "GET", share_path, params={"$select": _FOLDER_FIELDS}))
+            return _folder_ref(await resolve_share(token, folder_share, _FOLDER_FIELDS))
         default_path = f"{graph_path('me', 'drive', 'root')}:/{_DEFAULT_FOLDER}"
         try:
             item = await graph_json(token, "GET", default_path, params={"$select": _FOLDER_FIELDS})
@@ -545,7 +539,8 @@ class Microsoft365Tools(Toolkit):
         async def edit(token: str) -> dict[str, object]:
             receipt = await apply_edits(token, ref, plans, skip_conflicts=skip_conflicts)
             result = _receipt_fields(receipt)
-            if not receipt.applied:
+            if not receipt.written:
+                # A replay whose edits had all landed before changes nothing, so it posts no second card.
                 return result
             # The workbook already changed, so a failure from here on must not hide the receipt.
             try:
