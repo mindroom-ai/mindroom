@@ -3328,6 +3328,14 @@ path = "mindroom.desktop"
 depends_on = []
 
 [[modules]]
+path = "mindroom.desktop.filesystem"
+depends_on = ["mindroom.path_confinement"]
+
+[[modules]]
+path = "mindroom.desktop.shell"
+depends_on = []
+
+[[modules]]
 path = "mindroom.desktop.configuration"
 depends_on = [
     "mindroom.desktop.protocol",
