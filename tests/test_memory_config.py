@@ -119,6 +119,33 @@ class TestMemoryConfig:
         assert result["llm"]["config"]["model"] == OPENAI_GPT_LUNA
         assert result["llm"]["config"]["api_key"] == "test-key"
 
+    @pytest.mark.parametrize(
+        ("configured_api_key", "expected_api_key"),
+        [("sk-configured", "sk-configured"), ("", "sk-shared"), (None, "sk-shared")],
+        ids=["explicit", "blank", "missing"],
+    )
+    def test_memory_llm_explicit_api_key_beats_shared_provider_key(
+        self,
+        tmp_path: Path,
+        configured_api_key: str | None,
+        expected_api_key: str,
+    ) -> None:
+        """An explicit memory.llm.config.api_key must not be replaced by the provider's shared key."""
+        runtime_paths = _runtime_paths(tmp_path)
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials("openai", {"api_key": "sk-shared"})
+        llm_settings: dict[str, object] = {"model": OPENAI_GPT_LUNA}
+        if configured_api_key is not None:
+            llm_settings["api_key"] = configured_api_key
+        memory = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(provider="openai", config=EmbedderConfig(model="text-embedding-3-small")),
+            llm=_MemoryLLMConfig(provider="openai", config=llm_settings),
+        )
+        config = Config(memory=memory, router=RouterConfig(model="default"))
+
+        result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
+
+        assert result["llm"]["config"]["api_key"] == expected_api_key
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("model_id", "expected_top_p", "legacy_request_builder"),
