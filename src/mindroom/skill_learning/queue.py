@@ -24,7 +24,9 @@ from mindroom.background_loop import WakeSignal
 from mindroom.file_locks import advisory_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
-from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.runtime_resolution import resolve_agent_execution, resolve_agent_runtime
+from mindroom.skill_learning.library import skills_fingerprint
+from mindroom.tool_system.skills import agent_workspace_skills_root
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     parse_tool_execution_identity_payload,
@@ -34,6 +36,7 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from contextlib import AbstractContextManager
+    from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -73,7 +76,7 @@ class QueueEntry(BaseModel):
     last_seen_at: float
 
     def execution_identity(self) -> ToolExecutionIdentity | None:
-        """Return the latest requester scope that completed a run in this conversation."""
+        """Return the latest requester scope that completed a run in this conversation, or the one that opened it."""
         return parse_tool_execution_identity_payload(self.identity) if self.identity is not None else None
 
 
@@ -114,6 +117,18 @@ def _scope_worker_key(config: Config, agent_name: str, identity: ToolExecutionId
     return execution.worker_key if execution.is_private else None
 
 
+def conversation_skills_root(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    identity: ToolExecutionIdentity | None,
+) -> Path:
+    """Return the workspace skills directory that a conversation's reviews maintain."""
+    runtime = resolve_agent_runtime(agent_name, config, runtime_paths, execution_identity=identity)
+    workspace_root = runtime.workspace.root if runtime.workspace is not None else None
+    return agent_workspace_skills_root(runtime_paths, agent_name, workspace_root=workspace_root)
+
+
 def queue_skill_review(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -127,8 +142,9 @@ def queue_skill_review(
     """Record a person's response, which began at ``started_at``, without storing content.
 
     The response runner registers each response as it starts, so the first one fixes where counting starts even
-    when it later fails or pauses for approval, and the approved continuation of a paused run still counts. Only a
-    completed response makes the conversation due.
+    when it later fails or pauses for approval, and the approved continuation of a paused run still counts. The
+    first registration also records the workspace skills as they were, so an agent saving a skill itself during
+    that response restarts counting. Only a completed response updates the entry and makes the conversation due.
     """
     agent = config.agents.get(agent_name)
     if agent is None or not agent.skill_learning.enabled:
@@ -139,18 +155,24 @@ def queue_skill_review(
     now = time.time()
     with _locked(runtime_paths):
         state = _read(runtime_paths)
-        entry = state.entries.get(key) or QueueEntry(
-            agent=agent_name,
-            session=session_id,
-            worker_key=worker_key,
-            identity=identity,
-            reviewed_through=(started_at, -1),
-            last_seen_at=now,
-        )
-        update: dict[str, object] = {"identity": identity, "last_seen_at": now}
+        entry = state.entries.get(key)
+        if entry is None:
+            skills_root = conversation_skills_root(config, runtime_paths, agent_name, execution_identity)
+            entry = QueueEntry(
+                agent=agent_name,
+                session=session_id,
+                worker_key=worker_key,
+                identity=identity,
+                reviewed_through=(started_at, -1),
+                skills_root=str(skills_root),
+                seen_fingerprint=skills_fingerprint(skills_root),
+                last_seen_at=now,
+            )
+        elif not completed:
+            return
         if completed:
-            update["has_new_runs"] = True
-        state.entries[key] = entry.model_copy(update=update)
+            entry = entry.model_copy(update={"identity": identity, "last_seen_at": now, "has_new_runs": True})
+        state.entries[key] = entry
         _write(runtime_paths, state)
     if completed:
         SKILL_LEARNING_WAKE.notify()
