@@ -52,7 +52,9 @@ MindRoom trims both fields, and a blank value counts as unset, so the provider's
 `ollama` and `llama_cpp` models skip the shared provider key step.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and drop any configured key.
 The dashboard's **Models** editor shows whether a model uses its saved key, its config key, or the provider key, except for `ollama` models.
-`mindroom doctor` checks a provider's shared key only when some model uses it, and lists models that have their own key without sending that key anywhere.
+`mindroom doctor` checks a provider's shared key only when some model uses it, and only against an endpoint that model loading would call.
+That is the provider's default endpoint, or for `openai` the `extra_kwargs.base_url` or `OPENAI_BASE_URL` endpoint; other providers' custom `base_url` values are reported, not probed.
+Doctor lists models that have their own key without sending that key anywhere.
 
 Presentation metadata is optional:
 

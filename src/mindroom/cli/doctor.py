@@ -220,13 +220,6 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
 }
 
 
-def _model_base_url(provider: str, model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
-    """Return the custom endpoint one model calls, resolved the way model loading resolves it."""
-    if provider == "openai":
-        return constants.runtime_openai_base_url(runtime_paths, model_config.extra_kwargs)
-    return (model_config.extra_kwargs or {}).get("base_url") or None
-
-
 def _http_check(
     url: str,
     headers: dict[str, str] | None = None,
@@ -556,10 +549,23 @@ def _check_api_key_provider(
         console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
         return 0, 0, 1
 
-    base_url = next(
-        (url for model in shared_key_models if (url := _model_base_url(provider, model, runtime_paths))),
-        None,
-    )
+    # Send the key only where model loading would: an OpenAI endpoint through the helper model
+    # loading uses, else the provider's default endpoint. Other providers' custom base_url
+    # handling lives in each model class, so doctor reports those instead of probing them.
+    if provider == "openai":
+        base_url = next(
+            (
+                url
+                for model in shared_key_models
+                if (url := constants.runtime_openai_base_url(runtime_paths, model.extra_kwargs))
+            ),
+            None,
+        )
+    elif all((model.extra_kwargs or {}).get("base_url") for model in shared_key_models):
+        console.print(f"[dim]-[/dim] {provider}: shared API key not validated (its models set a custom base_url)")
+        return 0, 0, 0
+    else:
+        base_url = None
     valid, detail = _validate_provider_key(provider, api_key, base_url)
     return _print_validation(
         valid,
@@ -620,13 +626,13 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
         return 0, 0, 1
 
     llm_provider = config.memory.llm.provider
-    llm_host = (
-        config.memory.llm.config.get("host")
-        or config.memory.llm.config.get("openai_base_url")
-        or config.memory.llm.config.get("base_url")
-    )
     if llm_provider == "ollama":
-        host = llm_host or _get_ollama_host(config, runtime_paths=runtime_paths)
+        host = (
+            config.memory.llm.config.get("host")
+            or config.memory.llm.config.get("openai_base_url")
+            or config.memory.llm.config.get("base_url")
+            or _get_ollama_host(config, runtime_paths=runtime_paths)
+        )
         valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")
         return _print_validation(
             valid,
@@ -639,25 +645,16 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
     api_key = get_memory_llm_api_key(llm_provider, config.memory.llm.config, runtime_paths)
-    if env_key and not api_key:
-        console.print(
-            f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
-        )
-        return 0, 0, 1
-    # Mem0's OpenAI client also falls back to OPENAI_BASE_URL, so probe the endpoint it will call.
-    base_url = (
-        constants.runtime_openai_base_url(runtime_paths, {"base_url": llm_host})
-        if llm_provider == "openai"
-        else llm_host
-    )
-    valid, detail = _validate_provider_key(llm_provider, api_key or "", base_url)
-    return _print_validation(
-        valid,
-        detail,
-        f"Memory LLM: {llm_provider}/{llm_model} API key valid",
-        f"Memory LLM: {llm_provider}/{llm_model} API key invalid",
-        f"Memory LLM: {llm_provider}/{llm_model} could not validate",
-    )
+    if api_key is None:
+        if env_key:
+            console.print(f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set")
+            return 0, 0, 1
+        return 0, 0, 0
+    # Mem0 resolves its endpoint from its own config and process env, which MindRoom does not
+    # share, so doctor reports the key source instead of guessing where Mem0 would send it.
+    source = "its own API key" if api_key.source == "config" else f"the shared {llm_provider} key"
+    console.print(f"[green]✓[/green] Memory LLM: {llm_provider}/{llm_model} uses {source} (not validated)")
+    return 1, 0, 0
 
 
 def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
@@ -710,15 +707,10 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
         )
         return 0, 0, 1
 
-    base_url = emb.config.host
-    valid, detail = _validate_provider_key(emb.provider, api_key or "", base_url)
-    return _print_validation(
-        valid,
-        detail,
-        f"Memory embedder: {emb.provider}/{emb.config.model} API key valid",
-        f"Memory embedder: {emb.provider}/{emb.config.model} API key invalid",
-        f"Memory embedder: {emb.provider}/{emb.config.model} could not validate",
-    )
+    # Mem0 builds this embedder from its own config and env, so doctor cannot know which
+    # endpoint it would call and does not send the key anywhere.
+    console.print(f"[dim]-[/dim] Memory embedder: {emb.provider}/{emb.config.model} not validated")
+    return 0, 0, 0
 
 
 def _validate_sentence_transformers_embedder(runtime_paths: RuntimePaths, model: str) -> tuple[bool, str]:
