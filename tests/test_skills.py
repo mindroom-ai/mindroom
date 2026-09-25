@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import os
 import platform
+import threading
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 import mindroom.tool_system.skills as skills_module
 import mindroom.tools  # noqa: F401
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -614,6 +616,29 @@ def test_workspace_skill_loads_record_usage_but_configured_skills_do_not(tmp_pat
     assert usage["local"]["use_count"] == 2
     assert "shared" not in usage
     assert not (tmp_path / "global" / ".usage.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_workspace_skill_loads_on_the_event_loop_record_usage_in_a_thread(tmp_path: Path) -> None:
+    """Agno calls skill tools on the event loop, so the usage write, which syncs files, must not block it."""
+    storage = tmp_path / "storage"
+    workspace_skills = _workspace_skills(storage)
+    _write_skill(workspace_skills, "local", "Workspace skill")
+    skills = _load(tmp_path, storage, [])
+    get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
+    writers: list[threading.Thread] = []
+    record = skills_module.record_skill_use
+
+    def spy(skill_path: Path) -> None:
+        writers.append(threading.current_thread())
+        record(skill_path)
+
+    with patch.object(skills_module, "record_skill_use", spy):
+        get_instructions(skill_name="local")
+        assert await wait_for_background_tasks(5)
+    assert writers
+    assert threading.main_thread() not in writers
+    assert json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))["local"]["use_count"] == 1
 
 
 def test_symlinked_workspace_skill_is_not_loaded(tmp_path: Path) -> None:

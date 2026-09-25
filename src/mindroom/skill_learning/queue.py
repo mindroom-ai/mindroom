@@ -191,11 +191,18 @@ def queue_skill_review(
         SKILL_LEARNING_WAKE.notify()
 
 
-def _entry_is_current(config: Config, entry: QueueEntry, now: float) -> bool:
+def _stale_seconds(config: Config) -> float:
+    """Keep idle conversations at least as long as a response may wait for approval, so its continuation counts."""
+    approval = config.tool_approval
+    waits = [approval.timeout_days, *(rule.timeout_days for rule in approval.rules if rule.timeout_days is not None)]
+    return max(_STALE_SECONDS, max(waits) * 86400)
+
+
+def _entry_is_current(config: Config, entry: QueueEntry, now: float, stale_seconds: float) -> bool:
     agent = config.agents.get(entry.agent)
     if agent is None or not agent.skill_learning.enabled:
         return False
-    if now - entry.last_seen_at > _STALE_SECONDS and not entry.has_new_runs:
+    if now - entry.last_seen_at > stale_seconds and not entry.has_new_runs:
         return False
     try:
         return _scope_worker_key(config, entry.agent, entry.execution_identity()) == entry.worker_key
@@ -213,8 +220,9 @@ def drop_retired_reviews(config: Config, runtime_paths: RuntimePaths, *, now: fl
         return []
     with _locked(runtime_paths):
         state = _read(runtime_paths)
+    stale_seconds = _stale_seconds(config)
     current = sorted(
-        ((key, entry) for key, entry in state.entries.items() if _entry_is_current(config, entry, now)),
+        ((key, entry) for key, entry in state.entries.items() if _entry_is_current(config, entry, now, stale_seconds)),
         key=lambda item: item[1].last_seen_at,
     )[-_MAX_ENTRIES:]
     dropped = {key: state.entries[key] for key in state.entries.keys() - {key for key, _entry in current}}

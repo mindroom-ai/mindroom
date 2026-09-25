@@ -28,6 +28,7 @@ from openai import AsyncOpenAI
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, resolve_runtime_paths
@@ -1183,7 +1184,7 @@ def test_one_malformed_usage_record_never_erases_the_others(tmp_path: Path) -> N
     _write_skill(root, "handwritten", HANDWRITTEN)
     usage_path = root / ".usage.json"
     records = json.loads(usage_path.read_text())
-    records["deploy-checks"]["note"] = "keep"
+    records["deploy-checks"] |= {"note": "keep", "patch_count": None}
     records["handwritten"] = {"use_count": "many"}
     records["old-habit"] = {"use_count": "many"}
     usage_path.write_text(json.dumps(records))
@@ -1195,6 +1196,19 @@ def test_one_malformed_usage_record_never_erases_the_others(tmp_path: Path) -> N
     learned = library.read_skill_file(root, "deploy-checks")
     assert learned is not None
     assert learned.learned
+
+
+def test_conversations_outlast_their_longest_approval_wait(tmp_path: Path) -> None:
+    """A response may wait longer than the 30-day idle limit for approval, and its conversation must still be there."""
+    config, paths = _learner(tmp_path)
+    day = 86400.0
+    with patch("mindroom.skill_learning.queue.time.time", return_value=0.0):
+        _queue(config, paths, completed=False)
+    assert queue.drop_retired_reviews(config, paths, now=45 * day) == []
+    with patch("mindroom.skill_learning.queue.time.time", return_value=0.0):
+        _queue(config, paths, completed=False)
+    config.tool_approval.rules.append(ApprovalRuleConfig(match="deploy", action="require_approval", timeout_days=60))
+    assert [key for key, _entry in queue.drop_retired_reviews(config, paths, now=45 * day)] == ["mind:session"]
 
 
 def test_archival_skips_unreadable_user_skills(tmp_path: Path) -> None:
@@ -1377,8 +1391,8 @@ def test_pruning_keeps_an_entry_that_received_a_run_meanwhile(tmp_path: Path) ->
     (paths.storage_root / "skill_learning_state.json").write_text(json.dumps(state))
     judge = queue._entry_is_current
 
-    def judge_then_queue(config: Config, entry: queue.QueueEntry, now: float) -> bool:
-        current = judge(config, entry, now)
+    def judge_then_queue(config: Config, entry: queue.QueueEntry, now: float, stale_seconds: float) -> bool:
+        current = judge(config, entry, now, stale_seconds)
         _queue(config, paths)
         return current
 

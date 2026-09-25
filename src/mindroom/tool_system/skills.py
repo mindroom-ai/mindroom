@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import platform
 import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -15,6 +17,7 @@ from agno.skills import LocalSkills, Skills
 from agno.skills.errors import SkillValidationError
 from agno.skills.loaders import SkillLoader
 
+from mindroom.background_tasks import create_background_task
 from mindroom.constants import runtime_env_values
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
@@ -195,10 +198,20 @@ class MindroomSkills(Skills):
         return self.get_skill(skill_name) if skill_name in self._workspace_skill_names else None
 
     def record_use(self, skill_name: str) -> None:
-        """Count one agent load of a workspace skill; configured skills carry no usage telemetry."""
+        """Count one agent load of a workspace skill; configured skills carry no usage telemetry.
+
+        Agno calls the skill tools on the event loop, so there the usage write runs in a thread instead.
+        """
         skill = self._workspace_skill(skill_name)
-        if skill is not None:
-            record_skill_use(Path(skill.source_path))
+        if skill is None:
+            return
+        record = partial(record_skill_use, Path(skill.source_path))
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            record()
+            return
+        create_background_task(asyncio.to_thread(record), name="record_skill_use")
 
     def _read_workspace_support(self, skill: Skill, directory: str, filename: str, key: str) -> str:
         """Read a listed support file through the confined workspace reader."""

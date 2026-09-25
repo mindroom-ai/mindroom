@@ -227,10 +227,14 @@ def _usage_records(root_fd: int) -> dict[str, object]:
 
 
 def _parse_usage(record: object) -> SkillUsage | None:
+    """Parse one record like Hermes, dropping only fields that do not validate, so ownership and the rest stay."""
+    if not isinstance(record, dict):
+        return None
     try:
         return SkillUsage.model_validate(record)
-    except ValidationError:
-        return None
+    except ValidationError as exc:
+        invalid = {error["loc"][0] for error in exc.errors()}
+        return SkillUsage.model_validate({name: value for name, value in record.items() if name not in invalid})
 
 
 def _write_usage_records(root_fd: int, records: dict[str, object]) -> None:

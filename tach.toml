@@ -4531,6 +4531,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_system.skills"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.constants",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.worker_routing",
