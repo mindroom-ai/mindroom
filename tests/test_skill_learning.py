@@ -484,7 +484,8 @@ async def test_reviewer_creates_views_and_patches_with_only_skill_tools(tmp_path
     assert (root / "older-lesson/SKILL.md").read_text().endswith("2. Check logs.\n")
     assert (root / "deploy-checks/SKILL.md").read_text().endswith("2. Retry.\n")
     assert all(tools == {"skills_list", "skill_view", "skill_manage"} for tools in model.offered_tools)
-    assert all(model.provider_tools_blocked)
+    # Provider adapters must leave tool selection on, or the reviewer can never call skill_manage.
+    assert not any(model.provider_tools_blocked)
     assert "<conversation>" in model.requests[0][-1]
     assert "tests passed" in model.requests[0][-1]
     refused = json.loads(model.requests[2][-1])
@@ -960,3 +961,33 @@ async def test_failed_shutdown_bookkeeping_does_not_swallow_the_cancellation(tmp
         worker.stop()
         (result,) = await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5)
     assert isinstance(result, asyncio.CancelledError)
+
+
+def test_learner_keeps_ownership_when_the_agent_rewrites_its_skill(tmp_path: Path) -> None:
+    """Like Hermes' usage records, provenance survives a foreground rewrite that drops the frontmatter marker."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    (root / "deploy-checks/SKILL.md").write_text(LEARNED.replace("metadata:\n  mindroom:\n    learned: true\n", ""))
+    current = library.read_skill_file(root, "deploy-checks")
+    assert current is not None
+    assert current.learned
+    library.write_skill_file(root, "deploy-checks", "references/notes.md", "Notes.", expected_digest=None)
+
+
+def test_pinned_skills_are_left_alone_by_learner_and_curator(tmp_path: Path) -> None:
+    """Pinning a learned skill in its frontmatter stops both automatic edits and archival."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    (root / "deploy-checks/SKILL.md").write_text(LEARNED.replace("learned: true", "pinned: true"))
+    with open_skills_root(root) as root_fd:
+        update_skill_usage(
+            root_fd,
+            "deploy-checks",
+            lambda usage: usage.model_copy(update={"created_at": datetime.now(UTC) - timedelta(days=90)}),
+        )
+    current = library.read_skill_file(root, "deploy-checks")
+    assert current is not None
+    assert not current.learned
+    with pytest.raises(library.SkillEditError, match="not learner-owned"):
+        library.write_skill_file(root, "deploy-checks", "references/x.md", "x", expected_digest=None)
+    assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []

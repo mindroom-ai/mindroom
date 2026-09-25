@@ -351,9 +351,7 @@ metadata:
     learned: true
 ---
 
-Every learner-owned SKILL.md must keep that marker.
-
-Protected skills (DO NOT edit these): configured bundled, plugin, and user skills, and every workspace skill without the learned marker. A workspace skill without the marker belongs to the user even when the agent wrote it during a normal turn or loaded it in this conversation. If such a skill is wrong or outdated, say so in your reply instead of editing it. If the only skills that need updating are protected, say "Nothing to save." and stop.
+Protected skills (DO NOT edit these): every skill whose owner in skills_list is not "learner": configured bundled, plugin, and user skills, and workspace skills that someone else wrote or pinned, even when they were loaded in this conversation. If such a skill is wrong or outdated, say so in your reply instead of editing it. If the only skills that need updating are protected, say "Nothing to save." and stop.
 
 Do NOT capture (these become persistent self-imposed constraints that bite later when the environment changes):
 - Environment-dependent failures: missing binaries, fresh-install errors, post-migration path mismatches, "command not found", unconfigured credentials, uninstalled packages. The user can fix these; they are not durable rules.

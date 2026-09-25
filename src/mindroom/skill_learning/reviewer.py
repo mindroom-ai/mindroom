@@ -16,13 +16,12 @@ from agno.run.base import RunStatus
 from mindroom import model_loading
 from mindroom.agent_storage import create_session_storage
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
-from mindroom.provider_tool_policy import without_provider_tools
 from mindroom.skill_learning.library import (
     SkillEditError,
     SkillFile,
     content_digest,
     create_skill,
-    is_learned,
+    learner_owns,
     read_skill_file,
     remove_skill_file,
     support_file_paths,
@@ -31,7 +30,13 @@ from mindroom.skill_learning.library import (
 from mindroom.skill_learning.transcript import render_transcript
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.skills import build_agent_skills, list_skill_listings
-from mindroom.tool_system.workspace_skills import SKILL_FILENAME, parse_skill_markdown
+from mindroom.tool_system.workspace_skills import (
+    SKILL_FILENAME,
+    SkillUsage,
+    load_skill_usage,
+    open_skills_root,
+    parse_skill_markdown,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -344,6 +349,11 @@ def _skill_catalog(
 ) -> tuple[dict[str, _CatalogEntry], frozenset[str]]:
     """Return the agent's effective skills and every name a new skill must not shadow."""
     skills = build_agent_skills(agent_name, config, runtime_paths, workspace_skills_root=skills_root)
+    try:
+        with open_skills_root(skills_root) as root_fd:
+            usage = load_skill_usage(root_fd)
+    except FileNotFoundError:
+        usage = {}
     catalog: dict[str, _CatalogEntry] = {}
     for skill in skills.get_all_skills() if skills is not None else []:
         source = Path(skill.source_path)
@@ -352,7 +362,8 @@ def _skill_catalog(
             name=skill.name,
             description=skill.description,
             directory=source.name if in_workspace else None,
-            learned=in_workspace and is_learned({"metadata": skill.metadata}, path=str(source)),
+            learned=in_workspace
+            and learner_owns({"metadata": skill.metadata}, usage.get(source.name, SkillUsage()), path=str(source)),
             instructions=skill.instructions,
         )
     reserved = {name.lower() for name in catalog} | {listing.name.lower() for listing in list_skill_listings()}
@@ -394,12 +405,11 @@ async def review_conversation(
         telemetry=False,
     )
     invocation_id = uuid4().hex
-    with without_provider_tools():
-        response = await reviewer.arun(
-            review_input,
-            run_id=invocation_id,
-            session_id=f"skill_learning:{agent_name}:{session_id}",
-        )
+    response = await reviewer.arun(
+        review_input,
+        run_id=invocation_id,
+        session_id=f"skill_learning:{agent_name}:{session_id}",
+    )
     await record_helper_usage(
         response,
         owner=HelperUsageOwner(

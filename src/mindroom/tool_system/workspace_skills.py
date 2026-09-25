@@ -12,7 +12,7 @@ import stat
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import json5
 from agno.skills.skill import Skill
@@ -38,10 +38,11 @@ _USAGE_LOCK = threading.Lock()
 
 
 class SkillUsage(BaseModel):
-    """Activity telemetry for one workspace skill directory; never an authorization input."""
+    """Provenance and activity for one workspace skill directory; worker-writable, so it never grants access."""
 
     model_config = ConfigDict(extra="forbid")
 
+    created_by: Literal["learner"] | None = None
     created_at: datetime | None = None
     use_count: int = 0
     last_used_at: datetime | None = None
