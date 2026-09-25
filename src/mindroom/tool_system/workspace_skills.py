@@ -6,10 +6,10 @@ Hidden entries under ``skills/`` (usage, history, archive) are never discovered 
 
 from __future__ import annotations
 
-import fcntl
 import os
 import re
 import stat
+import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -34,6 +34,7 @@ SKILL_FILENAME = "SKILL.md"
 FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 MAX_SKILL_FILE_BYTES = 1_048_576
 _USAGE_FILENAME = ".usage.json"
+_USAGE_LOCK = threading.Lock()
 
 
 class SkillUsage(BaseModel):
@@ -91,7 +92,7 @@ def list_entries(directory_fd: int, *, directories: bool) -> list[str]:
         )
 
 
-def _list_support_files(skill_fd: int, directory: str) -> list[str]:
+def list_support_files(skill_fd: int, directory: str) -> list[str]:
     """Return visible regular files directly inside one support directory; a linked directory has none."""
     try:
         with open_directory_within_root(skill_fd, directory) as support_fd:
@@ -181,8 +182,8 @@ def _load_workspace_skill(root_fd: int, skills_root: Path, directory: str) -> Sk
             description=frontmatter.get("description", ""),
             instructions=instructions,
             source_path=str(skills_root / directory),
-            scripts=_list_support_files(skill_fd, "scripts"),
-            references=_list_support_files(skill_fd, "references"),
+            scripts=list_support_files(skill_fd, "scripts"),
+            references=list_support_files(skill_fd, "references"),
             metadata=frontmatter.get("metadata"),
             license=frontmatter.get("license"),
             compatibility=frontmatter.get("compatibility"),
@@ -217,18 +218,15 @@ def load_skill_usage(root_fd: int) -> dict[str, SkillUsage]:
 
 
 def update_skill_usage(root_fd: int, directory: str, update: Callable[[SkillUsage], SkillUsage]) -> None:
-    """Replace one skill's usage record atomically while holding the skills directory lock.
+    """Replace one skill's usage record atomically.
 
-    The lock is taken on the already pinned directory itself, so every thread and process sharing the workspace
-    serializes without opening a lock file by pathname.
+    The lock is process-local on purpose: any lock inside the worker-shared workspace could be held by worker
+    code to stall the primary, so concurrent primaries sharing one storage root may occasionally drop a count.
     """
-    fcntl.flock(root_fd, fcntl.LOCK_EX)
-    try:
+    with _USAGE_LOCK:
         usage = load_skill_usage(root_fd)
         usage[directory] = update(usage.get(directory, SkillUsage()))
         atomic_write_bytes_at(root_fd, _USAGE_FILENAME, _USAGE.dump_json(usage, exclude_defaults=True))
-    finally:
-        fcntl.flock(root_fd, fcntl.LOCK_UN)
 
 
 def record_skill_use(skill_path: Path) -> None:

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from yaml import YAMLError
 
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
+from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.redaction import contains_credential
 from mindroom.tool_system.workspace_skills import (
@@ -25,6 +26,7 @@ from mindroom.tool_system.workspace_skills import (
     SKILL_FILENAME,
     SkillUsage,
     list_entries,
+    list_support_files,
     load_skill_usage,
     open_skills_root,
     parse_skill_markdown,
@@ -36,6 +38,8 @@ from mindroom.tool_system.workspace_skills import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+logger = get_logger(__name__)
 
 _MAX_NAME_CHARS = 64
 _MAX_DESCRIPTION_CHARS = 1024
@@ -60,6 +64,7 @@ class SkillFile:
     content: str
     digest: str
     learned: bool
+    name: str
 
 
 def content_digest(content: str) -> str:
@@ -82,6 +87,7 @@ def _validate_skill_name(name: str) -> None:
 
 
 def _validate_markdown(name: str, content: str, *, new: bool) -> None:
+    """Check a learned SKILL.md: frontmatter ``name`` must stay ``name``, and new skills need a short description."""
     if len(content) > _MAX_SKILL_MARKDOWN_CHARS:
         msg = f"SKILL.md is {len(content)} characters; the limit is {_MAX_SKILL_MARKDOWN_CHARS}. Move depth into references/."
         raise SkillEditError(msg)
@@ -133,14 +139,12 @@ def _split_relative_path(relative_path: str) -> tuple[str | None, str]:
 
 
 @contextmanager
-def _open_skill(root_fd: int, name: str, *, writable: bool) -> Iterator[int]:
-    """Open one skill directory; only learner-valid names are ever written, any visible directory can be read."""
-    if writable:
-        _validate_skill_name(name)
-    elif "/" in name or name.startswith("."):
-        msg = f"Invalid skill directory {name!r}."
+def _open_skill(root_fd: int, directory: str) -> Iterator[int]:
+    """Open one visible skill directory; new learned skills are named by the stricter creation rule."""
+    if "/" in directory or directory.startswith("."):
+        msg = f"Invalid skill directory {directory!r}."
         raise SkillEditError(msg)
-    with open_directory_within_root(root_fd, name) as skill_fd:
+    with open_directory_within_root(root_fd, directory) as skill_fd:
         yield skill_fd
 
 
@@ -148,7 +152,7 @@ def read_skill_file(skills_root: Path, name: str, relative_path: str = SKILL_FIL
     """Return one workspace skill file and whether its skill is learner-owned, or None when absent."""
     _split_relative_path(relative_path)
     try:
-        with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name, writable=False) as skill_fd:
+        with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
             return _read_skill_file(skill_fd, name, relative_path)
     except FileNotFoundError:
         return None
@@ -163,18 +167,23 @@ def _read_skill_file(skill_fd: int, name: str, relative_path: str) -> SkillFile 
         frontmatter = parse_skill_markdown(markdown)[0] if markdown is not None else {}
     except (TypeError, YAMLError):
         frontmatter = {}
-    return SkillFile(content=content, digest=content_digest(content), learned=is_learned(frontmatter, path=name))
+    skill_name = frontmatter.get("name")
+    return SkillFile(
+        content=content,
+        digest=content_digest(content),
+        learned=is_learned(frontmatter, path=name),
+        name=skill_name if isinstance(skill_name, str) else name,
+    )
 
 
 def support_file_paths(skills_root: Path, name: str) -> list[str]:
     """Return every visible support file of one workspace skill as ``directory/filename``."""
-    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name, writable=False) as skill_fd:
-        present = set(list_entries(skill_fd, directories=True)) & _SUPPORT_DIRECTORIES
-        files: list[str] = []
-        for directory in sorted(present):
-            with open_directory_within_root(skill_fd, directory) as support_fd:
-                files.extend(f"{directory}/{filename}" for filename in list_entries(support_fd, directories=False))
-        return files
+    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+        return [
+            f"{directory}/{filename}"
+            for directory in sorted(_SUPPORT_DIRECTORIES)
+            for filename in list_support_files(skill_fd, directory)
+        ]
 
 
 def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: frozenset[str]) -> None:
@@ -208,11 +217,12 @@ def write_skill_file(
 ) -> None:
     """Replace or add one file of a learner-owned skill that the reviewer read in its current state."""
     directory, filename = _split_relative_path(relative_path)
-    if directory is None:
-        _validate_markdown(name, content, new=False)
     _validate_content(relative_path, content)
-    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name, writable=True) as skill_fd:
-        current = _require_writable(skill_fd, name, relative_path, expected_digest)
+    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+        markdown, current = _require_writable(skill_fd, name, relative_path, expected_digest)
+        if directory is None:
+            # An edit keeps the skill's identity, which may differ from its directory for an adopted skill.
+            _validate_markdown(markdown.name, content, new=False)
         if current is not None:
             _save_history(root_fd, name, relative_path, current.content)
         if directory is None:
@@ -231,8 +241,8 @@ def remove_skill_file(skills_root: Path, name: str, relative_path: str, *, expec
     if directory is None:
         msg = "SKILL.md cannot be removed; only support files can."
         raise SkillEditError(msg)
-    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name, writable=True) as skill_fd:
-        current = _require_writable(skill_fd, name, relative_path, expected_digest)
+    with open_skills_root(skills_root) as root_fd, _open_skill(root_fd, name) as skill_fd:
+        _markdown, current = _require_writable(skill_fd, name, relative_path, expected_digest)
         if current is None:
             msg = f"{relative_path} does not exist."
             raise SkillEditError(msg)
@@ -242,7 +252,13 @@ def remove_skill_file(skills_root: Path, name: str, relative_path: str, *, expec
         _record_patch(root_fd, name)
 
 
-def _require_writable(skill_fd: int, name: str, relative_path: str, expected_digest: str | None) -> SkillFile | None:
+def _require_writable(
+    skill_fd: int,
+    name: str,
+    relative_path: str,
+    expected_digest: str | None,
+) -> tuple[SkillFile, SkillFile | None]:
+    """Return the learner-owned SKILL.md and the current target, which must match the reviewer's last read."""
     markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME)
     if markdown is None or not markdown.learned:
         msg = (
@@ -257,7 +273,7 @@ def _require_writable(skill_fd: int, name: str, relative_path: str, expected_dig
             "skill_view for it, then retry using the content just returned."
         )
         raise SkillEditError(msg)
-    return current
+    return markdown, current
 
 
 def _write_keeping_mode(directory_fd: int, filename: str, content: str) -> None:
@@ -296,10 +312,13 @@ def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: da
     with open_skills_root(skills_root) as root_fd:
         usage = load_skill_usage(root_fd)
         for name in list_entries(root_fd, directories=True):
-            if not _NAME.fullmatch(name):
+            try:
+                with open_directory_within_root(root_fd, name) as skill_fd:
+                    markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME)
+            except (OSError, ValueError) as exc:
+                # One unreadable user skill must not block archival, and with it every review of the workspace.
+                logger.warning("Skipping unreadable workspace skill during archival", skill=name, error=str(exc))
                 continue
-            with open_directory_within_root(root_fd, name) as skill_fd:
-                markdown = _read_skill_file(skill_fd, name, SKILL_FILENAME)
             if markdown is None or not markdown.learned:
                 continue
             last_activity = usage.get(name, SkillUsage()).last_activity_at()

@@ -60,6 +60,9 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
+# Values that only stand in for a secret: shell or template references, ellipses, and masking runs.
+_PLACEHOLDER_PATTERN = re.compile(r"^[$<{%\[]|\.\.\.|x{4,}|\*{3,}", re.IGNORECASE)
+_ASSIGNED_VALUE_PATTERN = re.compile(r"[\"']?([^\s\"',;&)\]}]+)")
 # An unterminated block still redacts through the end of the text, so a split key never leaks its body.
 _PRIVATE_KEY_PATTERN = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
@@ -531,14 +534,45 @@ def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
 
 
 def contains_credential(value: str) -> bool:
-    """Return whether text holds a literal credential: a private key, a known token format, or a URL secret.
+    """Return whether text holds a literal credential rather than a placeholder or prose.
 
-    Unlike redaction, placeholder assignments such as ``OPENAI_API_KEY=<your key>`` do not count.
+    Unlike redaction, which also hides harmless values, this flags private keys, long known token formats, bearer
+    tokens, URL passwords or secret query values, and secret-named assignments, while exempting placeholders such
+    as ``OPENAI_API_KEY=<your key>``, ``sk-...``, or ``$TOKEN``.
     """
-    return bool(
-        _PRIVATE_KEY_PATTERN.search(value)
-        or _TOKEN_LIKE_PATTERN.search(value)
-        or any(_redact_url(match.group("url")) != match.group("url") for match in _URL_PATTERN.finditer(value)),
+    if _PRIVATE_KEY_PATTERN.search(value):
+        return True
+    tokens = [
+        match.group("token")
+        for pattern in (_TOKEN_LIKE_PATTERN, _BEARER_TOKEN_PATTERN)
+        for match in pattern.finditer(value)
+    ]
+    if any(_looks_like_secret(token) for token in tokens):
+        return True
+    if any(_url_holds_secret(match.group("url")) for match in _URL_PATTERN.finditer(value)):
+        return True
+    for match in _ASSIGNMENT_PREFIX_PATTERN.finditer(value):
+        assigned = _ASSIGNED_VALUE_PATTERN.match(value, match.end())
+        if _is_sensitive_key(match.group("key")) and assigned is not None and _looks_like_secret(assigned.group(1)):
+            return True
+    return False
+
+
+def _looks_like_secret(value: str) -> bool:
+    return len(value) >= 16 and len(set(value)) >= 8 and not _PLACEHOLDER_PATTERN.search(value)
+
+
+def _url_holds_secret(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        password = parsed.password
+    except ValueError:
+        return False
+    if password and not _PLACEHOLDER_PATTERN.search(password):
+        return True
+    return any(
+        _is_redacted_query_key(key) and _looks_like_secret(item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
     )
 
 

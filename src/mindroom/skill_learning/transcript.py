@@ -8,6 +8,7 @@ which keeps it valid for every provider regardless of which tools the reviewer i
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING
 
 from mindroom.history_run_visibility import is_model_history_visible_run
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
 
 _CONVERSATION_ROLES = frozenset({"user", "assistant", "tool"})
+_CLOSING_TAG = re.compile(r"</\s*conversation\s*>", re.IGNORECASE)
 _TAIL_MESSAGES = 24
 _DIGEST_USER_CHARS = 300
 _DIGEST_ASSISTANT_CHARS = 200
@@ -82,7 +84,7 @@ def render_transcript(messages: Sequence[Message], *, budget_chars: int) -> str:
         sections.append(f"[{omitted_messages} further messages omitted to fit the review budget.]")
     sections.extend(verbatim)
     # Conversation content must not close the reviewer's <conversation> evidence block.
-    return "\n\n".join(sections).replace("</conversation>", "<\\/conversation>")
+    return _CLOSING_TAG.sub("<\\/conversation>", "\n\n".join(sections))
 
 
 def _digest_line(message: Message) -> str | None:

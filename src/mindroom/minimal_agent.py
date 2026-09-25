@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -18,6 +19,7 @@ from mindroom.agent_cli.worker import open_configured_cli_worker
 from mindroom.agent_cli.worker_protocol import SHELL_OPERATION_NAMES, CliShellSettings
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.approval_tools import authorize_prepared_tool_call
+from mindroom.background_tasks import create_background_task
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, PreparedAgentToolCatalog
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -106,7 +108,8 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
         """Reading a skill's context document is minimal mode's equivalent of loading its instructions."""
         skill_name = self.skill_documents.get(document_name)
         if skill_name is not None and isinstance(self.skills, MindroomSkills):
-            self.skills.record_use(skill_name)
+            # Context reads run on the event loop; the usage write happens off it.
+            create_background_task(asyncio.to_thread(self.skills.record_use, skill_name), name="record_skill_use")
 
     def _failure_message(self, reason: str) -> str:
         assert self.id is not None

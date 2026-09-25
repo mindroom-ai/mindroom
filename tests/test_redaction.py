@@ -999,13 +999,27 @@ def test_private_key_blocks_are_redacted_through_their_end_or_the_text_end() -> 
 
 
 def test_contains_credential_flags_literal_secrets_but_not_placeholders() -> None:
-    """Learned skills may describe setup steps, so placeholder assignments are not credentials."""
-    for placeholder in ("Set OPENAI_API_KEY=<your key>", "Authorization: Bearer $TOKEN", "password: ask the user"):
-        assert not contains_credential(placeholder)
-    for secret in (
+    """Learned skills may describe setup steps, so placeholders and prose are not credentials."""
+    placeholders = (
+        "Set OPENAI_API_KEY=<your key>",
+        "OPENAI_API_KEY=sk-...",
+        "ghp_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        "https://api.example.test/?api_key=$API_KEY",
+        "https://user:${TOKEN}@git.example.test/repo",
+        "ssh://git@github.com/org/repo.git",
+        "postgres://postgres@localhost/db",
+        "pip install sk-learn",
+        "Authorization: Bearer $TOKEN",
+        "password: ask the user",
+    )
+    secrets = (
         "token sk-abcdefghijklmnopqrstu",
-        "connect to https://alice:secret@db.example.test",
-        "https://api.example.test/?token=abc123",
+        "connect to https://alice:hunter2@db.example.test",
+        "https://api.example.test/?token=a8f3k2m9q7w1z5x0v6b4",
+        "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc",
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "API_KEY=0123456789abcdef0123456789abcdef",
         "-----BEGIN RSA PRIVATE KEY-----\nMIIabc",
-    ):
-        assert contains_credential(secret)
+    )
+    assert [text for text in placeholders if contains_credential(text)] == []
+    assert [text for text in secrets if not contains_credential(text)] == []

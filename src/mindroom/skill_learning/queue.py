@@ -164,12 +164,14 @@ def claim_due_reviews(config: Config, runtime_paths: RuntimePaths, *, now: float
         ((key, entry) for key, entry in state.entries.items() if _entry_is_current(config, entry, now)),
         key=lambda item: item[1].last_seen_at,
     )[-_MAX_ENTRIES:]
-    dropped = state.entries.keys() - {key for key, _entry in current}
+    dropped = {key: state.entries[key] for key in state.entries.keys() - {key for key, _entry in current}}
     if dropped:
         with _locked(runtime_paths):
             state = _read(runtime_paths)
-            for key in dropped:
-                state.entries.pop(key, None)
+            for key, snapshot in dropped.items():
+                # A run queued since the snapshot keeps its entry for the next cycle to judge.
+                if state.entries.get(key) == snapshot:
+                    del state.entries[key]
             _write(runtime_paths, state)
     due = [
         (key, entry)
