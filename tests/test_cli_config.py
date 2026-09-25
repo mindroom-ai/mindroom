@@ -3270,7 +3270,7 @@ class TestDoctor:
         env: dict[str, str],
         expected: str,
     ) -> None:
-        """Mem0 clients other than openai and anthropic read their own env key, which doctor reports."""
+        """Doctor reports the process-env key a Mem0 client reads itself, including OpenRouter replacing openai."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
