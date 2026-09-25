@@ -76,7 +76,7 @@ def render_transcript(messages: Sequence[Message], *, budget_chars: int) -> str:
 
     sections: list[str] = []
     if omitted_digest or digest:
-        header = "[Earlier conversation digest; older turns are summarised, recent messages follow verbatim.]"
+        header = "[Earlier conversation digest; older turns are shortened to one line each, recent messages follow.]"
         if omitted_digest:
             header += f"\n[{omitted_digest} earlier turns omitted to fit the review budget.]"
         sections.append("\n".join([header, *digest]))
@@ -106,12 +106,14 @@ def _render_message(message: Message, limit: int) -> str:
         heading = f"TOOL RESULT ({message.tool_name or 'unknown tool'}):"
     else:
         heading = f"{message.role.upper()}:"
-    lines = [heading, _clip(message.get_content_string(), limit)]
+    calls = []
     for call in message.tool_calls or []:
         function = call.get("function") or {}
         arguments = function.get("arguments")
         rendered = arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
-        lines.append(f"-> calls {function.get('name', 'unknown tool')}({_clip(rendered, limit // 4)})")
+        calls.append(f"-> calls {function.get('name', 'unknown tool')}({_clip(rendered, limit // 4)})")
+    content_limit = max(_MIN_MESSAGE_CHARS, limit - len(heading) - sum(len(line) + 1 for line in calls))
+    lines = [heading, _clip(message.get_content_string(), content_limit), *calls]
     return redact_sensitive_text(_clip("\n".join(lines), limit))
 
 
@@ -120,6 +122,8 @@ def _tool_call_names(message: Message) -> list[str]:
 
 
 def _clip(text: str, limit: int) -> str:
+    """Keep the start and the end, where a command and its error or result usually are."""
     if len(text) <= limit:
         return text
-    return f"{text[:limit]}\n[... {len(text) - limit} characters omitted]"
+    half = limit // 2
+    return f"{text[:half]}\n[... {len(text) - 2 * half} characters omitted ...]\n{text[-half:]}"

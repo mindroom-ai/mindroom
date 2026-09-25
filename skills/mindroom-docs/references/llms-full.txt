@@ -14249,7 +14249,9 @@ Shutdown interrupts a running review, which runs again after the next start.
 ### What a review can do
 
 The reviewer is a separate model run that can only call `skills_list`, `skill_view`, and `skill_manage`.
-It receives the persisted conversation as evidence it must not obey: older turns as one-line digests and the newest 24 messages verbatim, including tool calls and results, with credential-like values redacted.
+It receives the persisted conversation as evidence it must not obey: the newest 24 messages verbatim, including tool calls and results, and each older message shortened to one line, with credential-like values redacted.
+Older tool results are left out, and a very long message keeps its start and end.
+Hermes replays the full conversation when the review uses the agent's own model and shortens older turns only for a different model, to limit the cost of a review without a warm prompt cache; MindRoom reviews later from stored history, so every review is such a review and always shortens older turns.
 Runs that model history hides, such as errored, cancelled, or paused runs, are left out.
 One review may read about 75% of the review model's `context_window` across all of its requests, capped at 600,000 tokens and defaulting to 120,000 tokens when the model sets no window.
 The budget is estimated at four characters per token.
