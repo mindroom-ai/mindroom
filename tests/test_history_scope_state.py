@@ -6,6 +6,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -19,7 +20,7 @@ from agno.session.team import TeamSession
 from agno.team import Team as AgnoTeam
 from agno.tools.function import Function
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
+from mindroom.agent_storage import create_session_storage, create_state_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
@@ -49,6 +50,21 @@ from tests.history_helpers import (  # noqa: F401
     _session,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from agno.db.base import BaseDb
+
+
+@pytest.fixture
+def storage(tmp_path: Path) -> Iterator[BaseDb]:
+    """Conversation storage for reading seen ids, which include the compaction archive's."""
+    db = create_state_storage("test_agent", tmp_path / "seen", subdir="sessions", session_table="test_agent_sessions")
+    try:
+        yield db
+    finally:
+        db.close()
+
 
 def _shared_session(*, is_team: bool) -> AgentSession | TeamSession:
     if is_team:
@@ -70,7 +86,7 @@ def _shared_session(*, is_team: bool) -> AgentSession | TeamSession:
     )
 
 
-def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:
+def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path, storage: BaseDb) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     scope = HistoryScope(kind="team", scope_id="team-123")
     session = _session("session-1")
@@ -78,7 +94,7 @@ def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None
     assert update_scope_seen_event_ids(session, scope, ["event-1"]) is True
     set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
 
-    assert read_scope_seen_event_ids(session, scope) == {"event-1"}
+    assert read_scope_seen_event_ids(storage, session, scope) == {"event-1"}
 
 
 def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> None:
@@ -98,7 +114,7 @@ def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> N
     assert session.metadata == {}
 
 
-def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Path) -> None:
+def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Path, storage: BaseDb) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     run = _completed_run("run-1")
@@ -108,11 +124,11 @@ def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Pat
     }
     session = _session("session-1", runs=[run])
 
-    assert read_scope_seen_event_ids(session, scope) == {"question-1", "answer-1"}
+    assert read_scope_seen_event_ids(storage, session, scope) == {"question-1", "answer-1"}
 
 
 @pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
-def test_seen_event_ids_match_model_history_visibility(is_team: bool) -> None:
+def test_seen_event_ids_match_model_history_visibility(storage: BaseDb, *, is_team: bool) -> None:
     entity_id = "team-123" if is_team else "test_agent"
     scope = HistoryScope(kind="team" if is_team else "agent", scope_id=entity_id)
 
@@ -149,7 +165,7 @@ def test_seen_event_ids_match_model_history_visibility(is_team: bool) -> None:
         session = AgentSession(session_id="session-1", agent_id=entity_id, runs=runs, created_at=1, updated_at=1)
     update_scope_seen_event_ids(session, scope, ["preserved-event"])
 
-    assert read_scope_seen_event_ids(session, scope) == {"completed-event", "preserved-event", "running-event"}
+    assert read_scope_seen_event_ids(storage, session, scope) == {"completed-event", "preserved-event", "running-event"}
     assert [run.run_id for run in scope_visible_runs(session, scope)] == ["completed", "running"]
 
 
@@ -303,7 +319,7 @@ def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
     }
 
 
-def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> None:
+def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path, storage: BaseDb) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
     team_scope = HistoryScope(kind="team", scope_id="team-123")
@@ -326,8 +342,8 @@ def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> Non
     )
     update_scope_seen_event_ids(session, team_scope, ["preserved-team-event"])
 
-    assert read_scope_seen_event_ids(session, agent_scope) == {"agent-event"}
-    assert read_scope_seen_event_ids(session, team_scope) == {"team-event", "preserved-team-event"}
+    assert read_scope_seen_event_ids(storage, session, agent_scope) == {"agent-event"}
+    assert read_scope_seen_event_ids(storage, session, team_scope) == {"team-event", "preserved-team-event"}
 
 
 @pytest.mark.asyncio
@@ -410,7 +426,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
     assert persisted.runs == []
-    assert read_scope_seen_event_ids(persisted, scope) == {
+    assert read_scope_seen_event_ids(storage, persisted, scope) == {
         "event-1",
         "event-2",
         "event-3",

@@ -328,8 +328,8 @@ def test_reconcile_restores_the_latest_generation_summary(tmp_path: Path) -> Non
     storage.close()
 
 
-def test_reconcile_records_an_interrupted_chunk_whose_summary_text_did_not_change(tmp_path: Path) -> None:
-    """A chunk archived without its session write still counts its events as seen when its summary matches."""
+def test_an_interrupted_chunk_counts_its_events_as_seen_when_its_summary_text_did_not_change(tmp_path: Path) -> None:
+    """Seen ids come from the archive, so a chunk archived without its session write still counts."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1"), _completed_run("run-2")])
@@ -350,9 +350,10 @@ def test_reconcile_records_an_interrupted_chunk_whose_summary_text_did_not_chang
     reconcile_compaction_state(storage, reloaded, _SCOPE)
 
     persisted = get_agent_session(storage, "session-1")
-    storage.close()
     assert persisted is not None
-    assert "$run-1" in read_scope_seen_event_ids(persisted, _SCOPE)
+    seen_event_ids = read_scope_seen_event_ids(storage, persisted, _SCOPE)
+    storage.close()
+    assert "$run-1" in seen_event_ids
     assert [run.run_id for run in persisted.runs or []] == ["run-2"]
 
 

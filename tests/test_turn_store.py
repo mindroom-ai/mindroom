@@ -375,11 +375,16 @@ def _seeded_storage(
     *,
     name: str = "agent",
 ) -> BaseDb:
-    """Return real conversation storage, seeded with ``session`` when one is given."""
+    """Return real conversation storage, seeded with ``session`` as an older release could have left it.
+
+    Reopening after seeding runs the storage-open migrations, as a restart onto this release would.
+    """
     storage = create_state_storage(name, tmp_path / name, subdir="sessions", session_table=f"{name}_sessions")
-    if session is not None:
-        seed_session(storage, session)
-    return storage
+    if session is None:
+        return storage
+    seed_session(storage, session)
+    storage.close()
+    return create_state_storage(name, tmp_path / name, subdir="sessions", session_table=f"{name}_sessions")
 
 
 def _stored(storage: BaseDb, session: AgentSession | TeamSession) -> AgentSession | TeamSession:
@@ -1385,7 +1390,7 @@ async def test_prepare_redaction_invalidates_legacy_compacted_replay(
     stored = _stored(storage, session)
     assert stored.runs == []
     assert stored.summary is None
-    assert read_scope_seen_event_ids(stored, scope) == set()
+    assert read_scope_seen_event_ids(storage, stored, scope) == set()
     assert read_scope_state(stored, scope) == HistoryScopeState()
     assert compaction_generations(storage, scope.key, target.session_id) == [
         StoredGeneration(summary=None, summary_model=None, legacy=True),
@@ -1584,7 +1589,7 @@ async def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(
     stored = _stored(storage, session)
     assert stored.runs == []
     assert stored.summary is None
-    assert read_scope_seen_event_ids(stored, scope) == set()
+    assert read_scope_seen_event_ids(storage, stored, scope) == set()
     cleaned = store.get_turn_record(human_event_id)
     assert cleaned is not None
     assert cleaned.pending_redaction_cleanup_event_ids == ()
@@ -1775,7 +1780,7 @@ async def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(
     assert should_suppress is False
     stored_owner = _stored(owner_storage, owner_session)
     assert stored_owner.summary is None
-    assert read_scope_seen_event_ids(stored_owner, scope) == set()
+    assert read_scope_seen_event_ids(owner_storage, stored_owner, scope) == set()
     assert _stored(unrelated_storage, unrelated_session).summary is not None
     unrelated_store.deps.state_writer.create_storage.assert_not_called()
 

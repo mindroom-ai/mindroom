@@ -29,6 +29,7 @@ from mindroom import (
     agno_compat_sqlite,
 )
 from mindroom.constants import prompt_roles_for_history_storage
+from mindroom.history.legacy_compaction_state import migrate_compaction_database
 from mindroom.legacy_session_storage import scrub_legacy_run_blobs
 from mindroom.legacy_usage_storage import migrate_usage_database
 from mindroom.logging_config import get_logger
@@ -217,6 +218,7 @@ def _create_sqlite_state_storage(
         db_dir.mkdir(parents=True, exist_ok=True)
         if subdir == "sessions":
             migrate_usage_database(db_dir / f"{storage_name}.db", session_table)
+            migrate_compaction_database(db_dir / f"{storage_name}.db", session_table)
         db_file = str(db_dir / f"{storage_name}.db")
         # Both: the engine is what the database is reached through, and the path
         # is what it reports itself as. Handing over an engine alone leaves

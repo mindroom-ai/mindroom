@@ -17,7 +17,6 @@ from agno.session.summary import SessionSummary
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
-from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY
 from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.execution_preparation import (
     _prepare_bound_team_execution_context,
@@ -778,12 +777,6 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         runs=previous_runs,
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session.metadata = {
-        MINDROOM_COMPACTION_METADATA_KEY: {
-            "version": 2,
-            "states": {scope.key: {"compacted_run_ids": ["prior-tombstone"]}},
-        },
-    }
     seed_session(storage, session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
@@ -886,8 +879,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     summary_only_tokens = _estimate_session_summary_tokens(persisted.summary.summary)
     assert outcome.after_tokens == summary_only_tokens
     assert outcome.after_tokens < replay_budget
-    # The legacy tombstone was adopted into the archive ahead of the new generations.
-    assert archived_run_ids(storage) == ["prior-tombstone", *(f"run-{index:02}" for index in range(1, 24))]
+    assert archived_run_ids(storage) == [f"run-{index:02}" for index in range(1, 24)]
     progress_events = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleProgress)]
     assert progress_events
     assert progress_events[-1].runs_remaining > 0

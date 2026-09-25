@@ -26,20 +26,42 @@ from mindroom.history.types import HistoryScope
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 _SCOPE = HistoryScope(kind="agent", scope_id="code")
 
 
+def _open(tmp_path: Path) -> SqliteDb:
+    db = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
+    assert isinstance(db, SqliteDb)
+    return db
+
+
 @pytest.fixture
 def storage(tmp_path: Path) -> Iterator[SqliteDb]:
     """Use the production conversation storage owner."""
-    db = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
-    assert isinstance(db, SqliteDb)
+    db = _open(tmp_path)
     try:
         yield db
     finally:
+        db.close()
+
+
+@pytest.fixture
+def open_legacy(tmp_path: Path) -> Iterator[Callable[[AgentSession], SqliteDb]]:
+    """Seed a session as a pre-archive release left it, then reopen so the migration adopts it."""
+    opened: list[SqliteDb] = []
+
+    def open_migrated(session: AgentSession) -> SqliteDb:
+        seeding = _open(tmp_path)
+        seed_session(seeding, session)
+        seeding.close()
+        opened.append(_open(tmp_path))
+        return opened[-1]
+
+    yield open_migrated
+    for db in opened:
         db.close()
 
 
@@ -85,6 +107,31 @@ def _summary(session: AgentSession) -> str | None:
     return session.summary.summary if session.summary is not None else None
 
 
+def _seen(storage: SqliteDb, session: AgentSession) -> set[str]:
+    return read_scope_seen_event_ids(storage, session, _SCOPE)
+
+
+def _legacy_session(run_ids: list[str], summary: str, seen_event_ids: list[str]) -> AgentSession:
+    session = AgentSession(
+        session_id="session",
+        agent_id="code",
+        runs=[_run(run_id) for run_id in run_ids],
+        summary=SessionSummary(summary=summary),
+    )
+    update_scope_seen_event_ids(session, _SCOPE, seen_event_ids)
+    return session
+
+
+def test_compaction_derives_seen_ids_without_storing_them(storage: SqliteDb) -> None:
+    """Compacted runs count as seen through the archive, so session metadata keeps no copy to repair."""
+    session = _seed(storage, ["r1", "r2"])
+    _compact(storage, session, ["r1"], "summary of r1")
+
+    stored = _stored(storage)
+    assert constants.MINDROOM_MATRIX_HISTORY_METADATA_KEY not in (stored.metadata or {})
+    assert _seen(storage, stored) == {"$r1", "$r2"}
+
+
 def test_redaction_restores_the_runs_compacted_before_the_redacted_one(storage: SqliteDb) -> None:
     """Only the redacted run and what follows it leave history; earlier compacted runs return to replay."""
     session = _seed(storage, ["r1", "r2", "r3", "r4", "r5"])
@@ -98,7 +145,7 @@ def test_redaction_restores_the_runs_compacted_before_the_redacted_one(storage: 
     assert [run.run_id for run in stored.runs or []] == ["r2"]
     assert _summary(stored) == "summary of r1"
     assert archive.archived_run_ids(storage, session_id="session", run_ids=["r1", "r2", "r3"]) == {"r1"}
-    assert read_scope_seen_event_ids(stored, _SCOPE) == {"$r1", "$r2"}
+    assert _seen(storage, stored) == {"$r1", "$r2"}
     assert _summary(session) == "summary of r1"
 
 
@@ -133,8 +180,8 @@ def test_redacting_a_live_only_event_keeps_the_archive_summary(storage: SqliteDb
     stored = _stored(storage)
     assert _summary(stored) == "summary of r1"
     assert [run.run_id for run in stored.runs or []] == ["r2"]
-    # Preserved ids now name exactly the compacted history, so removed messages count as unseen again.
-    assert read_scope_seen_event_ids(stored, _SCOPE) == {"$r1", "$r2"}
+    # Preserved ids are dropped; the archive and live runs still supply everything replay represents.
+    assert _seen(storage, stored) == {"$r1", "$r2"}
 
 
 def test_redaction_without_any_matching_history_changes_nothing(storage: SqliteDb) -> None:
@@ -148,17 +195,12 @@ def test_redaction_without_any_matching_history_changes_nothing(storage: SqliteD
     assert _summary(_stored(storage)) == "summary of r1"
 
 
-def test_redacting_legacy_provenance_clears_summary_and_archived_generations(storage: SqliteDb) -> None:
+def test_redacting_legacy_provenance_clears_summary_and_archived_generations(
+    open_legacy: Callable[[AgentSession], SqliteDb],
+) -> None:
     """Content-free legacy history cannot be split, so an event it consumed clears the scope."""
-    session = AgentSession(
-        session_id="session",
-        agent_id="code",
-        runs=[_run("r2"), _run("r3")],
-        summary=SessionSummary(summary="legacy summary"),
-    )
-    update_scope_seen_event_ids(session, _SCOPE, ["$legacy"])
-    seed_session(storage, session)
-    reconcile_compaction_state(storage, session, _SCOPE)
+    storage = open_legacy(_legacy_session(["r2", "r3"], "legacy summary", ["$legacy"]))
+    session = _stored(storage)
     _compact(storage, session, ["r2"], "legacy summary and r2")
 
     assert (
@@ -169,21 +211,14 @@ def test_redacting_legacy_provenance_clears_summary_and_archived_generations(sto
     stored = _stored(storage)
     assert stored.runs == []
     assert stored.summary is None
-    assert read_scope_seen_event_ids(stored, _SCOPE) == set()
+    assert _seen(storage, stored) == set()
     assert archive.archived_run_ids(storage, session_id="session", run_ids=["r2"]) == set()
 
 
-def test_removing_a_live_run_retires_a_legacy_summary(storage: SqliteDb) -> None:
+def test_removing_a_live_run_retires_a_legacy_summary(open_legacy: Callable[[AgentSession], SqliteDb]) -> None:
     """Legacy summaries lack complete provenance, so any live removal for the event retires them."""
-    session = seed_session(
-        storage,
-        AgentSession(
-            session_id="session",
-            agent_id="code",
-            runs=[_run("r2")],
-            summary=SessionSummary(summary="legacy summary"),
-        ),
-    )
+    storage = open_legacy(_legacy_session(["r2"], "legacy summary", []))
+    session = _stored(storage)
 
     assert remove_redacted_event_from_compaction(storage, session, _SCOPE, event_id="$gone", removed_live_run=True)
 
@@ -192,18 +227,12 @@ def test_removing_a_live_run_retires_a_legacy_summary(storage: SqliteDb) -> None
     assert stored.summary is None
 
 
-def test_removing_a_live_run_keeps_runs_archived_after_a_legacy_summary(storage: SqliteDb) -> None:
+def test_removing_a_live_run_keeps_runs_archived_after_a_legacy_summary(
+    open_legacy: Callable[[AgentSession], SqliteDb],
+) -> None:
     """Retiring a legacy summary keeps later archived runs stored, but no longer counts them as seen."""
-    session = seed_session(
-        storage,
-        AgentSession(
-            session_id="session",
-            agent_id="code",
-            runs=[_run("r1"), _run("r2")],
-            summary=SessionSummary(summary="legacy summary"),
-        ),
-    )
-    reconcile_compaction_state(storage, session, _SCOPE)
+    storage = open_legacy(_legacy_session(["r1", "r2"], "legacy summary", ["$legacy"]))
+    session = _stored(storage)
     _compact(storage, session, ["r1"], "legacy summary and r1")
 
     assert remove_redacted_event_from_compaction(storage, session, _SCOPE, event_id="$gone", removed_live_run=True)
@@ -212,7 +241,7 @@ def test_removing_a_live_run_keeps_runs_archived_after_a_legacy_summary(storage:
     assert [run.run_id for run in stored.runs or []] == ["r2"]
     assert stored.summary is None
     assert archive.archived_run_ids(storage, session_id="session", run_ids=["r1"]) == {"r1"}
-    assert read_scope_seen_event_ids(stored, _SCOPE) == {"$r2"}
+    assert _seen(storage, stored) == {"$r2"}
     stored.summary = SessionSummary(summary="legacy summary and r1")
     storage.upsert_session(stored)
     reconcile_compaction_state(storage, stored, _SCOPE)
@@ -224,13 +253,12 @@ def test_team_redaction_without_compaction_keeps_unrelated_runs(storage: SqliteD
     session = _seed(storage, ["t1", "t2"])
     update_scope_seen_event_ids(session, _SCOPE, ["$t1", "$t2", "$t3"])
     storage.upsert_session(session)
-    reconcile_compaction_state(storage, session, _SCOPE)
 
     assert remove_redacted_event_from_compaction(storage, session, _SCOPE, event_id="$t3", removed_live_run=True)
 
     stored = _stored(storage)
     assert [run.run_id for run in stored.runs or []] == ["t1", "t2"]
-    assert read_scope_seen_event_ids(stored, _SCOPE) == {"$t1", "$t2"}
+    assert _seen(storage, stored) == {"$t1", "$t2"}
 
 
 def test_rollback_forgets_seen_ids_of_the_removed_runs(storage: SqliteDb) -> None:
@@ -246,20 +274,13 @@ def test_rollback_forgets_seen_ids_of_the_removed_runs(storage: SqliteDb) -> Non
     stored = _stored(storage)
     assert stored.runs == []
     assert _summary(stored) == "summary of r1"
-    assert read_scope_seen_event_ids(stored, _SCOPE) == {"$r1"}
+    assert _seen(storage, stored) == {"$r1"}
 
 
-def test_legacy_provenance_wins_over_a_later_archive_hit(storage: SqliteDb) -> None:
+def test_legacy_provenance_wins_over_a_later_archive_hit(open_legacy: Callable[[AgentSession], SqliteDb]) -> None:
     """An event a legacy summary may contain clears it even when an archived run also represents it."""
-    session = AgentSession(
-        session_id="session",
-        agent_id="code",
-        runs=[_run("r1"), _run("r2")],
-        summary=SessionSummary(summary="legacy summary quoting $r1"),
-    )
-    update_scope_seen_event_ids(session, _SCOPE, ["$r1"])
-    seed_session(storage, session)
-    reconcile_compaction_state(storage, session, _SCOPE)
+    storage = open_legacy(_legacy_session(["r1", "r2"], "legacy summary quoting $r1", ["$r1"]))
+    session = _stored(storage)
     _compact(storage, session, ["r1"], "legacy summary quoting $r1, then r1")
 
     assert remove_redacted_event_from_compaction(storage, session, _SCOPE, event_id="$r1", removed_live_run=False)
@@ -286,7 +307,7 @@ def test_a_rearchived_run_keeps_its_first_generation(storage: SqliteDb) -> None:
     assert stored.runs == []
 
 
-def test_repairing_a_stale_summary_also_resets_seen_ids(storage: SqliteDb) -> None:
+def test_refreshing_a_stale_summary_drops_the_stale_rows_seen_ids(storage: SqliteDb) -> None:
     """A stale pre-rollback row cannot mark the rolled-back messages as seen again."""
     session = _seed(storage, ["r1", "r2", "r3"])
     _compact(storage, session, ["r1"], "summary of r1")
@@ -301,4 +322,4 @@ def test_repairing_a_stale_summary_also_resets_seen_ids(storage: SqliteDb) -> No
 
     stored = _stored(storage)
     assert _summary(stored) == "summary of r1"
-    assert read_scope_seen_event_ids(stored, _SCOPE) == {"$r1"}
+    assert _seen(storage, stored) == {"$r1"}

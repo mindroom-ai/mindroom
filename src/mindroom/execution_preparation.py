@@ -721,7 +721,7 @@ def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]
     """Return currently persisted seen IDs for one open prepared scope."""
     if scope_context is None or scope_context.session is None:
         return set()
-    return read_scope_seen_event_ids(scope_context.session, scope_context.scope)
+    return read_scope_seen_event_ids(scope_context.storage, scope_context.session, scope_context.scope)
 
 
 def _prepared_history_with_scheduled_limit(
@@ -796,7 +796,8 @@ async def _prepare_execution_context_common(
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
     history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
-    seen_event_ids = _scope_seen_event_ids(scope_context)
+    # Compacted history's seen ids are read from the archive; keep that SQLite read off the loop.
+    seen_event_ids = await asyncio.to_thread(_scope_seen_event_ids, scope_context)
     scheduled_history_budget = ctx.scheduled_history_budget
     if scheduled_history_budget is not None:
         thread_history = _thread_history_with_scheduled_budget(

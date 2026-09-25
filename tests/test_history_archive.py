@@ -9,8 +9,10 @@ from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
+from agno.session.summary import SessionSummary
 
 from mindroom.agent_storage import create_state_storage, get_agent_session
+from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history import archive
 from tests.conftest import seed_session
 from tests.history_helpers import StoredGeneration, compaction_generations
@@ -22,11 +24,16 @@ if TYPE_CHECKING:
 _SCOPE = "agent:code"
 
 
+def _open(state_root: Path) -> SqliteDb:
+    db = create_state_storage("code", state_root, subdir="sessions", session_table="code_sessions")
+    assert isinstance(db, SqliteDb)
+    return db
+
+
 @pytest.fixture
 def storage(tmp_path: Path) -> Iterator[SqliteDb]:
     """Use the production conversation storage owner."""
-    db = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
-    assert isinstance(db, SqliteDb)
+    db = _open(tmp_path)
     try:
         yield db
     finally:
@@ -87,7 +94,7 @@ def test_archiving_moves_runs_and_member_runs_out_of_the_live_table(storage: Sql
     ]
 
 
-def test_archived_event_ids_are_scoped(storage: SqliteDb) -> None:
+def test_compacted_event_ids_are_scoped(storage: SqliteDb) -> None:
     """Seen ids come from the scope's own archive only."""
     session = _seed(storage, ["r1", "r2"])
     _archive(storage, session, ["r1"], "summary")
@@ -101,7 +108,7 @@ def test_archived_event_ids_are_scoped(storage: SqliteDb) -> None:
         event_ids={"r2": {"$other"}},
     )
 
-    assert archive.archived_event_ids(storage, session_id="session", scope_key=_SCOPE) == {"$r1"}
+    assert archive.compacted_event_ids(storage, session_id="session", scope_key=_SCOPE) == {"$r1"}
     assert archive.latest_generation(storage, session_id="session", scope_key="missing") is None
 
 
@@ -149,27 +156,42 @@ def test_roll_back_drops_member_runs_archived_before_their_hit_team_run(storage:
     assert _live_run_ids(storage) == ["r1"]
 
 
-def test_clear_to_legacy_keeps_only_content_free_tombstones(storage: SqliteDb) -> None:
+def test_clear_to_legacy_keeps_only_content_free_tombstones(tmp_path: Path) -> None:
     """Legacy invalidation drops archived content and live runs but keeps legacy tombstones."""
-    session = _seed(storage, ["r2", "r3"])
-    archive.record_legacy_generation(
-        storage,
-        session_id="session",
-        scope_key=_SCOPE,
-        summary="legacy summary",
-        tombstone_run_ids=["gone"],
-        event_ids=["$legacy"],
+    seeding = _open(tmp_path / "legacy")
+    seed_session(
+        seeding,
+        AgentSession(
+            session_id="session",
+            agent_id="code",
+            runs=[_run("r2"), _run("r3")],
+            summary=SessionSummary(summary="legacy summary"),
+            metadata={
+                MINDROOM_COMPACTION_METADATA_KEY: {"version": 2, "states": {_SCOPE: {"compacted_run_ids": ["gone"]}}},
+                MINDROOM_MATRIX_HISTORY_METADATA_KEY: {
+                    "version": 1,
+                    "states": {_SCOPE: {"seen_event_ids": ["$legacy"]}},
+                },
+            },
+        ),
     )
-    _archive(storage, session, ["r2"], "generation one")
+    seeding.close()
+    storage = _open(tmp_path / "legacy")
+    try:
+        session = get_agent_session(storage, "session")
+        assert session is not None
+        _archive(storage, session, ["r2"], "generation one")
 
-    archive.clear_to_legacy(storage, session_id="session", scope_key=_SCOPE, live_run_ids=["r3"])
+        archive.clear_to_legacy(storage, session_id="session", scope_key=_SCOPE, live_run_ids=["r3"])
 
-    assert _live_run_ids(storage) == []
-    assert compaction_generations(storage, _SCOPE, "session") == [
-        StoredGeneration(summary=None, summary_model=None, legacy=True),
-    ]
-    assert archive.legacy_event_ids(storage, session_id="session", scope_key=_SCOPE) == set()
-    assert archive.archived_run_ids(storage, session_id="session", run_ids=["gone", "r2"]) == {"gone"}
+        assert _live_run_ids(storage) == []
+        assert compaction_generations(storage, _SCOPE, "session") == [
+            StoredGeneration(summary=None, summary_model=None, legacy=True),
+        ]
+        assert archive.legacy_event_ids(storage, session_id="session", scope_key=_SCOPE) == set()
+        assert archive.archived_run_ids(storage, session_id="session", run_ids=["gone", "r2"]) == {"gone"}
+    finally:
+        storage.close()
 
 
 def test_session_deletion_cascades_to_the_archive(storage: SqliteDb) -> None:
