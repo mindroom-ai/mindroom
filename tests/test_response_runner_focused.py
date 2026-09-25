@@ -73,6 +73,7 @@ from mindroom.dispatch_source import (
     HOOK_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     ScheduledHistoryBudget,
 )
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -9908,18 +9909,33 @@ async def test_a_response_registers_its_skill_review_conversation_before_it_runs
 
 
 @pytest.mark.asyncio
-async def test_replies_to_other_agents_never_count_toward_skill_review(tmp_path: Path) -> None:
-    """Like cron runs in Hermes, a turn another agent asked for has no person to learn from."""
+@pytest.mark.parametrize("requested_by", ["another agent", "a routed schedule"])
+async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_path: Path, requested_by: str) -> None:
+    """Like cron runs in Hermes, another agent's request or a schedule the router handed off has no person to learn from."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert bot.client is not None
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
     coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
     request = _plain_request(_target())
-    origin = message_origin(
-        sender_id="@mindroom_helper:localhost",
-        sender_entity_name="helper",
-        requester_entity_name="helper",
+    origin = (
+        message_origin(
+            sender_id="@mindroom_helper:localhost",
+            sender_entity_name="helper",
+            requester_entity_name="helper",
+        )
+        if requested_by == "another agent"
+        else replace(
+            message_origin(
+                sender_id="@mindroom_router:localhost",
+                requester_id="@user:localhost",
+                sender_entity_name="router",
+                source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                original_sender="@user:localhost",
+                trusted_user_relay=True,
+            ),
+            relayed_source_kind=SCHEDULED_SOURCE_KIND,
+        )
     )
     request = replace(request, response_envelope=replace(request.response_envelope, origin=origin))
     model = SyntheticModel(

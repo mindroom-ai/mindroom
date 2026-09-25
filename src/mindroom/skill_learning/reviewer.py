@@ -16,6 +16,7 @@ from agno.run.base import RunStatus
 from mindroom import model_loading
 from mindroom.agent_storage import create_session_storage
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
+from mindroom.logging_config import get_logger
 from mindroom.skill_learning.library import (
     SkillEditError,
     SkillFile,
@@ -28,7 +29,7 @@ from mindroom.skill_learning.library import (
     write_skill_file,
 )
 from mindroom.skill_learning.transcript import render_transcript
-from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_call_budget import install_model_call_cap, install_request_gate
 from mindroom.tool_system.skills import build_agent_skills, list_skill_listings
 from mindroom.tool_system.workspace_skills import (
     SKILL_FILENAME,
@@ -46,6 +47,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+logger = get_logger(__name__)
 
 # Hermes caps one review fork at 16 iterations and 75% of the review model's context window, at most 600k input
 # tokens across all of its requests, falling back to 120k when the window is unknown.
@@ -118,17 +121,24 @@ class _ReviewTools:
     _context_chars: int = 0
     _spent_chars: int = 0
 
-    def charge(self, chars: int) -> None:
-        """Account one more request that replays the grown context."""
+    def grow(self, chars: int) -> None:
+        """Add text that every later request of the review replays."""
         self._context_chars += chars
-        self._spent_chars += self._context_chars
 
-    def _exhausted(self) -> bool:
-        return self._spent_chars > self.budget_chars
+    def allow_request(self) -> bool:
+        """Like Hermes, end the review before its next request once the input it sent reached the budget.
+
+        Every request replays the whole context, and the tool results of one reply all go out in the next request.
+        """
+        if self._spent_chars >= self.budget_chars:
+            logger.info("Skill review reached its input budget", budget_chars=self.budget_chars)
+            return False
+        self._spent_chars += self._context_chars
+        return True
 
     def _reply(self, payload: dict[str, object], *arguments: str | None) -> str:
         reply = json.dumps(payload, ensure_ascii=False)
-        self.charge(len(reply) + sum(len(argument or "") for argument in arguments))
+        self.grow(len(reply) + sum(len(argument or "") for argument in arguments))
         return reply
 
     def _refusal(self, error: str, *arguments: str | None) -> str:
@@ -139,8 +149,6 @@ class _ReviewTools:
 
         Only skills whose owner is "learner" can be changed; "user" and "configured" skills are read-only.
         """
-        if self._exhausted():
-            return self._refusal(_BUDGET_EXHAUSTED)
         skills = [
             {"name": entry.name, "description": entry.description, "owner": entry.owner}
             for entry in sorted(self.catalog.values(), key=lambda item: item.name)
@@ -156,8 +164,6 @@ class _ReviewTools:
 
         """
         async with self._turn:
-            if self._exhausted():
-                return self._refusal(_BUDGET_EXHAUSTED, name, file_path)
             entry = self.catalog.get(name)
             if entry is None:
                 return self._refusal(f"Unknown skill {name!r}; call skills_list.", name, file_path)
@@ -220,8 +226,6 @@ class _ReviewTools:
         """
         async with self._turn:
             arguments = (name, content, old_string, new_string, file_path, file_content)
-            if self._exhausted():
-                return self._refusal(_BUDGET_EXHAUSTED, *arguments)
             entry = self.catalog.get(name)
             if action != "create" and entry is None:
                 return self._refusal(f"Unknown skill {name!r}; call skills_list.", *arguments)
@@ -337,9 +341,6 @@ class _ReviewTools:
         self._reads[directory, relative_path] = SkillFile(content, content_digest(content), learned=True, name=name)
 
 
-_BUDGET_EXHAUSTED = "The review input budget is exhausted. Stop calling tools and reply with the changes you made."
-
-
 def _required(value: str | None, argument: str) -> str:
     if value is None:
         msg = f"{argument} is required for this action."
@@ -415,9 +416,10 @@ async def review_conversation(
     tools = _ReviewTools(skills_root, catalog, reserved_names, budget_chars, progress)
     instructions = config.get_prompt("SKILL_REVIEW_PROMPT")
     review_input = f"<conversation>\n{transcript}\n</conversation>"
-    tools.charge(len(instructions) + len(review_input))
+    tools.grow(len(instructions) + len(review_input))
     model = model_loading.get_model_instance(config, runtime_paths, model_name, execution_identity=identity)
     install_model_call_cap(model, entity_name=agent_name)
+    install_request_gate(model, tools.allow_request)
     reviewer = Agent(
         name="SkillReviewer",
         model=model,

@@ -14241,7 +14241,7 @@ Each response to a person registers its conversation when it starts, so an appro
 An approved continuation that finishes after a later turn of the same thread was already reviewed is not counted, although its messages still appear in later reviews.
 Counting starts with the first response after learning is enabled, including every attempt of that response, and the queued conversations of an agent that stops learning are forgotten, so replies from before learning was enabled or while it was off never count toward a review.
 A review still reads the whole stored conversation as evidence, including turns from before learning was enabled, as a Hermes review sees the whole session.
-Automated responses from schedules, hooks, and external triggers, and responses another agent asked for, never start a count, just as Hermes skips reviews for cron jobs, so a thread with only such runs is never reviewed; in a thread people also use, those replies are part of the conversation that is counted and reviewed.
+Automated responses from schedules, hooks, and external triggers, including ones the router hands to an agent, and responses another agent asked for, never start a count, just as Hermes skips reviews for cron jobs, so a thread with only such runs is never reviewed; in a thread people also use, those replies are part of the conversation that is counted and reviewed.
 Team responses are excluded.
 When anyone other than the learner changes the workspace skills, for example an agent writing a skill with its file tools, counting starts again after the newest run because that lesson is already saved.
 This includes a change during a conversation's first response, because its first registration records the skills as they were; a change made while a review of another conversation is writing skills in the same workspace is taken as that review's own.
@@ -14264,6 +14264,7 @@ Hermes replays the full conversation when the review uses the agent's own model 
 Runs that model history hides, such as errored, cancelled, or paused runs, are left out.
 When compaction has replaced older turns with a summary, the review evidence starts with that summary, as a Hermes review sees the compressed conversation.
 One review may read about 75% of the review model's `context_window` across all of its requests, capped at 600,000 tokens and defaulting to 120,000 tokens when the model sets no window.
+Like Hermes, each request counts the whole context it sends, the tool results of one reply go out together in the next request, and the review ends before a request once the total reached the budget.
 The budget is estimated at four characters per token.
 It makes at most 16 tool calls and stops after `timeout_seconds`.
 The review prompt adapts Hermes' rules: build class-level skills, capture lessons rather than logs, treat user corrections as first-class signals, prefer patches over rewrites, and never capture environment-specific failures, negative claims about tools, transient errors, one-off narratives, or unresolved attempts.
@@ -15649,6 +15650,7 @@ Their `config` and `runtime_paths` values may be absent, and they do not expose 
 **`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`**
 Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
 For message-derived contexts, MindRoom automatically preserves the original requester in `com.mindroom.original_sender` so downstream routing, permissions, and memory attribution continue to use the human sender instead of the router relay.
+When the router hands off a scheduled task, hook dispatch, or external trigger, `com.mindroom.relayed_source_kind` keeps which automation started it, so features that only learn from people, such as automatic skill learning, can tell it apart from a person's message.
 For `ScheduleFiredContext`, omitting `thread_id` inherits `ctx.thread_id`, while passing `thread_id=None` explicitly posts at room level.
 Plain `hook` sends can still dispatch when they satisfy the usual routing rules, for example if the message explicitly mentions an agent or otherwise qualifies as a normal addressed message.
 Hook-originated sends always carry an internal synthetic-chain depth.
@@ -20481,6 +20483,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | J13 | Current behavior | [`event_journal_open.py`][journal-open] owns binding, generation, adoption, and database ownership guards. |
 | J14 | Current behavior | [`sync_restart_retry.py`][restart-retry] and [`visible_response_reconciliation.py`][visible-recovery] keep current replay and visible-response safety. |
 | J15 | Isolated | [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] recognizes approvals stranded by historical INITIAL retirement; current owners retain consent, failure handling, and settlement. |
+| J16 | Tiny retained default | [`event_journal/approval_continuations.py`][approval-continuations] reads a stored origin without `relayed_source_kind` as having none. |
 
 ## Agent state, history, memory, and knowledge
 
@@ -20635,6 +20638,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [legacy-approval]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_approval_payloads.py
 [legacy-attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_attachments.py
 [legacy-approval-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_approval_recovery.py
+[approval-continuations]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/approval_continuations.py
 [legacy-docker-worker-metadata]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/legacy_docker_worker_metadata.py
 [legacy-delivery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_delivery_payloads.py
 [legacy-handled]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_handled_turns.py

@@ -9,6 +9,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 from mindroom.constants import (
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
+    RELAYED_SOURCE_KIND_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SOURCE_KIND_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
@@ -160,6 +161,11 @@ def source_kind_from_content(content: Mapping[str, Any]) -> str | None:
     """Return canonical source-kind metadata from Matrix content."""
     source_kind = content.get(SOURCE_KIND_KEY)
     return _source_kind_from_value(source_kind)
+
+
+def relayed_source_kind_from_content(content: Mapping[str, Any]) -> str | None:
+    """Return the automation source kind a router handoff carries, or None."""
+    return _source_kind_from_value(content.get(RELAYED_SOURCE_KIND_KEY))
 
 
 def per_fire_thread_root_event_id_from_content(content: Mapping[str, Any]) -> str | None:

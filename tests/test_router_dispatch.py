@@ -16,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
+    RELAYED_SOURCE_KIND_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
     SOURCE_KIND_KEY,
 )
@@ -782,9 +783,11 @@ class TestAgentBot(AgentBotTestBase):
         bot._turn_controller._execute_router_relay.assert_awaited_once()
         call = bot._turn_controller._execute_router_relay.await_args.kwargs
         assert call["requester_user_id"] == "@user:localhost"
+        # The handoff becomes a trusted relay from the user, so it records that a schedule started it.
         assert call["extra_content"] == {
             ORIGINAL_SENDER_KEY: "@user:localhost",
             SCHEDULED_HISTORY_LIMIT_KEY: 4,
+            RELAYED_SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
         }
         assert call["scheduled_prompt"] == event.body
 

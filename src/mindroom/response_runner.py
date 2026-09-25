@@ -46,7 +46,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.event_journal import (
     ApprovalContinuation,
@@ -873,10 +873,10 @@ class _InboxResponseOwnership:
 def _requested_by_a_person(origin: TurnOrigin) -> bool:
     """Whether a turn counts toward skill learning.
 
-    Like Hermes skipping cron reviews, automated runs and replies to other agents never start a review; they have
-    no human to learn from.
+    Like Hermes skipping cron reviews, automated runs, including ones the router handed off, and replies to other
+    agents never start a review; they have no human to learn from.
     """
-    return origin.requester_kind == SenderKind.USER and not is_automation_source_kind(origin.source_kind)
+    return origin.requester_kind == SenderKind.USER and origin.automation_source_kind is None
 
 
 @dataclass

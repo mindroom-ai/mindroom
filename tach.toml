@@ -6969,7 +6969,7 @@ visibility = ["mindroom.agents", "mindroom.teams", "mindroom.custom_tools.dynami
 
 [[interfaces]]
 from = ["mindroom.tool_call_budget"]
-expose = ["install_model_call_cap"]
+expose = ["install_model_call_cap", "install_request_gate"]
 
 [[modules]]
 path = "mindroom.agno_compat_sqlite"
