@@ -333,6 +333,12 @@ Supported services are `gmail`, `google_calendar`, `google_drive`, `google_docs`
 Specify only provisioned services; each needs its corresponding API enabled and its own prefixed callback registered.
 Keep workspace names stable because they identify stored connections.
 
+### Additional Atlassian connections
+
+Use `AtlassianConnectionConfig` the same way to add another Atlassian Cloud site alongside the built-in `atlassian` tool.
+Each connection gets its own OAuth provider, stored connection, site pin, requested scopes, and prefixed function names such as `partner_confluence_search`.
+See [Atlassian Cloud](tools/atlassian.md#add-more-connections) for the plugin example, fields, and callback setup.
+
 ### Minimal example
 
 ```python

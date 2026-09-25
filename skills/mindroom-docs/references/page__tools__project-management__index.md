@@ -11,6 +11,7 @@ Use these tools when you need repository context, issue tracking, documentation 
 
 - [`github`] - GitHub repositories, issues, pull requests, files, branches, code search, and review requests.
 - [`bitbucket`] - Bitbucket workspace and repository inspection for repositories, commits, pull requests, and issues.
+- [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) - Jira and Confluence Cloud as each requester through per-user OAuth, documented on its own page.
 - [`jira`] - Jira issue lookup, creation, JQL search, comments, and worklogs.
 - [`linear`] - Linear GraphQL access for viewer info, teams, issues, and issue updates.
 - [`clickup`] - ClickUp space, list, task, and task-lifecycle operations.
@@ -25,7 +26,7 @@ Use these tools when you need repository context, issue tracking, documentation 
 
 The `todo` tool is available without credentials.
 The other tools on this page are registered as `status=requires_config`, so they stay unavailable in the dashboard until their required credentials or connection fields are present.
-GitHub supports requester-scoped OAuth through MindRoom's built-in `github` provider, while the remaining project-management tools use stored tool credentials or environment variables.
+GitHub supports requester-scoped OAuth through MindRoom's built-in `github` provider, and [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) does the same for Jira and Confluence Cloud, while the remaining project-management tools use stored tool credentials or environment variables.
 Password and token fields should be stored through the dashboard or credential store instead of inline YAML.
 Most upstream SDKs also read environment variables, including `GITHUB_ACCESS_TOKEN`, `BITBUCKET_USERNAME`, `BITBUCKET_PASSWORD`, `BITBUCKET_TOKEN`, `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_PASSWORD`, `JIRA_TOKEN`, `LINEAR_API_KEY`, `CLICKUP_API_KEY`, `MASTER_SPACE_ID`, `CONFLUENCE_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_KEY`, `CONFLUENCE_PASSWORD`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`, `TRELLO_API_KEY`, `TRELLO_API_SECRET`, `TRELLO_TOKEN`, `TODOIST_API_TOKEN`, `ZENDESK_USERNAME`, `ZENDESK_PASSWORD`, and `ZENDESK_COMPANY_NAME`.
 Several registry fields on this page are marked optional in metadata even though the upstream tool effectively requires them at runtime, so the notes below call out the practical requirement level for each tool.
