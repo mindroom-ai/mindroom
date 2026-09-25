@@ -34,7 +34,7 @@ from mindroom.tool_system.skills import build_agent_skills, list_skill_listings
 from mindroom.tool_system.workspace_skills import SKILL_FILENAME, parse_skill_markdown
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from agno.models.message import Message
 
@@ -74,6 +74,18 @@ class _CatalogEntry:
 
 
 @dataclass
+class ReviewProgress:
+    """What a review changed so far, and its file writes, which finish even after a timeout cancels the review."""
+
+    changes: dict[str, str] = field(default_factory=dict)
+    writes: set[asyncio.Future[None]] = field(default_factory=set)
+
+    async def settled(self) -> None:
+        """Wait until every file write the review started has landed or failed."""
+        await asyncio.gather(*self.writes, return_exceptions=True)
+
+
+@dataclass
 class _ReviewTools:
     """Skill-only tools with Hermes' ownership, read-before-write, and input-budget guards."""
 
@@ -81,7 +93,7 @@ class _ReviewTools:
     catalog: dict[str, _CatalogEntry]
     reserved_names: frozenset[str]
     budget_chars: int
-    changes: dict[str, str]
+    progress: ReviewProgress
     _reads: dict[tuple[str, str], SkillFile] = field(default_factory=dict)
     _context_chars: int = 0
     _spent_chars: int = 0
@@ -194,29 +206,51 @@ class _ReviewTools:
                 f"Skill {name!r} is {entry.owner}-owned and read-only; mention the needed change in your reply.",
                 *arguments,
             )
+        # An adopted skill may live in a directory named differently from its frontmatter name.
+        directory = entry.directory if entry is not None and entry.directory is not None else name
         relative_path = file_path or SKILL_FILENAME
         try:
             if action == "create":
                 await self._create(name, _required(content, "content"))
             elif action == "patch":
+                patched = self._patched(directory, relative_path, old_string, new_string, replace_all)
+                await self._write(name, directory, relative_path, patched)
+            elif action == "edit":
+                await self._write(name, directory, SKILL_FILENAME, _required(content, "content"))
+            elif action == "write_file":
                 await self._write(
                     name,
-                    relative_path,
-                    self._patched(name, relative_path, old_string, new_string, replace_all),
+                    directory,
+                    _required(file_path, "file_path"),
+                    _required(file_content, "file_content"),
                 )
-            elif action == "edit":
-                await self._write(name, SKILL_FILENAME, _required(content, "content"))
-            elif action == "write_file":
-                await self._write(name, _required(file_path, "file_path"), _required(file_content, "file_content"))
             else:
-                await self._remove(name, _required(file_path, "file_path"))
+                await self._remove(name, directory, _required(file_path, "file_path"))
         except (SkillEditError, OSError) as exc:
             return self._refusal(str(exc), *arguments)
-        self.changes.setdefault(name, "updated")
         return self._reply({"success": True, "action": action, "name": name, "file_path": relative_path}, *arguments)
 
+    async def _in_thread(self, operation: Callable[[], None], *, name: str, action: str) -> None:
+        """Run one file change in a thread that finishes even when a timeout cancels the review.
+
+        The change is recorded when the write lands, so a notice after a timeout still names it.
+        """
+        future = asyncio.ensure_future(asyncio.to_thread(operation))
+
+        def record(done: asyncio.Future[None]) -> None:
+            if not done.cancelled() and done.exception() is None:
+                self.progress.changes.setdefault(name, action)
+
+        future.add_done_callback(record)
+        self.progress.writes.add(future)
+        await asyncio.shield(future)
+
     async def _create(self, name: str, content: str) -> None:
-        await asyncio.to_thread(create_skill, self.skills_root, name, content, reserved_names=self.reserved_names)
+        await self._in_thread(
+            partial(create_skill, self.skills_root, name, content, reserved_names=self.reserved_names),
+            name=name,
+            action="created",
+        )
         frontmatter, instructions = parse_skill_markdown(content)
         self.catalog[name] = _CatalogEntry(
             name,
@@ -226,20 +260,19 @@ class _ReviewTools:
             instructions=instructions,
         )
         self.reserved_names |= {name}
-        self._reads[name, SKILL_FILENAME] = SkillFile(content, content_digest(content), learned=True)
-        self.changes[name] = "created"
+        self._reads[name, SKILL_FILENAME] = SkillFile(content, content_digest(content), learned=True, name=name)
 
     def _patched(
         self,
-        name: str,
+        directory: str,
         relative_path: str,
         old_string: str | None,
         new_string: str | None,
         replace_all: bool,
     ) -> str:
-        read = self._reads.get((name, relative_path))
+        read = self._reads.get((directory, relative_path))
         if read is None:
-            msg = f"Call skill_view for {relative_path} of {name!r} before patching it."
+            msg = f"Call skill_view for {relative_path} of {directory!r} before patching it."
             raise SkillEditError(msg)
         old, new = _required(old_string, "old_string"), _required(new_string, "new_string")
         matches = read.content.count(old) if old else 0
@@ -249,27 +282,40 @@ class _ReviewTools:
             raise SkillEditError(msg)
         return read.content.replace(old, new, -1 if replace_all else 1)
 
-    async def _remove(self, name: str, relative_path: str) -> None:
-        read = self._reads.pop((name, relative_path), None)
-        await asyncio.to_thread(
-            remove_skill_file,
-            self.skills_root,
-            name,
-            relative_path,
-            expected_digest=read.digest if read else None,
+    async def _remove(self, name: str, directory: str, relative_path: str) -> None:
+        read = self._reads.pop((directory, relative_path), None)
+        await self._in_thread(
+            partial(
+                remove_skill_file,
+                self.skills_root,
+                directory,
+                relative_path,
+                expected_digest=read.digest if read else None,
+            ),
+            name=name,
+            action="updated",
         )
 
-    async def _write(self, name: str, relative_path: str, content: str) -> None:
-        read = self._reads.get((name, relative_path))
-        await asyncio.to_thread(
-            write_skill_file,
-            self.skills_root,
-            name,
-            relative_path,
-            content,
-            expected_digest=read.digest if read else None,
+    async def _write(self, name: str, directory: str, relative_path: str, content: str) -> None:
+        read = self._reads.get((directory, relative_path))
+        await self._in_thread(
+            partial(
+                write_skill_file,
+                self.skills_root,
+                directory,
+                relative_path,
+                content,
+                expected_digest=read.digest if read else None,
+            ),
+            name=name,
+            action="updated",
         )
-        self._reads[name, relative_path] = SkillFile(content, content_digest(content), learned=True)
+        self._reads[directory, relative_path] = SkillFile(
+            content,
+            content_digest(content),
+            learned=True,
+            name=directory,
+        )
 
 
 _BUDGET_EXHAUSTED = "The review input budget is exhausted. Stop calling tools and reply with the changes you made."
@@ -325,9 +371,9 @@ async def review_conversation(
     identity: ToolExecutionIdentity | None,
     skills_root: Path,
     messages: Sequence[Message],
-    changes: dict[str, str],
+    progress: ReviewProgress,
 ) -> None:
-    """Run one review, recording each skill it creates or updates in ``changes`` as the write lands."""
+    """Run one review, recording each skill it creates or updates in ``progress`` as the write lands."""
     model_name = config.agents[agent_name].skill_learning.model or config.resolve_entity(agent_name).model_name
     budget_chars = _review_input_budget_chars(config, model_name)
     transcript = await asyncio.to_thread(
@@ -336,7 +382,7 @@ async def review_conversation(
         budget_chars=budget_chars // _TRANSCRIPT_BUDGET_SHARE,
     )
     catalog, reserved_names = await asyncio.to_thread(_skill_catalog, config, runtime_paths, agent_name, skills_root)
-    tools = _ReviewTools(skills_root, catalog, reserved_names, budget_chars, changes)
+    tools = _ReviewTools(skills_root, catalog, reserved_names, budget_chars, progress)
     instructions = config.get_prompt("SKILL_REVIEW_PROMPT")
     review_input = f"<conversation>\n{transcript}\n</conversation>"
     tools.charge(len(instructions) + len(review_input))

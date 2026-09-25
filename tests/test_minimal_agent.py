@@ -27,6 +27,7 @@ from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.agent_modes import resolve_agent_mode, set_agent_mode
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -218,7 +219,8 @@ def test_minimal_context_file_list_is_bounded() -> None:
     assert "mindroom-agent context list" in message
 
 
-def test_minimal_skill_document_reads_count_as_workspace_skill_use(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_minimal_skill_document_reads_count_as_workspace_skill_use(tmp_path: Path) -> None:
     """Minimal mode reads skills as context documents, which feeds the same usage telemetry as skill tools."""
     skills_root = agent_workspace_root_path(tmp_path, "helper") / "skills"
     (skills_root / "deploy").mkdir(parents=True)
@@ -247,6 +249,7 @@ def test_minimal_skill_document_reads_count_as_workspace_skill_use(tmp_path: Pat
     assert agent.context_documents["skill-1"] == "deploy\nSteps"
     agent._record_skill_document_read("instructions")
     agent._record_skill_document_read("skill-1")
+    await wait_for_background_tasks(5)
     assert '"use_count":1' in (skills_root / ".usage.json").read_text()
 
 

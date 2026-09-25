@@ -25,7 +25,7 @@ from mindroom.skill_learning.queue import (
     record_count,
     settle_review,
 )
-from mindroom.skill_learning.reviewer import review_conversation
+from mindroom.skill_learning.reviewer import ReviewProgress, review_conversation
 from mindroom.skill_learning.transcript import conversation_messages, count_model_replies
 from mindroom.tool_system.skills import agent_workspace_skills_root
 
@@ -142,7 +142,7 @@ class SkillLearningWorker:
         settings = config.agents[entry.agent].skill_learning
         identity = entry.execution_identity()
         before = await asyncio.to_thread(skills_fingerprint, skills_root)
-        changes: dict[str, str] = {}
+        progress = ReviewProgress()
         outcome: Literal["reviewed", "failed"] = "reviewed"
         try:
             archived = await asyncio.to_thread(
@@ -171,18 +171,25 @@ class SkillLearningWorker:
                         identity=identity,
                         skills_root=skills_root,
                         messages=conversation_messages(session),
-                        changes=changes,
+                        progress=progress,
                     ),
                     timeout=settings.timeout_seconds,
                 )
         except asyncio.CancelledError:
-            # Shutdown keeps the counter for a retry but still records the learner's partial writes as its own.
-            self._settle(key, skills_root, before, outcome="interrupted")
+            # Shutdown keeps the counter for a retry but still records the learner's partial writes as its own;
+            # a bookkeeping error here must not replace the cancellation.
+            try:
+                self._settle(key, skills_root, before, outcome="interrupted")
+            except Exception:
+                logger.exception("Could not record an interrupted skill review", agent=entry.agent)
             raise
         except Exception:
             outcome = "failed"
             logger.exception("Skill review failed", agent=entry.agent, session_id=entry.session)
+        # A timeout cancels the review, not the file writes it started; they land before the state is recorded.
+        await progress.settled()
         await asyncio.to_thread(self._settle, key, skills_root, before, outcome=outcome)
+        changes = progress.changes
         logger.info(
             "Skill review finished",
             agent=entry.agent,

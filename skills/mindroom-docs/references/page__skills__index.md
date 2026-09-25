@@ -201,7 +201,8 @@ Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](https:/
 `skill_manage` can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/`, `templates/`, `scripts/`, or `assets/`.
 Before changing an existing file, the reviewer must load its current version with `skill_view` in the same review, and a write against any other version is refused.
 A new skill needs a lowercase hyphenated name matching its directory, a description of at most 60 characters, and the ownership marker below.
-Files containing a literal credential, such as a private key, a known API token format, or a password in a URL, are refused, while placeholders like `OPENAI_API_KEY=<your key>` are allowed.
+Files containing a literal credential are refused: a private key, a long known token or bearer token, a password or secret query value in a URL, or a long value assigned to a secret-named setting.
+Placeholders such as `OPENAI_API_KEY=<your key>`, `sk-...`, `$TOKEN`, and usernames in URLs like `ssh://git@github.com/...` are allowed.
 Workspace skill scripts still cannot be executed through `get_skill_script`.
 
 ### Ownership
