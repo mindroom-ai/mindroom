@@ -1,6 +1,7 @@
 """Real subprocess checks for local desktop shell approval."""
 
 import asyncio
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -112,6 +113,31 @@ async def test_revoke_stops_running_process_group(tmp_path: Path) -> None:
     result = await task
     assert result["cancelled"] is True
     assert not marker.exists()
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_revoke_kills_term_resistant_child_after_parent_exits(tmp_path: Path) -> None:
+    """Revocation escalates even when shell exits and redirected pipes close."""
+    shell = DesktopShell()
+    shell.grant(60)
+    script = (
+        "import pathlib, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "pathlib.Path('ready').write_text('ready'); "
+        "time.sleep(1.5); pathlib.Path('marker').write_text('leaked')"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} >/dev/null 2>&1 & wait"
+    task = asyncio.create_task(shell.execute(request(command, tmp_path)))
+    for _ in range(200):
+        if (tmp_path / "ready").exists():
+            break
+        await asyncio.sleep(0.01)
+    assert (tmp_path / "ready").exists()
+    await shell.revoke()
+    assert (await task)["cancelled"] is True
+    await asyncio.sleep(1.6)
+    assert not (tmp_path / "marker").exists()
     await shell.close()
 
 

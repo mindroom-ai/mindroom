@@ -299,18 +299,30 @@ class DesktopShell:
         with suppress(ProcessLookupError):
             os.killpg(process.pid, sig)
 
+    def _group_exists(self) -> bool:
+        process = self._process
+        if process is None:
+            return False
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
     async def _terminate_process(self) -> None:
         process = self._process
         if process is None:
             return
         self._signal_group(signal.SIGTERM)
-        if process.returncode is not None:
-            return
-        try:
-            await asyncio.wait_for(process.wait(), _TERM_GRACE_SECONDS)
-        except TimeoutError:
+        deadline = asyncio.get_running_loop().time() + _TERM_GRACE_SECONDS
+        # Descendants may outlive the shell and close its pipes; group liveness has no event to await.
+        while self._group_exists() and asyncio.get_running_loop().time() < deadline:  # noqa: ASYNC110
+            await asyncio.sleep(0.05)
+        if self._group_exists():
             self._signal_group(signal.SIGKILL)
-            await process.wait()
+        await process.wait()
 
     async def revoke(self) -> None:
         """Clear lease and settle any pending or active command."""
