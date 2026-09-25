@@ -45,7 +45,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.event_journal import (
     ApprovalContinuation,
@@ -110,7 +110,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.scheduled_run_records import record_silent_schedule_started_if_needed
-from mindroom.skill_learning.worker import queue_skill_learning
+from mindroom.skill_learning.queue import queue_skill_review
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
@@ -1224,6 +1224,7 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         queue_memory_persistence: Callable[[], None] | None = None,
+        queue_skill_review: Callable[[str], None] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build post-response effect deps bound to one request's room."""
@@ -1231,6 +1232,7 @@ class ResponseRunner:
             room_id=request.room_id,
             membership_turn_id=request.response_envelope.source_event_id,
             queue_memory_persistence=queue_memory_persistence,
+            queue_skill_review=queue_skill_review,
             persist_response_event_id=persist_response_event_id,
         )
 
@@ -2059,6 +2061,7 @@ class ResponseRunner:
             room_id=continuation.room_id,
             membership_turn_id=continuation.source_event_ids[0],
             queue_memory_persistence=self._approval_memory_persistence(continuation),
+            queue_skill_review=self._approval_skill_review(continuation),
             persist_response_event_id=self._approval_response_event_persistence(continuation),
         )
 
@@ -2076,6 +2079,40 @@ class ResponseRunner:
             )
             for index, turn in enumerate(continuation.memory_thread_history)
         )
+
+    def _approval_skill_review(self, continuation: ApprovalContinuation) -> Callable[[str], None] | None:
+        """Return the normal skill-review handoff for a completed agent continuation."""
+        if continuation.entity_kind != "agent":
+            return None
+        return self._skill_review(
+            agent_name=continuation.entity_name,
+            session_id=continuation.session_id,
+            execution_identity=parse_tool_execution_identity_payload(
+                continuation.execution_identity,
+                error_prefix="Approval continuation execution_identity",
+            ),
+        )
+
+    def _skill_review(
+        self,
+        *,
+        agent_name: str,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> Callable[[str], None]:
+        """Build the completed-agent handoff that counts one run toward a background skill review."""
+
+        def queue(run_id: str) -> None:
+            queue_skill_review(
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+                agent_name=agent_name,
+                session_id=session_id,
+                execution_identity=execution_identity,
+                run_id=run_id,
+            )
+
+        return queue
 
     def _approval_memory_persistence(self, continuation: ApprovalContinuation) -> Callable[[], None] | None:
         """Return the normal agent-memory handoff for a completed continuation."""
@@ -2118,16 +2155,6 @@ class ResponseRunner:
                 session_id=session_id,
                 execution_identity=execution_identity,
             )
-            try:
-                queue_skill_learning(
-                    self.deps.runtime.config,
-                    self.deps.runtime_paths,
-                    agent_name=agent_name,
-                    session_id=session_id,
-                    execution_identity=execution_identity,
-                )
-            except Exception:
-                self.deps.logger.exception("Could not queue skill learning", agent=agent_name)
             if self.deps.runtime.config.resolve_entity(agent_name).memory_backend == "mem0":
                 create_background_task(
                     store_conversation_memory(
@@ -5476,6 +5503,16 @@ class ResponseRunner:
             thread_history=memory_thread_history,
             user_id=request.user_id,
         )
+        # Like Hermes skipping cron reviews, scheduled runs have no human in the loop to learn from.
+        queue_skill_review = (
+            None
+            if request.response_envelope.source_kind in {SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND}
+            else self._skill_review(
+                agent_name=self.deps.agent_name,
+                session_id=session_id,
+                execution_identity=execution_identity,
+            )
+        )
 
         persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
@@ -5566,6 +5603,7 @@ class ResponseRunner:
                 post_response_deps=lambda: self._post_response_deps(
                     request,
                     queue_memory_persistence=queue_memory_persistence,
+                    queue_skill_review=queue_skill_review,
                     persist_response_event_id=persist_response_event_id,
                 ),
                 approval_suspension_handler=lambda paused: self._suspend_for_approval(

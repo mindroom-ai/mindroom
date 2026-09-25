@@ -21,6 +21,7 @@ from mindroom.approval_tools import authorize_prepared_tool_call
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, PreparedAgentToolCatalog
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.skills import MindroomSkills
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tools.shell import ShellRuntimeSettings
 
@@ -42,6 +43,7 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
     """Keep complete agent state while presenting exactly one Bash function."""
 
     context_documents: dict[str, str]
+    skill_documents: dict[str, str]
     bootstrap_message: str = ""
     deferred_toolkits: tuple[DeferredAgentToolkit, ...] = ()
     response_context: ResponseTurnContext | None = None
@@ -80,9 +82,11 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
         }
         for index, document in enumerate(context_documents):
             self.context_documents[f"context-{index + 1}"] = document
+        self.skill_documents = {}
         if self.skills is not None:
             for index, skill in enumerate(self.skills.get_all_skills()):
                 self.context_documents[f"skill-{index + 1}"] = f"{skill.name}\n{skill.instructions}"
+                self.skill_documents[f"skill-{index + 1}"] = skill.name
         if isinstance(self.tools, list):
             for index, toolkit in enumerate(self.tools):
                 if isinstance(toolkit, Toolkit) and toolkit.instructions:
@@ -97,6 +101,12 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
             runtime_context=(self.additional_context or "") + runtime_context,
         )
         self.system_message = self.bootstrap_message
+
+    def _record_skill_document_read(self, document_name: str) -> None:
+        """Reading a skill's context document is minimal mode's equivalent of loading its instructions."""
+        skill_name = self.skill_documents.get(document_name)
+        if skill_name is not None and isinstance(self.skills, MindroomSkills):
+            self.skills.record_use(skill_name)
 
     def _failure_message(self, reason: str) -> str:
         assert self.id is not None
@@ -297,6 +307,7 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
                     worker=worker,
                     authorize=authorize,
                     context=self.context_documents,
+                    on_context_read=self._record_skill_document_read,
                     output_file_policy=self.output_file_policy,
                     delegation_depth=self.delegation_depth,
                     refresh_scheduler=self.refresh_scheduler,

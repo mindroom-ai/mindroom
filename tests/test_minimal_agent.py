@@ -41,7 +41,9 @@ from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.tool_access import ToolKey
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import ScriptedProvider
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
@@ -214,6 +216,38 @@ def test_minimal_context_file_list_is_bounded() -> None:
     assert len(message) < 2600
     assert "1000 context files" in message
     assert "mindroom-agent context list" in message
+
+
+def test_minimal_skill_document_reads_count_as_workspace_skill_use(tmp_path: Path) -> None:
+    """Minimal mode reads skills as context documents, which feeds the same usage telemetry as skill tools."""
+    skills_root = agent_workspace_root_path(tmp_path, "helper") / "skills"
+    (skills_root / "deploy").mkdir(parents=True)
+    (skills_root / "deploy" / "SKILL.md").write_text("---\nname: deploy\ndescription: Deploy\n---\nSteps\n")
+    config = Config(agents={"helper": AgentConfig(display_name="Helper")})
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    agent = MinimalAgent(
+        id="helper",
+        name="Helper",
+        skills=build_agent_skills("helper", config, runtime_paths, env_vars={}, credential_keys=set()),
+    )
+    agent.configure_minimal(
+        instructions=[],
+        interactive_prompt="",
+        context_documents=[],
+        deferred_toolkits=(),
+        toolkit_names=[],
+        minimal_instructions=[],
+        context_files=[],
+        memory_root=None,
+        runtime_context="",
+        output_file_policy=None,
+        delegation_depth=0,
+        refresh_scheduler=None,
+    )
+    assert agent.context_documents["skill-1"] == "deploy\nSteps"
+    agent._record_skill_document_read("instructions")
+    agent._record_skill_document_read("skill-1")
+    assert '"use_count":1' in (skills_root / ".usage.json").read_text()
 
 
 @pytest.mark.asyncio

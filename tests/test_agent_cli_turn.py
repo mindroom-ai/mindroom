@@ -855,6 +855,31 @@ async def test_context_page_caps_complete_unicode_envelope(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_context_reads_report_each_document_read_once(tmp_path: Path) -> None:
+    """A context read notifies its observer on the first page only, so paging counts one read."""
+    catalog = await _catalog(tmp_path, [])
+
+    async def authorize(key, arguments):
+        return None
+
+    reads: list[str] = []
+    owner = LiveTurnTools(
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        catalog=catalog,
+        worker=None,
+        authorize=authorize,
+        context={"skill-1": "deploy\n" + "x" * 100},
+        on_context_read=reads.append,
+    )
+    first = await owner.operation(ContextReadOperation(operation="context.read", name="skill-1", limit=10))
+    await owner.operation(
+        ContextReadOperation(operation="context.read", name="skill-1", offset=first["next_offset"], limit=10),
+    )
+    assert reads == ["skill-1"]
+    await owner.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("large_result", [False, True])
 async def test_live_call_retains_frozen_arguments_and_bounds_terminal_output(
     tmp_path: Path,

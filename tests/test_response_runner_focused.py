@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from functools import partial
@@ -69,7 +68,7 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
 )
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, ScheduledHistoryBudget
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.event_journal import (
     ApprovalCall,
@@ -9733,21 +9732,33 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("private", [False, True])
-async def test_completed_response_queues_scoped_skill_learning(
+@pytest.mark.parametrize("scheduled", [False, True])
+async def test_completed_response_counts_toward_a_scoped_skill_review(
     tmp_path: Path,
     streaming: bool,
     private: bool,
+    scheduled: bool,
 ) -> None:
-    """Both persisted response drivers enqueue learning through completed post-effects."""
+    """Both response drivers record the completed run for skill review, except scheduled runs like Hermes' cron."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert bot.client is not None
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
     config = coordinator.deps.runtime.config
     config.agents["general"].skill_learning.enabled = True
-    config.memory.backend = "file"
     if private:
         config.agents["general"].private = AgentPrivateConfig(per="user")
+    request = _plain_request(_target())
+    if scheduled:
+        request = replace(
+            request,
+            response_envelope=request_envelope(
+                target=request.response_envelope.target,
+                prompt=request.prompt,
+                user_id=request.user_id,
+                source_kind=SCHEDULED_SOURCE_KIND,
+            ),
+        )
     model = SyntheticModel(
         id="synthetic",
         min_response_chars=30,
@@ -9763,15 +9774,14 @@ async def test_completed_response_queues_scoped_skill_learning(
             should_use_streaming=AsyncMock(return_value=streaming),
         ),
     ):
-        await coordinator.generate_response(_plain_request(_target()))
+        await coordinator.generate_response(request)
     assert model_factory.called, logs
-    queue_path = coordinator.deps.runtime_paths.storage_root / "skill_learning.db"
-    assert queue_path.exists(), logs
-    with sqlite3.connect(queue_path) as connection:
-        rows = connection.execute("SELECT scope FROM reviews").fetchall()
-    assert len(rows) == 1
-    scope = json.loads(rows[0][0])
-    assert scope["agent"] == "general"
-    assert scope["identity"]["requester_id"] == "@user:localhost"
-    assert scope["private"] is private
-    assert ("private_instances" in scope["workspace"]) is private
+    state_path = coordinator.deps.runtime_paths.storage_root / "skill_learning_state.json"
+    if scheduled:
+        assert not state_path.exists()
+        return
+    (entry,) = json.loads(state_path.read_text())["entries"].values()
+    assert entry["agent"] == "general"
+    assert entry["identity"]["requester_id"] == "@user:localhost"
+    assert (entry["worker_key"] is not None) is private
+    assert len(entry["pending_run_ids"]) == 1

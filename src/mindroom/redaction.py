@@ -19,6 +19,7 @@ REDACTION_FAILED = "[redaction failed]"
 __all__ = [
     "REDACTED",
     "REDACTION_FAILED",
+    "contains_sensitive_text",
     "redact_log_event",
     "redact_sensitive_data",
     "redact_sensitive_text",
@@ -59,6 +60,11 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
+# An unterminated block still redacts through the end of the text, so a split key never leaks its body.
+_PRIVATE_KEY_PATTERN = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
+    re.DOTALL,
+)
 _TOKEN_LIKE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?P<token>("
     r"(?:sk|pk)-[A-Za-z0-9._-]+"
@@ -493,9 +499,12 @@ def _redact_sensitive_text(value: str, *, max_length: int | None) -> str:
     has_bearer = "bearer" in lowered_value
     has_api_key_message = "api key" in lowered_value
     has_token = any(marker in bounded_value for marker in _TOKEN_LIKE_MARKERS)
-    if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token)):
+    has_private_key = "PRIVATE KEY-----" in bounded_value
+    if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token, has_private_key)):
         return _truncate_text(bounded_value, max_length)
-    redacted = _URL_PATTERN.sub(_redact_url_match, bounded_value) if has_url else bounded_value
+    redacted = _PRIVATE_KEY_PATTERN.sub(REDACTED, bounded_value) if has_private_key else bounded_value
+    if has_url:
+        redacted = _URL_PATTERN.sub(_redact_url_match, redacted)
     if has_bearer:
         redacted = _BEARER_TOKEN_PATTERN.sub(_redact_matched_token, redacted)
     if has_api_key_message:
@@ -519,6 +528,24 @@ def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     if len(_bounded_redaction_input(value, max_length=max_length)) > _MAX_TEXT_INPUT_LENGTH:
         return _truncate_text(REDACTION_FAILED, max_length)
     return _redact_sensitive_text_fail_closed(value, max_length=max_length)
+
+
+def contains_sensitive_text(value: str) -> bool:
+    """Return whether redaction would change any line-bounded slice of arbitrarily long text."""
+    chunk: list[str] = []
+    size = 0
+    for line in value.splitlines(keepends=True):
+        if chunk and size + len(line) > _MAX_TEXT_INPUT_LENGTH:
+            if _chunk_is_sensitive("".join(chunk)):
+                return True
+            chunk, size = [], 0
+        chunk.append(line)
+        size += len(line)
+    return bool(chunk) and _chunk_is_sensitive("".join(chunk))
+
+
+def _chunk_is_sensitive(chunk: str) -> bool:
+    return redact_sensitive_text(chunk) != chunk
 
 
 def _normalized_structured_value(value: object) -> object:

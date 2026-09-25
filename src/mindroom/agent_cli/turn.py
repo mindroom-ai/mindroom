@@ -132,6 +132,7 @@ class LiveTurnTools(TurnToolBridge):
         worker: _ShellWorker | None,
         authorize: Callable[[ToolKey, dict[str, object]], Awaitable[None]],
         context: Mapping[str, str] | None = None,
+        on_context_read: Callable[[str], None] | None = None,
         output_file_policy: ToolOutputFilePolicy | None = None,
         run_child: ChildResponseRunner | None = None,
         delegation_depth: int = 0,
@@ -146,6 +147,7 @@ class LiveTurnTools(TurnToolBridge):
         self._worker = worker
         self._authorize = authorize
         self._context = dict(context or {})
+        self._on_context_read = on_context_read
         self._output_file_policy = output_file_policy
         self._media: list[ModelResponse] = []
         self._run_child = run_child
@@ -266,6 +268,8 @@ class LiveTurnTools(TurnToolBridge):
         if value is None:
             msg = "Context document is unavailable"
             raise CliOperationError(msg)
+        if operation.offset == 0 and self._on_context_read is not None:
+            self._on_context_read(operation.name)
         end = min(len(value), operation.offset + operation.limit)
         while True:
             page = {

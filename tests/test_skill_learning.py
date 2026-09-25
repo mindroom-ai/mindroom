@@ -1,945 +1,595 @@
-"""Real filesystem and persisted-session tests for automatic skill learning."""
+"""Automatic skill learning through real persistence, queue state, workspace files, and Agno tool loops."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
-import signal
-import sqlite3
-from typing import TYPE_CHECKING, cast
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
+from functools import partial
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, patch
 
-from agno.models.message import Message
+import pytest
+from agno.models.message import Message, MessageMetrics
+from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
-from structlog.testing import capture_logs
 
-import mindroom.skill_learning.store as store_module
-import mindroom.skill_learning.worker as worker_module
-import mindroom.tool_system.skills as skills_module
-from mindroom.agent_modes import set_agent_mode
 from mindroom.agent_storage import create_session_storage
-from mindroom.config.agent import AgentPrivateConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
+from mindroom.constants import resolve_runtime_paths
 from mindroom.provider_tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.skill_learning import library, queue
+from mindroom.skill_learning.reviewer import review_conversation
+from mindroom.skill_learning.transcript import count_model_replies, render_transcript
+from mindroom.skill_learning.worker import SkillLearningWorker
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.workspace_skills import open_skills_root, update_skill_usage
 from mindroom.usage_stats import collect_admin_usage
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.skill_learning.worker import SkillReview
 
-import pytest
-from agno.agent import Agent
-from agno.metrics import MessageMetrics, RunMetrics
+LEARNED = (
+    "---\nname: deploy-checks\ndescription: Use when deploying the web service\n"
+    "metadata:\n  mindroom:\n    learned: true\n---\n1. Run the smoke test.\n"
+)
+HANDWRITTEN = "---\nname: handwritten\ndescription: Mine\n---\nBody\n"
+ALICE = ToolExecutionIdentity(
+    channel="matrix",
+    agent_name="mind",
+    requester_id="@alice:example.test",
+    room_id="!room:example.test",
+    thread_id="$thread",
+    resolved_thread_id="$thread",
+    session_id="session",
+)
+BOB = replace(ALICE, requester_id="@bob:example.test")
 
-from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
-from mindroom.tool_system.skills import build_agent_skills
 
-MARKDOWN = "---\nname: learned-task\ndescription: Verify a repaired task\n---\nRun the check and inspect its result.\n"
+@dataclass
+class _ScriptedModel(SyntheticModel):
+    """Provider double that plays a fixed tool-call script, then answers."""
+
+    script: list[tuple[str, dict[str, object]]] = field(default_factory=list)
+    requests: list[list[str]] = field(default_factory=list)
+    offered_tools: list[set[str]] = field(default_factory=list)
+    provider_tools_blocked: list[bool] = field(default_factory=list)
+
+    async def ainvoke(
+        self,
+        messages: list[Message],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+        **_kwargs: object,
+    ) -> ModelResponse:
+        self.requests.append([message.get_content_string() for message in messages])
+        self.offered_tools.append({tool["function"]["name"] for tool in tools or []})
+        self.provider_tools_blocked.append(provider_tools_disabled())
+        usage = MessageMetrics(input_tokens=7, output_tokens=3, total_tokens=10)
+        if not self.script:
+            return ModelResponse(content="Done.", response_usage=usage)
+        name, arguments = self.script.pop(0)
+        call = {
+            "id": f"call-{len(self.requests)}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }
+        return ModelResponse(content="", tool_calls=[call], response_usage=usage)
 
 
-def test_learning_is_opt_in() -> None:
-    """Learning is opt in."""
+def _model(*script: tuple[str, dict[str, object]]) -> _ScriptedModel:
+    return _ScriptedModel(id="scripted", name="scripted", provider="test", script=list(script))
+
+
+def _learner(
+    tmp_path: Path,
+    *,
+    private: bool = False,
+    review_interval: int = 2,
+    context_window: int | None = None,
+) -> tuple[Config, RuntimePaths]:
     agent = AgentConfig(display_name="Mind", role="")
-    assert getattr(agent, "skill_learning", None) is not None
-    assert agent.skill_learning.enabled is False
-
-
-def test_publish_is_discovered_and_replay_is_idempotent(tmp_path: Path) -> None:
-    """Publish is discovered and replay is idempotent."""
-    module = store_module
-    store = module.SkillStore(tmp_path / "owner")
-    revision = store.snapshot()
-    assert store.publish("learned-task", MARKDOWN, action="create", expected=revision, source="run-1")
-    assert not store.publish("learned-task", MARKDOWN, action="create", expected=revision, source="run-1")
-    assert (tmp_path / "owner/skills/learned-task/SKILL.md").read_text() == MARKDOWN
-    assert not (tmp_path / "other/skills/learned-task/SKILL.md").exists()
-    config = Config(agents={"mind": AgentConfig(display_name="Mind", role="")})
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    skills = build_agent_skills("mind", config, paths, workspace_skills_root=tmp_path / "owner/skills")
-    assert skills is not None
-    assert "learned-task" in skills.get_skill_names()
-
-
-def test_update_preserves_previous_version_and_rejects_manual_edits(tmp_path: Path) -> None:
-    """Update preserves previous version and rejects manual edits."""
-    module = store_module
-    store = module.SkillStore(tmp_path)
-    store.publish("learned-task", MARKDOWN, action="create", expected=store.snapshot(), source="run-1")
-    revision = store.snapshot()
-    changed = MARKDOWN + "Repeat the verification.\n"
-    assert store.publish("learned-task", changed, action="update", expected=revision, source="run-2")
-    assert MARKDOWN in json.loads((store.workspace / ".skill-learning.json").read_text())["learned-task"]["previous"]
-    revision = store.snapshot()
-    path = tmp_path / "skills/learned-task/SKILL.md"
-    path.write_text("User edit")
-    with pytest.raises(ValueError, match=r"changed|owned"):
-        store.publish("learned-task", changed, action="update", expected=revision, source="run-3")
-    assert path.read_text() == "User edit"
-
-
-@pytest.mark.parametrize("name", ["../escape", "/absolute", "UPPER", "a/b", "mindroom-docs"])
-def test_rejects_invalid_and_protected_names(tmp_path: Path, name: str) -> None:
-    """Rejects invalid and protected names."""
-    module = store_module
-    store = module.SkillStore(tmp_path)
-    with pytest.raises(ValueError, match=r"Invalid|Protected|owned|Unsafe"):
-        store.publish(name, MARKDOWN.replace("learned-task", name), action="create", expected={}, source="run")
-
-
-def test_rejects_manual_skill_and_symlink(tmp_path: Path) -> None:
-    """Rejects manual skill and symlink."""
-    module = store_module
-    store = module.SkillStore(tmp_path / "owner")
-    path = tmp_path / "owner/skills/learned-task"
-    path.mkdir(parents=True)
-    (path / "SKILL.md").write_text(MARKDOWN)
-    with pytest.raises(ValueError, match=r"owned|Unsafe"):
-        store.publish("learned-task", MARKDOWN, action="update", expected=store.snapshot(), source="run")
-    (path / "SKILL.md").unlink()
-    (path / "SKILL.md").symlink_to(tmp_path / "outside")
-    with pytest.raises(ValueError, match=r"owned|Unsafe"):
-        store.publish("learned-task", MARKDOWN, action="create", expected={}, source="run")
-    assert not (tmp_path / "outside").exists()
-
-
-def test_replay_recovers_interrupted_update(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replay recovers interrupted update."""
-    module = store_module
-    store = module.SkillStore(tmp_path)
-    store.publish("learned-task", MARKDOWN, action="create", expected={}, source="run-1")
-    expected = store.snapshot()
-    changed = MARKDOWN + "Verify again.\n"
-    original = module.atomic_write_bytes_at
-
-    def fail_skill(descriptor: int, filename: str, payload: bytes, **kwargs: object) -> None:
-        if filename == "SKILL.md":
-            message = "Simulated crash before publication"
-            raise OSError(message)
-        original(descriptor, filename, payload, **kwargs)
-
-    monkeypatch.setattr(module, "atomic_write_bytes_at", fail_skill)
-    with pytest.raises(OSError, match="Simulated crash"):
-        store.publish("learned-task", changed, action="update", expected=expected, source="run-2")
-    monkeypatch.setattr(module, "atomic_write_bytes_at", original)
-    assert store.publish("learned-task", changed, action="update", expected=expected, source="run-2")
-    assert json.loads((store.workspace / ".skill-learning.json").read_text())["learned-task"]["previous"] == [MARKDOWN]
-
-
-def _learner(tmp_path: Path, *, private: bool = False) -> tuple[Config, RuntimePaths]:
-
-    config = Config(agents={"mind": AgentConfig(display_name="Mind", role="")})
-    config.agents["mind"].skill_learning.enabled = True
-    config.agents["mind"].skill_learning.cooldown_seconds = 0
+    agent.skill_learning.enabled = True
+    agent.skill_learning.review_interval = review_interval
     if private:
-        config.agents["mind"].private = AgentPrivateConfig(per="user")
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    return config, paths
+        agent.private = AgentPrivateConfig(per="user")
+    config = Config(
+        agents={"mind": agent},
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=context_window)},
+    )
+    return config, resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
 
-def _persist(
+def _run(run_id: str, *messages: Message) -> RunOutput:
+    return RunOutput(run_id=run_id, agent_id="mind", session_id="session", messages=list(messages))
+
+
+def _tool_turn(run_id: str, result: str = "tests passed") -> RunOutput:
+    """One run with two model replies: a tool-calling step and the final answer."""
+    return _run(
+        run_id,
+        Message(role="user", content="Deploy the web service"),
+        Message(role="assistant", content="", tool_calls=[{"function": {"name": "shell", "arguments": "{}"}}]),
+        Message(role="tool", content=result, tool_name="shell", tool_call_id="call"),
+        Message(role="assistant", content="Deployed."),
+    )
+
+
+def _seed(
     config: Config,
     paths: RuntimePaths,
+    *runs: RunOutput,
     identity: ToolExecutionIdentity | None = None,
-    *,
-    text: str = "The validation passed",
+    session_id: str = "session",
 ) -> None:
-
     storage = create_session_storage("mind", config, paths, execution_identity=identity)
+    try:
+        seed_session(storage, AgentSession(session_id=session_id, agent_id="mind", runs=list(runs)))
+    finally:
+        storage.close()
 
-    seed_session(
-        storage,
-        AgentSession(
-            session_id="session",
-            agent_id="mind",
-            runs=[
-                RunOutput(
-                    run_id="run-1",
-                    agent_id="mind",
-                    session_id="session",
-                    messages=[
-                        Message(role="user", content="Repair and verify"),
-                        Message(role="tool", content=text, tool_call_id="tool-1", tool_name="verify"),
-                        Message(role="assistant", content="The test passed after repair"),
-                    ],
-                ),
-            ],
-        ),
+
+def _skills_root(config: Config, paths: RuntimePaths, identity: ToolExecutionIdentity | None = None) -> Path:
+    runtime = resolve_agent_runtime("mind", config, paths, identity)
+    workspace = (
+        runtime.workspace.root if runtime.workspace is not None else paths.storage_root / "agents/mind/workspace"
     )
+    return workspace / "skills"
 
 
-@pytest.mark.asyncio
-async def test_worker_reviews_persisted_trace_and_deduplicates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Worker reviews persisted trace and deduplicates."""
-    module = worker_module
-    config, paths = _learner(tmp_path)
-    _persist(config, paths)
-    reviews = []
-
-    async def review(**kwargs: object) -> SkillReview:
-        reviews.append(cast("str", kwargs["trace"]))
-        return module.SkillReview(action="create", name="learned-task", markdown=MARKDOWN)
-
-    monkeypatch.setattr(module, "_review_session", review)
-    module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    worker = module.SkillLearningWorker(paths, lambda: config)
-    await worker._run_cycle()
-    module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    await module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert len(reviews) == 1
-    assert any(message["role"] == "tool" for run in json.loads(reviews[0]) for message in run["messages"])
-    assert "The validation passed" in reviews[0]
-    assert (tmp_path / "agents/mind/workspace/skills/learned-task/SKILL.md").exists()
+def _write_skill(root: Path, name: str, content: str) -> Path:
+    path = root / name / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(content)
+    return path
 
 
-@pytest.mark.asyncio
-async def test_private_queue_survives_restart_and_rechecks_config(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Private queue survives restart and rechecks config."""
-    module = worker_module
-    config, paths = _learner(tmp_path, private=True)
-    alice = ToolExecutionIdentity(
-        channel="matrix",
-        requester_id="@alice:example.test",
-        agent_name="mind",
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session",
-    )
-    bob = ToolExecutionIdentity(
-        channel="matrix",
-        requester_id="@bob:example.test",
-        agent_name="mind",
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session",
-    )
-    _persist(config, paths, alice)
-    _persist(config, paths, bob, text="Bob's private data")
-    alice_root = resolve_agent_runtime("mind", config, paths, alice).workspace.root
-    bob_root = resolve_agent_runtime("mind", config, paths, bob).workspace.root
-
-    async def review(**kwargs: object) -> SkillReview:
-        assert "Bob's private data" not in cast("str", kwargs["trace"])
-        return module.SkillReview(action="create", name="learned-task", markdown=MARKDOWN)
-
-    monkeypatch.setattr(module, "_review_session", review)
-    module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=alice)
-    await module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert (alice_root / "skills/learned-task/SKILL.md").read_text() == MARKDOWN
-    assert not (bob_root / "skills/learned-task/SKILL.md").exists()
-    module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=bob)
-    config.agents["mind"].skill_learning.enabled = False
-    await module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert not (bob_root / "skills/learned-task/SKILL.md").exists()
+def _entries(paths: RuntimePaths) -> dict[str, dict[str, Any]]:
+    return json.loads((paths.storage_root / "skill_learning_state.json").read_text())["entries"]
 
 
-@pytest.mark.asyncio
-async def test_disabled_does_no_io_and_no_change_writes_no_skill(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Disabled does no io and no change writes no skill."""
-    module = worker_module
-    config, paths = _learner(tmp_path)
-    config.agents["mind"].skill_learning.enabled = False
-    module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    assert not (tmp_path / "skill_learning.db").exists()
-    config.agents["mind"].skill_learning.enabled = True
-    _persist(config, paths)
-
-    async def review(**_kwargs: object) -> SkillReview:
-        return module.SkillReview(action="no_change")
-
-    monkeypatch.setattr(module, "_review_session", review)
-    module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    await module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert not list(tmp_path.rglob("SKILL.md"))
-
-
-@pytest.mark.asyncio
-async def test_retry_budget_and_current_config_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Retry budget and current config check."""
-    module = worker_module
-    config, paths = _learner(tmp_path)
-    _persist(config, paths)
-    calls = []
-
-    async def failed(**kwargs: object) -> SkillReview:
-        calls.append(kwargs)
-        raise TimeoutError
-
-    monkeypatch.setattr(module, "_review_session", failed)
-    module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    for now in [100, 200, 300, 400, 500]:
-        monkeypatch.setattr(module.time, "time", lambda now=now: 20000000000 + now)
-        await module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert len(calls) == 3
-    assert not list(tmp_path.rglob("SKILL.md"))
-
-    async def disabled_during_review(**_kwargs: object) -> SkillReview:
-        config.agents["mind"].skill_learning.enabled = False
-        return module.SkillReview(action="create", name="learned-task", markdown=MARKDOWN)
-
-    monkeypatch.setattr(module, "_review_session", disabled_during_review)
-    module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    await module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert not list(tmp_path.rglob("SKILL.md"))
-
-
-@pytest.mark.asyncio
-async def test_minimal_mode_preserves_queue_without_paid_review(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Minimal mode preserves queue without paid review."""
-    module = worker_module
-    config, paths = _learner(tmp_path)
-    _persist(config, paths)
-    runtime = resolve_agent_runtime("mind", config, paths, None)
-    calls = []
-
-    async def review(**kwargs: object) -> SkillReview:
-        calls.append(kwargs)
-        return module.SkillReview(action="no_change")
-
-    monkeypatch.setattr(module, "_review_session", review)
-    module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    set_agent_mode(runtime.state_root, "mind", "session", "minimal", "@alice:example.test")
-    await module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert calls == []
-    set_agent_mode(runtime.state_root, "mind", "session", "standard", "@alice:example.test")
-    resumed_at = worker_module.time.time() + 6
-    monkeypatch.setattr(worker_module.time, "time", lambda: resumed_at)
-    await module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert len(calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_input_and_output_budgets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Input and output budgets."""
-    module = worker_module
-    config, paths = _learner(tmp_path)
-    config.agents["mind"].skill_learning.max_input_chars = 1000
-    config.agents["mind"].skill_learning.max_output_chars = 500
-    _persist(config, paths, text="Result " * 1000)
-    seen = []
-
-    async def review(**kwargs: object) -> SkillReview:
-        seen.append(kwargs)
-        return module.SkillReview(action="create", name="learned-task", markdown=MARKDOWN + "X" * 1000)
-
-    monkeypatch.setattr(module, "_review_session", review)
-    module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    await module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert len(cast("str", seen[0]["trace"])) + len(cast("str", seen[0]["skill_context"])) <= 1000
-    trace = json.loads(cast("str", seen[0]["trace"]))
-    assert trace
-    assert all(message["role"] in {"user", "assistant", "tool"} for run in trace for message in run["messages"])
-    tool = next(message for run in trace for message in run["messages"] if message["role"] == "tool")
-    assert tool["tool_call_id"] == "tool-1"
-    assert tool["tool_name"] == "verify"
-    assert "[truncated]" in tool["content"]
-    assert not list(tmp_path.rglob("SKILL.md"))
-
-
-@pytest.mark.asyncio
-async def test_worker_updates_owned_skill_with_labelled_context(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A later verified correction updates the owned skill and preserves rollback content."""
-    config, paths = _learner(tmp_path)
-    _persist(config, paths)
-    changed = MARKDOWN + "Verify the corrected result.\n"
-    calls = []
-
-    async def review(**kwargs: object) -> SkillReview:
-        calls.append(kwargs)
-        if len(calls) == 1:
-            return worker_module.SkillReview(action="create", name="learned-task", markdown=MARKDOWN)
-        assert "learner-owned" in cast("str", kwargs["skill_context"])
-        assert MARKDOWN in cast("str", kwargs["skill_context"])
-        return worker_module.SkillReview(action="update", name="learned-task", markdown=changed)
-
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    for result in ["first verified", "corrected verified"]:
-        _persist(config, paths, text=result)
-        worker_module.queue_skill_learning(
-            config,
-            paths,
-            agent_name="mind",
-            session_id="session",
-            execution_identity=None,
-        )
-        await worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    path = tmp_path / "agents/mind/workspace/skills/learned-task/SKILL.md"
-    assert path.read_text() == changed
-    assert json.loads((path.parents[2] / ".skill-learning.json").read_text())["learned-task"]["previous"] == [MARKDOWN]
-
-
-def test_workspace_snapshot_rejects_symlink_content(tmp_path: Path) -> None:
-    """Review context must not read an escaped workspace skill."""
-    outside = tmp_path / "outside"
-    outside.write_text(MARKDOWN)
-    workspace = tmp_path / "workspace"
-    skill = workspace / "skills/learned-task"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").symlink_to(outside)
-    with pytest.raises(ValueError, match="Unsafe"):
-        store_module.SkillStore(workspace).snapshot()
-
-
-@pytest.mark.asyncio
-async def test_worker_shutdown_does_not_publish_late_model_result(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A model that swallows cancellation cannot publish after worker shutdown."""
-    config, paths = _learner(tmp_path)
-    _persist(config, paths)
-    worker = worker_module.SkillLearningWorker(paths, lambda: config)
-
-    async def review(**_kwargs: object) -> SkillReview:
-        worker.stop()
-        return worker_module.SkillReview(action="create", name="learned-task", markdown=MARKDOWN)
-
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    await worker._run_cycle()
-    assert not list(tmp_path.rglob("SKILL.md"))
-    # The retained validated proposal completes without another paid call after restart.
-    await worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert (tmp_path / "agents/mind/workspace/skills/learned-task/SKILL.md").exists()
-
-
-@pytest.mark.asyncio
-async def test_minimal_sessions_do_not_starve_ready_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Paused sessions yield their queue position to runnable work."""
-    config, paths = _learner(tmp_path)
-    for index in range(4):
-        session_id = f"paused-{index}"
-        worker_module.queue_skill_learning(
-            config,
-            paths,
-            agent_name="mind",
-            session_id=session_id,
-            execution_identity=None,
-        )
-        set_agent_mode(paths.storage_root / "agents/mind", "mind", session_id, "minimal", "@alice:example.test")
-    _persist(config, paths)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    calls = []
-
-    async def review(**kwargs: object) -> SkillReview:
-        calls.append(kwargs)
-        return worker_module.SkillReview(action="no_change")
-
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    worker = worker_module.SkillLearningWorker(paths, lambda: config)
-    await worker._run_cycle()
-    await worker._run_cycle()
-    assert len(calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_reviewer_has_no_tools_and_records_content_free_usage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The structured helper has no tools and attributes paid usage to its source session."""
-    config, paths = _learner(tmp_path)
-    _persist(config, paths)
-
-    async def inference(self: Agent, prompt: str, **_kwargs: object) -> RunOutput:
-        assert provider_tools_disabled()
-        assert not self.tools
-        assert self.output_schema is worker_module.SkillReview
-        assert "private trace" in prompt
-        return RunOutput(
-            content=worker_module.SkillReview(action="no_change"),
-            model="synthetic",
-            model_provider="test",
-            metrics=RunMetrics(input_tokens=7, output_tokens=3, total_tokens=10),
-            messages=[
-                Message(role="assistant", metrics=MessageMetrics(input_tokens=7, output_tokens=3, total_tokens=10)),
-            ],
-        )
-
-    monkeypatch.setattr(
-        worker_module.model_loading,
-        "get_model_instance",
-        lambda *_args, **_kwargs: SyntheticModel(id="synthetic"),
-    )
-    monkeypatch.setattr(Agent, "arun", inference)
-    result = await worker_module._review_session(
-        config=config,
-        runtime_paths=paths,
-        scope=worker_module._scope(config, paths, "mind", "session", None),
-        trace="private trace",
-        skill_context="",
-        identity=None,
-    )
-    assert result.action == "no_change"
-    with sqlite3.connect(tmp_path / "agents/mind/sessions/mind.db") as connection:
-        rows = connection.execute("SELECT usage_data FROM mind_sessions_usage").fetchall()
-    helper_rows = [json.loads(row[0]) for row in rows if json.loads(row[0]).get("kind") == "skill_learning"]
-    assert len(helper_rows) == 1
-    assert helper_rows[0]["metrics"]["total_tokens"] == 10
-    assert "private trace" not in json.dumps(helper_rows)
-    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
-    assert report.totals.total_tokens == 10
-    assert report.request_breakdown is not None
-    assert [(row.kind, row.totals.total_tokens) for row in report.request_breakdown] == [("skill_learning", 10)]
-
-
-@pytest.mark.asyncio
-async def test_persisted_trace_redacts_credentials_before_review(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Session tool credentials never enter the review prompt or reusable skill files."""
-    config, paths = _learner(tmp_path)
-    _persist(config, paths, text="password: very-secret-password-value; verified result passed")
-    calls = []
-
-    async def review(**kwargs: object) -> SkillReview:
-        calls.append(cast("str", kwargs["trace"]))
-        return worker_module.SkillReview(action="no_change")
-
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    await worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert len(calls) == 1
-    assert "very-secret-password-value" not in calls[0]
-
-
-def test_publisher_rejects_url_credentials(tmp_path: Path) -> None:
-    """Generated instructions cannot persist credentials embedded in URLs."""
-    with pytest.raises(ValueError, match="credential"):
-        store_module.SkillStore(tmp_path).publish(
-            "learned-task",
-            MARKDOWN + "Connect to https://alice:secret@service.test",
-            action="create",
-            expected={},
-            source="source",
-        )
-
-
-@pytest.mark.asyncio
-async def test_recovered_proposal_does_not_acknowledge_newer_turn(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A saved proposal acknowledges only the turn generation it reviewed."""
-    config, paths = _learner(tmp_path)
-    _persist(config, paths)
-    stopped = worker_module.SkillLearningWorker(paths, lambda: config)
-    calls = []
-    changed = MARKDOWN + "Verify the newer correction.\n"
-
-    async def review(**kwargs: object) -> SkillReview:
-        calls.append(kwargs)
-        if len(calls) == 1:
-            stopped.stop()
-            return worker_module.SkillReview(action="create", name="learned-task", markdown=MARKDOWN)
-        return worker_module.SkillReview(action="update", name="learned-task", markdown=changed)
-
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    await stopped._run_cycle()
-    _persist(config, paths, text="The newer correction passed")
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    worker = worker_module.SkillLearningWorker(paths, lambda: config)
-    await worker._run_cycle()
-    await worker._run_cycle()
-    assert (tmp_path / "agents/mind/workspace/skills/learned-task/SKILL.md").read_text() == changed
-    assert len(calls) == 2
-
-
-@pytest.mark.asyncio
-async def test_private_scope_change_during_review_discards_publication(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A queued private lesson cannot move to a newly configured private scope."""
-    config, paths = _learner(tmp_path, private=True)
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@alice:example.test",
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session",
-    )
-    _persist(config, paths, identity)
-
-    async def review(**_kwargs: object) -> SkillReview:
-        config.agents["mind"].private = AgentPrivateConfig(per="user_agent")
-        return worker_module.SkillReview(action="create", name="learned-task", markdown=MARKDOWN)
-
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    worker_module.queue_skill_learning(
+def _queue(config: Config, paths: RuntimePaths, run_id: str, identity: ToolExecutionIdentity | None = None) -> None:
+    queue.queue_skill_review(
         config,
         paths,
         agent_name="mind",
-        session_id="session",
+        session_id="session" if not run_id.startswith("o") else "other",
         execution_identity=identity,
+        run_id=run_id,
     )
-    await worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert not list(tmp_path.rglob("SKILL.md"))
 
 
-def test_queue_metadata_is_owner_readable_only(tmp_path: Path) -> None:
-    """The shared queue must not expose private proposals to other operating-system users."""
-    config, paths = _learner(tmp_path)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    assert (tmp_path / "skill_learning.db").stat().st_mode & 0o777 == 0o600
+async def _cycle(config: Config, paths: RuntimePaths, client: object | None = None) -> None:
+    await SkillLearningWorker(paths, lambda: config, client_provider=lambda _agent: client)._run_cycle(config)
 
 
-@pytest.mark.parametrize("allowlist", [[], ["allowed", "ineligible", "overridden"]])
-@pytest.mark.asyncio
-async def test_review_context_contains_only_effective_accessible_skills(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    allowlist: list[str],
-) -> None:
-    """Review inputs respect configured access, eligibility and workspace precedence."""
-    config, paths = _learner(tmp_path)
-    config.agents["mind"].skills = allowlist
-    _persist(config, paths)
-    global_root = tmp_path / "global-skills"
-    workspace_root = tmp_path / "agents/mind/workspace/skills"
-    for root, name, description, metadata in [
-        (global_root, "hidden", "Hidden global procedure", ""),
-        (global_root, "allowed", "Allowed global procedure", ""),
-        (global_root, "overridden", "Overridden global procedure", ""),
-        (global_root, "ineligible", "Ineligible global procedure", "metadata: {openclaw: {os: [unavailable-os]}}\n"),
-        (workspace_root, "overridden", "Effective workspace procedure", ""),
-        (
-            workspace_root,
-            "workspace-ineligible",
-            "Ineligible workspace procedure",
-            "metadata: {openclaw: {os: [unavailable-os]}}\n",
-        ),
-    ]:
-        directory = root / name
-        directory.mkdir(parents=True)
-        (directory / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: {description}\n{metadata}---\n{description} body.\n",
-        )
-    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [global_root])
-    contexts = []
-
-    async def review(**kwargs: object) -> SkillReview:
-        contexts.append(cast("str", kwargs["skill_context"]))
-        return worker_module.SkillReview(action="no_change")
-
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    await worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert len(contexts) == 1
-    assert "Effective workspace procedure body." in contexts[0]
-    assert "Hidden global procedure" not in contexts[0]
-    assert "Overridden global procedure" not in contexts[0]
-    assert "Ineligible" not in contexts[0]
-    assert ("Allowed global procedure" in contexts[0]) == bool(allowlist)
-    store = store_module.SkillStore(workspace_root.parent)
-    with pytest.raises(ValueError, match="Protected"):
-        store.publish("hidden", MARKDOWN.replace("learned-task", "hidden"), action="create", expected={}, source="run")
+@pytest.mark.parametrize(
+    ("name", "content", "error"),
+    [
+        ("Deploy", LEARNED, "Invalid skill name"),
+        ("deploy-checks", LEARNED.replace("name: deploy-checks", "name: other"), "Frontmatter name"),
+        ("deploy-checks", LEARNED.replace("Use when deploying the web service", "x" * 61), "Description exceeds 60"),
+        ("deploy-checks", LEARNED.replace("learned: true", "learned: false"), "learned: true"),
+        ("deploy-checks", LEARNED.replace("---\n1. Run the smoke test.\n", "---\n"), "instructions"),
+        ("deploy-checks", LEARNED + "Log in with sk-abcdefghijklmnopqrstu.\n", "credential-like"),
+        ("deploy-checks", LEARNED + "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n", "credential-like"),
+        ("mindroom-docs", LEARNED.replace("deploy-checks", "mindroom-docs"), "already exists"),
+    ],
+)
+def test_create_rejects_invalid_or_shadowing_skills(tmp_path: Path, name: str, content: str, error: str) -> None:
+    """New learned skills need Hermes' frontmatter shape, the marker, no secrets, and an unused name."""
+    with pytest.raises(library.SkillEditError, match=error):
+        library.create_skill(tmp_path / "skills", name, content, reserved_names=frozenset({"mindroom-docs"}))
+    assert not (tmp_path / "skills" / name).exists()
 
 
-def test_create_rejects_case_insensitive_manual_frontmatter_collision(tmp_path: Path) -> None:
-    """A manual name protects its case variants regardless of the directory name."""
-    store = store_module.SkillStore(tmp_path)
-    manual_path = tmp_path / "skills/different-directory/SKILL.md"
-    manual_path.parent.mkdir(parents=True)
-    manual = MARKDOWN.replace("learned-task", "Learned-Task")
-    manual_path.write_text(manual)
-    with pytest.raises(ValueError, match="already exists"):
-        store.publish("learned-task", MARKDOWN, action="create", expected=store.snapshot(), source="run")
-    assert manual_path.read_text() == manual
-    assert not (tmp_path / "skills/learned-task/SKILL.md").exists()
+def test_writes_require_a_current_read_and_learner_ownership(tmp_path: Path) -> None:
+    """Edits need the digest skill_view returned, never touch user skills, and keep restorable history."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    changed = LEARNED + "2. Check the logs.\n"
+    with pytest.raises(library.SkillEditError, match="has not been loaded"):
+        library.write_skill_file(root, "deploy-checks", "SKILL.md", changed, expected_digest=None)
+    current = library.read_skill_file(root, "deploy-checks")
+    assert current is not None
+    assert current.learned
+    library.write_skill_file(root, "deploy-checks", "SKILL.md", changed, expected_digest=current.digest)
+    (root / "deploy-checks/SKILL.md").write_text(changed + "User note.\n")
+    with pytest.raises(library.SkillEditError, match="has not been loaded"):
+        library.write_skill_file(root, "deploy-checks", "SKILL.md", changed, expected_digest=current.digest)
+    assert [path.read_text() for path in sorted((root / ".history/deploy-checks").iterdir())] == [LEARNED]
+
+    manual = _write_skill(root, "handwritten", HANDWRITTEN)
+    loaded = library.read_skill_file(root, "handwritten")
+    assert loaded is not None
+    assert not loaded.learned
+    with pytest.raises(library.SkillEditError, match="not learner-owned"):
+        library.write_skill_file(root, "handwritten", "references/notes.md", "notes", expected_digest=None)
+    assert not (manual.parent / "references").exists()
 
 
-@pytest.mark.parametrize("newer_before_exhaustion", [False, True])
-@pytest.mark.asyncio
-async def test_exhausted_proposal_leaves_newer_turn_for_fresh_review(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    newer_before_exhaustion: bool,
-) -> None:
-    """Rejected publications cannot pin a session to an old proposal or consume later turns."""
-    config, paths = _learner(tmp_path)
-    config.agents["mind"].skill_learning.max_attempts = 1
-    _persist(config, paths)
-    initial_worker = worker_module.SkillLearningWorker(paths, lambda: config)
-    traces = []
-
-    async def review(**kwargs: object) -> SkillReview:
-        traces.append(cast("str", kwargs["trace"]))
-        if len(traces) == 1:
-            if newer_before_exhaustion:
-                initial_worker.stop()
-            return worker_module.SkillReview(
-                action="create",
-                name="mindroom-docs",
-                markdown=MARKDOWN.replace("learned-task", "mindroom-docs"),
-            )
-        return worker_module.SkillReview(action="create", name="learned-task", markdown=MARKDOWN)
-
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    await initial_worker._run_cycle()
-    _persist(config, paths, text="A newer successful verification")
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    restarted = worker_module.SkillLearningWorker(paths, lambda: config)
-    if newer_before_exhaustion:
-        await restarted._run_cycle()
-    with sqlite3.connect(paths.storage_root / "skill_learning.db") as connection:
-        generation, processed, attempts, proposal = connection.execute(
-            "SELECT generation, processed, attempts, proposal FROM reviews",
-        ).fetchone()
-    assert (generation, processed, attempts, proposal) == (2, 1, 0, None)
-    await restarted._run_cycle()
-    assert len(traces) == 2
-    assert "A newer successful verification" in traces[1]
-    assert (tmp_path / "agents/mind/workspace/skills/learned-task/SKILL.md").read_text() == MARKDOWN
+def test_support_files_stay_directly_under_support_directories(tmp_path: Path) -> None:
+    """Support writes are single files under Hermes' support directories and can be removed after a read."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    for bad in ("../escape.md", "references/../x.md", "references/nested/x.md", "other/x.md", "references/.hidden"):
+        with pytest.raises(library.SkillEditError, match="file_path"):
+            library.write_skill_file(root, "deploy-checks", bad, "x", expected_digest=None)
+    library.write_skill_file(root, "deploy-checks", "references/rollback.md", "Roll back.", expected_digest=None)
+    assert library.support_file_paths(root, "deploy-checks") == ["references/rollback.md"]
+    loaded = library.read_skill_file(root, "deploy-checks", "references/rollback.md")
+    assert loaded is not None
+    library.remove_skill_file(root, "deploy-checks", "references/rollback.md", expected_digest=loaded.digest)
+    assert library.support_file_paths(root, "deploy-checks") == []
 
 
-@pytest.mark.asyncio
-async def test_exhausted_inference_preserves_turn_queued_during_review(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Failure before a proposal exists settles only the generation that began review."""
-    config, paths = _learner(tmp_path)
-    config.agents["mind"].skill_learning.max_attempts = 1
-    _persist(config, paths)
-    calls = []
-
-    async def review(**kwargs: object) -> SkillReview:
-        calls.append(kwargs)
-        if len(calls) == 1:
-            _persist(config, paths, text="Later completed turn")
-            worker_module.queue_skill_learning(
-                config,
-                paths,
-                agent_name="mind",
-                session_id="session",
-                execution_identity=None,
-            )
-            raise TimeoutError
-        return worker_module.SkillReview(action="create", name="learned-task", markdown=MARKDOWN)
-
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    worker = worker_module.SkillLearningWorker(paths, lambda: config)
-    await worker._run_cycle()
-    await worker._run_cycle()
-    assert len(calls) == 2
-    assert (tmp_path / "agents/mind/workspace/skills/learned-task/SKILL.md").exists()
-
-
-@pytest.mark.parametrize("entry", ["fifo", "symlink", "linked-parent"])
-@pytest.mark.parametrize("operation", ["snapshot", "context", "journal"])
-def test_store_and_context_reject_special_files_without_blocking(
-    tmp_path: Path,
-    entry: str,
-    operation: str,
-) -> None:
-    """Every learner read path refuses planted files before an ordinary pathname read."""
-    config, paths = _learner(tmp_path)
-    workspace = tmp_path / "agents/mind/workspace"
-    target = workspace / (".skill-learning.json" if operation == "journal" else "skills/manual/SKILL.md")
-    target.parent.mkdir(parents=True)
-    if entry == "fifo":
-        os.mkfifo(target)
-    elif entry == "symlink":
-        outside = tmp_path / "outside"
-        outside.write_text(MARKDOWN)
-        target.symlink_to(outside)
+@pytest.mark.parametrize("planted", ["skill-link", "file-link", "support-link", "fifo"])
+def test_learner_never_follows_links_planted_in_the_workspace(tmp_path: Path, planted: str) -> None:
+    """Worker code shares the workspace, so learner reads and writes refuse links and special files."""
+    root = tmp_path / "workspace/skills"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text(LEARNED)
+    if planted == "skill-link":
+        root.mkdir(parents=True)
+        (root / "deploy-checks").symlink_to(outside)
     else:
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        (outside / target.name).write_text(MARKDOWN)
-        target.parent.rmdir()
-        target.parent.symlink_to(outside, target_is_directory=True)
-    timed_out = []
-
-    def timeout(_signum: int, _frame: object) -> None:
-        timed_out.append(True)
-        msg = "Unsafe read blocked"
-        raise TimeoutError(msg)
-
-    old_handler = signal.signal(signal.SIGALRM, timeout)
-    signal.setitimer(signal.ITIMER_REAL, 1)
-    try:
-        store = store_module.SkillStore(workspace)
-        if operation == "context":
-            worker = worker_module.SkillLearningWorker(paths, lambda: config)
-            with pytest.raises(ValueError, match=r"Unsafe|regular file"):
-                worker._skill_context(store, 1000, config=config, agent_name="mind")
+        path = _write_skill(root, "deploy-checks", LEARNED)
+        if planted == "file-link":
+            path.unlink()
+            path.symlink_to(outside / "SKILL.md")
+        elif planted == "support-link":
+            (path.parent / "references").symlink_to(outside)
         else:
-            with pytest.raises(ValueError, match=r"Unsafe|regular file"):
-                store.owned_names() if operation == "journal" else store.snapshot()
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old_handler)
-    assert not timed_out
+            path.unlink()
+            os.mkfifo(path)
+    operation = (
+        partial(library.write_skill_file, root, "deploy-checks", "references/x.md", "x", expected_digest=None)
+        if planted == "support-link"
+        else partial(library.read_skill_file, root, "deploy-checks")
+    )
+    with pytest.raises((OSError, ValueError)):
+        operation()
+    assert (outside / "SKILL.md").read_text() == LEARNED
+    assert not (outside / "x.md").exists()
 
 
-def test_malformed_journal_is_rejected_at_load(tmp_path: Path) -> None:
-    """A durable journal is validated before ownership or publication uses its fields."""
-    (tmp_path / ".skill-learning.json").write_text('{"learned-task": {"markdown": 123}}')
-    with pytest.raises(ValueError, match="validation errors"):
-        store_module.SkillStore(tmp_path).owned_names()
-
-
-@pytest.mark.asyncio
-async def test_invalid_scope_does_not_starve_next_queue_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A malformed durable row is retired without breaking the serial queue cycle."""
-    config, paths = _learner(tmp_path)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="broken", execution_identity=None)
-    with sqlite3.connect(paths.storage_root / "skill_learning.db") as connection:
-        connection.execute("UPDATE reviews SET scope=?", ('{"agent": "mind", "session": 123}',))
-    _persist(config, paths)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    calls = []
-
-    async def review(**kwargs: object) -> SkillReview:
-        calls.append(kwargs)
-        return worker_module.SkillReview(action="no_change")
-
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    await worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert len(calls) == 1
-    with sqlite3.connect(paths.storage_root / "skill_learning.db") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM reviews WHERE generation > processed").fetchone()[0] == 0
-
-
-@pytest.mark.asyncio
-async def test_skill_context_redacts_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Manual descriptions and bodies receive the same credential redaction as traces."""
-    config, paths = _learner(tmp_path)
-    _persist(config, paths)
-    path = tmp_path / "agents/mind/workspace/skills/manual/SKILL.md"
-    path.parent.mkdir(parents=True)
-    path.write_text("---\nname: manual\ndescription: api_key=sk-description-secret123\n---\npassword=body-secret123\n")
-    contexts = []
-
-    async def review(**kwargs: object) -> SkillReview:
-        contexts.append(cast("str", kwargs["skill_context"]))
-        return worker_module.SkillReview(action="no_change")
-
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    await worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    assert len(contexts) == 1
-    assert "manual, protected" in contexts[0]
-    assert "description-secret123" not in contexts[0]
-    assert "body-secret123" not in contexts[0]
-
-
-@pytest.mark.asyncio
-async def test_overlapping_workers_review_each_generation_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The cross-process lock covers selection, inference and queue acknowledgement."""
-    config, paths = _learner(tmp_path)
-    _persist(config, paths)
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    calls = []
-
-    async def review(**kwargs: object) -> SkillReview:
-        calls.append(kwargs)
-        if len(calls) == 1:
-            entered.set()
-            await release.wait()
-        return worker_module.SkillReview(action="no_change")
-
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    first = asyncio.create_task(worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle())
-    await asyncio.wait_for(entered.wait(), 2)
-    second = asyncio.create_task(worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle())
-    await asyncio.sleep(0.05)
-    assert len(calls) == 1
-    _persist(config, paths, text="New generation")
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    release.set()
-    await asyncio.wait_for(asyncio.gather(first, second), 3)
-    assert len(calls) == 2
-    assert "New generation" in cast("str", calls[1]["trace"])
-
-
-@pytest.mark.asyncio
-async def test_cancelled_worker_releases_review_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Cancelled inference cannot strand another worker behind its file lock."""
-    config, paths = _learner(tmp_path)
-    _persist(config, paths)
-    entered = asyncio.Event()
-    calls = []
-
-    async def review(**kwargs: object) -> SkillReview:
-        calls.append(kwargs)
-        if len(calls) == 1:
-            entered.set()
-            await asyncio.Event().wait()
-        return worker_module.SkillReview(action="no_change")
-
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    first = asyncio.create_task(worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle())
-    await asyncio.wait_for(entered.wait(), 2)
-    first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first
-    await asyncio.wait_for(worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle(), 2)
-    assert len(calls) == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["inference", "context"])
-async def test_failure_logs_safe_locations_without_exception_content(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    phase: str,
-) -> None:
-    """Troubleshooting metadata must not disclose provider echoes of private content."""
-    config, paths = _learner(tmp_path)
-    config.agents["mind"].skill_learning.max_attempts = 1
-    _persist(config, paths)
-    if phase == "context":
-        skill = tmp_path / "agents/mind/workspace/skills/manual/SKILL.md"
-        skill.parent.mkdir(parents=True)
-        skill.write_text(
-            "---\nname: manual\ndescription: [private conversation about Alice password=secret-value\n---\nBody",
+def test_archive_moves_only_inactive_learned_skills(tmp_path: Path) -> None:
+    """The deterministic curator pass archives unused learned skills, seeds adopted ones, and never deletes."""
+    root = tmp_path / "skills"
+    now = datetime.now(UTC)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    _write_skill(root, "adopted", LEARNED.replace("deploy-checks", "adopted"))
+    _write_skill(root, "handwritten", HANDWRITTEN)
+    with open_skills_root(root) as root_fd:
+        update_skill_usage(
+            root_fd,
+            "deploy-checks",
+            lambda usage: usage.model_copy(update={"created_at": now - timedelta(days=45)}),
         )
 
-    async def review(**_kwargs: object) -> SkillReview:
-        msg = "private conversation about Alice password=secret-value"
-        raise ValueError(msg)
+    assert library.archive_unused_skills(root, archive_after_days=30, now=now) == ["deploy-checks"]
+    assert not (root / "deploy-checks").exists()
+    assert [path.name.split("--")[0] for path in (root / ".archive").iterdir()] == ["deploy-checks"]
+    assert (root / "adopted/SKILL.md").exists()
+    assert (root / "handwritten/SKILL.md").exists()
+    assert library.archive_unused_skills(root, archive_after_days=30, now=now + timedelta(days=29)) == []
+    assert library.archive_unused_skills(root, archive_after_days=0, now=now + timedelta(days=90)) == []
 
-    monkeypatch.setattr(worker_module, "_review_session", review)
-    worker_module.queue_skill_learning(config, paths, agent_name="mind", session_id="session", execution_identity=None)
-    with capture_logs() as logs:
-        await worker_module.SkillLearningWorker(paths, lambda: config)._run_cycle()
-    failure = next(log for log in logs if log["event"] == "Skill learning review failed")
-    assert failure["phase"] == phase
-    assert failure["exhausted"] is True
-    assert failure["frames"]
-    assert "private conversation" not in json.dumps(failure)
-    assert "secret-value" not in json.dumps(failure)
-    assert "private conversation" not in json.dumps(logs)
+
+def test_fingerprint_ignores_learner_housekeeping(tmp_path: Path) -> None:
+    """Usage telemetry, history, and archive never look like someone else editing skills."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    before = library.skills_fingerprint(root)
+    with open_skills_root(root) as root_fd:
+        update_skill_usage(root_fd, "deploy-checks", lambda usage: usage.model_copy(update={"use_count": 3}))
+    (root / ".history").mkdir()
+    (root / ".archive").mkdir()
+    assert library.skills_fingerprint(root) == before
+    (root / "deploy-checks/SKILL.md").write_text(LEARNED + "Edited by hand.\n")
+    assert library.skills_fingerprint(root) != before
+
+
+def test_transcript_digests_older_turns_and_keeps_recent_evidence_verbatim() -> None:
+    """Hermes' digest keeps the newest messages whole, never opens on a tool result, and marks omissions."""
+    older = [Message(role="user", content=f"old request {index} " + "x" * 400) for index in range(30)]
+    recent = [
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[{"function": {"name": "shell", "arguments": '{"cmd": "make"}'}}],
+        ),
+        *[Message(role="tool", content=f"result {index}", tool_name="shell") for index in range(24)],
+        Message(role="assistant", content="password: hunter2hunter2 was used"),
+    ]
+    transcript = render_transcript([*older, *recent], budget_chars=100_000)
+    digest, _, verbatim = transcript.partition("\n\nASSISTANT:\n")
+    assert "USER: old request 0" in digest
+    assert "x" * 301 not in digest
+    assert verbatim.startswith('\n-> calls shell({"cmd": "make"})')
+    assert "TOOL RESULT (shell):\nresult 23" in verbatim
+    assert "hunter2hunter2" not in transcript
+
+    small = render_transcript([*older, *recent], budget_chars=3_000)
+    assert "earlier turns omitted" in small
+    assert len(small) < 3_500
+
+
+def test_model_replies_count_only_the_named_runs() -> None:
+    """Each assistant message is one model request; history copies and other runs are not counted."""
+    session = AgentSession(
+        session_id="session",
+        runs=[
+            _tool_turn("r1"),
+            _tool_turn("r2"),
+            _run(
+                "r3",
+                Message(role="assistant", content="copied", from_history=True),
+                Message(role="assistant", content="new"),
+            ),
+        ],
+    )
+    assert count_model_replies(session, {"r1"}) == 2
+    assert count_model_replies(session, {"r1", "r3"}) == 3
+    assert count_model_replies(session, set()) == 0
+
+
+def test_queue_keys_conversations_by_scope_not_requester(tmp_path: Path) -> None:
+    """A shared thread is reviewed once however many people talk in it; private instances stay separate."""
+    config, paths = _learner(tmp_path)
+    _queue(config, paths, "r1", ALICE)
+    _queue(config, paths, "r2", BOB)
+    (entry,) = _entries(paths).values()
+    assert entry["pending_run_ids"] == ["r1", "r2"]
+    assert entry["identity"]["requester_id"] == "@bob:example.test"
+
+    private_config, private_paths = _learner(tmp_path / "private", private=True)
+    _queue(private_config, private_paths, "r1", ALICE)
+    _queue(private_config, private_paths, "r2", BOB)
+    assert sorted(entry["pending_run_ids"] for entry in _entries(private_paths).values()) == [["r1"], ["r2"]]
+
+
+def test_queue_counts_each_run_once_and_backs_off_failures(tmp_path: Path) -> None:
+    """Settling removes only counted runs; failures retry with backoff and are abandoned after three."""
+    config, paths = _learner(tmp_path)
+    _queue(config, paths, "r1")
+    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
+    _queue(config, paths, "r2")
+    queue.settle_review(paths, key, entry.pending_run_ids, iterations=5, skills_root="root", fingerprint="a")
+    assert _entries(paths)[key]["pending_run_ids"] == ["r2"]
+
+    for attempt in (1, 2):
+        queue.settle_review(paths, key, (), iterations=5, failed_at=100.0)
+        state = _entries(paths)[key]
+        assert state["failures"] == attempt
+        assert state["next_attempt_at"] == 100.0 + 60 * 2 ** (attempt - 1)
+        assert queue.claim_due_reviews(config, paths, now=101.0) == []
+    queue.settle_review(paths, key, (), iterations=5, failed_at=100.0)
+    state = _entries(paths)[key]
+    assert (state["failures"], state["iterations"], state["pending_run_ids"]) == (0, 0, [])
+
+
+def test_queue_drops_entries_of_disabled_agents(tmp_path: Path) -> None:
+    """Disabling learning retires queued conversations and stops recording new runs."""
+    config, paths = _learner(tmp_path)
+    _queue(config, paths, "r1")
+    config.agents["mind"].skill_learning.enabled = False
+    assert queue.claim_due_reviews(config, paths, now=1.0) == []
+    assert _entries(paths) == {}
+    _queue(config, paths, "r2")
+    assert _entries(paths) == {}
+
+
+@pytest.mark.asyncio
+async def test_reviewer_creates_views_and_patches_with_only_skill_tools(tmp_path: Path) -> None:
+    """The review is an Agno tool loop with Hermes' three skill tools, no provider tools, and recorded usage."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    root = _skills_root(config, paths)
+    patch_step = {"action": "patch", "name": "deploy-checks", "old_string": "1. Run the smoke test."}
+    model = _model(
+        ("skills_list", {}),
+        ("skill_manage", {**patch_step, "new_string": "0. Guess."}),
+        ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}),
+        ("skill_view", {"name": "deploy-checks"}),
+        ("skill_manage", {**patch_step, "new_string": "1. Run the smoke test.\n2. Check the logs."}),
+    )
+    changes: dict[str, str] = {}
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        await review_conversation(
+            config=config,
+            runtime_paths=paths,
+            agent_name="mind",
+            session_id="session",
+            identity=None,
+            skills_root=root,
+            messages=_tool_turn("r1").messages or [],
+            changes=changes,
+        )
+    assert changes == {"deploy-checks": "created"}
+    assert (root / "deploy-checks/SKILL.md").read_text().endswith("2. Check the logs.\n")
+    assert all(tools == {"skills_list", "skill_view", "skill_manage"} for tools in model.offered_tools)
+    assert all(model.provider_tools_blocked)
+    assert "<conversation>" in model.requests[0][-1]
+    assert "tests passed" in model.requests[0][-1]
+    refused = json.loads(model.requests[2][-1])
+    assert refused["success"] is False
+    assert "has not been loaded" in refused["error"] or "Call skill_view" in refused["error"]
+
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+    assert report.request_breakdown is not None
+    assert {row.kind for row in report.request_breakdown} == {"skill_learning"}
+    assert report.totals.total_tokens == 10 * len(model.requests)
+
+
+@pytest.mark.asyncio
+async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(tmp_path: Path) -> None:
+    """User skills stay read-only, and an exhausted input budget refuses every further tool call."""
+    config, paths = _learner(tmp_path, context_window=8_000)
+    root = _skills_root(config, paths)
+    _write_skill(root, "handwritten", HANDWRITTEN)
+    model = _model(
+        ("skill_view", {"name": "handwritten"}),
+        (
+            "skill_manage",
+            {"action": "edit", "name": "handwritten", "content": LEARNED.replace("deploy-checks", "handwritten")},
+        ),
+        *[("skills_list", {})] * 12,
+    )
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
+    ):
+        await review_conversation(
+            config=config,
+            runtime_paths=paths,
+            agent_name="mind",
+            session_id="session",
+            identity=None,
+            skills_root=root,
+            messages=[Message(role="user", content="x" * 4_000)],
+            changes={},
+        )
+    assert "not learner-owned" in json.loads(model.requests[2][-1])["error"]
+    assert "budget is exhausted" in json.loads(model.requests[-1][-1])["error"]
+    assert (root / "handwritten/SKILL.md").read_text() == HANDWRITTEN
+
+
+@pytest.mark.asyncio
+async def test_worker_reviews_only_at_the_interval_and_posts_a_notice(tmp_path: Path) -> None:
+    """Runs accumulate model replies across turns; the review and its m.notice arrive at the interval."""
+    config, paths = _learner(tmp_path, review_interval=4)
+    _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
+    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
+    client = object()
+    send = AsyncMock(return_value=object())
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.skill_learning.worker.send_message_result", send),
+    ):
+        _queue(config, paths, "r1", ALICE)
+        await _cycle(config, paths, client)
+        assert model.requests == []
+        assert next(iter(_entries(paths).values()))["iterations"] == 2
+        _queue(config, paths, "r2", ALICE)
+        await _cycle(config, paths, client)
+    assert model.requests
+    assert (_skills_root(config, paths, ALICE) / "deploy-checks/SKILL.md").exists()
+    assert next(iter(_entries(paths).values()))["iterations"] == 0
+    sent_client, room_id, content = send.await_args.args
+    assert (sent_client, room_id) == (client, "!room:example.test")
+    assert content["msgtype"] == "m.notice"
+    assert content["body"] == "💾 Skill review: created `deploy-checks`"
+    assert content["m.relates_to"]["event_id"] == "$thread"
+
+
+@pytest.mark.asyncio
+async def test_foreign_skill_edits_reset_the_counter(tmp_path: Path) -> None:
+    """Like Hermes resetting after the agent saves a skill itself, outside skill edits restart the count."""
+    config, paths = _learner(tmp_path, review_interval=4)
+    _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
+    model = _model()
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        _queue(config, paths, "r1")
+        await _cycle(config, paths)
+        _write_skill(_skills_root(config, paths), "handwritten", HANDWRITTEN)
+        _queue(config, paths, "r2")
+        await _cycle(config, paths)
+    assert model.requests == []
+    assert next(iter(_entries(paths).values()))["iterations"] == 0
+
+
+@pytest.mark.asyncio
+async def test_learner_edits_do_not_reset_other_conversations(tmp_path: Path) -> None:
+    """A review in one conversation moves every conversation that saw the same skills forward."""
+    config, paths = _learner(tmp_path, review_interval=2)
+    _seed(config, paths, _tool_turn("r1"))
+    _seed(config, paths, _run("o1", Message(role="assistant", content="hi")), session_id="other")
+    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        _queue(config, paths, "o1")
+        await _cycle(config, paths)
+        _queue(config, paths, "r1")
+        await _cycle(config, paths)
+    entries = _entries(paths)
+    assert entries["mind:other"]["seen_fingerprint"] == entries["mind:session"]["seen_fingerprint"]
+    assert entries["mind:other"]["iterations"] == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_review_reports_partial_changes_and_retries_later(tmp_path: Path) -> None:
+    """A review that fails after writing still reports its writes and keeps its counter for a backed-off retry."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    send = AsyncMock(return_value=object())
+    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock(side_effect=TimeoutError)),
+        patch("mindroom.skill_learning.worker.send_message_result", send),
+    ):
+        _queue(config, paths, "r1", ALICE)
+        await _cycle(config, paths, object())
+    (entry,) = _entries(paths).values()
+    assert (entry["failures"], entry["iterations"], entry["pending_run_ids"]) == (1, 2, [])
+    assert send.await_args.args[2]["body"] == "💾 Skill review: created `deploy-checks`"
+
+
+@pytest.mark.asyncio
+async def test_review_archives_inactive_learned_skills_first(tmp_path: Path) -> None:
+    """The curator pass runs before each review, and its archival is part of the notice."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    root = _skills_root(config, paths, ALICE)
+    library.create_skill(root, "old-habit", LEARNED.replace("deploy-checks", "old-habit"), reserved_names=frozenset())
+    with open_skills_root(root) as root_fd:
+        update_skill_usage(
+            root_fd,
+            "old-habit",
+            lambda usage: usage.model_copy(update={"created_at": datetime.now(UTC) - timedelta(days=31)}),
+        )
+    send = AsyncMock(return_value=object())
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=_model()),
+        patch("mindroom.skill_learning.worker.send_message_result", send),
+    ):
+        _queue(config, paths, "r1", ALICE)
+        await _cycle(config, paths, object())
+    assert not (root / "old-habit").exists()
+    assert send.await_args.args[2]["body"] == "💾 Skill review: archived unused `old-habit`"
+
+
+@pytest.mark.asyncio
+async def test_private_reviews_stay_in_the_requester_workspace(tmp_path: Path) -> None:
+    """A private instance learns only from its own session and publishes only into its own workspace."""
+    config, paths = _learner(tmp_path, private=True)
+    _seed(config, paths, _tool_turn("r1"), identity=ALICE)
+    _seed(config, paths, _tool_turn("b1", result="bob private result"), identity=BOB)
+    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        _queue(config, paths, "r1", ALICE)
+        await _cycle(config, paths)
+    assert "tests passed" in model.requests[0][-1]
+    assert "bob private result" not in model.requests[0][-1]
+    assert (_skills_root(config, paths, ALICE) / "deploy-checks/SKILL.md").exists()
+    assert not (_skills_root(config, paths, BOB) / "deploy-checks").exists()
+
+
+def test_unknown_review_model_is_rejected() -> None:
+    """A skill_learning model alias must name a configured model."""
+    with pytest.raises(ValueError, match="Unknown skill_learning model"):
+        Config(
+            agents={"mind": AgentConfig(display_name="Mind", skill_learning={"enabled": True, "model": "missing"})},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
+        )

@@ -15,6 +15,7 @@ from mindroom import redaction
 from mindroom.redaction import (
     REDACTED,
     REDACTION_FAILED,
+    contains_sensitive_text,
     redact_log_event,
     redact_sensitive_data,
     redact_sensitive_text,
@@ -988,3 +989,18 @@ def test_cache_eviction_does_not_change_key_classification() -> None:
         )
 
     assert {key: redact_sensitive_data({key: "probe-value"}) for key in probe_keys} == before
+
+
+def test_private_key_blocks_are_redacted_through_their_end_or_the_text_end() -> None:
+    """A PEM private key is removed whole, and an unterminated block never leaks its body."""
+    block = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----"
+    assert redact_sensitive_text(f"before\n{block}\nafter") == f"before\n{REDACTED}\nafter"
+    assert redact_sensitive_text("-----BEGIN RSA PRIVATE KEY-----\nMIIabc") == REDACTED
+
+
+def test_contains_sensitive_text_scans_text_beyond_one_redaction_window() -> None:
+    """Credential checks cover every line of long text instead of failing on the redaction size limit."""
+    filler = "plain line\n" * 20_000
+    assert not contains_sensitive_text(filler)
+    assert contains_sensitive_text(filler + "token sk-abcdefghijklmnopqrstu\n")
+    assert contains_sensitive_text("connect to https://alice:secret@db.example.test")
