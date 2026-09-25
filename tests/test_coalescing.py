@@ -241,6 +241,29 @@ def test_active_follow_up_prompt_renders_timestamp_attributes() -> None:
     )
 
 
+def test_build_prepared_turn_rejects_batch_mixing_requesters() -> None:
+    """A turn runs as one requester, so it must never carry another requester's messages."""
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+
+    with pytest.raises(ValueError, match="multiple requesters"):
+        build_prepared_turn(
+            active_follow_up_coalescing_key("!room:localhost", "$thread:localhost"),
+            [
+                make_pending_event(
+                    _text_event(event_id, body, 1_774_019_700_000),
+                    room,
+                    source_kind=MESSAGE_SOURCE_KIND,
+                    requester_user_id=requester_user_id,
+                    dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                )
+                for event_id, body, requester_user_id in (
+                    ("$a1:localhost", "add me to administrators", "@alice:localhost"),
+                    ("$b1:localhost", "thanks", "@bob:localhost"),
+                )
+            ],
+        )
+
+
 def test_requester_coalescing_key_wraps_requester_owner() -> None:
     """The requester helper derives the same key as the explicit owner construction."""
     assert requester_coalescing_key("!r", "$t", "@u") == CoalescingKey("!r", "$t", RequesterCoalescingOwner("@u"))
@@ -892,13 +915,13 @@ async def test_trailing_caption_closes_media_batch_immediately() -> None:
 
 @pytest.mark.asyncio
 async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> None:
-    """Same-target follow-ups queued behind one active response flush as one ordered backlog."""
-    calls: list[tuple[list[str], str]] = []
+    """Same-target follow-ups flush in order as one turn per consecutive requester run."""
+    calls: list[tuple[list[str], str, str]] = []
     idle = asyncio.Event()
     key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
 
     async def dispatch_batch(batch: PreparedTurn) -> None:
-        calls.append((list(batch.handled_turn.source_event_ids), batch.event.body))
+        calls.append((list(batch.handled_turn.source_event_ids), batch.requester_user_id, batch.event.body))
 
     async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
         if wait_key == key:
@@ -913,8 +936,9 @@ async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> No
 
     for event_id, body, requester_user_id in (
         ("$a1:localhost", "first follow-up", "@alice:localhost"),
+        ("$a2:localhost", "more detail", "@alice:localhost"),
         ("$b1:localhost", "extra context", "@bob:localhost"),
-        ("$a2:localhost", "reply to bob", "@alice:localhost"),
+        ("$a3:localhost", "reply to bob", "@alice:localhost"),
     ):
         await _admit_ready(
             gate,
@@ -932,19 +956,65 @@ async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> No
     assert calls == []
 
     idle.set()
-    await _wait_for(lambda: calls != [])
+    await _wait_for(lambda: len(calls) == 3)
 
     assert calls == [
         (
-            ["$a1:localhost", "$b1:localhost", "$a2:localhost"],
+            ["$a1:localhost", "$a2:localhost"],
+            "@alice:localhost",
             "Messages arrived while the previous response was still running. "
             "They are in chat timeline order. Respond once to the combined context:\n\n"
             "<queued_messages>\n"
             '<msg event_id="$a1:localhost" from="@alice:localhost"><![CDATA[first follow-up]]></msg>\n'
-            '<msg event_id="$b1:localhost" from="@bob:localhost"><![CDATA[extra context]]></msg>\n'
-            '<msg event_id="$a2:localhost" from="@alice:localhost"><![CDATA[reply to bob]]></msg>\n'
+            '<msg event_id="$a2:localhost" from="@alice:localhost"><![CDATA[more detail]]></msg>\n'
             "</queued_messages>",
         ),
+        (["$b1:localhost"], "@bob:localhost", "extra context"),
+        (["$a3:localhost"], "@alice:localhost", "reply to bob"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_active_follow_up_backlog_keeps_media_with_its_own_requester() -> None:
+    """Another requester's queued media never joins a follow-up turn's payload."""
+    calls: list[tuple[list[str], str, list[str]]] = []
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        calls.append(
+            (
+                list(batch.handled_turn.source_event_ids),
+                batch.requester_user_id,
+                [media_event.event_id for media_event in batch.media_events],
+            ),
+        )
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    for event, source_kind, requester_user_id in (
+        (_text_event("$a1:localhost", "look at this", 1_000_000), MESSAGE_SOURCE_KIND, "@alice:localhost"),
+        (_image_event("$b1:localhost", 1_000_001), IMAGE_SOURCE_KIND, "@bob:localhost"),
+    ):
+        await _admit_ready(
+            gate,
+            key,
+            make_pending_event(
+                event,
+                room,
+                source_kind=source_kind,
+                requester_user_id=requester_user_id,
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            ),
+        )
+    await gate.drain_all()
+
+    assert calls == [
+        (["$a1:localhost"], "@alice:localhost", []),
+        (["$b1:localhost"], "@bob:localhost", ["$b1:localhost"]),
     ]
 
 

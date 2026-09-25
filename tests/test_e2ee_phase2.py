@@ -186,8 +186,8 @@ class TestManagedRoomEncryptionReconcile:
             servers=["example.com"],
         )
 
-        monkeypatch.setattr(matrix_state, "load_rooms", dict)
-        monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
+        recorded_room = matrix_state.MatrixRoom(room_id="!lobby:example.com", alias="#lobby:example.com", name="Lobby")
+        monkeypatch.setattr(matrix_state, "load_rooms", lambda **_kwargs: {"lobby": recorded_room})
         monkeypatch.setattr(matrix_rooms, "ensure_room_name", AsyncMock(return_value=True))
         monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
         monkeypatch.setattr(matrix_rooms, "ensure_managed_room_power_levels", AsyncMock(return_value=True))
