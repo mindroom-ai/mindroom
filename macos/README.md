@@ -3,6 +3,7 @@
 The native app and its desktop helper require macOS 14 or newer.
 
 The app has Overview, Local agents, Computer access, and Settings sections, with a compact menu bar companion.
+Sidebar buttons support Tab and Space navigation; when you activate a section, keyboard focus follows that section instead of remaining on a previous button.
 The menu shows local-agent and computer-access status as clickable shortcuts to their sections, with start, stop, and revoke actions when available.
 Hover over Quit MindRoom for its effect on background work: computer access stops, while local agents keep running.
 Its Python desktop helper is bundled at:
