@@ -585,7 +585,7 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
         room_id: str,
         membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
-        queue_skill_review: Callable[[], Awaitable[None]] | None = None,
+        queue_skill_review: Callable[[bool], Awaitable[None]] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         del room_id, membership_turn_id, queue_memory_persistence, queue_skill_review, persist_response_event_id

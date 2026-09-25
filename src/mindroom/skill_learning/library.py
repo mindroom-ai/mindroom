@@ -93,7 +93,10 @@ def _validate_skill_name(name: str) -> None:
 def _validate_markdown(name: str, content: str, *, new: bool) -> None:
     """Check a learned SKILL.md: frontmatter ``name`` must stay ``name``, and new skills need a short description."""
     if len(content) > _MAX_SKILL_MARKDOWN_CHARS:
-        msg = f"SKILL.md is {len(content)} characters; the limit is {_MAX_SKILL_MARKDOWN_CHARS}. Move depth into references/."
+        msg = (
+            f"SKILL.md is {len(content)} characters; the limit is {_MAX_SKILL_MARKDOWN_CHARS}. "
+            "Move depth into references/."
+        )
         raise SkillEditError(msg)
     if not content.startswith("---"):
         msg = "SKILL.md must start with YAML frontmatter (---)."

@@ -5219,6 +5219,34 @@ async def test_dashboard_departure_uses_live_membership_owner(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_config_changes_forget_conversations_of_agents_that_stopped_learning(tmp_path: Path) -> None:
+    """While other agents keep learning, an agent that stops learning loses its queued conversations at once."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    orchestrator = orchestrator_module._MultiAgentOrchestrator(runtime_paths=paths)
+    config = Config(agents={name: AgentConfig(display_name=name) for name in ("general", "helper")})
+    for agent in config.agents.values():
+        agent.skill_learning.enabled = True
+    orchestrator.config = config
+    for name in config.agents:
+        queue_skill_review(
+            config,
+            paths,
+            agent_name=name,
+            session_id="s",
+            execution_identity=None,
+            started_at=0,
+            completed=True,
+        )
+    config.agents["helper"].skill_learning.enabled = False
+    await orchestrator._sync_background_workers()
+    try:
+        entries = json.loads((tmp_path / "skill_learning_state.json").read_text())["entries"]
+        assert [entry["agent"] for entry in entries.values()] == ["general"]
+    finally:
+        await orchestrator._skill_learning.stop()
+
+
+@pytest.mark.asyncio
 async def test_background_workers_follow_config_across_reloads(tmp_path: Path) -> None:
     """The orchestrator keeps one skill-learning worker exactly while an agent opts in."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
@@ -5234,7 +5262,15 @@ async def test_background_workers_follow_config_across_reloads(tmp_path: Path) -
     first = orchestrator._skill_learning._task
     await orchestrator._sync_background_workers()
     assert orchestrator._skill_learning._task is first
-    queue_skill_review(config, paths, agent_name="general", session_id="s", execution_identity=None, started_at=0)
+    queue_skill_review(
+        config,
+        paths,
+        agent_name="general",
+        session_id="s",
+        execution_identity=None,
+        started_at=0,
+        completed=True,
+    )
     config.agents["general"].skill_learning.enabled = False
     await orchestrator._sync_background_workers()
     assert first is not None

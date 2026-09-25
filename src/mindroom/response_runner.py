@@ -1225,7 +1225,7 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         queue_memory_persistence: Callable[[], None] | None = None,
-        queue_skill_review: Callable[[], Awaitable[None]] | None = None,
+        queue_skill_review: Callable[[bool], Awaitable[None]] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build post-response effect deps bound to one request's room."""
@@ -2081,7 +2081,7 @@ class ResponseRunner:
             for index, turn in enumerate(continuation.memory_thread_history)
         )
 
-    def _approval_skill_review(self, continuation: ApprovalContinuation) -> Callable[[], Awaitable[None]] | None:
+    def _approval_skill_review(self, continuation: ApprovalContinuation) -> Callable[[bool], Awaitable[None]] | None:
         """Return the normal skill-review handoff for a completed agent continuation."""
         if continuation.entity_kind != "agent" or is_automation_source_kind(continuation.source_kind):
             return None
@@ -2100,14 +2100,14 @@ class ResponseRunner:
         agent_name: str,
         session_id: str,
         execution_identity: ToolExecutionIdentity | None,
-    ) -> Callable[[], Awaitable[None]]:
-        """Build the handoff that marks a conversation for counting toward a background skill review.
+    ) -> Callable[[bool], Awaitable[None]]:
+        """Build the handoff that records a finished response toward a background skill review.
 
         It is built before the response runs, so a conversation's first count covers every run of that response.
         """
         started_at = int(time.time())
 
-        async def queue() -> None:
+        async def queue(completed: bool) -> None:
             await asyncio.to_thread(
                 queue_skill_review,
                 self.deps.runtime.config,
@@ -2116,6 +2116,7 @@ class ResponseRunner:
                 session_id=session_id,
                 execution_identity=execution_identity,
                 started_at=started_at,
+                completed=completed,
             )
 
         return queue

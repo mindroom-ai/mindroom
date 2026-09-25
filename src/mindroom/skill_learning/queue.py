@@ -61,10 +61,10 @@ class QueueEntry(BaseModel):
     session: str
     worker_key: str | None
     identity: dict[str, object] | None
-    # A new entry starts at the second its first response began, so enabling learning never reviews older history
-    # and every attempt of that response, including one retried after a discarded empty run, counts.
+    # A new entry starts at the second its first response began, so enabling learning never reviews older history,
+    # and every run of that response counts: retries after a discarded empty attempt and an approved continuation.
     reviewed_through: RunPosition
-    has_new_runs: bool = True
+    has_new_runs: bool = False
     skills_root: str | None = None
     seen_fingerprint: str | None = None
     failures: int = 0
@@ -121,8 +121,14 @@ def queue_skill_review(
     session_id: str,
     execution_identity: ToolExecutionIdentity | None,
     started_at: int,
+    completed: bool,
 ) -> None:
-    """Mark one conversation for counting after a person's response that began at ``started_at`` completed."""
+    """Record a person's finished response, which began at ``started_at``, without storing content.
+
+    The conversation's first finished response fixes where counting starts, even when it failed or paused for
+    approval, so the approved continuation of a paused run still counts. Only a completed response makes the
+    conversation due.
+    """
     agent = config.agents.get(agent_name)
     if agent is None or not agent.skill_learning.enabled:
         return
@@ -140,9 +146,13 @@ def queue_skill_review(
             reviewed_through=(started_at, -1),
             last_seen_at=now,
         )
-        state.entries[key] = entry.model_copy(update={"identity": identity, "has_new_runs": True, "last_seen_at": now})
+        update: dict[str, object] = {"identity": identity, "last_seen_at": now}
+        if completed:
+            update["has_new_runs"] = True
+        state.entries[key] = entry.model_copy(update=update)
         _write(runtime_paths, state)
-    SKILL_LEARNING_WAKE.notify()
+    if completed:
+        SKILL_LEARNING_WAKE.notify()
 
 
 def _entry_is_current(config: Config, entry: QueueEntry, now: float) -> bool:
@@ -203,9 +213,9 @@ def record_count(
     """Place the conversation's marker and return the model replies after it.
 
     ``replies`` holds each visible run's position and model replies, oldest first. Hermes resets its counter when
-    the agent saves a skill itself; here counting restarts after the newest run when anyone other than the learner changed the workspace
-    skills since this conversation last looked. The comparison uses the stored state, which reviews of other
-    conversations move forward when the learner itself changes skills.
+    the agent saves a skill itself; here counting restarts after the newest run when anyone other than the learner
+    changed the workspace skills since this conversation last looked. The comparison uses the stored state, which
+    reviews of other conversations move forward when the learner itself changes skills.
     """
     newest = replies[-1][0] if replies else NO_RUN
     with _locked(runtime_paths):
