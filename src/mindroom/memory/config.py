@@ -207,8 +207,6 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
         )
         if api_key is not None:
             llm_config["config"]["api_key"] = api_key.value
-        else:
-            llm_config["config"].pop("api_key", None)
 
         logger.info(
             "Configured memory LLM",
