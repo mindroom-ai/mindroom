@@ -225,6 +225,51 @@ def test_cli_run_does_not_mix_different_controller_with_saved_authority(
     bridge.assert_not_called()
 
 
+@pytest.mark.parametrize("state", ["missing", "disabled", "malformed"])
+def test_cli_run_reports_unusable_saved_setup(
+    shared_setup: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    """Expected saved-configuration failures stay in the CLI error boundary."""
+    path = native_config_path(shared_setup.storage_root)
+    if state != "missing":
+        save_native_config(path, replace(_config(), enabled=False), expected_revision=0)
+    if state == "malformed":
+        path.write_text("not JSON")
+    bridge = AsyncMock()
+    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
+
+    result = CliRunner().invoke(desktop_cli.desktop_app, ["run"])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert "Desktop bridge failed:" in result.output
+    bridge.assert_not_called()
+
+
+def test_setup_reports_a_concurrent_app_save_without_overwriting_it(
+    shared_setup: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An app edit during pairing remains saved and gives the terminal a readable conflict."""
+    path = native_config_path(shared_setup.storage_root)
+    previous = save_native_config(path, _config(), expected_revision=0)
+
+    async def save_app_choices(**_: object) -> str:
+        save_native_config(path, replace(previous, allowed_app_ids=()), expected_revision=previous.revision)
+        return "verification"
+
+    monkeypatch.setattr(desktop_cli, "_pair_desktop", save_app_choices)
+
+    result = CliRunner().invoke(desktop_cli.desktop_app, _setup_args())
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert "Desktop setup failed:" in result.output
+    assert load_native_config(path).allowed_app_ids == ()
+
+
 def test_cli_run_keeps_relative_browser_path_support(
     shared_setup: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,

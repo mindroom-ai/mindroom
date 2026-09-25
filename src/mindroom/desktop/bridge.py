@@ -72,19 +72,18 @@ async def _run_macos_application_events() -> None:
         msg = "The macOS desktop bridge must run on the main thread."
         raise RuntimeError(msg)
 
-    import CoreFoundation  # noqa: PLC0415
-    import objc  # noqa: PLC0415
+    from CoreFoundation import (  # noqa: PLC0415  # ty: ignore[unresolved-import]
+        CFRunLoopRunInMode,
+        kCFRunLoopDefaultMode,
+    )
+    from objc import autorelease_pool  # noqa: PLC0415
 
     while True:
         # NSWorkspace and NSRunningApplication update only on the main Cocoa
         # run loop. Keep pumping while native worker threads wait for launches
         # and activation; a refresh only before dispatch cannot observe either.
-        with objc.autorelease_pool():
-            CoreFoundation.CFRunLoopRunInMode(  # ty: ignore[unresolved-attribute]
-                CoreFoundation.kCFRunLoopDefaultMode,  # ty: ignore[unresolved-attribute]
-                0.0,
-                False,
-            )
+        with autorelease_pool():
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, False)
         await asyncio.sleep(0.05)
 
 

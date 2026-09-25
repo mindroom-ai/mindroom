@@ -109,6 +109,64 @@ final class DesktopControlStoreTests: XCTestCase {
         XCTAssertTrue(store.browserEnabled)
         XCTAssertEqual(store.browserExecutable, "/Applications/Draft.app")
         XCTAssertEqual(store.browserProfile, "/draft-profile")
+        XCTAssertEqual(store.controllerUserID, "@controller:example.org")
+    }
+
+    func testFirstSavedConfigurationPreservesDraftFieldsReturnedToDefaults() {
+        let store = DesktopControlStore()
+        store.controllerUserID = "@draft:example.org"
+        store.controllerUserID = ""
+        store.controllerDeviceID = "DRAFT"
+        store.controllerDeviceID = ""
+        store.controllerFingerprint = "draft-key"
+        store.controllerFingerprint = ""
+        store.requesterIDs = "@draft:example.org"
+        store.requesterIDs = ""
+        store.agentNames = "draft-agent"
+        store.agentNames = ""
+        store.selectedAppIDs = ["com.example.Draft"]
+        store.selectedAppIDs = []
+        store.browserEnabled = true
+        store.browserEnabled = false
+        store.browserExecutable = "/Applications/Draft.app"
+        store.browserExecutable = ""
+        store.browserProfile = "/draft-profile"
+        store.browserProfile = ""
+
+        store.hydrateConfiguration(from: configuredStatus(
+            revision: 1, apps: ["com.example.Editor"],
+            browser: configuredBrowser(executable: "/Applications/Saved.app", profile: "/saved-profile")
+        ))
+
+        XCTAssertEqual(store.controllerUserID, "")
+        XCTAssertEqual(store.controllerDeviceID, "")
+        XCTAssertEqual(store.controllerFingerprint, "")
+        XCTAssertEqual(store.requesterIDs, "")
+        XCTAssertEqual(store.agentNames, "")
+        XCTAssertTrue(store.selectedAppIDs.isEmpty)
+        XCTAssertFalse(store.browserEnabled)
+        XCTAssertEqual(store.browserExecutable, "")
+        XCTAssertEqual(store.browserProfile, "")
+    }
+
+    func testFirstSavedSessionPreservesLoginIdentityReturnedToDefaults() {
+        for editHomeserver in [false, true] {
+            let store = DesktopControlStore()
+            if editHomeserver {
+                store.homeserver = "https://draft.example.org"
+                store.homeserver = "https://mindroom.chat"
+            } else {
+                store.matrixUserID = "@draft:example.org"
+                store.matrixUserID = ""
+            }
+
+            store.hydrateConfiguration(from: configuredStatus(
+                revision: 1, apps: [], homeserver: "https://saved.example.org", userID: "@saved:saved.example.org"
+            ))
+
+            XCTAssertEqual(store.homeserver, "https://mindroom.chat")
+            XCTAssertEqual(store.matrixUserID, "")
+        }
     }
 
     func testExternalSessionReplacementRefreshesUneditedLoginFields() {

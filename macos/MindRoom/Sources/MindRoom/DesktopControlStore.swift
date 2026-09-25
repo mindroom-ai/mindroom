@@ -14,21 +14,25 @@ final class DesktopControlStore: ObservableObject {
     @Published private(set) var confirmationCommand = ""
     @Published private(set) var leaseRemainingSeconds = 0
 
-    @Published var homeserver = "https://mindroom.chat"
-    @Published var matrixUserID = ""
+    @Published var homeserver = "https://mindroom.chat" {
+        didSet { if observedSession == nil { hasInitialSessionEdits = true } }
+    }
+    @Published var matrixUserID = "" {
+        didSet { if observedSession == nil { hasInitialSessionEdits = true } }
+    }
     @Published var matrixPassword = ""
     @Published var pairingCode = ""
     @Published var setupDescriptor = ""
     @Published private(set) var accessGatewayRequired = false
-    @Published var controllerUserID = "" { didSet { invalidateConfirmation() } }
-    @Published var controllerDeviceID = "" { didSet { invalidateConfirmation() } }
-    @Published var controllerFingerprint = "" { didSet { invalidateConfirmation() } }
-    @Published var requesterIDs = "" { didSet { invalidateConfirmation() } }
-    @Published var agentNames = "" { didSet { invalidateConfirmation() } }
-    @Published var selectedAppIDs = Set<String>()
-    @Published var browserEnabled = false
-    @Published var browserExecutable = ""
-    @Published var browserProfile = ""
+    @Published var controllerUserID = "" { didSet { configurationFieldChanged(\.controllerUserID) } }
+    @Published var controllerDeviceID = "" { didSet { configurationFieldChanged(\.controllerDeviceID) } }
+    @Published var controllerFingerprint = "" { didSet { configurationFieldChanged(\.controllerFingerprint) } }
+    @Published var requesterIDs = "" { didSet { configurationFieldChanged(\.requesterIDs) } }
+    @Published var agentNames = "" { didSet { configurationFieldChanged(\.agentNames) } }
+    @Published var selectedAppIDs = Set<String>() { didSet { configurationFieldChanged(\.selectedAppIDs) } }
+    @Published var browserEnabled = false { didSet { configurationFieldChanged(\.browserEnabled) } }
+    @Published var browserExecutable = "" { didSet { configurationFieldChanged(\.browserExecutable) } }
+    @Published var browserProfile = "" { didSet { configurationFieldChanged(\.browserProfile) } }
     @Published var controlMinutes = 15
 
     @Published private(set) var applications = InstalledApplicationCatalog.applications()
@@ -39,6 +43,9 @@ final class DesktopControlStore: ObservableObject {
     private var observedConfigRevision = 0
     private var observedConfiguration: DesktopStatus?
     private var observedSession: DesktopPairingStatus?
+    // A draft can return to its default value before any saved baseline arrives.
+    private var initialConfigurationEdits = Set<PartialKeyPath<DesktopControlStore>>()
+    private var hasInitialSessionEdits = false
     private var addedApplicationURLs = Set<URL>()
     private var pendingOperationCount = 0
 
@@ -314,12 +321,14 @@ final class DesktopControlStore: ObservableObject {
                 confirmedIdentity = nil
             }
             // Keep the login identity together so a prepared SSO login cannot switch accounts or servers.
-            if homeserver == (observedSession?.homeserver ?? "https://mindroom.chat"),
+            if !hasInitialSessionEdits,
+               homeserver == (observedSession?.homeserver ?? "https://mindroom.chat"),
                matrixUserID == (observedSession?.userID ?? "") {
                 homeserver = value.pairing.homeserver ?? homeserver
                 matrixUserID = value.pairing.userID ?? ""
             }
             observedSession = value.pairing
+            hasInitialSessionEdits = false
         }
         if observedConfigRevision != value.config.revision {
             confirmedIdentity = nil
@@ -330,34 +339,41 @@ final class DesktopControlStore: ObservableObject {
         // Merge persisted changes only into fields that still match the last saved values.
         // Empty fields and app selections can be intentional unsaved edits.
         let previous = observedConfiguration ?? .stopped
-        if controllerUserID == (previous.config.controllerUserID ?? "") {
+        let initialEdits = initialConfigurationEdits
+        observedConfiguration = value
+        initialConfigurationEdits.removeAll()
+        if !initialEdits.contains(\.controllerUserID),
+           controllerUserID == (previous.config.controllerUserID ?? "") {
             controllerUserID = value.config.controllerUserID ?? ""
         }
-        if controllerDeviceID == (previous.config.controllerDeviceID ?? "") {
+        if !initialEdits.contains(\.controllerDeviceID),
+           controllerDeviceID == (previous.config.controllerDeviceID ?? "") {
             controllerDeviceID = value.config.controllerDeviceID ?? ""
         }
-        if requesterIDs == (previous.config.allowedRequesterIDs?.joined(separator: ", ") ?? "") {
+        if !initialEdits.contains(\.requesterIDs),
+           requesterIDs == (previous.config.allowedRequesterIDs?.joined(separator: ", ") ?? "") {
             requesterIDs = value.config.allowedRequesterIDs?.joined(separator: ", ") ?? ""
         }
-        if agentNames == (previous.config.allowedAgentNames?.joined(separator: ", ") ?? "") {
+        if !initialEdits.contains(\.agentNames),
+           agentNames == (previous.config.allowedAgentNames?.joined(separator: ", ") ?? "") {
             agentNames = value.config.allowedAgentNames?.joined(separator: ", ") ?? ""
         }
-        if selectedAppIDs == Set(previous.config.allowedAppIDs ?? []) {
+        if !initialEdits.contains(\.selectedAppIDs), selectedAppIDs == Set(previous.config.allowedAppIDs ?? []) {
             selectedAppIDs = Set(value.config.allowedAppIDs ?? [])
         }
-        if controllerFingerprint == (previous.pairing.controllerFingerprint ?? "") {
+        if !initialEdits.contains(\.controllerFingerprint),
+           controllerFingerprint == (previous.pairing.controllerFingerprint ?? "") {
             controllerFingerprint = value.pairing.controllerFingerprint ?? ""
         }
-        if browserEnabled == previous.browser.configured {
+        if !initialEdits.contains(\.browserEnabled), browserEnabled == previous.browser.configured {
             browserEnabled = value.browser.configured
         }
-        if browserExecutable == (previous.browser.executablePath ?? "") {
+        if !initialEdits.contains(\.browserExecutable), browserExecutable == (previous.browser.executablePath ?? "") {
             browserExecutable = value.browser.executablePath ?? ""
         }
-        if browserProfile == (previous.browser.userDataDirectory ?? "") {
+        if !initialEdits.contains(\.browserProfile), browserProfile == (previous.browser.userDataDirectory ?? "") {
             browserProfile = value.browser.userDataDirectory ?? ""
         }
-        observedConfiguration = value
     }
 
     private var currentIdentity: String {
@@ -373,7 +389,8 @@ final class DesktopControlStore: ObservableObject {
             && Set(status.config.allowedAgentNames ?? []) == Set(split(agentNames))
     }
 
-    private func invalidateConfirmation() {
+    private func configurationFieldChanged(_ field: PartialKeyPath<DesktopControlStore>) {
+        if observedConfiguration == nil { initialConfigurationEdits.insert(field) }
         if confirmedIdentity != nil, confirmedIdentity != currentIdentity {
             confirmedIdentity = nil
         }
