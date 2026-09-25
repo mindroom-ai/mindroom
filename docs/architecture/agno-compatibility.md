@@ -37,6 +37,7 @@ Paths are relative to `src/mindroom/`.
 | Knowledge search failures become plausible empty results. | [Issue #10150](https://github.com/agno-agi/agno/issues/10150), [PR #10152](https://github.com/agno-agi/agno/pull/10152), both open. | `agno_compat_knowledge.py`; insertion failures and validation need separate work. |
 | Prepared requests and effective tools require private Agent/Team APIs. | [Issue #7806](https://github.com/agno-agi/agno/issues/7806), [PR #7807](https://github.com/agno-agi/agno/pull/7807), both open. | `agno_compat_prepared_tools.py`; an inspection API must also support executable run-context/media bindings to replace the RTC and live-turn catalog paths. |
 | Async runs lack supported persistence hooks for synchronous storage owners. | [Issue #10149](https://github.com/agno-agi/agno/issues/10149), open; [PR #10148](https://github.com/agno-agi/agno/pull/10148), open and partial. | `agno_compat_session_persistence.py`; the PR only routes Agent startup through the awaitable read path. Agent/Team writes and owner dispatch remain. |
+| Gemini request building mutates an authored `generation_config` dictionary in place. | [Issue #10161](https://github.com/agno-agi/agno/issues/10161), [PR #10162](https://github.com/agno-agi/agno/pull/10162), both open when checked on September 24, 2026. | `google_gemini.py`; decision requests use a model copy with a deep-copied `generation_config`, so their tool configuration and system instruction cannot leak into later replies. |
 
 [PR #9814](https://github.com/agno-agi/agno/pull/9814) is merged, and its typed embedding errors are present in the pinned Agno 3.0.9 embedder.
 The remaining embedder work concerns request/validation hooks and owner-controlled batch failure handling.
@@ -146,6 +147,7 @@ Small owner-adjacent boundaries use the same source records:
 | `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
 | `openai_models.py` | Private byte-only image header parser. | Bounded local decoding, unknown-format fallback, and visual token budgets. |
 | `bedrock_claude.py` | Mantle SDK client factories using private Agno parameter construction. | AWS credentials, explicit endpoint selection, and async client lifetime. |
+| `google_gemini.py` | Decision requests build from a model copy with a deep-copied `generation_config`. | Native-tool removal, disabled function calling, and decision JSON output apply only to the decision request. |
 
 ## Installation and ownership
 

@@ -1166,7 +1166,8 @@ The following provider restrictions apply to this same-model check; a valid deci
 With Claude tools, only the tool and system caches are reusable across the check and reply because disabling tool selection changes tool choice.
 Ollama omits tool schemas during the check because its API cannot disable tool selection while retaining them.
 Gemini native tools are omitted during the check; its explicit context caches, OpenAI Chat search-only requests, OpenRouter automatic web search, and Groq Compound systems cannot be checked safely and stay quiet.
-Gemini decision requests, including LLM judgments, also require JSON output because Gemini can emit function calls even when function calling is disabled or no functions are declared.
+Gemini can emit function calls even when function calling is disabled, so MindRoom also requests JSON output with a reason followed by an action from Gemini API models.
+On Vertex AI, MindRoom requests this JSON output only when the agent sends no function declarations, because Vertex acceptance of JSON beside disabled declarations is unverified; a Gemini function call then fails the check, and the agent stays quiet.
 Cancellation before approval does not create an interruption notice.
 If an interrupted turn already owns a visible response, recovery retains its approval and finishes that response.
 Commands and scheduled work do not opt into adaptive participation.
@@ -1200,6 +1201,7 @@ It receives no executable tools, agent system prompt, or agent memory.
 It must return a structured boolean decision; an explicit abstention or invalid response triggers the existing in-model fallback.
 No self-reported confidence score is requested or treated as a probability.
 Provider modes whose automatic native tools cannot be disabled are refused for decision calls.
+MindRoom requests JSON output from Gemini judgment models on both the Gemini API and Vertex AI, because Gemini can emit function calls even when a request declares none.
 
 To switch to System One, change the judgment settings and set `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env`:
 
@@ -1294,6 +1296,7 @@ Acknowledgements, praise, thanks, "continue," and "do not interrupt" allow conti
 Unrelated requests wait for a later turn unless the user requests an immediate switch.
 For TypeSafe, continuation requires `1 - P(interrupt) >= threshold`; the default `0.8` permits interruption probabilities up to `0.2`.
 For the LLM backend, an explicit `false` answer permits continuation.
+Gemini LLM judges receive the same JSON output request as participation judgments.
 Abstentions, timeouts, missing credentials, exhausted capacity, and backend errors retain the normal wrap-up behavior.
 Judgments reuse the shared participation concurrency limits and backend deadlines.
 
@@ -21000,6 +21003,7 @@ Paths are relative to `src/mindroom/`.
 | Knowledge search failures become plausible empty results. | [Issue #10150](https://github.com/agno-agi/agno/issues/10150), [PR #10152](https://github.com/agno-agi/agno/pull/10152), both open. | `agno_compat_knowledge.py`; insertion failures and validation need separate work. |
 | Prepared requests and effective tools require private Agent/Team APIs. | [Issue #7806](https://github.com/agno-agi/agno/issues/7806), [PR #7807](https://github.com/agno-agi/agno/pull/7807), both open. | `agno_compat_prepared_tools.py`; an inspection API must also support executable run-context/media bindings to replace the RTC and live-turn catalog paths. |
 | Async runs lack supported persistence hooks for synchronous storage owners. | [Issue #10149](https://github.com/agno-agi/agno/issues/10149), open; [PR #10148](https://github.com/agno-agi/agno/pull/10148), open and partial. | `agno_compat_session_persistence.py`; the PR only routes Agent startup through the awaitable read path. Agent/Team writes and owner dispatch remain. |
+| Gemini request building mutates an authored `generation_config` dictionary in place. | [Issue #10161](https://github.com/agno-agi/agno/issues/10161), [PR #10162](https://github.com/agno-agi/agno/pull/10162), both open when checked on September 24, 2026. | `google_gemini.py`; decision requests use a model copy with a deep-copied `generation_config`, so their tool configuration and system instruction cannot leak into later replies. |
 
 [PR #9814](https://github.com/agno-agi/agno/pull/9814) is merged, and its typed embedding errors are present in the pinned Agno 3.0.9 embedder.
 The remaining embedder work concerns request/validation hooks and owner-controlled batch failure handling.
@@ -21109,6 +21113,7 @@ Small owner-adjacent boundaries use the same source records:
 | `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
 | `openai_models.py` | Private byte-only image header parser. | Bounded local decoding, unknown-format fallback, and visual token budgets. |
 | `bedrock_claude.py` | Mantle SDK client factories using private Agno parameter construction. | AWS credentials, explicit endpoint selection, and async client lifetime. |
+| `google_gemini.py` | Decision requests build from a model copy with a deep-copied `generation_config`. | Native-tool removal, disabled function calling, and decision JSON output apply only to the decision request. |
 
 ## Installation and ownership
 

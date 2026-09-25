@@ -9,15 +9,13 @@ import httpx
 import pytest
 from agno.exceptions import ModelProviderError
 from agno.models.message import Message
-from google import genai
-from google.genai.types import HttpOptions, HttpRetryOptions
-from google.oauth2.credentials import Credentials
 from openai import APIStatusError
 
 from mindroom import provider_stream_retry
 from mindroom.agno_compat_provider_errors import is_transient_stream_error
 from mindroom.google_gemini import MindRoomGoogleGemini
 from mindroom.provider_stream_retry import install_provider_stream_retry_hook
+from tests.gemini_helpers import gemini_client
 
 
 @pytest.mark.asyncio
@@ -56,21 +54,9 @@ async def test_google_sdk_status_controls_stream_retry(
             '"finishReason":"STOP"}]}\n\n',
         )
 
-    transport = httpx.MockTransport(respond)
-    client = genai.Client(
-        vertexai=True,
-        project="test-project",
-        location="us-central1",
-        credentials=Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
-        http_options=HttpOptions(
-            httpx_client=httpx.Client(transport=transport),
-            httpx_async_client=httpx.AsyncClient(transport=transport),
-            retry_options=HttpRetryOptions(attempts=1),
-        ),
-    )
-    model = MindRoomGoogleGemini(id="test-model", client=client, vertexai=True)
-    install_provider_stream_retry_hook(model)
-    try:
+    async with gemini_client(respond, vertexai=True) as client:
+        model = MindRoomGoogleGemini(id="test-model", client=client, vertexai=True)
+        install_provider_stream_retry_hook(model)
         stream = model.ainvoke_stream([Message(role="user", content="Hello")], Message(role="assistant"))
         if status == 400:
             with pytest.raises(ModelProviderError):
@@ -84,9 +70,6 @@ async def test_google_sdk_status_controls_stream_retry(
             assert requests[0] == requests[1]
             assert len(delays) == 1
             assert 1 <= delays[0] <= 1.25
-    finally:
-        await client.aio.aclose()
-        client.close()
 
 
 @pytest.mark.parametrize("typed_status", [False, True])

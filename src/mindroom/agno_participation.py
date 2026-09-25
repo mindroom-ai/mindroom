@@ -38,6 +38,16 @@ _DECISION_INSTRUCTION = (
     "Do not answer the conversation or call tools during this check.\n"
     "Return only a JSON object with action (respond or stay_silent) and a brief reason.\n"
 )
+# Providers that constrain decisions to this schema must decode the reason first:
+# committing to the action first made a small Gemini model stay silent for open questions.
+_DECISION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reason": {"type": "string"},
+        "action": {"type": "string", "enum": ["respond", "stay_silent"]},
+    },
+    "required": ["reason", "action"],
+}
 
 
 def _parse_decision(content: str) -> ParticipationDecision:
@@ -109,7 +119,7 @@ async def _request_decision(
         decision_kwargs["assistant_message"] = Message(role=model.assistant_message_role)
         token = _active_decision.set(gate)
         try:
-            with without_provider_tools():
+            with without_provider_tools(response_schema=_DECISION_SCHEMA):
                 response = await invoke(messages=decision_messages, **decision_kwargs)
         finally:
             _active_decision.reset(token)

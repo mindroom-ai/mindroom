@@ -24,7 +24,8 @@ from mindroom.judgment.llm import judge_with_llm
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
 from mindroom.provider_tool_policy import provider_tools_disabled
 from tests.conftest import test_runtime_paths
-from tests.participation_helpers import ParticipationModel, gemini_client, gemini_decision_response
+from tests.gemini_helpers import gemini_client, gemini_decision_response
+from tests.participation_helpers import ParticipationModel
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -183,7 +184,12 @@ async def test_backends_share_capacity_and_cancellation_releases_it(
 
 
 @pytest.mark.asyncio
-async def test_llm_gemini_judgment_requires_json_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("vertexai", [False, True], ids=["gemini_api", "vertex_ai"])
+async def test_llm_gemini_judgment_requires_json_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    vertexai: bool,
+) -> None:
     """Gemini can call functions without declarations, which would discard a valid judgment."""
     requests: list[dict[str, object]] = []
 
@@ -192,10 +198,9 @@ async def test_llm_gemini_judgment_requires_json_output(tmp_path: Path, monkeypa
         requests.append(payload)
         return gemini_decision_response(payload, '{"decision": true}', leaked_call={"name": "skills_list", "args": {}})
 
-    client = gemini_client(respond, vertexai=False)
-    judge = MindRoomGoogleGemini(id="gemini-3.8-flash", client=client)
-    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
-    try:
+    async with gemini_client(respond, vertexai=vertexai) as client:
+        judge = MindRoomGoogleGemini(id="gemini-3.8-flash", client=client, vertexai=vertexai)
+        monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
         result = await judge_with_llm(
             _request(),
             LLMJudgmentConfig(provider="llm", model="cheap"),
@@ -203,9 +208,6 @@ async def test_llm_gemini_judgment_requires_json_output(tmp_path: Path, monkeypa
             test_runtime_paths(tmp_path),
             owner="llm",
         )
-    finally:
-        await client.aio.aclose()
-        client.close()
     assert result.decision is True
     assert result.failure is None
     assert "tools" not in requests[0]

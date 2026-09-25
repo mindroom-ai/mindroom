@@ -23,12 +23,8 @@ from mindroom.openai_models import MindRoomOpenAIChat
 from mindroom.participation import ParticipationGate
 from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_paths
 from tests.conftest import make_turn_context
-from tests.participation_helpers import (
-    ParticipationModel,
-    gemini_client,
-    gemini_decision_response,
-    gemini_response,
-)
+from tests.gemini_helpers import gemini_client, gemini_decision_response, gemini_response
+from tests.participation_helpers import ParticipationModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -193,8 +189,7 @@ async def test_openai_decision_disables_function_selection_before_answering() ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("vertexai", [False, True], ids=["gemini_api", "vertex_ai"])
-async def test_gemini_decision_requires_json_output_while_keeping_declarations(vertexai: bool) -> None:
+async def test_gemini_decision_requests_reason_first_json_while_keeping_declarations() -> None:
     """Gemini can call functions under mode NONE, which would silence an otherwise useful answer."""
     requests: list[dict[str, Any]] = []
     executions: list[tuple[int, int]] = []
@@ -211,17 +206,16 @@ async def test_gemini_decision_requires_json_output_while_keeping_declarations(v
         if len(requests) == 1:
             return gemini_decision_response(
                 payload,
-                '{"action":"respond","reason":"An unanswered math question."}',
+                '{"reason":"An unanswered math question.","action":"respond"}',
                 leaked_call=multiply_call,
             )
         if len(requests) == 2:
             return gemini_response({"functionCall": multiply_call})
         return gemini_response({"text": "437"})
 
-    client = gemini_client(provider, vertexai=vertexai)
-    model = MindRoomGoogleGemini(id="test", client=client, vertexai=vertexai)
     gate = ParticipationGate()
-    try:
+    async with gemini_client(provider, vertexai=False) as client:
+        model = MindRoomGoogleGemini(id="test", client=client)
         with participation_model(model, gate, run_id="primary"):
             response = await model.aresponse(
                 [Message(role="user", content="Use the calculator to multiply 23 by 19.")],
@@ -229,9 +223,6 @@ async def test_gemini_decision_requires_json_output_while_keeping_declarations(v
                 tool_choice="auto",
                 run_response=RunOutput(run_id="primary"),
             )
-    finally:
-        await client.aio.aclose()
-        client.close()
 
     assert gate.approved
     assert response.content == "437"
@@ -241,8 +232,13 @@ async def test_gemini_decision_requires_json_output_while_keeping_declarations(v
     assert decision["tools"][0]["functionDeclarations"][0]["name"] == "multiply"
     assert decision["toolConfig"] == {"functionCallingConfig": {"mode": "NONE"}}
     assert primary["toolConfig"] == {"functionCallingConfig": {"mode": "AUTO"}}
+    output_schema = decision["generationConfig"]["responseJsonSchema"]
     assert decision["generationConfig"]["responseMimeType"] == "application/json"
+    # Constrained decoding that commits to the action first biased small Gemini models toward silence.
+    assert list(output_schema["properties"]) == ["reason", "action"]
+    assert output_schema["properties"]["action"]["enum"] == ["respond", "stay_silent"]
     assert "responseMimeType" not in primary.get("generationConfig", {})
+    assert "responseJsonSchema" not in primary.get("generationConfig", {})
     # Gemini merges the appended decision prompt into the final user turn.
     assert decision["contents"][0]["parts"][:-1] == primary["contents"][0]["parts"]
 

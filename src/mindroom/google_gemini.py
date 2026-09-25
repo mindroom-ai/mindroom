@@ -18,7 +18,7 @@ from google.genai.types import (
 )
 
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
-from mindroom.provider_tool_policy import provider_tools_disabled
+from mindroom.provider_tool_policy import decision_response_schema, provider_tools_disabled
 
 if TYPE_CHECKING:
     from typing import Any
@@ -34,8 +34,8 @@ def _provider_tool_call_id(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _without_tool_selection(config: object) -> GenerateContentConfig:
-    """Keep function schemas for the shared prefix, remove native tools, and require JSON output."""
+def _decision_config(config: object, *, vertexai: bool) -> GenerateContentConfig:
+    """Keep function schemas for the shared prefix, remove native tools, and request the decision's JSON."""
     generation_config = GenerateContentConfig.model_validate(config).model_copy(deep=True)
     if generation_config.cached_content:
         # Cached content may contain native tools that this request cannot inspect.
@@ -55,10 +55,18 @@ def _without_tool_selection(config: object) -> GenerateContentConfig:
         generation_config.tool_config = ToolConfig(
             function_calling_config=FunctionCallingConfig(mode=FunctionCallingConfigMode.NONE),
         )
-    # Gemini can emit function calls under NONE and even without declarations; JSON output mode cannot.
-    # Gemini 2.5 rejects JSON output beside function declarations unless the mode is NONE.
-    generation_config.response_mime_type = "application/json"
-    return generation_config
+        if vertexai:
+            # The Gemini API accepts Gemini 2.5 JSON output beside declarations only under NONE.
+            # Vertex AI acceptance is unverified, and a rejection would fail every decision.
+            return generation_config
+    # Gemini can emit function calls under NONE and even without declarations; JSON output cannot.
+    return generation_config.model_copy(
+        update={
+            "response_mime_type": "application/json",
+            "response_schema": None,
+            "response_json_schema": decision_response_schema(),
+        },
+    )
 
 
 @dataclass
@@ -79,7 +87,15 @@ class MindRoomGoogleGemini(Gemini):
             if client_http_options is not None and HttpOptions.model_validate(client_http_options).extra_body:
                 msg = "Participation decisions cannot safely apply Gemini body overrides"
                 raise ValueError(msg)
-            # Agno updates authored generation dictionaries in place while merging.
+            # AGNO_COMPAT: Gemini request building mutates an authored generation_config dict.
+            # Reason: Agno's Gemini.get_request_params merges request settings into the authored
+            # dict in place, so a decision's tool_config and system instruction could leak
+            # into later reply requests.
+            # Upstream issue: https://github.com/agno-agi/agno/issues/10161, open.
+            # Upstream PR: https://github.com/agno-agi/agno/pull/10162, open; copies the config.
+            # Remove when: the pinned Agno builds the request from a copy of generation_config;
+            # keep applying _decision_config to the returned request only.
+            # Coverage: tests/test_provider_tool_policy.py::test_gemini_removes_native_tools_without_mutating_authored_config.
             request_model = copy(self)
             request_model.generation_config = deepcopy(self.generation_config)
         request_params = super(MindRoomGoogleGemini, request_model).get_request_params(
@@ -88,8 +104,8 @@ class MindRoomGoogleGemini(Gemini):
             tools=tools,
             tool_choice=tool_choice,
         )
-        if provider_tools_disabled():
-            request_params["config"] = _without_tool_selection(request_params.get("config") or {})
+        if provider_tools_disabled() and (generation_config := request_params.get("config")) is not None:
+            request_params["config"] = _decision_config(generation_config, vertexai=self.get_client().vertexai)
         if not self.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES):
             return request_params
 

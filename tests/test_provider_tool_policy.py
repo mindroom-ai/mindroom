@@ -18,10 +18,12 @@ from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses, 
 from mindroom.openai_tool_search import install_openai_deferred_tool_search
 from mindroom.provider_tool_policy import without_provider_tools
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.gemini_helpers import gemini_client
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import httpx
     from agno.models.groq import Groq
 
 
@@ -179,15 +181,44 @@ def test_gemini_removes_native_tools_without_mutating_authored_config(source: st
     assert regular.response_mime_type is None
 
 
-def test_gemini_decisions_without_generation_settings_still_require_json() -> None:
-    """Gemini emits function calls even without declarations, so every decision needs JSON output."""
-    model = MindRoomGoogleGemini(api_key="test-key")
-    with without_provider_tools():
-        decision = model.get_request_params()["config"]
+def test_gemini_decision_schema_replaces_authored_output_schema() -> None:
+    """A decision answers in its caller's JSON shape, never in the reply's structured output shape."""
+    decision_schema = {"type": "object", "properties": {"decision": {"type": "boolean"}}, "required": ["decision"]}
+    config = GenerateContentConfig(response_mime_type="application/json", response_schema={"type": "STRING"})
+    model = MindRoomGoogleGemini(api_key="test-key", request_params={"config": config})
 
-    assert decision.response_mime_type == "application/json"
-    assert decision.tools is None
-    assert "config" not in model.get_request_params()
+    with without_provider_tools(response_schema=decision_schema):
+        decision = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
+    with without_provider_tools():
+        schemaless = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
+
+    assert decision.response_json_schema == decision_schema
+    assert decision.response_schema is None
+    assert schemaless.response_mime_type == "application/json"
+    assert schemaless.response_json_schema is None
+    assert schemaless.response_schema is None
+    assert config.response_schema is not None
+
+
+@pytest.mark.asyncio
+async def test_vertex_gemini_requests_json_only_without_declarations() -> None:
+    """Vertex AI acceptance of JSON beside disabled declarations is unverified, so declarations keep NONE only."""
+
+    def unreachable(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError
+
+    async with gemini_client(unreachable, vertexai=True) as client:
+        model = MindRoomGoogleGemini(id="gemini-2.5-pro", client=client)
+        with without_provider_tools(response_schema={"type": "object"}):
+            declared = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
+            undeclared = model.get_request_params(system_message="Judge.", tool_choice="none")["config"]
+
+    assert declared.tools[0].function_declarations[0].name == "read_status"
+    assert declared.tool_config.function_calling_config.mode == "NONE"
+    assert declared.response_mime_type is None
+    assert declared.response_json_schema is None
+    assert undeclared.response_mime_type == "application/json"
+    assert undeclared.response_json_schema == {"type": "object"}
 
 
 def test_gemini_keeps_only_declarations_in_mixed_tool() -> None:
