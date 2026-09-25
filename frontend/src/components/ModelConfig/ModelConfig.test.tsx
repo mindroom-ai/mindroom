@@ -460,6 +460,7 @@ describe("ModelConfig", () => {
         expect(within(row).getByText("Config key")).toBeTruthy();
       });
       expect(within(row).getByText("Source: config.yaml")).toBeTruthy();
+      expect(within(row).getByText("sk-c...real")).toBeTruthy();
       expect(within(row).queryByText("Provider key")).toBeNull();
 
       fireEvent.click(within(row).getByTitle("Copy API key"));
@@ -511,7 +512,79 @@ describe("ModelConfig", () => {
       expect(within(row).getByText("Custom key")).toBeTruthy();
     });
     expect(within(row).queryByText("Config key")).toBeNull();
+
+    fireEvent.click(screen.getByText("proxied"));
+
+    expect(
+      screen.getByText(
+        "No new key provided. This model will keep its saved key.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(
+        "No custom key provided. This model will use its key from config.yaml.",
+      ),
+    ).toBeNull();
   });
+
+  it("gives equal config.yaml keys one badge colour", async () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...mockStore,
+      config: {
+        ...mockStore.config,
+        models: {
+          ...mockStore.config.models,
+          first: {
+            provider: "openrouter",
+            id: "z-ai/glm-5.3",
+            api_key: "sk-shared-config",
+          },
+          second: {
+            provider: "openrouter",
+            id: "openai/gpt-5.6-terra",
+            extra_kwargs: { api_key: "sk-shared-config" },
+          },
+        },
+      },
+    } as never);
+
+    render(<ModelConfig />);
+
+    const badgeFor = (modelName: string) => {
+      const row = screen.getByText(modelName).closest("tr");
+      if (!row) throw new Error("row not found");
+      return within(row).getByText("Config key");
+    };
+    await waitFor(() => {
+      expect(badgeFor("first")).toBeTruthy();
+    });
+    expect(badgeFor("first").className).toBe(badgeFor("second").className);
+  });
+
+  it.each(["codex", "kimi", "bedrock_claude", "vertexai_claude", "synthetic"])(
+    "does not show a config.yaml key for %s, which drops API keys",
+    async (provider) => {
+      vi.mocked(useConfigStore).mockReturnValue({
+        ...mockStore,
+        config: {
+          ...mockStore.config,
+          models: {
+            ...mockStore.config.models,
+            keyless: { provider, id: "some-model", api_key: "sk-config-real" },
+          },
+        },
+      } as never);
+
+      render(<ModelConfig />);
+
+      const row = screen.getByText("keyless").closest("tr");
+      if (!row) throw new Error("row not found");
+      await waitFor(() => {
+        expect(within(row).getByText("No API key")).toBeTruthy();
+      });
+      expect(within(row).queryByText("Config key")).toBeNull();
+    },
+  );
 
   it("adds a model using the top add row", async () => {
     render(<ModelConfig />);
