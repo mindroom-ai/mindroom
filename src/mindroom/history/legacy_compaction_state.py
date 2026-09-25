@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 # Legacy format: A v2 ``mindroom_compaction`` scope state holding ``compacted_run_ids``
 # tombstones and ``last_compacted_at``/``last_summary_model``/``last_compacted_run_count``
 # audit fields, written when compaction deleted the runs it summarized.
-# Last legacy release: v2026.9.304; replacement: the next release archives compacted runs
+# Last legacy release: v2026.9.305; replacement: the next release archives compacted runs
 # in ``<session_table>_compactions`` and ``<session_table>_compacted_runs``.
 # Handling: ``adopt_legacy_compaction`` records such a scope, or a ``session.summary`` of a scope
 # without archive generations, as a content-free legacy generation holding that summary, the

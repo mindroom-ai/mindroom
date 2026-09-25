@@ -422,7 +422,7 @@ def _compacted_event_ids(storage: BaseDb, session: AgentSession | TeamSession, s
 # LEGACY_COMPAT: Redaction of history compacted before the archive existed.
 # Legacy format: A legacy generation (see ``history/legacy_compaction_state.py``) whose summary
 # still replays and whose provenance is only the preserved seen ids captured at adoption.
-# Last legacy release: v2026.9.304; replacement: the next release records exact per-run provenance.
+# Last legacy release: v2026.9.305; replacement: the next release records exact per-run provenance.
 # Handling: Because that summary cannot be split by run, an event it may contain (its captured
 # seen ids, retained source ownership, or any live run removed for the event) retires it together
 # with every later generation and live run, as redaction did before the archive existed.
