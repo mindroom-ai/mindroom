@@ -290,6 +290,28 @@ def test_writes_require_a_current_read_and_learner_ownership(tmp_path: Path) -> 
     assert not (manual.parent / "references").exists()
 
 
+def test_a_write_that_changes_nothing_is_refused(tmp_path: Path) -> None:
+    """Like Hermes, an identical rewrite is no update: no notice, history snapshot, or reset of the skill's age."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    current = library.read_skill_file(root, "deploy-checks")
+    assert current is not None
+    with pytest.raises(library.SkillEditError, match="No change was made"):
+        library.write_skill_file(root, "deploy-checks", "SKILL.md", LEARNED, expected_digest=current.digest)
+    assert not (root / ".history").exists()
+    usage = json.loads((root / ".usage.json").read_text())["deploy-checks"]
+    assert "patch_count" not in usage
+
+
+def test_usage_rewrites_keep_the_file_mode(tmp_path: Path) -> None:
+    """A usage record update keeps the permissions a person gave the usage file."""
+    root = tmp_path / "skills"
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    (root / ".usage.json").chmod(0o644)
+    record_skill_use(root / "deploy-checks")
+    assert (root / ".usage.json").stat().st_mode & 0o777 == 0o644
+
+
 def test_support_files_stay_directly_under_support_directories(tmp_path: Path) -> None:
     """Support writes are single files under the support directories the skill tools serve, removable after a read."""
     root = tmp_path / "skills"

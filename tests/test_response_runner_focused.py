@@ -153,6 +153,7 @@ from mindroom.turn_record import EditPreparation, canonicalize_turn_record
 from tests.conftest import (
     make_matrix_client_mock,
     make_visible_message,
+    message_origin,
     patch_response_runner_module,
     replace_response_runner_deps,
     request_envelope,
@@ -9794,12 +9795,16 @@ async def test_completed_response_counts_toward_a_scoped_skill_review(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source_kind", ["message", SCHEDULED_SOURCE_KIND])
+@pytest.mark.parametrize(
+    ("source_kind", "requesting_agent"),
+    [("message", None), (SCHEDULED_SOURCE_KIND, None), ("message", "helper")],
+)
 async def test_approved_continuation_counts_toward_skill_review_unless_automated(
     tmp_path: Path,
     source_kind: str,
+    requesting_agent: str | None,
 ) -> None:
-    """A resumed agent run counts like any response, while a resumed scheduled run stays excluded."""
+    """A resumed run a person asked for counts, while resumed scheduled runs and agent requests stay excluded."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
@@ -9827,9 +9832,18 @@ async def test_approved_continuation_counts_toward_skill_review_unless_automated
         state="ready",
         execution_identity=serialize_tool_execution_identity(identity),
         source_kind=source_kind,
+        origin=(
+            message_origin(
+                sender_id=f"@mindroom_{requesting_agent}:localhost",
+                sender_entity_name=requesting_agent,
+                requester_entity_name=requesting_agent,
+            )
+            if requesting_agent is not None
+            else None
+        ),
     )
     queue = runner._approval_skill_review(continuation)
-    if source_kind != "message":
+    if source_kind != "message" or requesting_agent is not None:
         assert queue is None
         return
     assert queue is not None
@@ -9891,6 +9905,41 @@ async def test_a_response_registers_its_skill_review_conversation_before_it_runs
         await coordinator.generate_response(_plain_request(_target()))
     assert seen_while_running[:1] == [[False]]
     assert [entry["has_new_runs"] for entry in json.loads(state_path.read_text())["entries"].values()] == [True]
+
+
+@pytest.mark.asyncio
+async def test_replies_to_other_agents_never_count_toward_skill_review(tmp_path: Path) -> None:
+    """Like cron runs in Hermes, a turn another agent asked for has no person to learn from."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    request = _plain_request(_target())
+    origin = message_origin(
+        sender_id="@mindroom_helper:localhost",
+        sender_entity_name="helper",
+        requester_entity_name="helper",
+    )
+    request = replace(request, response_envelope=replace(request.response_envelope, origin=origin))
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=30,
+        max_response_chars=30,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=False),
+        ),
+    ):
+        await coordinator.generate_response(request)
+        assert await wait_for_background_tasks(5, owner=coordinator.deps.runtime)
+    assert bot.client.room_send.await_count >= 1
+    assert not (coordinator.deps.runtime_paths.storage_root / "skill_learning_state.json").exists()
 
 
 @pytest.mark.asyncio

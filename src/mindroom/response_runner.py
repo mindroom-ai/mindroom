@@ -147,6 +147,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
+from mindroom.turn_origin import SenderKind
 from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
 
@@ -219,6 +220,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.turn_origin import TurnOrigin
     from mindroom.turn_record import TurnRecord
 
     from .response_admission import ResponseAdmissionGate
@@ -866,6 +868,15 @@ class _InboxResponseOwnership:
     room_id: str
     drain_intent: RuntimeShutdownIntent | None = None
     proof_task: asyncio.Task[bool] | None = None
+
+
+def _requested_by_a_person(origin: TurnOrigin) -> bool:
+    """Whether a turn counts toward skill learning.
+
+    Like Hermes skipping cron reviews, automated runs and replies to other agents never start a review; they have
+    no human to learn from.
+    """
+    return origin.requester_kind == SenderKind.USER and not is_automation_source_kind(origin.source_kind)
 
 
 @dataclass
@@ -2089,7 +2100,7 @@ class ResponseRunner:
         """Return the normal skill-review handoff for an agent continuation."""
         if (
             continuation.entity_kind != "agent"
-            or is_automation_source_kind(continuation.source_kind)
+            or not _requested_by_a_person(restore_legacy_approval_origin(continuation))
             or not self._learns_skills(continuation.entity_name)
         ):
             return None
@@ -5540,17 +5551,16 @@ class ResponseRunner:
             thread_history=memory_thread_history,
             user_id=request.user_id,
         )
-        # Like Hermes skipping cron reviews, automated runs never start a review; they have no human to learn from.
         queue_skill_review = (
-            None
-            if is_automation_source_kind(request.response_envelope.source_kind)
-            else self._register_skill_review(
+            self._register_skill_review(
                 self._skill_review(
                     agent_name=self.deps.agent_name,
                     session_id=session_id,
                     execution_identity=execution_identity,
                 ),
             )
+            if _requested_by_a_person(request.response_envelope.origin)
+            else None
         )
 
         persist_response_event_id = self._build_persist_response_event_id_effect(
