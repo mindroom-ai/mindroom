@@ -64,21 +64,17 @@ _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
 # Values that only stand in for a secret: shell or template references, ellipses, and masking runs.
 _PLACEHOLDER_PATTERN = re.compile(r"^[$<{%\[]|\.\.\.|x{4,}|\*{3,}", re.IGNORECASE)
 # Credentials written into skill content, adapted from Hermes Agent's skill guard (tools/skills_guard.py): quoted
-# values of api-key, token, secret, or password settings unless they name an environment variable, AWS access key
-# IDs, Anthropic and GitLab tokens, and unquoted values on env-file style lines.
+# values of api-key, token, secret, or password settings unless they name an environment variable, also with a
+# quoted name as in JSON, AWS access key IDs, and Anthropic and GitLab tokens.
 _SKILL_SECRET_PATTERNS = (
     re.compile(
-        r"(?:api[_-]?key|token|secret|password)\s*[=:]\s*[\"']"
+        r"(?:api[_-]?key|token|secret|password)[\"']?\s*[=:]\s*[\"']"
         r"(?!(?-i:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)[\"'])(?P<secret>[A-Za-z0-9+/=_-]{20,})",
         re.IGNORECASE,
     ),
     re.compile(r"(?P<secret>AKIA[0-9A-Z]{16})"),
     re.compile(r"(?P<secret>sk-ant-[A-Za-z0-9_-]{90,})"),
     re.compile(r"(?P<secret>glpat-[A-Za-z0-9_-]{20,})"),
-    re.compile(
-        r"^[^\S\n]*+(?:export[^\S\n]++)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*=(?P<secret>[^\s\"'$<{]\S{19,})$",
-        re.MULTILINE,
-    ),
 )
 # URL passwords that only name a local default rather than a secret.
 _DEFAULT_URL_PASSWORDS = frozenset({"changeme", "example", "pass", "password", "secret"})
@@ -563,7 +559,7 @@ def find_credential(value: str) -> int | None:
     Unlike redaction, which also hides harmless values, this flags private keys, long known token formats, bearer
     tokens, URL passwords or secret query values, and the setting shapes of Hermes Agent's skill guard, while
     exempting placeholders such as ``OPENAI_API_KEY=<your key>``, ``sk-...``, or ``$TOKEN``. It is a heuristic for
-    common formats, so an unusual secret format can pass.
+    common formats, so an unusual secret format or an unquoted value of an unknown format can pass.
     """
     if match := _PRIVATE_KEY_PATTERN.search(value):
         return match.start()

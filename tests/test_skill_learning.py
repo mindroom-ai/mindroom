@@ -1369,7 +1369,7 @@ def test_restored_or_reused_skill_names_start_over(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_first_count_starts_at_the_response_that_enabled_counting(tmp_path: Path) -> None:
-    """Enabling learning never reviews a conversation's older history, like Hermes' counter starting at zero."""
+    """Replies from before learning was enabled never count toward a review, like Hermes' counter starting at zero."""
     config, paths = _learner(tmp_path, review_interval=4)
     now = int(time.time())
     history = [_tool_turn("h1"), _tool_turn("h2")]

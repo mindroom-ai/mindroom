@@ -61,8 +61,9 @@ class QueueEntry(BaseModel):
     session: str
     worker_key: str | None
     identity: dict[str, object] | None
-    # A new entry starts at the second its first response began, so enabling learning never reviews older history,
-    # and every run of that response counts: retries after a discarded empty attempt and an approved continuation.
+    # A new entry starts at the second its first response began, so replies from before learning was enabled never
+    # count, and every run of that response counts: retries after a discarded empty attempt and an approved
+    # continuation. Reviews still read the whole stored conversation as evidence.
     reviewed_through: RunPosition
     has_new_runs: bool = False
     skills_root: str | None = None
@@ -170,8 +171,8 @@ def _entry_is_current(config: Config, entry: QueueEntry, now: float) -> bool:
 def drop_retired_reviews(config: Config, runtime_paths: RuntimePaths, *, now: float) -> list[tuple[str, QueueEntry]]:
     """Drop entries of disabled agents, stale conversations, and changed scopes, and return the others.
 
-    The orchestrator also calls this on every config change, so learning turned off and on again never reviews the
-    time it was off. Scope resolution happens outside the lock that completed responses also take.
+    The orchestrator also calls this on every config change, so learning turned off and on again never counts the
+    replies from the time it was off. Scope resolution happens outside the lock that completed responses also take.
     """
     if not (runtime_paths.storage_root / _STATE_FILENAME).exists():
         return []
