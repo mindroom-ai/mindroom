@@ -41,16 +41,15 @@ _FORMAT_SETTINGS = {
     "extensions.refstorage": frozenset({"files", "reftable"}),
 }
 _FORMAT_SETTINGS_PATTERN = r"^(core\.repositoryformatversion|extensions\.(objectformat|refstorage))$"
-_MAX_CONFIG_BYTES = 1 << 20
 _GIT_CONFIG_TIMEOUT_SECONDS = 30.0
 
 
 def adopt_in_tree_git_dir(base_id: str, source_path: Path, git_dir: Path) -> bool:
     """Move ``source_path/.git`` to ``git_dir`` and return whether a legacy directory was adopted.
 
-    ``git_dir`` must not hold a repository yet. The rename goes to a staging
-    directory first and ``git_dir`` appears only once nothing executable is
-    left in it, so an interrupted adoption resumes from staging.
+    The rename goes to a staging directory first and ``git_dir`` appears only
+    once nothing executable is left in it, so an interrupted adoption resumes
+    from staging.
     """
     staging = git_dir.with_name(f"{git_dir.name}.adopting")
     if not os.path.lexists(staging):
@@ -61,10 +60,9 @@ def adopt_in_tree_git_dir(base_id: str, source_path: Path, git_dir: Path) -> boo
             return False
         if not stat.S_ISDIR(mode):
             msg = (
-                f"Refusing to sync knowledge base '{base_id}': {in_tree} is a link or a file, not a Git directory. "
-                f"MindRoom keeps knowledge Git directories under {git_dir.parent} and never follows a pointer "
-                "inside the knowledge folder, because anyone who can write the folder could redirect it. "
-                f"Delete {source_path} and the next sync clones it afresh."
+                f"Refusing to sync knowledge base '{base_id}': {in_tree} is a link or a file, not a Git directory, "
+                f"and MindRoom never follows a pointer inside a knowledge folder. Delete {source_path} and the next "
+                "sync clones it afresh."
             )
             raise RuntimeError(msg)
         staging.parent.mkdir(parents=True, exist_ok=True)
@@ -75,8 +73,7 @@ def adopt_in_tree_git_dir(base_id: str, source_path: Path, git_dir: Path) -> boo
                 raise
             msg = (
                 f"Cannot move {in_tree} to {staging} for knowledge base '{base_id}': they are on different "
-                "filesystems, and MindRoom renames a knowledge repository rather than copying it. "
-                f"Stop MindRoom, move {in_tree} to {staging}, and start MindRoom again to finish the move, "
+                f"filesystems. Stop MindRoom, move {in_tree} to {staging}, and start MindRoom again, "
                 f"or delete {source_path} and the next sync clones it afresh."
             )
             raise RuntimeError(msg) from None
@@ -86,56 +83,30 @@ def adopt_in_tree_git_dir(base_id: str, source_path: Path, git_dir: Path) -> boo
     return True
 
 
-def _run_git_config(config_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run ``git config`` on one file, which follows no includes and runs nothing.
+def _replace_config(staging: Path) -> None:
+    """Replace the old config with one holding only the repository format.
 
-    Discovery is bounded to the MindRoom-owned directory holding the staging
-    directory, so no enclosing repository is consulted either.
+    ``git config --file`` reads one file, follows no includes and runs nothing,
+    and discovery is bounded to the MindRoom-owned directory around staging.
     """
-    control_dir = config_path.parent.parent
-    return subprocess.run(
-        hardened_git_command(["config", "--file", str(config_path), *args]),
-        cwd=str(control_dir),
-        env=hardened_git_env({"GIT_CEILING_DIRECTORIES": str(control_dir.parent)}),
+    config_path = staging / "config"
+    result = subprocess.run(
+        hardened_git_command(["config", "--file", str(config_path), "--get-regexp", _FORMAT_SETTINGS_PATTERN]),
+        cwd=str(staging.parent),
+        env=hardened_git_env({"GIT_CEILING_DIRECTORIES": str(staging.parent.parent)}),
         check=False,
         capture_output=True,
         text=True,
         timeout=_GIT_CONFIG_TIMEOUT_SECONDS,
     )
-
-
-def _format_settings(config_path: Path) -> dict[str, str]:
-    try:
-        status = config_path.lstat()
-    except FileNotFoundError:
-        return {}
-    if not stat.S_ISREG(status.st_mode) or status.st_size > _MAX_CONFIG_BYTES:
-        return {}
-    result = _run_git_config(config_path, "--get-regexp", _FORMAT_SETTINGS_PATTERN)
-    settings: dict[str, str] = {}
+    lines = []
     for line in result.stdout.splitlines():
         key, _, value = line.partition(" ")
         if value in _FORMAT_SETTINGS.get(key, ()):
-            settings[key] = value
-    return settings
-
-
-def _replace_config(staging: Path) -> None:
-    """Replace the old config with one holding only the repository format."""
-    config_path = staging / "config"
-    settings = _format_settings(config_path)
-    has_extensions = any(key.startswith("extensions.") for key in settings)
-    settings.setdefault("core.repositoryformatversion", "1" if has_extensions else "0")
-    settings["core.bare"] = "false"
+            section, _, name = key.partition(".")
+            lines.append(f"[{section}]\n\t{name} = {value}\n")
     new_config = staging / "config.adopting"
-    _delete(new_config)
-    for key, value in settings.items():
-        result = _run_git_config(new_config, key, value)
-        if result.returncode != 0:
-            msg = f"Could not write {new_config}: {result.stderr.strip()}"
-            raise RuntimeError(msg)
-    if config_path.is_dir() and not config_path.is_symlink():
-        shutil.rmtree(config_path)
+    new_config.write_text("".join(lines), encoding="utf-8")
     new_config.replace(config_path)
 
 

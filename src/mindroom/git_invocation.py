@@ -1,20 +1,12 @@
-"""Hardened ``git`` invocation shared by every Git command MindRoom runs.
+"""Hardened ``git`` invocation shared by every Git command MindRoom runs itself.
 
 MindRoom runs Git from processes that hold every runtime secret, against trees
-that agents and worker containers can write. Git takes configuration, hooks and
-filters from the repository it operates on and runs what they name, so two
-rules apply to every command:
-
-* Knowledge sync commands name a MindRoom-owned Git directory and work tree
-  explicitly (``git_dir``/``work_tree``), so Git never discovers or reads a
-  ``.git`` somebody else wrote. Only that closes the hole: an attacker-defined
-  ``filter.<name>.smudge`` has an arbitrary name that no ``-c`` override can
-  anticipate.
-* Every command also carries ``-c`` overrides for the keys that name a program,
-  reads no system or global configuration, and starts from a small allowlisted
-  environment, so no provider key, Matrix credential or encryption key reaches
-  a Git child. Callers add the repository credential as an explicit override
-  for the commands that talk to the remote.
+agents and worker containers can write, and Git runs programs that repository
+metadata names. Knowledge sync therefore names a MindRoom-owned Git directory
+explicitly, since no ``-c`` override can anticipate an arbitrary
+``filter.<name>``; every command also carries overrides for the keys that name
+a program, reads no system or global configuration, and gets a minimal
+environment. Callers add the repository credential only to remote commands.
 """
 
 from __future__ import annotations
@@ -56,15 +48,12 @@ _INHERITED_ENV = (
     "HOME",
     "HTTPS_PROXY",
     "HTTP_PROXY",
-    "LOGNAME",
     "NIX_SSL_CERT_FILE",
     "NO_PROXY",
     "SSH_AUTH_SOCK",
     "SSL_CERT_DIR",
     "SSL_CERT_FILE",
-    "SYSTEMROOT",
     "TMPDIR",
-    "USER",
     "all_proxy",
     "http_proxy",
     "https_proxy",

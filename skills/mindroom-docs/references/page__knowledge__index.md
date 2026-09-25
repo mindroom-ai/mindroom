@@ -315,23 +315,17 @@ If a checkout already holds a credential-bearing remote from before this check e
 #### Checkout layout
 
 The knowledge folder holds the checked-out files only.
-Its Git directory lives at `<storage>/knowledge_git/<folder>_<path digest>`, beside the agent and private-instance state roots that workers mount rather than inside one, and every sync and listing command names it explicitly.
-That is deliberate: Git runs programs named by the repository it operates on (`core.fsmonitor`, hooks, content filters, SSH and credential helpers), and a Git-backed base may live where agent tools and worker containers can write every file (`private.knowledge.git`, or a shared base rooted in a workspace).
-A `.git` written into the knowledge folder is therefore never read, never followed, and never indexed.
-Knowledge Git commands also run with hooks, fsmonitor, credential and askpass helpers, proxy commands and the `ext::` protocol disabled, read no system or global Git configuration, and receive a minimal environment that carries no MindRoom secrets beyond the repository credential for the commands that contact the remote.
-Configure proxies, CA bundles and SSH through environment variables such as `HTTPS_PROXY`, `SSL_CERT_FILE`, `GIT_SSH_COMMAND` and `SSH_AUTH_SOCK` or through `~/.ssh/config`, and repository credentials through `credentials_service`; settings in `~/.gitconfig` or `/etc/gitconfig`, credential helpers included, do not apply to knowledge sync.
+Its Git directory lives at `<storage>/knowledge_git/<folder>_<path digest>`, outside every state root a worker mounts, and every knowledge Git command names it explicitly, so a `.git` written into the folder is never read, followed, or indexed.
+Git runs programs that repository metadata names (`core.fsmonitor`, hooks, filters, credential helpers), and a Git-backed base may live where agent tools and worker containers can write every file.
+Knowledge Git commands also disable those programs, read no system or global Git configuration, and receive a minimal environment without MindRoom secrets; configure proxies, CA bundles and SSH through environment variables or `~/.ssh/config`, and credentials through `credentials_service`.
 
-Bases that share a folder share one Git directory.
-The directory is keyed by the resolved folder path, so changing a base's `path` starts a new repository in the new folder, which must be empty and is cloned afresh; delete the old directory under `<storage>/knowledge_git/` to reclaim its space.
-It holds repository content only: remote URLs are written without credentials, credentials reach Git only through the environment of a single command, and fetches do not write `FETCH_HEAD`.
-Deleting only the knowledge folder restores its files from the Git directory on the next sync without fetching history again; delete both to clone afresh.
+Bases that share a folder share one Git directory, keyed by the resolved folder path.
+Changing a base's `path` starts a new repository in the new folder, which must be empty; delete the old directory under `<storage>/knowledge_git/` to reclaim its space.
+Deleting only the knowledge folder restores its files from the Git directory on the next sync; delete both to clone afresh.
 
-A checkout created by an earlier release keeps its `.git` directory inside the knowledge folder.
-The first sync after upgrading moves that directory to its new location with a single rename, so the object store is neither copied nor fetched again and the published index stays valid without re-embedding.
-Before the moved repository is used, MindRoom replaces its config with one holding only the repository format and the configured `repo_url`, and deletes everything else Git could run or be redirected by, including hooks, `info/`, reflogs, `FETCH_HEAD`, worktree and submodule metadata, and alternates.
-An interrupted move finishes on the next sync.
-The sync fails with an error instead when the folder's `.git` is a link or a `gitdir:` file, which is never followed, or when the knowledge folder and `<storage>` are on different filesystems or mounts, because the move would have to copy the whole object store.
-In the second case, stop MindRoom, move the `.git` directory to the path the error names, and start MindRoom again; in either case you can instead delete the folder so the next sync clones it afresh.
+A checkout created by an earlier release has its `.git` inside the knowledge folder.
+The first sync after upgrading renames that directory into place, so nothing is copied, fetched, or re-embedded, after replacing its config with one that keeps only the repository format and deleting everything else Git could run or be redirected by, such as hooks and `info/`.
+The sync fails with an error instead when that `.git` is a link or a `gitdir:` file, or when it is on a different filesystem or mount from `<storage>`; follow the error to move it, or delete the folder so the next sync clones afresh.
 
 ### Sync Behavior
 

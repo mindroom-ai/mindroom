@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
-from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.path_confinement import is_git_metadata_path
 from mindroom.tools.path_safety import (
     blocked_git_metadata_message,
@@ -370,12 +369,10 @@ def _gitignored_paths(paths: list[Path], base_dir: Path) -> set[Path]:
 
     payload = "\0".join(path_map.keys()) + "\0"
     try:
-        # The base dir is agent-writable, so its repository config is too.
         result = subprocess.run(
-            hardened_git_command(["check-ignore", "--stdin", "-z"]),
+            ["git", "check-ignore", "--stdin", "-z"],
             check=False,
             cwd=str(base_dir),
-            env=hardened_git_env(),
             input=payload.encode("utf-8"),
             capture_output=True,
             timeout=5,

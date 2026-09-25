@@ -23,7 +23,6 @@ import asyncio
 import base64
 import os
 import re
-import shutil
 import signal
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -722,8 +721,7 @@ class GitKnowledgeSource:
         """Make the MindRoom-owned repository exist; return whether it was just created."""
         expected_remote = _persistable_remote_url(git_config.repo_url, self.base_id)
         initialized = False
-        if not await asyncio.to_thread(self._repository_initialized):
-            await asyncio.to_thread(self._clear_partial_git_dir)
+        if not await asyncio.to_thread(git_checkout_present, self.source_path, self.git_dir):
             if await asyncio.to_thread(adopt_in_tree_git_dir, self.base_id, self.source_path, self.git_dir):
                 logger.info(
                     "Moved knowledge Git directory out of the checkout",
@@ -742,19 +740,6 @@ class GitKnowledgeSource:
             await self._run_git(["config", "remote.origin.url", expected_remote])
         return initialized
 
-    def _repository_initialized(self) -> bool:
-        """Return whether the Git directory holds a repository, never guessing on an I/O error."""
-        try:
-            (self.git_dir / "HEAD").lstat()
-        except FileNotFoundError:
-            return False
-        return True
-
-    def _clear_partial_git_dir(self) -> None:
-        """Remove what an interrupted initialization left before ``HEAD`` existed."""
-        shutil.rmtree(self.git_dir, ignore_errors=True)
-        self.git_dir.parent.mkdir(parents=True, exist_ok=True)
-
     async def _initialize_repository(self) -> None:
         """Create an empty repository for a new checkout; the first sync fetches into it."""
         if any(self.source_path.iterdir()):
@@ -764,6 +749,7 @@ class GitKnowledgeSource:
             )
             raise RuntimeError(msg)
         await asyncio.to_thread(self._clear_lfs_hydrated_head)
+        await asyncio.to_thread(self.git_dir.parent.mkdir, parents=True, exist_ok=True)
         await self._run_git(["init", "--quiet", "--template="])
 
     async def _sync_once(self, git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
