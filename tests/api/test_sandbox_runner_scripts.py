@@ -473,11 +473,11 @@ router:
         supervisor.shutdown()
 
 
-def test_worker_script_ignores_code_planted_in_shared_agent_workspace(
+def test_worker_script_does_not_load_workspace_code_into_its_launchers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A script run for one requester must not run code another requester wrote into a shared agent root."""
+    """Workspace files must not replace MindRoom's script launchers or inject site code into them."""
     run_id = f"script-{'b' * 32}"
     state_scope_worker_key = "v1:test:user_agent:@victim:example.test:watcher"
     worker_key = script_worker_key_for_run(state_scope_worker_key, run_id)
@@ -530,10 +530,7 @@ router:
         runner_token=_TOKEN,
     )
     shared_workspace = shared_storage_root / "agents" / "watcher" / "workspace"
-    hook_path = shared_workspace / ".mindroom" / "worker-env.sh"
-    hook_path.parent.mkdir(parents=True)
-    hook_path.write_text('touch "$PWD/planted-hook-ran"\nexport SCRIPT_TEST_OVERLAY=planted\n', encoding="utf-8")
-    (shared_workspace / "mindroom").mkdir()
+    (shared_workspace / "mindroom").mkdir(parents=True)
     (shared_workspace / "mindroom" / "__init__.py").write_text(
         "from pathlib import Path\nPath.cwd().joinpath('planted-package-ran').touch()\n",
         encoding="utf-8",
@@ -556,10 +553,7 @@ router:
         "from pathlib import Path\n"
         "import helper\n"
         "workspace = Path(os.environ['MINDROOM_SCRIPT_WORKSPACE_ROOT'])\n"
-        "workspace.joinpath('script-result.txt').write_text(\n"
-        "    os.environ.get('SCRIPT_TEST_OVERLAY', 'missing') + '|' + helper.VALUE,\n"
-        "    encoding='utf-8',\n"
-        ")\n"
+        "workspace.joinpath('script-result.txt').write_text(helper.VALUE, encoding='utf-8')\n"
     )
     _source_path, _token_path, source_digest = _write_run_files(prepared.paths.workspace, run_id, source)
     supervisor = _ShellSupervisorManager()
@@ -599,8 +593,7 @@ router:
 
         assert status.json()["state"] == "exited"
         assert status.json()["exit_code"] == 0
-        assert (shared_workspace / "script-result.txt").read_text(encoding="utf-8") == "missing|helper-value"
-        assert not (shared_workspace / "planted-hook-ran").exists()
+        assert (shared_workspace / "script-result.txt").read_text(encoding="utf-8") == "helper-value"
         assert not (shared_workspace / "planted-package-ran").exists()
         assert not (shared_workspace / "planted-pth-ran").exists()
     finally:

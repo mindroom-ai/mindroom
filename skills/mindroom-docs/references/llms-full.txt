@@ -2845,16 +2845,10 @@ Isolation depends on the worker backend:
 - **Shared-runner and local backends**: no hard filesystem boundary today, regardless of scope.
 
 Use `user_agent` if you need per-agent filesystem isolation.
-A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` runtimes, so files one requester leaves there (for example Git config under the workspace `HOME`) are seen by the others.
-Use `private` agents when requesters must not share workspace state.
 
 For per-workspace env that an agent can edit (PATH, package indexes, npm cache locations, etc.), drop a `.mindroom/worker-env.sh` script in the agent workspace; MindRoom sources it before each worker-routed `shell` or `python` request.
 MindRoom-owned workspace identity, cache, and virtualenv env names are reasserted after the hook, so hooks cannot redirect `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, or `VIRTUAL_ENV`.
-Runtimes that act for one requester (`user` and `user_agent` workers, background script runs, and CLI agent turns) source the hook only from a workspace no other requester can write: a private agent's workspace or the worker's own scratch workspace.
-They ignore a hook in a non-private agent's `agents/<agent>/workspace` and log that once per workspace, because every requester's runtime for that agent can write that file and the hook would otherwise run with the current requester's credentials.
-`shared` and unscoped runtimes still source hooks from the agent workspace, because they already serve every requester alike.
-Give an agent `private` when each requester needs its own editable hook.
-With `worker_scope: user`, the same runtime can move between several private agent workspaces, and the hook is discovered from the current request's workspace — different private agents get different overlays automatically.
+With `worker_scope: user`, the same runtime can move between several agent workspaces, and the hook is discovered from the current request's workspace — different agents get different overlays automatically.
 See [Workspace env hook](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh) for filename, filtering, and failure semantics.
 
 ### Where Agent Data Lives
@@ -21190,6 +21184,7 @@ Do not report or "fix" these; they are deliberate.
 - `mindroom_output_path`, attachment saves, Google Drive downloads, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
+- A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 
 ## Reviewing security findings
@@ -23494,10 +23489,7 @@ The runner sources this script with `bash` after applying the workspace home con
 - For agent-routed worker requests, the hook lives at the resolved agent workspace root as `.mindroom/worker-env.sh`.
 - For shared and unscoped agents that means `agents/<agent>/workspace/.mindroom/worker-env.sh`.
 - For private agents that means `private_instances/<scope>/<agent>/workspace/.mindroom/worker-env.sh`.
-- For `worker_scope: user`, the hook follows the per-request workspace, so one shared user runtime can pick up different hooks as it works in different private agent workspaces.
-- Runtimes that act for one requester (`user` and `user_agent` workers, background script runs, and CLI agent turns) only source a hook from a private agent's workspace or the worker's own scratch workspace.
-  A hook in a non-private agent's `agents/<agent>/workspace` is writable by every requester's runtime for that agent, so these runtimes ignore it and log `workspace_env_hook_ignored_in_shared_workspace` once per workspace.
-  `shared` and unscoped runtimes serve every requester alike and keep sourcing it.
+- For `worker_scope: user`, the hook follows the per-request workspace, so one shared user runtime can pick up different hooks as it works in different agent workspaces.
 - For unkeyed static-sidecar proxy calls (no `worker_key`), the hook is discovered from `tool_init_overrides["base_dir"]` only when that value is an absolute path; relative strings are ignored on this path because there is no canonical workspace root to resolve them against.
 
 **Semantics:**
@@ -23524,8 +23516,8 @@ If you don't want a value to reach tools, don't export it.
 - Hook failures do not poison the worker; only the requesting tool call fails.
 
 This hook works identically for static sidecar, dedicated Docker, and dedicated Kubernetes worker backends because it runs inside the sandbox runner per request.
-The runner starts its own Python processes (tool children, the forkserver template, background-script shims, and supervised process wrappers) with `python -P -s`.
-That keeps the workspace working directory off `sys.path` and skips user site-packages under a workspace `HOME`, so modules or `.pth` files left in a shared workspace cannot run inside those processes.
+The runner starts its own Python processes (tool children, the forkserver template, background-script shims, supervised process wrappers, and package installs) with `python -P -s`.
+That keeps the workspace working directory off `sys.path` and skips user site-packages under a workspace `HOME`, so a workspace file named like a MindRoom or installed module cannot replace it inside those processes.
 It is not a true container startup hook — it does not change pod templates, recreate Deployments, or alter Helm values.
 For an example, see `docs/tools/execution-and-coding.md`.
 

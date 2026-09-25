@@ -425,13 +425,6 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
             request_workspace=workspace,
             prepared=prepared,
             execution_env=execution_environment,
-            apply_workspace_env_hook=sandbox_worker_prep.workspace_env_hook_allowed(
-                workspace,
-                worker_key=payload.worker_key,
-                state_worker_key=payload.state_scope_worker_key,
-                prepared=prepared,
-                runtime_paths=app_runtime_paths(request.app),
-            ),
         )
     except sandbox_exec.WorkspaceEnvHookError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

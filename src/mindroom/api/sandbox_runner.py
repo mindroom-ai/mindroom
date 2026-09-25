@@ -1012,14 +1012,6 @@ def _prepare_execute_request(
     execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
     config = config or _runtime_config_or_empty(runtime_paths)
     request_workspace = _resolve_request_workspace(request, prepared, runtime_paths=runtime_paths, config=config)
-    if request_workspace is not None and not sandbox_worker_prep.workspace_env_hook_allowed(
-        request_workspace,
-        worker_key=request.worker_key,
-        state_worker_key=None,
-        prepared=prepared,
-        runtime_paths=runtime_paths,
-    ):
-        apply_workspace_env_hook = False
     try:
         env_result = sandbox_env_assembly.build_request_execution_env(
             request_workspace=request_workspace,

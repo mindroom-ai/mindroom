@@ -161,12 +161,13 @@ def _current_python_has_module(module_name: str) -> bool:
 def install_command_for_current_python() -> list[str]:
     """Build the pip/uv install command for the current interpreter."""
     in_venv = _in_virtualenv()
+    # `-P -s`: the installer's cwd or `HOME` may be a workspace whose files must not shadow its modules.
     if _current_python_has_module("uv"):
-        cmd = [sys.executable, "-m", "uv", "pip", "install", "--python", sys.executable]
+        cmd = [sys.executable, "-P", "-s", "-m", "uv", "pip", "install", "--python", sys.executable]
     elif shutil.which("uv"):
         cmd = ["uv", "pip", "install", "--python", sys.executable]
     else:
-        cmd = [sys.executable, "-m", "pip", "install"]
+        cmd = [sys.executable, "-P", "-s", "-m", "pip", "install"]
         if not in_venv:
             cmd.append("--user")
         return cmd
