@@ -9,7 +9,8 @@ import os
 import stat
 import time
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from dataclasses import replace
+from threading import Barrier, Event
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -75,6 +76,117 @@ def test_session_round_trip_remembers_interactive_access_transport(
     save_desktop_session(path, session)
 
     assert load_desktop_session(path) == session
+
+
+def test_session_metadata_update_preserves_exact_saved_credentials(tmp_path: Path) -> None:
+    """Successful setup can persist Access transport without replacing its login."""
+    path = tmp_path / "desktop" / "matrix_session.json"
+    original = _session()
+    save_desktop_session(path, original)
+    updated = replace(original, cloudflare_access=True)
+
+    save_desktop_session(path, updated, expected_session=original)
+
+    assert load_desktop_session(path) == updated
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"homeserver": "https://other.example.org"},
+        {"user_id": "@other:example.org"},
+        {"device_id": "NEW-DEVICE"},
+        {"access_token": "replacement-token"},
+        {"cloudflare_access": True},
+    ],
+)
+def test_session_metadata_update_rejects_changed_saved_session(tmp_path: Path, changed: dict[str, object]) -> None:
+    """Any concurrent login or metadata change invalidates the setup snapshot."""
+    path = tmp_path / "matrix_session.json"
+    original = _session()
+    current = replace(original, **changed)
+    save_desktop_session(path, current)
+    before = path.read_bytes()
+
+    with pytest.raises(DesktopSessionError, match="changed"):
+        save_desktop_session(path, replace(original, cloudflare_access=True), expected_session=original)
+
+    assert path.read_bytes() == before
+    assert load_desktop_session(path) == current
+
+
+def test_session_login_writer_waits_for_pending_metadata_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older setup write cannot overwrite a login published during its transaction."""
+    from mindroom.desktop import session as session_module  # noqa: PLC0415
+
+    path = tmp_path / "matrix_session.json"
+    original = _session()
+    updated = replace(original, cloudflare_access=True)
+    new_login = replace(original, device_id="NEW-DEVICE", access_token="replacement-token")
+    save_desktop_session(path, original)
+    metadata_writing = Event()
+    release_metadata = Event()
+    login_started = Event()
+    login_finished = Event()
+    write = session_module.write_json_file_durable
+
+    def pause_metadata_write(target: Path, payload: object, **kwargs: object) -> None:
+        if payload == updated.to_payload():
+            metadata_writing.set()
+            assert release_metadata.wait(timeout=5)
+        write(target, payload, **kwargs)
+
+    def login() -> None:
+        login_started.set()
+        save_desktop_session(path, new_login)
+        login_finished.set()
+
+    monkeypatch.setattr(session_module, "write_json_file_durable", pause_metadata_write)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        metadata = pool.submit(save_desktop_session, path, updated, expected_session=original)
+        try:
+            assert metadata_writing.wait(timeout=2)
+            latest = pool.submit(login)
+            assert login_started.wait(timeout=2)
+            login_finished.wait(timeout=0.05)
+        finally:
+            release_metadata.set()
+        metadata.result(timeout=2)
+        latest.result(timeout=2)
+
+    assert load_desktop_session(path) == new_login
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory", "malformed", "exposed"])
+def test_session_metadata_update_preserves_private_read_checks(tmp_path: Path, kind: str) -> None:
+    """Conditional writes cannot repair or overwrite an unreadable session implicitly."""
+    if kind == "exposed" and os.name == "nt":
+        pytest.skip("Unix permission bits are not authoritative on Windows")
+    path = tmp_path / "matrix_session.json"
+    if kind == "directory":
+        path.mkdir()
+    elif kind == "malformed":
+        path.write_text("{", encoding="utf-8")
+        path.chmod(0o600)
+    elif kind == "exposed":
+        save_desktop_session(path, _session())
+        path.chmod(0o640)
+    before = path.read_bytes() if path.is_file() else None
+
+    with pytest.raises(DesktopSessionError):
+        save_desktop_session(path, replace(_session(), cloudflare_access=True), expected_session=_session())
+
+    if before is not None:
+        assert path.read_bytes() == before
+    elif kind == "directory":
+        assert path.is_dir()
+    else:
+        assert not path.exists()
 
 
 @pytest.mark.skipif(

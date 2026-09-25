@@ -69,6 +69,12 @@ Open **Computer access** to manage its session independently.
 7. Check macOS permissions and start observation.
 
 For a homeserver behind Cloudflare Access, complete the Terminal authentication flow shown in chat first.
+The terminal `mindroom desktop setup` command saves the same connection used by the app.
+An already open app refreshes that setup automatically while computer access is stopped, preserving unsaved edits.
+After confirming pairing in chat, choose and save allowed apps here, then start observation from either the app or `mindroom desktop run`.
+Stop the bridge in the interface that started it before starting it in the other interface.
+Terminal setup can also save app choices with repeated `--allow-app` options; omitting them preserves choices for the same controller.
+Both interfaces default to `~/.mindroom`; a terminal `--config` or `--storage-path` override creates a separate setup.
 The existing native helper owns authentication, pairing, permissions, browser sessions, and control leases.
 
 The session card explains unavailable Start and Stop buttons and provides shortcuts to the next required step.

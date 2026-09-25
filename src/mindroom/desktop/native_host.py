@@ -91,13 +91,26 @@ class NativeDesktopHost:
         self._last_error: dict[str, object] | None = None
         self._pairing_state = "unpaired"
         self._config: NativeDesktopConfig | None = None
+        self._config_error: dict[str, object] | None = None
         self._config_error_revision = 0
+        self._refresh_config()
+
+    def _refresh_config(self) -> None:
+        """Follow terminal edits while stopped without changing a running bridge's authority."""
+        if self._runtime is not None or self._startup_task is not None:
+            return
         try:
-            self._config = load_native_config(native_config_path(runtime_paths.storage_root))
+            config = load_native_config(native_config_path(self._runtime_paths.storage_root))
         except NativeConfigError as exc:
+            self._config = None
             self._config_error_revision = exc.revision
-            if exc.code != "configuration_missing":
-                self._last_error = _error_payload(exc.code, str(exc))
+            self._config_error = _error_payload(exc.code, str(exc)) if exc.code != "configuration_missing" else None
+        else:
+            if self._config is not None and self._config.controller != config.controller:
+                self._pairing_state = "unpaired"
+            self._config = config
+            self._config_error = None
+            self._config_error_revision = 0
 
     def hello(self) -> dict[str, object]:
         """Return the first process record."""
@@ -111,6 +124,7 @@ class NativeDesktopHost:
 
     def status(self) -> dict[str, object]:
         """Return complete redacted process state."""
+        self._refresh_config()
         config = self._config
         session_state, session_identity = _saved_session_identity(self._runtime_paths)
         runtime_status = self._runtime.status() if self._runtime is not None else {}
@@ -121,7 +135,7 @@ class NativeDesktopHost:
         browser_configured = bool(config and config.browser.enabled)
         return {
             "config": {
-                "state": "ready" if config is not None else ("invalid" if self._last_error else "missing"),
+                "state": "ready" if config is not None else ("invalid" if self._config_error else "missing"),
                 "revision": config.revision if config is not None else self._config_error_revision,
                 "enabled": config.enabled if config is not None else False,
                 "controller_user_id": config.controller.user_id if config is not None else None,
@@ -142,7 +156,7 @@ class NativeDesktopHost:
             "bridge": {
                 "state": bridge_state,
                 "active_action": runtime_status.get("active_action"),
-                "last_error": runtime_status.get("last_error", self._last_error),
+                "last_error": runtime_status.get("last_error", self._config_error or self._last_error),
             },
             "authority": {
                 "control_available": bool(runtime_status.get("control_available", False)),
@@ -206,6 +220,7 @@ class NativeDesktopHost:
 
     async def _handle_locked(self, request: NativeRequest) -> dict[str, object]:
         action, parameters = request.action, request.parameters
+        self._refresh_config()
         if action == "status":
             _expect_keys(parameters, set())
             return {"status": self.status()}
@@ -858,8 +873,8 @@ def _permission_status() -> dict[str, object]:
         import ApplicationServices
         import Quartz
 
-        accessibility = bool(ApplicationServices.AXIsProcessTrusted())
-        screen_recording = bool(Quartz.CGPreflightScreenCaptureAccess())
+        accessibility = bool(ApplicationServices.AXIsProcessTrusted())  # ty: ignore[unresolved-attribute]
+        screen_recording = bool(Quartz.CGPreflightScreenCaptureAccess())  # ty: ignore[unresolved-attribute]
     except (ImportError, AttributeError):
         return {"accessibility": unknown.copy(), "screen_recording": unknown.copy()}
     return {
@@ -882,13 +897,13 @@ def _request_permission(permission: str) -> None:
     if permission == "accessibility":
         import ApplicationServices
 
-        ApplicationServices.AXIsProcessTrustedWithOptions(
-            {ApplicationServices.kAXTrustedCheckOptionPrompt: True},
+        ApplicationServices.AXIsProcessTrustedWithOptions(  # ty: ignore[unresolved-attribute]
+            {ApplicationServices.kAXTrustedCheckOptionPrompt: True},  # ty: ignore[unresolved-attribute]
         )
     else:
         import Quartz
 
-        Quartz.CGRequestScreenCaptureAccess()
+        Quartz.CGRequestScreenCaptureAccess()  # ty: ignore[unresolved-attribute]
 
 
 def _expect_keys(parameters: dict[str, object], allowed: set[str]) -> None:

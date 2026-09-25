@@ -37,9 +37,9 @@ final class DesktopControlStore: ObservableObject {
     private var countdownTimer: Timer?
     @Published private var confirmedIdentity: String?
     private var observedConfigRevision = 0
-    private var observedBrowserConfiguration: DesktopBrowserStatus?
+    private var observedConfiguration: DesktopStatus?
+    private var observedSession: DesktopPairingStatus?
     private var addedApplicationURLs = Set<URL>()
-    private var didHydrateSession = false
     private var pendingOperationCount = 0
 
     init(helper: DesktopBridgeProcess? = nil) {
@@ -307,38 +307,57 @@ final class DesktopControlStore: ObservableObject {
     }
 
     func hydrateConfiguration(from value: DesktopStatus) {
-        if !didHydrateSession, value.pairing.sessionState == .ready {
-            didHydrateSession = true
-            if matrixUserID.isEmpty, homeserver == "https://mindroom.chat" {
+        if value.pairing.sessionState == .ready {
+            if observedSession?.homeserver != value.pairing.homeserver
+                || observedSession?.userID != value.pairing.userID
+                || observedSession?.deviceID != value.pairing.deviceID {
+                confirmedIdentity = nil
+            }
+            // Keep the login identity together so a prepared SSO login cannot switch accounts or servers.
+            if homeserver == (observedSession?.homeserver ?? "https://mindroom.chat"),
+               matrixUserID == (observedSession?.userID ?? "") {
                 homeserver = value.pairing.homeserver ?? homeserver
                 matrixUserID = value.pairing.userID ?? ""
             }
+            observedSession = value.pairing
         }
-        let shouldHydrateConfiguration = value.config.state == "ready" && observedConfigRevision != value.config.revision
         if observedConfigRevision != value.config.revision {
             confirmedIdentity = nil
         }
         observedConfigRevision = value.config.revision
-        if controllerUserID.isEmpty { controllerUserID = value.config.controllerUserID ?? "" }
-        if controllerDeviceID.isEmpty { controllerDeviceID = value.config.controllerDeviceID ?? "" }
-        if requesterIDs.isEmpty { requesterIDs = value.config.allowedRequesterIDs?.joined(separator: ", ") ?? "" }
-        if agentNames.isEmpty { agentNames = value.config.allowedAgentNames?.joined(separator: ", ") ?? "" }
-        if shouldHydrateConfiguration { selectedAppIDs = Set(value.config.allowedAppIDs ?? []) }
-        if controllerFingerprint.isEmpty {
+        guard value.config.state == "ready" else { return }
+
+        // Merge persisted changes only into fields that still match the last saved values.
+        // Empty fields and app selections can be intentional unsaved edits.
+        let previous = observedConfiguration ?? .stopped
+        if controllerUserID == (previous.config.controllerUserID ?? "") {
+            controllerUserID = value.config.controllerUserID ?? ""
+        }
+        if controllerDeviceID == (previous.config.controllerDeviceID ?? "") {
+            controllerDeviceID = value.config.controllerDeviceID ?? ""
+        }
+        if requesterIDs == (previous.config.allowedRequesterIDs?.joined(separator: ", ") ?? "") {
+            requesterIDs = value.config.allowedRequesterIDs?.joined(separator: ", ") ?? ""
+        }
+        if agentNames == (previous.config.allowedAgentNames?.joined(separator: ", ") ?? "") {
+            agentNames = value.config.allowedAgentNames?.joined(separator: ", ") ?? ""
+        }
+        if selectedAppIDs == Set(previous.config.allowedAppIDs ?? []) {
+            selectedAppIDs = Set(value.config.allowedAppIDs ?? [])
+        }
+        if controllerFingerprint == (previous.pairing.controllerFingerprint ?? "") {
             controllerFingerprint = value.pairing.controllerFingerprint ?? ""
         }
-        if shouldHydrateConfiguration {
-            if observedBrowserConfiguration == nil || browserEnabled == observedBrowserConfiguration?.configured {
-                browserEnabled = value.browser.configured
-            }
-            if observedBrowserConfiguration == nil || browserExecutable == (observedBrowserConfiguration?.executablePath ?? "") {
-                browserExecutable = value.browser.executablePath ?? ""
-            }
-            if observedBrowserConfiguration == nil || browserProfile == (observedBrowserConfiguration?.userDataDirectory ?? "") {
-                browserProfile = value.browser.userDataDirectory ?? ""
-            }
-            observedBrowserConfiguration = value.browser
+        if browserEnabled == previous.browser.configured {
+            browserEnabled = value.browser.configured
         }
+        if browserExecutable == (previous.browser.executablePath ?? "") {
+            browserExecutable = value.browser.executablePath ?? ""
+        }
+        if browserProfile == (previous.browser.userDataDirectory ?? "") {
+            browserProfile = value.browser.userDataDirectory ?? ""
+        }
+        observedConfiguration = value
     }
 
     private var currentIdentity: String {
