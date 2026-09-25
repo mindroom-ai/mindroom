@@ -5265,6 +5265,7 @@ expose = [
     "unsupported_team_agent_message",
     "resolve_agent_policy_index",
     "resolve_private_knowledge_base_agent",
+    "user_scope_shared_agent_names",
 ]
 from = ["mindroom.agent_policy"]
 

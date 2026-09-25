@@ -3658,14 +3658,29 @@ def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_
     assert saved_file.read_text(encoding="utf-8") == "hello"
 
 
-def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
+def test_sandbox_runner_user_scope_base_dir_reaches_only_user_scope_agent_roots(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """User-scoped workers intentionally allow base_dir anywhere under the shared agents tree."""
+    """A user worker addresses its user-scope agents' roots, never agents on other scopes."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml_io.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "agents": {
+                    "coder": {"display_name": "Coder", "worker_scope": "user"},
+                    "ops": {"display_name": "Ops", "worker_scope": "shared"},
+                },
+                "router": {"model": "default"},
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
@@ -3673,8 +3688,8 @@ def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
         (venv_dir / "bin" / "python").symlink_to(Path(sys.executable))
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create):
-        response = runner_client.post(
+    def save_note(agent_name: str) -> object:
+        return runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
             json={
@@ -3683,13 +3698,20 @@ def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
                 "args": ["hello", "note.txt"],
                 "kwargs": {},
                 "worker_key": "v1:tenant-123:user:@alice:example.org",
-                "tool_init_overrides": {"base_dir": "agents/other/workspace"},
+                "tool_init_overrides": {"base_dir": f"agents/{agent_name}/workspace"},
             },
         )
 
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-    assert (storage_root / "agents" / "other" / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create):
+        allowed = save_note("coder")
+        rejected = save_note("ops")
+
+    assert allowed.status_code == 200
+    assert allowed.json()["ok"] is True
+    assert (storage_root / "agents" / "coder" / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
+    assert rejected.status_code == 400
+    assert "allowed state roots" in rejected.json()["detail"]
+    assert not (storage_root / "agents" / "ops").exists()
 
 
 def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
@@ -6134,6 +6156,66 @@ def test_workspace_env_hook_user_agent_routed_request_uses_prepared_private_base
     )
 
     assert workspace == private_workspace
+
+
+def test_python_subprocess_child_ignores_code_planted_in_workspace(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A workspace package or user-site `.pth` file must not run inside the protocol child."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    (workspace / "mindroom").mkdir(parents=True)
+    # Would replace MindRoom itself if the child's cwd led sys.path.
+    (workspace / "mindroom" / "__init__.py").write_text(
+        "from pathlib import Path\nPath.cwd().joinpath('planted-package-ran').touch()\n",
+        encoding="utf-8",
+    )
+    user_site = subprocess.run(
+        [sys.executable, "-c", "import site; print(site.getusersitepackages())"],
+        env={**os.environ, "HOME": str(workspace.resolve())},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    Path(user_site).mkdir(parents=True)
+    # `.pth` import lines run at interpreter startup whenever the user site is enabled.
+    (Path(user_site) / "planted.pth").write_text(
+        "import pathlib; pathlib.Path.cwd().joinpath('planted-pth-ran').touch()\n",
+        encoding="utf-8",
+    )
+    (workspace / "helper.py").write_text('VALUE = "helper-value"\n', encoding="utf-8")
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    def _venv_with_real_python(venv_dir: Path) -> None:
+        bin_dir = venv_dir / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / "python").symlink_to(Path(sys.executable))
+
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_venv_with_real_python):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "python",
+                "function_name": "run_python_code",
+                "args": ["import helper\nresult = helper.VALUE", "result"],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, payload
+    assert payload["result"] == "helper-value"
+    assert not (workspace / "planted-package-ran").exists()
+    assert not (workspace / "planted-pth-ran").exists()
 
 
 def test_request_preparation_failure_response_marks_request_errors_as_tool_failures() -> None:
