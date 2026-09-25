@@ -84,23 +84,24 @@ class MindRoomGoogleGemini(Gemini):
         tool_choice: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build request parameters accepted by the selected Gemini generation."""
-        request_model = self
         if provider_tools_disabled():
             client_http_options = (self.client_params or {}).get("http_options")
             if client_http_options is not None and HttpOptions.model_validate(client_http_options).extra_body:
                 msg = "Participation decisions cannot safely apply Gemini body overrides"
                 raise ValueError(msg)
-            # AGNO_COMPAT: Gemini request building mutates an authored generation_config dict.
-            # Reason: Agno's Gemini.get_request_params merges request settings into the authored
-            # dict in place, so a decision's tool_config and system instruction could leak
-            # into later reply requests.
-            # Upstream issue: https://github.com/agno-agi/agno/issues/10161, open.
-            # Upstream PR: https://github.com/agno-agi/agno/pull/10162, open; copies the config.
-            # Remove when: the pinned Agno builds the request from a copy of generation_config;
-            # keep applying _decision_config to the returned request only.
-            # Coverage: tests/test_provider_tool_policy.py::test_gemini_removes_native_tools_without_mutating_authored_config.
-            request_model = copy(self)
-            request_model.generation_config = deepcopy(self.generation_config)
+        # AGNO_COMPAT: Gemini request building mutates an authored generation_config dict.
+        # Reason: Agno's Gemini.get_request_params merges each request's settings into the
+        # authored dict in place. Instances loaded from one models entry share that dict, so
+        # one request's tools, tool_config and system instruction leak into later requests,
+        # including decisions and judgments on other instances.
+        # Upstream issue: https://github.com/agno-agi/agno/issues/10161, open.
+        # Upstream PR: https://github.com/agno-agi/agno/pull/10162, open; copies the config.
+        # Remove when: the pinned Agno builds every request from a copy of generation_config;
+        # keep applying _decision_config to the returned decision request only.
+        # Coverage: tests/test_provider_tool_policy.py::test_gemini_removes_native_tools_without_mutating_authored_config;
+        # tests/test_provider_tool_policy.py::test_gemini_models_sharing_one_generation_config_stay_independent.
+        request_model = copy(self)
+        request_model.generation_config = deepcopy(self.generation_config)
         request_params = super(MindRoomGoogleGemini, request_model).get_request_params(
             system_message=system_message,
             response_format=response_format,

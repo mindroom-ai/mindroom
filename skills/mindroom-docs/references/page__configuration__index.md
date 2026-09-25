@@ -78,7 +78,8 @@ With Claude tools, only the tool and system caches are reusable across the check
 Ollama omits tool schemas during the check because its API cannot disable tool selection while retaining them.
 Gemini native tools are omitted during the check; its explicit context caches, OpenAI Chat search-only requests, OpenRouter automatic web search, and Groq Compound systems cannot be checked safely and stay quiet.
 Gemini can emit function calls even when function calling is disabled, so MindRoom also requests JSON output with a reason followed by an action from Gemini API models.
-On Vertex AI, MindRoom requests this JSON output only when the agent sends no function declarations, because Vertex acceptance of JSON beside disabled declarations is unverified; a Gemini function call then fails the check, and the agent stays quiet.
+On Vertex AI, MindRoom requests this JSON output only when the agent sends no function declarations, because Vertex acceptance of JSON beside disabled declarations is unverified.
+With declarations, a leaked function call still fails the check, and the agent stays quiet.
 The Vertex AI request without declarations, with JSON output and its ordered response schema, is not live-verified.
 Cancellation before approval does not create an interruption notice.
 If an interrupted turn already owns a visible response, recovery retains its approval and finishes that response.
