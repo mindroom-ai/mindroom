@@ -649,7 +649,12 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
     llm_settings = config.memory.llm.config
-    api_key = _read_credential_store(lambda: get_memory_llm_api_key(llm_provider, llm_settings, runtime_paths), None)
+    # Only the shared openai/anthropic lookup opens the store; without it, fall back to that env key.
+    env_api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
+    api_key = _read_credential_store(
+        lambda: get_memory_llm_api_key(llm_provider, llm_settings, runtime_paths),
+        ResolvedApiKey(env_api_key, "shared") if env_api_key else None,
+    )
     # Mem0 resolves its endpoint from its own config and process env, which MindRoom does not
     # share, so doctor reports the key source instead of guessing where Mem0 would send it.
     if api_key is not None:
@@ -658,7 +663,8 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
         # Mem0's other clients (groq, gemini, deepseek, ...) read this key from the process env themselves.
         source = env_key
     elif env_key:
-        console.print(f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set")
+        where = " in the process environment (Mem0 reads it directly; .env is not exported)" if env_api_key else ""
+        console.print(f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set{where}")
         return 0, 0, 1
     else:
         console.print(f"[dim]-[/dim] Memory LLM: {llm_provider}/{llm_model} not validated")
