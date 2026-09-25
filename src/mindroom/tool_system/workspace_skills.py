@@ -6,6 +6,7 @@ Hidden entries under ``skills/`` (usage, history, archive) are never discovered 
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -16,7 +17,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import json5
 from agno.skills.skill import Skill
-from pydantic import AfterValidator, BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import AfterValidator, BaseModel, ConfigDict, ValidationError
 from yaml import YAMLError
 
 from mindroom import yaml_io
@@ -48,7 +49,8 @@ _UtcDatetime = Annotated[datetime, AfterValidator(_as_utc)]
 class SkillUsage(BaseModel):
     """Provenance and activity for one workspace skill directory; worker-writable, so it never grants access."""
 
-    model_config = ConfigDict(extra="forbid")
+    # Like Hermes, fields a person or another tool added survive rewrites of the record.
+    model_config = ConfigDict(extra="allow")
 
     created_by: Literal["learner"] | None = None
     created_at: _UtcDatetime | None = None
@@ -61,9 +63,6 @@ class SkillUsage(BaseModel):
         """Return the newest creation, use, or learner edit."""
         moments = [moment for moment in (self.created_at, self.last_used_at, self.last_patched_at) if moment]
         return max(moments, default=None)
-
-
-_USAGE = TypeAdapter(dict[str, SkillUsage])
 
 
 @contextmanager
@@ -216,36 +215,55 @@ def read_support_file(skill_path: Path, directory: str, filename: str) -> str:
     return content
 
 
-def load_skill_usage(root_fd: int) -> dict[str, SkillUsage]:
-    """Return usage keyed by skill directory; malformed telemetry reads as empty."""
+def _usage_records(root_fd: int) -> dict[str, object]:
+    """Return the raw usage records; an unreadable file or one that is not a JSON object reads as empty."""
     try:
         payload = read_text_at(root_fd, _USAGE_FILENAME)
-        return _USAGE.validate_json(payload) if payload else {}
-    except (OSError, ValueError, ValidationError) as exc:
+        records = json.loads(payload) if payload else {}
+    except (OSError, ValueError) as exc:
         logger.warning("Ignoring unreadable skill usage telemetry", error=str(exc))
         return {}
+    return records if isinstance(records, dict) else {}
+
+
+def _parse_usage(record: object) -> SkillUsage | None:
+    try:
+        return SkillUsage.model_validate(record)
+    except ValidationError:
+        return None
+
+
+def _write_usage_records(root_fd: int, records: dict[str, object]) -> None:
+    atomic_write_bytes_at(root_fd, _USAGE_FILENAME, json.dumps(records, separators=(",", ":")).encode())
+
+
+def load_skill_usage(root_fd: int) -> dict[str, SkillUsage]:
+    """Return usage keyed by skill directory; a malformed record reads as absent without hiding the others."""
+    usage = {name: _parse_usage(record) for name, record in _usage_records(root_fd).items()}
+    return {name: record for name, record in usage.items() if record is not None}
 
 
 def update_skill_usage(root_fd: int, directory: str, update: Callable[[SkillUsage], SkillUsage]) -> None:
-    """Replace one skill's usage record atomically.
+    """Replace one skill's usage record atomically, leaving every other record as written.
 
     The lock is process-local on purpose: any lock inside the worker-shared workspace could be held by worker
     code to stall the primary, so concurrent primaries sharing one storage root may occasionally drop a count.
     """
     with _USAGE_LOCK:
-        usage = load_skill_usage(root_fd)
-        usage[directory] = update(usage.get(directory, SkillUsage()))
-        atomic_write_bytes_at(root_fd, _USAGE_FILENAME, _USAGE.dump_json(usage, exclude_defaults=True))
+        records = _usage_records(root_fd)
+        current = _parse_usage(records.get(directory)) or SkillUsage()
+        records[directory] = update(current).model_dump(mode="json", exclude_defaults=True)
+        _write_usage_records(root_fd, records)
 
 
 def forget_missing_skill_usage(root_fd: int) -> None:
     """Drop records of skill directories that are gone, so a restored or reused name starts as a new skill."""
     with _USAGE_LOCK:
-        usage = load_skill_usage(root_fd)
+        records = _usage_records(root_fd)
         present = set(list_entries(root_fd, directories=True))
-        kept = {name: record for name, record in usage.items() if name in present}
-        if len(kept) < len(usage):
-            atomic_write_bytes_at(root_fd, _USAGE_FILENAME, _USAGE.dump_json(kept, exclude_defaults=True))
+        kept = {name: record for name, record in records.items() if name in present}
+        if len(kept) < len(records):
+            _write_usage_records(root_fd, kept)
 
 
 def record_skill_use(skill_path: Path) -> None:

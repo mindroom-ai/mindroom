@@ -23,6 +23,7 @@ from mindroom.skill_learning.library import archive_unused_skills, skills_finger
 from mindroom.skill_learning.queue import (
     NO_RUN,
     SKILL_LEARNING_WAKE,
+    LearnerChange,
     QueueEntry,
     RunPosition,
     claim_due_reviews,
@@ -163,6 +164,7 @@ class SkillLearningWorker:
     ) -> None:
         settings = config.agents[entry.agent].skill_learning
         identity = entry.execution_identity()
+        started_at = time.time()
         before = await asyncio.to_thread(skills_fingerprint, skills_root)
         progress = ReviewProgress()
         outcome: Literal["reviewed", "failed", "interrupted"] = "reviewed"
@@ -208,7 +210,9 @@ class SkillLearningWorker:
             logger.exception("Skill review failed", agent=entry.agent, session_id=entry.session)
         # Every exit, a stop included, waits for the archival and writes it started, which land even after a timeout
         # or a stop cancels the review, so they are recorded as the learner's before the state is settled.
-        finish = asyncio.ensure_future(self._finish(key, entry, skills_root, before, progress, outcome, through))
+        finish = asyncio.ensure_future(
+            self._finish(key, entry, skills_root, (started_at, before), progress, outcome, through),
+        )
         while not finish.done():
             try:
                 # Waiting never cancels the bookkeeping, so a stop arriving now still lets it finish.
@@ -237,7 +241,7 @@ class SkillLearningWorker:
         key: str,
         claimed: QueueEntry,
         skills_root: Path,
-        before: str,
+        baseline: tuple[float, str],
         progress: ReviewProgress,
         outcome: Literal["reviewed", "failed", "interrupted"],
         through: RunPosition,
@@ -247,7 +251,7 @@ class SkillLearningWorker:
             # Like Hermes' best-effort review, one that already changed skills is done; rerunning the same
             # conversation would repeat its edits and notices.
             outcome = "reviewed"
-        await asyncio.to_thread(self._settle, key, claimed, skills_root, before, outcome=outcome, through=through)
+        await asyncio.to_thread(self._settle, key, claimed, skills_root, baseline, outcome=outcome, through=through)
         return outcome
 
     def _settle(
@@ -255,11 +259,13 @@ class SkillLearningWorker:
         key: str,
         claimed: QueueEntry,
         skills_root: Path,
-        before: str,
+        baseline: tuple[float, str],
         *,
         outcome: Literal["reviewed", "failed", "interrupted"],
         through: RunPosition,
     ) -> None:
+        """Settle the review; ``baseline`` is when it started and the skills fingerprint it started from."""
+        started_at, before = baseline
         try:
             after = skills_fingerprint(skills_root)
         except OSError:
@@ -273,7 +279,7 @@ class SkillLearningWorker:
             outcome=outcome,
             now=time.time(),
             through=through,
-            learner_change=(before, after) if after != before else None,
+            learner_change=LearnerChange(before, after, started_at) if after != before else None,
         )
 
     async def _notify(self, agent_name: str, identity: ToolExecutionIdentity, changes: dict[str, str]) -> None:
