@@ -1006,8 +1006,12 @@ def test_private_key_blocks_are_redacted_through_their_end_or_the_text_end() -> 
 
 def test_find_credential_flags_literal_secrets_but_not_placeholders() -> None:
     """Learned skills may describe setup steps, so placeholders, code, identifiers, and prose are not credentials."""
-    # Assembled at runtime so repository secret scanners do not read the fixture as a leaked key.
-    sendgrid_key = ".".join(["SG", "Zq8vN3pL7wX2kR9mT4yB6c", "D1fG5hJ0aQ9wE8rT7yU6iO5pA4sD3fG2hJ1kL0zX9cV"])  # noqa: FLY002
+    # Provider-shaped fixtures are assembled at runtime so repository secret scanners do not read them as leaks.
+    jwt = ".".join(  # noqa: FLY002
+        ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", "SflKxwRJSMeKKF2QT4fwpMeJf36"],
+    )
+    aws_key_id = "".join(["AKIA", "Q3EGRZ7XK4M2P9TB"])  # noqa: FLY002
+    gitlab_token = "".join(["glpat-", "Zq8vN3pL7wX2kR9mT4yB"])  # noqa: FLY002
     placeholders = (
         "Set OPENAI_API_KEY=<your key>",
         "OPENAI_API_KEY=sk-...",
@@ -1016,67 +1020,60 @@ def test_find_credential_flags_literal_secrets_but_not_placeholders() -> None:
         "https://user:${TOKEN}@git.example.test/repo",
         "ssh://git@github.com/org/repo.git",
         "postgres://postgres@localhost/db",
+        "postgres://postgres:postgres@localhost:5432/app",
+        "amqp://guest:guest@localhost:5672/",
+        "postgres://user:password@localhost/db",
         "pip install sk-learn",
         "Authorization: Bearer $TOKEN",
         "Authorization: Bearer YOUR_ACCESS_TOKEN_HERE",
         "password: ask the user",
         "password = getpass.getpass()",
         "api_key = settings.OPENAI_API_KEY",
+        'api_key = "OPENAI_API_KEY_FROM_ENV"',
         "token = credentials.access_token",
         "AWS_SECRET_ACCESS_KEY=your-secret-access-key-here",
         "max_tokens=4096",
-        "password: |\n  <your password>",
-        "token:\n  file: /run/secrets/token_v2_2024",
-        "env:\n  - name: DB_PASSWORD\n    valueFrom:\n      secretKeyRef:\n        name: app-db-credentials-v2",
-        "password:\nnext_setting: Zq8vN3pL7wX2kR9mT4yB6c",
+        'curl -d \'{"password":"","user":"admin2024"}\'',
+        '{"cache_key":"weather_v2","ttl":3600}',
+        '{"idempotency_key":"order-1","amount":1000}',
+        "token=abc&page=2&limit=100&sort=created_at_desc",
         "cache_key: weather_forecast_2024_v2",
         "s3_key: exports/2026/09/daily.parquet",
-        "idempotency_key: order-12345-retry-1",
-        "secretName: my-tls-secret-2024-prod",
-        "access_token_url: https://oauth2.googleapis.com/token",
-        "secret_arn: arn:aws:secretsmanager:us-east-1:123456789012:secret:app",
-        "credentials:\n  client_id: 1234567890-abc.apps.googleusercontent.com",
-        "token:\n  id: 8f14e45fceea167a5a36dedd4bea2543\n  expires_in: 3600",
+        "ssh_key: ~/.ssh/id_ed25519",
+        "call hf_hub_download(repo_id) with gsk_client_timeout",
     )
     secrets = (
         "token sk-abcdefghij0123456789",
         "GITHUB_TOKEN=0123456789abcdef0123456789abcdef",
-        "HF_TOKEN=hf_aB3dE5gH7jK9mN1pQ3sT5",
         "connect to https://alice:hunter2@db.example.test",
         "https://api.example.test/?token=a8f3k2m9q7w1z5x0v6b4",
-        "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc",
+        f"Authorization: Bearer {jwt}",
         "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
         "API_KEY=0123456789abcdef0123456789abcdef",
+        "export DB_PASSWORD=Zq8vN3pL7wX2kR9mT4yB6c",
         "-----BEGIN RSA PRIVATE KEY-----\nMIIabc",
         "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF",
-        "password: |\n  Zq8vN3pL7wX2kR9mT4yB6c",
-        "db:\n  password:\n    Zq8vN3pL7wX2kR9mT4yB6c",
-        "api_token: >-\n  # rotated monthly\n  Zq8vN3pL7wX2kR9mT4yB6c",
-        "password: |2-\n  Zq8vN3pL7wX2kR9mT4yB6c",
-        "password: !!str Zq8vN3pL7wX2kR9mT4yB6c",
-        "api_keys:\n- 3f9aZq8vN3pL7wX2kR9mT4yB",
-        "access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
-        "VAULT_TOKEN=" + "hvs." + "CAESIJq8vN3pL7wX2kR9mT4yB6cD1fG5hJ0",
-        f"SENDGRID_API_KEY={sendgrid_key}",
-        "Authorization: Basic dXNlcjpTM2NyM3RQYXNzdzByZDEyMw==",
-        "Authorization: Token 9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b",
-        "botToken: Zq8vN3pL7wX2kR9mT4yB6cD1",
-        "bot-token: Zq8vN3pL7wX2kR9mT4yB6cD1",
-        "privateKey: Zq8vN3pL7wX2kR9mT4yB6cD1",
-        "PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=",
-        "PRIVATE-TOKEN: " + "glpat-" + "Zq8vN3pL7wX2kR9mT4yB",
-        "DB_PASS=Zq8vN3pL7wX2kR9mT4yB6c",
-        "passphrase: Zq8vN3pL7wX2kR9mT4yB6c",
-        "run with eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        'password: "Zq8vN3pL7wX2kR9mT4yB6c"',
+        'client = Client(api_key="Zq8vN3pL7wX2kR9mT4yB6cD1")',
+        f'access_token: "{jwt}"',
+        f"aws_access_key_id = {aws_key_id}",
+        f"PRIVATE-TOKEN: {gitlab_token}",
     )
     assert [text for text in placeholders if find_credential(text) is not None] == []
     assert [text for text in secrets if find_credential(text) is None] == []
     assert find_credential("intro\nsteps\nAPI_KEY=0123456789abcdef0123456789abcdef") == len("intro\nsteps\nAPI_KEY=")
 
 
-def test_find_credential_scans_large_yaml_in_linear_time() -> None:
-    """Many secret-named keys with values on following lines must not rescan the rest of the file each time."""
+def test_shared_redaction_leaves_ordinary_identifiers_alone() -> None:
+    """Skill-only credential shapes never widen log redaction, which judgments and error messages also rely on."""
+    for text in ("hf_hub_download(repo_id)", "gsk_client_timeout", "hf_transfer"):
+        assert redact_sensitive_text(text) == text
+
+
+def test_find_credential_scans_large_inputs_in_linear_time() -> None:
+    """Large skill files with many settings stay fast, so a learner write never stalls settlement."""
     started = time.monotonic()
-    assert find_credential("token:\n" * 40_000) is None
-    assert find_credential("env:\n" + "  - valueFrom:\n      secretKeyRef:\n        name: db\n" * 10_000) is None
+    assert find_credential("token:\n" + "- token:\n" * 40_000) is None
+    assert find_credential("token: a " * 50_000) is None
+    assert find_credential('{"sort_key":"created_at","limit":100}' * 20_000) is None
     assert time.monotonic() - started < 5

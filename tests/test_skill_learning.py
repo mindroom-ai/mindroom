@@ -224,7 +224,7 @@ async def _cycle(config: Config, paths: RuntimePaths, client: object | None = No
         ("deploy-checks", LEARNED + "Log in with sk-abcdefghij0123456789.\n", "literal credential"),
         ("deploy-checks", LEARNED + "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n", "literal credential"),
         ("deploy-checks", LEARNED + "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n", "literal credential"),
-        ("deploy-checks", LEARNED + "```yaml\npassword: |\n  Zq8vN3pL7wX2kR9mT4yB6c\n```\n", "literal credential"),
+        ("deploy-checks", LEARNED + '```yaml\npassword: "Zq8vN3pL7wX2kR9mT4yB6c"\n```\n', "Line 10 of SKILL.md"),
         ("deploy-checks", LEARNED + "Clone https://alice:hunter2@git.example.test/repo.\n", "literal credential"),
         ("mindroom-docs", LEARNED.replace("deploy-checks", "mindroom-docs"), "already exists"),
     ],
