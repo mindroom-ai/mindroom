@@ -250,7 +250,7 @@ class _ReviewTools:
                     )
                 else:
                     await self._remove(name, directory, _required(file_path, "file_path"))
-            except (SkillEditError, OSError) as exc:
+            except (OSError, ValueError) as exc:
                 return self._refusal(str(exc), *arguments)
             return self._reply(
                 {"success": True, "action": action, "name": name, "file_path": relative_path},

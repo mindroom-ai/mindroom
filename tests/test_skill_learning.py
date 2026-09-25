@@ -221,11 +221,11 @@ async def _cycle(config: Config, paths: RuntimePaths, client: object | None = No
         ("deploy-checks", LEARNED.replace("Use when deploying the web service", "x" * 61), "Description exceeds 60"),
         ("deploy-checks", LEARNED.replace("learned: true", "learned: false"), "learned: true"),
         ("deploy-checks", LEARNED.replace("---\n1. Run the smoke test.\n", "---\n"), "instructions"),
-        ("deploy-checks", LEARNED + "Log in with sk-abcdefghij0123456789.\n", "credential-like"),
-        ("deploy-checks", LEARNED + "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n", "credential-like"),
-        ("deploy-checks", LEARNED + "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n", "credential-like"),
-        ("deploy-checks", LEARNED + "```yaml\npassword: |\n  Zq8vN3pL7wX2kR9mT4yB6c\n```\n", "credential-like"),
-        ("deploy-checks", LEARNED + "Clone https://alice:hunter2@git.example.test/repo.\n", "credential-like"),
+        ("deploy-checks", LEARNED + "Log in with sk-abcdefghij0123456789.\n", "literal credential"),
+        ("deploy-checks", LEARNED + "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n", "literal credential"),
+        ("deploy-checks", LEARNED + "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n", "literal credential"),
+        ("deploy-checks", LEARNED + "```yaml\npassword: |\n  Zq8vN3pL7wX2kR9mT4yB6c\n```\n", "literal credential"),
+        ("deploy-checks", LEARNED + "Clone https://alice:hunter2@git.example.test/repo.\n", "literal credential"),
         ("mindroom-docs", LEARNED.replace("deploy-checks", "mindroom-docs"), "already exists"),
     ],
 )
@@ -1561,3 +1561,34 @@ async def test_a_skills_root_that_cannot_be_fingerprinted_still_settles_the_revi
         await _cycle(config, paths)
     (entry,) = _entries(paths).values()
     assert (entry["failures"], entry["has_new_runs"], _marker_index(entry)) == (0, False, 0)
+
+
+@pytest.mark.asyncio
+async def test_writing_over_a_binary_support_file_is_refused_not_crashed(tmp_path: Path) -> None:
+    """An existing asset that is not text cannot be read back, and the reviewer gets a refusal it can act on."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    root = _skills_root(config, paths)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    (root / "deploy-checks/assets").mkdir()
+    (root / "deploy-checks/assets/logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe")
+    model = _model(
+        (
+            "skill_manage",
+            {"action": "write_file", "name": "deploy-checks", "file_path": "assets/logo.png", "file_content": "x"},
+        ),
+    )
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        await review_conversation(
+            config=config,
+            runtime_paths=paths,
+            agent_name="mind",
+            session_id="session",
+            identity=None,
+            skills_root=root,
+            messages=_tool_turn("r1").messages or [],
+            summary=None,
+            progress=ReviewProgress(),
+        )
+    assert json.loads(model.requests[1][-1])["success"] is False
+    assert (root / "deploy-checks/assets/logo.png").read_bytes().startswith(b"\x89PNG")

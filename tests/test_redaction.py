@@ -15,7 +15,7 @@ from mindroom import redaction
 from mindroom.redaction import (
     REDACTED,
     REDACTION_FAILED,
-    contains_credential,
+    find_credential,
     redact_log_event,
     redact_private_keys,
     redact_sensitive_data,
@@ -1004,8 +1004,10 @@ def test_private_key_blocks_are_redacted_through_their_end_or_the_text_end() -> 
     )
 
 
-def test_contains_credential_flags_literal_secrets_but_not_placeholders() -> None:
-    """Learned skills may describe setup steps, so placeholders and prose are not credentials."""
+def test_find_credential_flags_literal_secrets_but_not_placeholders() -> None:
+    """Learned skills may describe setup steps, so placeholders, code, identifiers, and prose are not credentials."""
+    # Assembled at runtime so repository secret scanners do not read the fixture as a leaked key.
+    sendgrid_key = ".".join(["SG", "Zq8vN3pL7wX2kR9mT4yB6c", "D1fG5hJ0aQ9wE8rT7yU6iO5pA4sD3fG2hJ1kL0zX9cV"])  # noqa: FLY002
     placeholders = (
         "Set OPENAI_API_KEY=<your key>",
         "OPENAI_API_KEY=sk-...",
@@ -1023,6 +1025,18 @@ def test_contains_credential_flags_literal_secrets_but_not_placeholders() -> Non
         "token = credentials.access_token",
         "AWS_SECRET_ACCESS_KEY=your-secret-access-key-here",
         "max_tokens=4096",
+        "password: |\n  <your password>",
+        "token:\n  file: /run/secrets/token_v2_2024",
+        "env:\n  - name: DB_PASSWORD\n    valueFrom:\n      secretKeyRef:\n        name: app-db-credentials-v2",
+        "password:\nnext_setting: Zq8vN3pL7wX2kR9mT4yB6c",
+        "cache_key: weather_forecast_2024_v2",
+        "s3_key: exports/2026/09/daily.parquet",
+        "idempotency_key: order-12345-retry-1",
+        "secretName: my-tls-secret-2024-prod",
+        "access_token_url: https://oauth2.googleapis.com/token",
+        "secret_arn: arn:aws:secretsmanager:us-east-1:123456789012:secret:app",
+        "credentials:\n  client_id: 1234567890-abc.apps.googleusercontent.com",
+        "token:\n  id: 8f14e45fceea167a5a36dedd4bea2543\n  expires_in: 3600",
     )
     secrets = (
         "token sk-abcdefghij0123456789",
@@ -1038,12 +1052,31 @@ def test_contains_credential_flags_literal_secrets_but_not_placeholders() -> Non
         "password: |\n  Zq8vN3pL7wX2kR9mT4yB6c",
         "db:\n  password:\n    Zq8vN3pL7wX2kR9mT4yB6c",
         "api_token: >-\n  # rotated monthly\n  Zq8vN3pL7wX2kR9mT4yB6c",
+        "password: |2-\n  Zq8vN3pL7wX2kR9mT4yB6c",
+        "password: !!str Zq8vN3pL7wX2kR9mT4yB6c",
+        "api_keys:\n- 3f9aZq8vN3pL7wX2kR9mT4yB",
+        "access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        "VAULT_TOKEN=" + "hvs." + "CAESIJq8vN3pL7wX2kR9mT4yB6cD1fG5hJ0",
+        f"SENDGRID_API_KEY={sendgrid_key}",
+        "Authorization: Basic dXNlcjpTM2NyM3RQYXNzdzByZDEyMw==",
+        "Authorization: Token 9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b",
+        "botToken: Zq8vN3pL7wX2kR9mT4yB6cD1",
+        "bot-token: Zq8vN3pL7wX2kR9mT4yB6cD1",
+        "privateKey: Zq8vN3pL7wX2kR9mT4yB6cD1",
+        "PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=",
+        "PRIVATE-TOKEN: " + "glpat-" + "Zq8vN3pL7wX2kR9mT4yB",
+        "DB_PASS=Zq8vN3pL7wX2kR9mT4yB6c",
+        "passphrase: Zq8vN3pL7wX2kR9mT4yB6c",
+        "run with eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
     )
-    placeholders += (
-        "password: |\n  <your password>",
-        "token:\n  file: /run/secrets/token",
-        "env:\n  - name: DB_PASSWORD\n    valueFrom:\n      secretKeyRef:\n        name: db",
-        "password:\nnext_setting: Zq8vN3pL7wX2kR9mT4yB6c",
-    )
-    assert [text for text in placeholders if contains_credential(text)] == []
-    assert [text for text in secrets if not contains_credential(text)] == []
+    assert [text for text in placeholders if find_credential(text) is not None] == []
+    assert [text for text in secrets if find_credential(text) is None] == []
+    assert find_credential("intro\nsteps\nAPI_KEY=0123456789abcdef0123456789abcdef") == len("intro\nsteps\nAPI_KEY=")
+
+
+def test_find_credential_scans_large_yaml_in_linear_time() -> None:
+    """Many secret-named keys with values on following lines must not rescan the rest of the file each time."""
+    started = time.monotonic()
+    assert find_credential("token:\n" * 40_000) is None
+    assert find_credential("env:\n" + "  - valueFrom:\n      secretKeyRef:\n        name: db\n" * 10_000) is None
+    assert time.monotonic() - started < 5

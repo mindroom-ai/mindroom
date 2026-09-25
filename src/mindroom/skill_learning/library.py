@@ -21,7 +21,7 @@ from yaml import YAMLError
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
-from mindroom.redaction import contains_credential
+from mindroom.redaction import find_credential
 from mindroom.tool_system.workspace_skills import (
     MAX_SKILL_FILE_BYTES,
     SKILL_FILENAME,
@@ -129,8 +129,12 @@ def _validate_content(relative_path: str, content: str) -> None:
     if len(content.encode()) > MAX_SKILL_FILE_BYTES:
         msg = f"{relative_path} exceeds {MAX_SKILL_FILE_BYTES} bytes."
         raise SkillEditError(msg)
-    if contains_credential(content):
-        msg = f"{relative_path} contains credential-like text; remove secrets and describe how to obtain them instead."
+    if (position := find_credential(content)) is not None:
+        line = content.count("\n", 0, position) + 1
+        msg = (
+            f"Line {line} of {relative_path} looks like a literal credential; replace it with a placeholder such as "
+            "<your token> and describe how to obtain it."
+        )
         raise SkillEditError(msg)
 
 
