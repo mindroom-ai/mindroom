@@ -214,10 +214,11 @@ def install_tool_result_callback(
 # to end a run on their own condition, which the skill review needs to stop at its aggregate input budget.
 # Upstream issue: https://github.com/agno-agi/agno/issues/8304 and
 # https://github.com/agno-agi/agno/issues/10041 cover refused tool_call_limit batches; no upstream
-# issue identified for loops of unknown-tool or unparseable-argument calls.
+# issue identified for loops of unknown-tool or unparseable-argument calls. Tracking gap: no issue proposes a
+# caller-owned hook, consulted before each model request, that can end the run.
 # Upstream PR: https://github.com/agno-agi/agno/pull/10042 and
 # https://github.com/agno-agi/agno/pull/8324 are open and stop only after a batch of limit refusals,
-# which unknown-tool and unparseable-argument batches never produce.
+# which unknown-tool and unparseable-argument batches never produce; none identified for a pre-request hook.
 # Remove when: Agno ends every async streaming and non-streaming response loop after a bounded
 # number of model requests, whatever the requested tool calls, through its normal completion path,
 # and offers a public hook consulted before each model request that can end the run; the owner's cap
