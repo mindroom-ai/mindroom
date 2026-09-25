@@ -183,20 +183,30 @@ def test_gemini_removes_native_tools_without_mutating_authored_config(source: st
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("vertexai", [False, True], ids=["gemini_api", "vertex_ai"])
-async def test_gemini_decision_schema_replaces_authored_output_schema(vertexai: bool) -> None:
-    """A decision answers in its caller's JSON shape, never in the reply's structured output shape."""
+@pytest.mark.parametrize(
+    ("authored_field", "authored_schema"),
+    [("response_schema", {"type": "STRING"}), ("response_json_schema", {"type": "string"})],
+)
+async def test_gemini_decisions_drop_the_authored_output_schema(
+    vertexai: bool,
+    authored_field: str,
+    authored_schema: dict[str, str],
+) -> None:
+    """Only the caller's decision schema may shape a decision; the reply's authored output schema never does."""
 
     def unreachable(_request: httpx.Request) -> httpx.Response:
         raise AssertionError
 
     decision_schema = {"type": "object", "properties": {"decision": {"type": "boolean"}}, "required": ["decision"]}
-    authored = GenerateContentConfig(response_mime_type="application/json", response_schema={"type": "STRING"})
+    authored = {"response_mime_type": "application/json", authored_field: authored_schema}
+    before = deepcopy(authored)
     async with gemini_client(unreachable, vertexai=vertexai) as client:
         model = MindRoomGoogleGemini(id="gemini-2.5-pro", client=client, generation_config=authored)
         with without_provider_tools(response_schema=decision_schema):
             decision = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
         with without_provider_tools():
             schemaless = model.get_request_params(tools=[_function_tool()], tool_choice="none")["config"]
+        assert authored == before
         regular = model.get_request_params(tools=[_function_tool()], tool_choice="auto")["config"]
 
     for config in (decision, schemaless):
@@ -207,9 +217,8 @@ async def test_gemini_decision_schema_replaces_authored_output_schema(vertexai: 
         assert config.response_mime_type == (None if vertexai else "application/json")
     assert decision.response_json_schema == (None if vertexai else decision_schema)
     assert schemaless.response_json_schema is None
-    assert regular.response_schema is not None
+    assert regular.model_dump(exclude_none=True)[authored_field]
     assert regular.tool_config.function_calling_config.mode == "AUTO"
-    assert authored.response_schema is not None
 
 
 @pytest.mark.asyncio

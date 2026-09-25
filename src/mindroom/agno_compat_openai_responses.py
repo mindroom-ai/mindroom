@@ -82,9 +82,10 @@ _RESPONSES_FILE_MIME_TYPES = {
 # AGNO_COMPAT: Responses continuation depends on hard-coded model names.
 # Reason: Agno 3.0.9 gates Responses continuation behind a hard-coded model-name
 # predicate, which excludes aliases and compatible Responses endpoints.
-# Upstream issue: No matching issue identified; the PR below added the public capability.
-# Upstream PR: https://github.com/agno-agi/agno/pull/10075, merged and released in Agno 3.0.11;
-# MindRoom pins 3.0.9.
+# Upstream issue: Tracking gap; no issue identified for the model-name predicate.
+# Upstream PR: https://github.com/agno-agi/agno/pull/10075, released in Agno 3.0.11, is related and
+# partial: it adds use_previous_response_id, but _using_reasoning_model still gates chaining by
+# model-name prefix in 3.0.11 and on main.
 # Remove when: A pinned Agno release exposes continuation independently of model
 # names while still honoring store=False and explicit replay.
 # Coverage: tests/test_openai_models.py::test_responses_continue_tool_calls_independently_of_model_name;

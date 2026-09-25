@@ -19,8 +19,9 @@ _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 # Upstream issue: https://github.com/agno-agi/agno/issues/9960
 # Upstream PR: https://github.com/agno-agi/agno/pull/9968, closed in favour of
 # https://github.com/agno-agi/agno/pull/10075 (released in Agno 3.0.11) and
-# https://github.com/agno-agi/agno/pull/10395 (merged, unreleased after 3.0.11);
-# their coverage of every reasoning item is unverified.
+# https://github.com/agno-agi/agno/pull/10395 (merged, unreleased after 3.0.11). Both are
+# partial: Agno main still keeps one provider_data["reasoning_output"], overwritten per item,
+# so only the last reasoning item survives and this workaround remains required.
 # Remove when: The pinned Agno release preserves complete ordered reasoning beside
 # stored text and function calls during explicit replay.
 # Coverage: tests/test_openai_native_compaction.py::test_reasoning_survives_native_tool_loop;
