@@ -109,6 +109,11 @@ jobs:
           docker run --rm ghcr.io/mindroom-ai/mindroom:latest mindroom version
           docker run --rm ghcr.io/mindroom-ai/mindroom-minimal:latest mindroom version
 
+      - name: Smoke local instance sandbox isolation
+        run: python -m scripts.smoke_local_instance_sandbox
+        env:
+          MINDROOM_IMAGE: ghcr.io/mindroom-ai/mindroom:latest
+
       - name: Smoke platform images
         run: python -m scripts.smoke_platform_images
 

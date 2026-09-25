@@ -21,13 +21,14 @@ services:
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MINDROOM_STORAGE_PATH=/app/mindroom_data
-      - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-runner:8766
-      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:-sandbox-secret}
+      - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
+      # deploy.py generates the token; without one the runner rejects every request.
+      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:-}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
       - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
       - HOME=/app
       - MEM0_DIR=/app/mindroom_data/memory/mem0  # Used by mem0
-      - MINDROOM_PUBLIC_URL=https://${INSTANCE_DOMAIN}
+      - MINDROOM_PUBLIC_URL=${MINDROOM_PUBLIC_URL:-https://${INSTANCE_DOMAIN}}
       - MINDROOM_PORT=${MINDROOM_PORT:-8765}
       - MINDROOM_API_KEY=${MINDROOM_API_KEY:-}
     networks:
@@ -82,17 +83,38 @@ services:
       - sandbox-workspace:/app/workspace
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
-      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:-sandbox-secret}
+      - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:-}
       - MINDROOM_CONFIG_PATH=/app/config.yaml
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
+    # Tool code runs here, so share no network with the runtime, datastores, or homeserver.
+    # The sandbox network keeps outbound internet access for package installs and web requests.
+    networks:
+      - sandbox-network
+
+  # Forwards only the runner port from the runtime network into the sandbox network.
+  # The per-address connection cap keeps the runner from exhausting the relay for MindRoom.
+  # Disabled IP forwarding is defense in depth for runners started as root, which could send it raw packets.
+  sandbox-relay:
+    image: busybox:1.36
+    container_name: ${INSTANCE_NAME:-mindroom}-sandbox-relay
+    restart: always
+    user: "65534:65534"
+    cap_drop:
+      - ALL
+    sysctls:
+      net.ipv4.ip_forward: 0
+    command: ["tcpsvd", "-c", "256", "-C", "128", "0.0.0.0", "8766", "nc", "sandbox-runner", "8766"]
     networks:
       - mindroom-network
+      - sandbox-network
 
 volumes:
   sandbox-workspace:
 
 networks:
   mindroom-network:
+    driver: bridge
+  sandbox-network:
     driver: bridge
   mynetwork:
     external: true

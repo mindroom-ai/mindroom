@@ -259,6 +259,25 @@ def storage_key_for_base(base_id: str, knowledge_path: Path) -> str:
     return f"{_safe_identifier(base_id)}_{digest}"
 
 
+#: Primary-owned directory holding the Git directory of every Git-backed base.
+#: It sits beside the ``agents/`` and private-instance state roots that workers
+#: mount, never inside one, because a Git directory chooses the programs Git runs.
+_KNOWLEDGE_GIT_DIRNAME = "knowledge_git"
+
+
+def knowledge_git_dir(storage_root: Path, knowledge_path: Path) -> Path:
+    """Return the MindRoom-owned Git directory behind one knowledge checkout.
+
+    Keyed by the resolved checkout path rather than by base: bases that share a
+    folder share its worktree and source lock, so they share one repository.
+    Changing a base's path therefore starts a new repository, and the old one
+    is left behind holding repository content but no credentials.
+    """
+    resolved = knowledge_path.resolve()
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:16]
+    return storage_root.resolve() / _KNOWLEDGE_GIT_DIRNAME / f"{_safe_identifier(resolved.name)}_{digest}"
+
+
 def _filter_settings_key(values: Iterable[str]) -> str:
     return str(tuple(sorted(values)))
 

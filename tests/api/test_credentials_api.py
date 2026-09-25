@@ -94,7 +94,7 @@ def client(tmp_path: Path) -> TestClient:
         ),
     )
     _publish_committed_runtime_config(app, _config_with_worker_scope(None))
-    return TestClient(app)
+    return TestClient(app, base_url="http://localhost")
 
 
 @pytest.fixture
@@ -1790,7 +1790,7 @@ class TestCredentialsAPI:
         )
         authorized_test_response = client.post(
             "/api/credentials/acme_oauth/test?agent_name=general",
-            headers=alice_headers,
+            headers={**alice_headers, "Origin": "http://localhost"},
         )
 
         assert unauthorized_response.status_code == 403
