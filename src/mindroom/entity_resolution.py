@@ -12,7 +12,7 @@ from mindroom.matrix.invited_rooms_store import should_persist_invited_rooms
 from mindroom.matrix_identifiers import (
     room_alias_identifier_candidates,
 )
-from mindroom.requester_identity import mindroom_user_id, runtime_matrix_domain
+from mindroom.requester_identity import INTERNAL_USER_ENTITY_NAME, mindroom_user_id, runtime_matrix_domain
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -336,6 +336,20 @@ def current_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> 
     if internal_user_id := mindroom_user_id(config, runtime_paths):
         sender_ids.add(internal_user_id)
     return frozenset(sender_ids)
+
+
+def persisted_bot_user_ids(runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return every persisted managed bot account's Matrix ID, including entities no longer configured.
+
+    The internal user account is excluded because a human may sign in to it.
+    """
+    domain = runtime_matrix_domain(runtime_paths)
+    internal_user_account_key = managed_account_key(INTERNAL_USER_ENTITY_NAME)
+    return frozenset(
+        MatrixID.from_username(account.username, account.domain or domain).full_id
+        for account_key, account in matrix_state.matrix_state_for_runtime(runtime_paths).accounts.items()
+        if account_key.startswith("agent_") and account_key != internal_user_account_key
+    )
 
 
 def resolve_agent_thread_mode(

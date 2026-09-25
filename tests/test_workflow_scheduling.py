@@ -42,6 +42,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.scheduling_helpers import serve_task_state_events
 
 
 def _mid(name: str) -> MatrixID:
@@ -1104,6 +1105,10 @@ class TestIntegrationWithScheduling:
             state_key="task123",
             room_id="!room:server",
         )
+        serve_task_state_events(
+            client,
+            sender=entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id,
+        )
 
         task_id, message = await schedule_task(
             runtime=make_test_scheduling_runtime(
@@ -1210,6 +1215,10 @@ class TestIntegrationWithScheduling:
             event_type="com.mindroom.scheduled.task",
             state_key="task123",
             room_id="!room:server",
+        )
+        serve_task_state_events(
+            client,
+            sender=entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id,
         )
 
         task_id, message = await schedule_task(
