@@ -35,7 +35,7 @@ def _provider_tool_call_id(value: object) -> str | None:
 
 
 def _without_tool_selection(config: object) -> GenerateContentConfig:
-    """Preserve function schemas and remove native tools from a decision request."""
+    """Keep function schemas for the shared prefix, remove native tools, and require JSON output."""
     generation_config = GenerateContentConfig.model_validate(config).model_copy(deep=True)
     if generation_config.cached_content:
         # Cached content may contain native tools that this request cannot inspect.
@@ -55,6 +55,9 @@ def _without_tool_selection(config: object) -> GenerateContentConfig:
         generation_config.tool_config = ToolConfig(
             function_calling_config=FunctionCallingConfig(mode=FunctionCallingConfigMode.NONE),
         )
+    # Gemini can emit function calls under NONE and even without declarations; JSON output mode cannot.
+    # Gemini 2.5 rejects JSON output beside function declarations unless the mode is NONE.
+    generation_config.response_mime_type = "application/json"
     return generation_config
 
 
@@ -85,8 +88,8 @@ class MindRoomGoogleGemini(Gemini):
             tools=tools,
             tool_choice=tool_choice,
         )
-        if provider_tools_disabled() and (generation_config := request_params.get("config")) is not None:
-            request_params["config"] = _without_tool_selection(generation_config)
+        if provider_tools_disabled():
+            request_params["config"] = _without_tool_selection(request_params.get("config") or {})
         if not self.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES):
             return request_params
 

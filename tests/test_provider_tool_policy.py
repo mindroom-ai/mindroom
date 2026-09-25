@@ -172,9 +172,22 @@ def test_gemini_removes_native_tools_without_mutating_authored_config(source: st
         assert config.tools[0].function_declarations[0].name == "read_status"
         assert config.system_instruction == "Stable agent instructions"
         assert config.tool_config.function_calling_config.mode == "NONE"
+    assert config.response_mime_type == "application/json"
     assert options == before
     regular = GenerateContentConfig.model_validate(model.get_request_params()["config"])
     assert any(tool.google_search is not None for tool in regular.tools)
+    assert regular.response_mime_type is None
+
+
+def test_gemini_decisions_without_generation_settings_still_require_json() -> None:
+    """Gemini emits function calls even without declarations, so every decision needs JSON output."""
+    model = MindRoomGoogleGemini(api_key="test-key")
+    with without_provider_tools():
+        decision = model.get_request_params()["config"]
+
+    assert decision.response_mime_type == "application/json"
+    assert decision.tools is None
+    assert "config" not in model.get_request_params()
 
 
 def test_gemini_keeps_only_declarations_in_mixed_tool() -> None:

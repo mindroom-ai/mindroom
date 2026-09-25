@@ -39,7 +39,11 @@ def disable_tool_selection(request_params: dict[str, Any]) -> dict[str, Any]:
 
 @contextmanager
 def without_provider_tools() -> Iterator[None]:
-    """Disable tool selection and provider-managed execution within this asynchronous task."""
+    """Disable tool selection and provider-managed execution within this asynchronous task.
+
+    Callers make decision-only requests answered by one JSON object, so an adapter may
+    require JSON output where its provider does not reliably honour disabled tool selection.
+    """
     token = _tools_disabled.set(True)
     try:
         yield

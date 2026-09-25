@@ -16,6 +16,7 @@ from groq import AsyncGroq
 from mindroom import model_loading
 from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
+from mindroom.google_gemini import MindRoomGoogleGemini
 from mindroom.groq_model import MindRoomGroq
 from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
 from mindroom.judgment.execution import SHARED_CAPACITY
@@ -23,7 +24,7 @@ from mindroom.judgment.llm import judge_with_llm
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
 from mindroom.provider_tool_policy import provider_tools_disabled
 from tests.conftest import test_runtime_paths
-from tests.participation_helpers import ParticipationModel
+from tests.participation_helpers import ParticipationModel, gemini_client, gemini_decision_response
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -179,6 +180,36 @@ async def test_backends_share_capacity_and_cancellation_releases_it(
         owner="shared-owner",
     )
     assert recovered.decision is True
+
+
+@pytest.mark.asyncio
+async def test_llm_gemini_judgment_requires_json_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gemini can call functions without declarations, which would discard a valid judgment."""
+    requests: list[dict[str, object]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        return gemini_decision_response(payload, '{"decision": true}', leaked_call={"name": "skills_list", "args": {}})
+
+    client = gemini_client(respond, vertexai=False)
+    judge = MindRoomGoogleGemini(id="gemini-3.8-flash", client=client)
+    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
+    try:
+        result = await judge_with_llm(
+            _request(),
+            LLMJudgmentConfig(provider="llm", model="cheap"),
+            Config(),
+            test_runtime_paths(tmp_path),
+            owner="llm",
+        )
+    finally:
+        await client.aio.aclose()
+        client.close()
+    assert result.decision is True
+    assert result.failure is None
+    assert "tools" not in requests[0]
+    assert requests[0]["generationConfig"] == {"responseMimeType": "application/json"}
 
 
 @pytest.mark.asyncio

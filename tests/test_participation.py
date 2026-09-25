@@ -18,11 +18,17 @@ from openai import AsyncOpenAI
 
 from mindroom.agno_participation import participation_model
 from mindroom.ai import ai_response, stream_agent_response
+from mindroom.google_gemini import MindRoomGoogleGemini
 from mindroom.openai_models import MindRoomOpenAIChat
 from mindroom.participation import ParticipationGate
 from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_paths
 from tests.conftest import make_turn_context
-from tests.participation_helpers import ParticipationModel
+from tests.participation_helpers import (
+    ParticipationModel,
+    gemini_client,
+    gemini_decision_response,
+    gemini_response,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -184,6 +190,61 @@ async def test_openai_decision_disables_function_selection_before_answering() ->
     assert requests[1]["tool_choice"] == "auto"
     assert requests[0]["tools"] == requests[1]["tools"]
     assert requests[0]["messages"][:-1] == requests[1]["messages"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vertexai", [False, True], ids=["gemini_api", "vertex_ai"])
+async def test_gemini_decision_requires_json_output_while_keeping_declarations(vertexai: bool) -> None:
+    """Gemini can call functions under mode NONE, which would silence an otherwise useful answer."""
+    requests: list[dict[str, Any]] = []
+    executions: list[tuple[int, int]] = []
+    multiply_call = {"name": "multiply", "args": {"a": 23, "b": 19}}
+
+    def multiply(a: int, b: int) -> str:
+        """Multiply two integers."""
+        executions.append((a, b))
+        return str(a * b)
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if len(requests) == 1:
+            return gemini_decision_response(
+                payload,
+                '{"action":"respond","reason":"An unanswered math question."}',
+                leaked_call=multiply_call,
+            )
+        if len(requests) == 2:
+            return gemini_response({"functionCall": multiply_call})
+        return gemini_response({"text": "437"})
+
+    client = gemini_client(provider, vertexai=vertexai)
+    model = MindRoomGoogleGemini(id="test", client=client, vertexai=vertexai)
+    gate = ParticipationGate()
+    try:
+        with participation_model(model, gate, run_id="primary"):
+            response = await model.aresponse(
+                [Message(role="user", content="Use the calculator to multiply 23 by 19.")],
+                tools=[Function.from_callable(multiply)],
+                tool_choice="auto",
+                run_response=RunOutput(run_id="primary"),
+            )
+    finally:
+        await client.aio.aclose()
+        client.close()
+
+    assert gate.approved
+    assert response.content == "437"
+    assert executions == [(23, 19)]
+    decision, primary, _continuation = requests
+    assert decision["tools"] == primary["tools"]
+    assert decision["tools"][0]["functionDeclarations"][0]["name"] == "multiply"
+    assert decision["toolConfig"] == {"functionCallingConfig": {"mode": "NONE"}}
+    assert primary["toolConfig"] == {"functionCallingConfig": {"mode": "AUTO"}}
+    assert decision["generationConfig"]["responseMimeType"] == "application/json"
+    assert "responseMimeType" not in primary.get("generationConfig", {})
+    # Gemini merges the appended decision prompt into the final user turn.
+    assert decision["contents"][0]["parts"][:-1] == primary["contents"][0]["parts"]
 
 
 @pytest.mark.asyncio
