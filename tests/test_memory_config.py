@@ -121,8 +121,14 @@ class TestMemoryConfig:
 
     @pytest.mark.parametrize(
         ("configured_api_key", "expected_api_key"),
-        [("sk-configured", "sk-configured"), ("", "sk-shared"), (None, "sk-shared")],
-        ids=["explicit", "blank", "missing"],
+        [
+            ("sk-configured", "sk-configured"),
+            (" sk-configured ", "sk-configured"),
+            ("", "sk-shared"),
+            ("   ", "sk-shared"),
+            (None, "sk-shared"),
+        ],
+        ids=["explicit", "explicit-trimmed", "blank", "whitespace", "missing"],
     )
     def test_memory_llm_explicit_api_key_beats_shared_provider_key(
         self,

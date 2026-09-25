@@ -105,7 +105,7 @@ memory:
 ```
 
 Supported LLM providers: `ollama` (default), `openai`, `anthropic`.
-For `openai` and `anthropic`, an `api_key` in `memory.llm.config` is used as given; without one, MindRoom uses the provider's shared key.
+For `openai` and `anthropic`, MindRoom trims an `api_key` in `memory.llm.config` and uses it; a blank or missing key falls back to the provider's shared key.
 
 ## Backend: `none`
 
