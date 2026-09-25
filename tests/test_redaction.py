@@ -1041,16 +1041,22 @@ def test_find_credential_flags_literal_secrets_but_not_placeholders() -> None:
         "s3_key: exports/2026/09/daily.parquet",
         "ssh_key: ~/.ssh/id_ed25519",
         "call hf_hub_download(repo_id) with gsk_client_timeout",
+        "GOOGLE_TOKEN_URI=https://oauth2.googleapis.com/token",
+        "OIDC_TOKEN_ENDPOINT=https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        "SSH_KEY_FILE=/home/user/.ssh/id_ed25519",
+        "TOKEN_CACHE_DIR=/var/cache/app/tokens-v2",
+        "SECRET_NAME=projects/my-proj/secrets/api-key/versions/3",
+        '{"token_endpoint": "https://oauth2.example.test/v2/token"}',
     )
     secrets = (
         "token sk-abcdefghij0123456789",
-        "GITHUB_TOKEN=0123456789abcdef0123456789abcdef",
         "connect to https://alice:hunter2@db.example.test",
         "https://api.example.test/?token=a8f3k2m9q7w1z5x0v6b4",
         f"Authorization: Bearer {jwt}",
-        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-        "API_KEY=0123456789abcdef0123456789abcdef",
-        "export DB_PASSWORD=Zq8vN3pL7wX2kR9mT4yB6c",
+        'GITHUB_TOKEN="0123456789abcdef0123456789abcdef"',
+        "export DB_PASSWORD='Zq8vN3pL7wX2kR9mT4yB6c'",
+        '{"api_key": "Zq8vN3pL7wX2kR9mT4yB6cD1"}',
+        "{'client_secret': 'Zq8vN3pL7wX2kR9mT4yB6cD1'}",
         "-----BEGIN RSA PRIVATE KEY-----\nMIIabc",
         "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF",
         'password: "Zq8vN3pL7wX2kR9mT4yB6c"',
@@ -1061,7 +1067,8 @@ def test_find_credential_flags_literal_secrets_but_not_placeholders() -> None:
     )
     assert [text for text in placeholders if find_credential(text) is not None] == []
     assert [text for text in secrets if find_credential(text) is None] == []
-    assert find_credential("intro\nsteps\nAPI_KEY=0123456789abcdef0123456789abcdef") == len("intro\nsteps\nAPI_KEY=")
+    prefix = 'intro\nsteps\napi_key = "'
+    assert find_credential(prefix + '0123456789abcdef0123456789abcdef"') == len(prefix)
 
 
 def test_shared_redaction_leaves_ordinary_identifiers_alone() -> None:
@@ -1076,4 +1083,6 @@ def test_find_credential_scans_large_inputs_in_linear_time() -> None:
     assert find_credential("token:\n" + "- token:\n" * 40_000) is None
     assert find_credential("token: a " * 50_000) is None
     assert find_credential('{"sort_key":"created_at","limit":100}' * 20_000) is None
+    assert find_credential("TOKEN" * 200_000) is None
+    assert find_credential('"token": ' * 100_000) is None
     assert time.monotonic() - started < 5
