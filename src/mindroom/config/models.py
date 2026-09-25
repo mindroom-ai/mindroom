@@ -634,12 +634,18 @@ class ModelConfig(BaseModel):
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
     api_key: str | None = Field(
         default=None,
-        description="Optional API key (usually from env vars)",
+        description=(
+            "Optional model-specific API key used instead of the provider's shared key; "
+            "a key saved for this model in the dashboard takes precedence"
+        ),
         json_schema_extra=dashboard_hint(secret=True),
     )
     extra_kwargs: dict[str, Any] | None = Field(
         default=None,
-        description="Additional provider-specific parameters passed directly to the model; may include api_key",
+        description=(
+            "Additional provider-specific parameters passed directly to the model; "
+            "may include api_key as an alternative to the api_key field"
+        ),
         json_schema_extra=dashboard_hint(secret=True),
     )
     context_window: int | None = Field(
@@ -711,6 +717,13 @@ class ModelConfig(BaseModel):
     def _validate_api_provider(self) -> Self:
         if self.api is not None and self.provider.strip().lower() != "openai":
             msg = "Model api is only supported for provider: openai"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_single_api_key(self) -> Self:
+        if self.api_key and self.extra_kwargs and "api_key" in self.extra_kwargs:
+            msg = "Set the model API key in either api_key or extra_kwargs.api_key, not both"
             raise ValueError(msg)
         return self
 

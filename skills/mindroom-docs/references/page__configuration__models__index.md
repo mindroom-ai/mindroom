@@ -35,11 +35,15 @@ Each model configuration supports the following fields:
 | `icon` | No | `null` | Image path relative to the config file's directory, or a Matrix `mxc://` URI |
 | `api` | No | `null` | For `openai`, force `responses` or `chat_completions`; unset keeps automatic selection |
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
+| `api_key` | No | `null` | Model-specific API key; equivalent to `extra_kwargs.api_key`, and setting both is a validation error |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
 | `context_window` | No | `null` | Actual provider context window size in tokens; MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction sets a smaller `replay_window_tokens`; an explicit `compaction.model` or `compaction.fallback_model` needs its own `context_window` for summary generation; on `vertexai_claude` it also enables request-time fitting |
 
 For Azure OpenAI, `id` is the Azure deployment name, not the underlying base-model name.
-Provider credentials come from supported environment variables, stored credentials, CLI authentication, or deliberately supplied `extra_kwargs`; the top-level `ModelConfig.api_key` field is not used during model construction.
+Provider credentials come from supported environment variables, stored credentials, CLI authentication, or a model-specific key.
+MindRoom resolves a model's API key in this order: the key saved for that model in the dashboard's **Models** editor, then `api_key` or `extra_kwargs.api_key` from the model config, then the provider's shared key from the environment or credential store.
+`ollama` and `llama_cpp` models skip the shared provider key step.
+`codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore any configured key.
 
 Presentation metadata is optional:
 

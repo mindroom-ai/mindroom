@@ -381,6 +381,8 @@ def get_model_instance(
     model_id = model_config.id
 
     extra_kwargs = dict(model_config.extra_kwargs or {})
+    if model_config.api_key:
+        extra_kwargs["api_key"] = model_config.api_key
 
     creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     model_creds = creds_manager.load_credentials(f"model:{model_name}")
