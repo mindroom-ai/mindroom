@@ -265,11 +265,15 @@ const PROVIDERS_WITHOUT_API_KEYS = new Set([
   "synthetic",
 ]);
 
-/** The model's own key from config.yaml (api_key or extra_kwargs.api_key); blank values count as unset. */
+/**
+ * The model's own key from config.yaml (api_key or extra_kwargs.api_key) as used with `provider`,
+ * which may be an unsaved draft; blank values count as unset.
+ */
 function getConfiguredApiKey(
   modelConfig: ModelConfigType | undefined,
+  provider: string,
 ): string | null {
-  if (!modelConfig || PROVIDERS_WITHOUT_API_KEYS.has(modelConfig.provider)) {
+  if (!modelConfig || PROVIDERS_WITHOUT_API_KEYS.has(provider)) {
     return null;
   }
   const configured = [modelConfig.api_key, modelConfig.extra_kwargs?.api_key]
@@ -566,7 +570,7 @@ export function ModelConfig() {
   };
 
   const copyApiKeyForRow = async (modelName: string, provider: string) => {
-    const configuredApiKey = getConfiguredApiKey(models[modelName]);
+    const configuredApiKey = getConfiguredApiKey(models[modelName], provider);
     const usesConfiguredKey =
       !modelKeys[modelName]?.hasKey && configuredApiKey !== null;
     const service = modelKeys[modelName]?.hasKey
@@ -1003,7 +1007,7 @@ export function ModelConfig() {
       const keyDisplay = getKeyStatusDisplay(
         modelName,
         modelConfig.provider,
-        getConfiguredApiKey(modelConfig),
+        getConfiguredApiKey(modelConfig, modelConfig.provider),
         modelKeys,
         providerKeys,
       );
@@ -1113,7 +1117,7 @@ export function ModelConfig() {
       !hasReuseSource;
     const providerFallbackKey = providerKeys[draft.provider];
     const configuredApiKey = currentModelName
-      ? getConfiguredApiKey(models[currentModelName])
+      ? getConfiguredApiKey(models[currentModelName], draft.provider)
       : null;
     const currentStatus = currentModelName
       ? getKeyStatusDisplay(

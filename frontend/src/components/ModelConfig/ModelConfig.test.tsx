@@ -561,6 +561,54 @@ describe("ModelConfig", () => {
     expect(badgeFor("first").className).toBe(badgeFor("second").className);
   });
 
+  it.each([
+    ["openrouter", "Vertex AI Claude", false],
+    ["codex", "OpenAI", true],
+  ])(
+    "follows the draft provider when a %s model with a config.yaml key switches to %s",
+    async (savedProvider, draftProviderName, expectsConfigKey) => {
+      vi.mocked(useConfigStore).mockReturnValue({
+        ...mockStore,
+        config: {
+          ...mockStore.config,
+          models: {
+            ...mockStore.config.models,
+            switching: {
+              provider: savedProvider,
+              id: "some-model",
+              api_key: "sk-config-real",
+            },
+          },
+        },
+      } as never);
+
+      render(<ModelConfig />);
+
+      fireEvent.click(screen.getByText("switching"));
+      const row = screen.getByDisplayValue("switching").closest("tr");
+      if (!row) throw new Error("row not found");
+      fireEvent.click(within(row).getAllByRole("combobox")[0]);
+      fireEvent.click(
+        screen.getByRole("option", { name: new RegExp(draftProviderName) }),
+      );
+
+      const configHint =
+        "No custom key provided. This model will use its key from config.yaml.";
+      await waitFor(() => {
+        if (expectsConfigKey) {
+          expect(within(row).getByText("Config key")).toBeTruthy();
+        } else {
+          expect(within(row).queryByText("Config key")).toBeNull();
+        }
+      });
+      if (expectsConfigKey) {
+        expect(within(row).getByText(configHint)).toBeTruthy();
+      } else {
+        expect(within(row).queryByText(configHint)).toBeNull();
+      }
+    },
+  );
+
   it.each(["codex", "kimi", "bedrock_claude", "vertexai_claude", "synthetic"])(
     "does not show a config.yaml key for %s, which drops API keys",
     async (provider) => {
