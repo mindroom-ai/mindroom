@@ -186,7 +186,7 @@ async def _release_writes_the_store_abandoned(
     backend: SqliteBackend,
     abandoned: set[asyncio.Task[object]],
 ) -> None:
-    """End writes a close left waiting, so a failure reads as one.
+    """End writes the store left waiting, so a failure reads as one.
 
     Empty on a healthy close, and reached only when the test using it is
     already failing. It exists because an abandoned write cannot be cancelled
@@ -9272,6 +9272,7 @@ class TestClosingAnswersEveryWriteItWillNotRun:
         assert not ran.is_set()
         assert len(refusals) == 1
         assert isinstance(refusals[0], RuntimeError)
+        assert str(refusals[0]) == "The event-journal writer stopped before running this write"
 
 
 class TestTheJournalIsAtLeastAsDurableAsWhatCertifiesIt:

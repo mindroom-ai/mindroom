@@ -84,7 +84,8 @@ class ThreadOffload:
         The pool holds each work item until its thread next gets to drop it,
         which a starved thread can put off past the caller's next statement.
         The worker therefore takes ``call`` out before running it, so what the
-        statement references is released before its completion is reported.
+        statement closes over is released before its completion is reported.
+        Its result, or its exception and traceback, still travel with the future.
         """
         context = contextvars.copy_context()
         pending = [call]

@@ -38,6 +38,7 @@ logger = get_logger(__name__)
 
 _BUSY_TIMEOUT_MILLISECONDS = 10_000
 _CLOSED_MESSAGE = "The event-journal store is closed"
+_WRITER_STOPPED_MESSAGE = "The event-journal writer stopped before running this write"
 # How long to wait between attempts at the one statement SQLite's own busy
 # handler will not retry. Short enough that a contended open is not noticeably
 # slower than an uncontended one, long enough not to spin.
@@ -183,7 +184,7 @@ class SqliteBackend:
             # ``settled`` outlives the caller's own cancellation. A callback
             # rather than a ``finally``, since a task cancelled before its first
             # step never enters its coroutine.
-            self._writer_task.add_done_callback(lambda _task: _refuse_queued_writes(queue))
+            self._writer_task.add_done_callback(lambda _task: self._refuse_queued_writes(queue))
         return queue
 
     def _connect_writer(self) -> sqlite3.Connection:
@@ -236,6 +237,13 @@ class SqliteBackend:
             with self._reader_lock:
                 self._open_readers.append(connection)
         return connection
+
+    def _refuse_queued_writes(self, queue: asyncio.Queue[_QueuedWrite]) -> None:
+        """Answer every write a stopped writer task will never run."""
+        message = _CLOSED_MESSAGE if self._closed else _WRITER_STOPPED_MESSAGE
+        while not queue.empty():
+            _deliver(queue.get_nowait().future, _WriteOutcome(error=RuntimeError(message)))
+            queue.task_done()
 
     async def _drain_writes(self, queue: asyncio.Queue[_QueuedWrite]) -> None:
         while True:
@@ -409,7 +417,7 @@ class SqliteBackend:
         writer_task = self._writer_task
         self._writer_task = None
         if writer_task is not None:
-            # Its exit refuses every write still queued, before this resumes.
+            # Its exit refuses every write still queued.
             writer_task.cancel()
             try:  # noqa: SIM105 - the task may already be finished
                 await writer_task
@@ -429,13 +437,6 @@ class SqliteBackend:
         finally:
             self._offload.shutdown()
             self._recovery_offload.shutdown()
-
-
-def _refuse_queued_writes(queue: asyncio.Queue[_QueuedWrite]) -> None:
-    """Answer every write its stopped writer task will never run."""
-    while not queue.empty():
-        _deliver(queue.get_nowait().future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
-        queue.task_done()
 
 
 def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:
