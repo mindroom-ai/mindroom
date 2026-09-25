@@ -157,7 +157,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
 | S21 | Isolated | [`legacy_attachments.py`][legacy-attachments] adopts in-place attachment records into verified retained copies; [`attachments.py`][attachments] keeps copying, record publication, and retention cleanup. |
 | S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] pokes a todo item without `requester_id` as the assignee's own internal turn under its unchanged dedup key, and [`custom_tools/todo.py`][todo-tool] records the current requester on the item's next write. |
-| S23 | Isolated | [`knowledge/legacy_git_checkout.py`][knowledge-legacy-git] renames a checkout's in-tree `.git` to its MindRoom-owned location, keeping only repository data under a fresh config; [`knowledge/git_source.py`][knowledge-git-source] keeps initialization, sync, and the current layout. |
+| S23 | Isolated | [`knowledge/legacy_git_checkout.py`][knowledge-legacy-git] moves a checkout's in-tree `.git` aside and hard-links only its repository files into a fresh MindRoom-owned Git directory under a new config; [`knowledge/git_source.py`][knowledge-git-source] keeps initialization, sync, and the current layout. |
 
 ## Configuration and credentials
 

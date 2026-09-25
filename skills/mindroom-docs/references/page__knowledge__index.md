@@ -324,7 +324,7 @@ Changing a base's `path` starts a new repository in the new folder, which must b
 Deleting only the knowledge folder restores its files from the Git directory on the next sync; delete both to clone afresh.
 
 A checkout created by an earlier release has its `.git` inside the knowledge folder.
-The first sync after upgrading renames that directory into place, so nothing is copied, fetched, or re-embedded, after replacing its config with one that keeps only the repository format and deleting everything else Git could run or be redirected by, such as hooks and `info/`.
+The first sync after upgrading moves that directory aside and hard-links its objects, refs, index, and LFS files into a Git directory created fresh, with a new config that keeps only the repository format, so nothing is copied, fetched, or re-embedded and nothing else from the old `.git`, such as hooks and `info/`, carries over.
 The sync fails with an error instead when that `.git` is a link or a `gitdir:` file, or when it is on a different filesystem or mount from `<storage>`; follow the error to move it, or delete the folder so the next sync clones afresh.
 
 ### Sync Behavior

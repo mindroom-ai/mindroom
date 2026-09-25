@@ -1401,8 +1401,13 @@ def _record_git_commands(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     return commands
 
 
-def _object_files(git_dir: Path) -> list[str]:
-    return sorted(path.relative_to(git_dir).as_posix() for path in (git_dir / "objects").rglob("*"))
+def _object_files(git_dir: Path) -> dict[str, int]:
+    """Map every object-store file to its inode, which a hard link keeps and a copy or fetch does not."""
+    return {
+        path.relative_to(git_dir).as_posix(): path.stat().st_ino
+        for path in (git_dir / "objects").rglob("*")
+        if path.is_file()
+    }
 
 
 def _published_row_ids() -> dict[str, list[object]]:
@@ -1477,7 +1482,6 @@ async def test_legacy_in_tree_git_dir_is_renamed_not_refetched(
     # published index, with the Git directory inside the checkout.
     git_dir.rename(docs_path / ".git")
     _git(docs_path, "config", "--unset", "core.worktree")
-    objects_inode = (docs_path / ".git" / "objects").stat().st_ino
     object_files = _object_files(docs_path / ".git")
     row_ids = _published_row_ids()
     commands = _record_git_commands(monkeypatch)
@@ -1486,7 +1490,6 @@ async def test_legacy_in_tree_git_dir_is_renamed_not_refetched(
 
     assert result.index_published is True
     assert not (docs_path / ".git").exists()
-    assert (git_dir / "objects").stat().st_ino == objects_inode
     assert _object_files(git_dir) == object_files
     assert not any(args[0] in {"clone", "init"} for args in commands)
     assert _published_row_ids() == row_ids
@@ -1543,6 +1546,52 @@ async def test_legacy_adoption_drops_executable_git_metadata(tmp_path: Path) -> 
     assert await _search(config, runtime_paths, "content") == ["updated content"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell filters and directory descriptors are required")
+@pytest.mark.asyncio
+async def test_legacy_adoption_ignores_writes_through_handles_into_the_old_git_dir(tmp_path: Path) -> None:
+    """A descriptor an agent kept into the legacy .git, or into a directory inside it, reaches nothing Git reads.
+
+    Writes through such a handle may fail once the old directories are gone;
+    what matters is that none of them lands in the MindRoom-owned repository.
+    """
+    remote_work, remote_bare = _committed_remote(tmp_path, "legacy content")
+    docs_path = tmp_path / "docs"
+    _git(tmp_path, "clone", "--quiet", "--single-branch", "--branch", "main", str(remote_bare), str(docs_path))
+    program, marker = _planted_program(tmp_path)
+    git_dir_handle = os.open(docs_path / ".git", os.O_RDONLY)
+    objects_handle = os.open(docs_path / ".git" / "objects", os.O_RDONLY)
+    config = _git_docs_config(tmp_path, docs_path, remote_bare)
+    runtime_paths = runtime_paths_for(config)
+    planted_filter = f'[filter "planted"]\n\tsmudge = {program}\n\tclean = cat\n\trequired = true\n'
+
+    def _write_through(handle: int, name: str, content: str) -> None:
+        with suppress(OSError):
+            descriptor = os.open(name, os.O_WRONLY | os.O_APPEND | os.O_CREAT, dir_fd=handle)
+            os.write(descriptor, content.encode())
+            os.close(descriptor)
+
+    try:
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+        _write_through(git_dir_handle, "config", planted_filter)
+        _write_through(objects_handle, "../config", planted_filter)
+        with suppress(OSError):
+            os.mkdir("info", dir_fd=objects_handle)
+        _write_through(objects_handle, "info/alternates", f"{tmp_path}\n")
+    finally:
+        os.close(git_dir_handle)
+        os.close(objects_handle)
+    (docs_path / ".gitattributes").write_text("* filter=planted\n", encoding="utf-8")
+    _push_change(remote_work, remote_bare, "updated content")
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    git_dir = knowledge_git_dir(runtime_paths.storage_root, docs_path)
+
+    assert not marker.exists()
+    assert "planted" not in (git_dir / "config").read_text(encoding="utf-8")
+    assert not (git_dir / "objects" / "info" / "alternates").exists()
+    assert (docs_path / "doc.md").read_text(encoding="utf-8") == "updated content"
+
+
 @pytest.mark.asyncio
 async def test_legacy_adoption_resumes_from_staging(
     tmp_path: Path,
@@ -1556,14 +1605,14 @@ async def test_legacy_adoption_resumes_from_staging(
     runtime_paths = runtime_paths_for(config)
     git_dir = knowledge_git_dir(runtime_paths.storage_root, docs_path)
     staging = git_dir.with_name(f"{git_dir.name}.adopting")
-    objects_inode = (docs_path / ".git" / "objects").stat().st_ino
+    object_files = _object_files(docs_path / ".git")
 
-    def _interrupt(_staging: Path) -> None:
+    def _interrupt(_old_config: Path, _new_config: Path) -> None:
         msg = "interrupted adoption"
         raise RuntimeError(msg)
 
     with monkeypatch.context() as interrupted:
-        interrupted.setattr(legacy_git_checkout_module, "_delete_unkept_entries", _interrupt)
+        interrupted.setattr(legacy_git_checkout_module, "_write_config", _interrupt)
         with pytest.raises(RuntimeError, match="interrupted adoption"):
             await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -1575,7 +1624,7 @@ async def test_legacy_adoption_resumes_from_staging(
 
     assert result.index_published is True
     assert not staging.exists()
-    assert (git_dir / "objects").stat().st_ino == objects_inode
+    assert _object_files(git_dir) == object_files
     assert not (docs_path / ".git" / "packed-refs").exists()
     assert await _search(config, runtime_paths, "legacy") == ["legacy content"]
 
