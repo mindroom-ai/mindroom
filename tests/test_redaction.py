@@ -1046,6 +1046,9 @@ def test_find_credential_flags_literal_secrets_but_not_placeholders() -> None:
         "SSH_KEY_FILE=/home/user/.ssh/id_ed25519",
         "TOKEN_CACHE_DIR=/var/cache/app/tokens-v2",
         "SECRET_NAME=projects/my-proj/secrets/api-key/versions/3",
+        "DATABASE_URL=postgres://postgres:YOUR_DB_PASSWORD@localhost:5432/app",
+        "redis://default:REDIS_PASSWORD@localhost:6379",
+        'password: "xxxxxxxxxxxxxxxxxxxxxxxx"',
         '{"token_endpoint": "https://oauth2.example.test/v2/token"}',
     )
     secrets = (
@@ -1060,6 +1063,8 @@ def test_find_credential_flags_literal_secrets_but_not_placeholders() -> None:
         "-----BEGIN RSA PRIVATE KEY-----\nMIIabc",
         "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF",
         'password: "Zq8vN3pL7wX2kR9mT4yB6c"',
+        'password: "correct-horse-battery-staple"',
+        "postgres://app:Password_2024@db.example.test/app",
         'client = Client(api_key="Zq8vN3pL7wX2kR9mT4yB6cD1")',
         f'access_token: "{jwt}"',
         f"aws_access_key_id = {aws_key_id}",

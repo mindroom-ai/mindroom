@@ -63,13 +63,16 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
 _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
 # Values that only stand in for a secret: shell or template references, ellipses, and masking runs.
 _PLACEHOLDER_PATTERN = re.compile(r"^[$<{%\[]|\.\.\.|x{4,}|\*{3,}", re.IGNORECASE)
+# An environment variable name such as OPENAI_API_KEY, which says where a credential lives instead of holding it.
+_ENV_NAME = r"(?-i:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)"
+_ENV_NAME_PATTERN = re.compile(_ENV_NAME)
 # Credentials written into skill content, adapted from Hermes Agent's skill guard (tools/skills_guard.py): quoted
 # values of api-key, token, secret, or password settings unless they name an environment variable, also with a
 # quoted name as in JSON, AWS access key IDs, and Anthropic and GitLab tokens.
 _SKILL_SECRET_PATTERNS = (
     re.compile(
         r"(?:api[_-]?key|token|secret|password)[\"']?\s*[=:]\s*[\"']"
-        r"(?!(?-i:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)[\"'])(?P<secret>[A-Za-z0-9+/=_-]{20,})",
+        rf"(?!{_ENV_NAME}[\"'])(?P<secret>[A-Za-z0-9+/=_-]{{20,}})",
         re.IGNORECASE,
     ),
     re.compile(r"(?P<secret>AKIA[0-9A-Z]{16})"),
@@ -572,7 +575,8 @@ def find_credential(value: str) -> int | None:
             return match.start("url")
     for pattern in _SKILL_SECRET_PATTERNS:
         for match in pattern.finditer(value):
-            if _looks_like_secret(match.group("secret")):
+            # Like Hermes, a quoted passphrase counts, so only placeholder markers exempt these values.
+            if not _PLACEHOLDER_PATTERN.search(match.group("secret")):
                 return match.start("secret")
     return None
 
@@ -594,12 +598,20 @@ def _url_holds_secret(url: str) -> bool:
         password = parsed.password
     except ValueError:
         return False
-    default = password is not None and (password == parsed.username or password.lower() in _DEFAULT_URL_PASSWORDS)
-    if password and not default and not _PLACEHOLDER_PATTERN.search(password):
+    if password and not _url_password_is_placeholder(password, parsed.username):
         return True
     return any(
         _is_redacted_query_key(key) and _looks_like_secret(item)
         for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+    )
+
+
+def _url_password_is_placeholder(password: str, username: str | None) -> bool:
+    return (
+        password == username
+        or password.lower() in _DEFAULT_URL_PASSWORDS
+        or _ENV_NAME_PATTERN.fullmatch(password) is not None
+        or _PLACEHOLDER_PATTERN.search(password) is not None
     )
 
 

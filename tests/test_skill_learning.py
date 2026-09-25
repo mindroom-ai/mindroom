@@ -618,6 +618,56 @@ async def test_reviewer_creates_views_and_patches_with_only_skill_tools(tmp_path
     assert report.totals.total_tokens == 10 * len(model.requests)
 
 
+@pytest.mark.asyncio
+async def test_reviewer_patches_and_support_files_refuse_literal_credentials(tmp_path: Path) -> None:
+    """Every learner write is checked for credentials, not only new skills, and the refusal names the line."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    root = _skills_root(config, paths)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
+    leaked_line = 'password: "Zq8vN3pL7wX2kR9mT4yB6c"'
+    model = _model(
+        ("skill_view", {"name": "deploy-checks"}),
+        (
+            "skill_manage",
+            {
+                "action": "patch",
+                "name": "deploy-checks",
+                "old_string": "1. Run the smoke test.",
+                "new_string": leaked_line,
+            },
+        ),
+        (
+            "skill_manage",
+            {
+                "action": "write_file",
+                "name": "deploy-checks",
+                "file_path": "references/login.md",
+                "file_content": f"Log in first.\n{leaked_line}\n",
+            },
+        ),
+    )
+    progress = ReviewProgress()
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        await review_conversation(
+            config=config,
+            runtime_paths=paths,
+            agent_name="mind",
+            session_id="session",
+            identity=None,
+            skills_root=root,
+            messages=_tool_turn("r1").messages or [],
+            summary=None,
+            progress=progress,
+        )
+    patched, written = (json.loads(request[-1]) for request in model.requests[2:4])
+    assert "Line 8 of SKILL.md looks like a literal credential" in patched["error"]
+    assert "Line 2 of references/login.md looks like a literal credential" in written["error"]
+    assert progress.changes == {}
+    assert (root / "deploy-checks/SKILL.md").read_text() == LEARNED
+    assert not (root / "deploy-checks/references").exists()
+
+
 def _chat_reply(message: dict[str, object], finish_reason: str) -> dict[str, object]:
     return {
         "id": "chatcmpl-review",
