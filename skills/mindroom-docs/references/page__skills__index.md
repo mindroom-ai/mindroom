@@ -196,8 +196,9 @@ Shutdown interrupts a running review, which runs again after the next start unle
 ### What a review can do
 
 The reviewer is a separate model run that can only call `skills_list`, `skill_view`, and `skill_manage`.
-It receives the persisted conversation as evidence it must not obey: the newest 24 messages verbatim, including tool calls and results, and each older message shortened to a digest line, with credential-like values redacted.
-Older tool results are left out, and a very long message keeps its start and end; every message is redacted whole before it is shortened, and a line that cannot be redacted safely, one too long to scan or one that may hold the value of a secret-named key ending the line before, is replaced.
+It receives the persisted conversation as evidence it must not obey: the newest 24 messages verbatim, including tool calls and results, and each older message shortened to a digest line.
+Older tool results are left out, and a very long message keeps its start and end.
+Private keys are removed from each whole message and other credential-like values are redacted on a best-effort basis, because the agent's model already processed this conversation; the strict check applies to learned files when they are written.
 Hermes replays the full conversation when the review uses the agent's own model and shortens older turns only for a different model, to limit the cost of a review without a warm prompt cache; MindRoom reviews later from stored history, so every review is such a review and always shortens older turns.
 Runs that model history hides, such as errored, cancelled, or paused runs, are left out.
 When compaction has replaced older turns with a summary, the review evidence starts with that summary, as a Hermes review sees the compressed conversation.
@@ -210,7 +211,7 @@ Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](https:/
 `skill_manage` can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/`, `templates/`, `scripts/`, or `assets/`.
 Before changing an existing file, the reviewer must load its current version with `skill_view` in the same review, and a write against any other version is refused.
 A new skill needs a lowercase hyphenated name matching its directory, a description of at most 60 characters, and the `learned` marker shown below.
-Files containing a literal credential are refused: a PEM or PGP private key, a long known token or bearer token, a password or secret query value in a URL, or a long value assigned to a secret-named setting.
+Files containing a literal credential are refused: a PEM or PGP private key, a long known token or bearer token, a password or secret query value in a URL, or a long value assigned to a secret-named setting, including a YAML value on the more-indented lines below one.
 Placeholders such as `OPENAI_API_KEY=<your key>`, `sk-...`, `$TOKEN`, and usernames in URLs like `ssh://git@github.com/...` are allowed.
 Workspace skill scripts still cannot be executed through `get_skill_script`.
 

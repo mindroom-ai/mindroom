@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from functools import partial
@@ -9874,7 +9875,7 @@ async def test_a_response_registers_its_skill_review_conversation_before_it_runs
     real_ainvoke = model.ainvoke
 
     async def ainvoke(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        await wait_for_background_tasks(owner=coordinator)
+        await wait_for_background_tasks(owner=coordinator.deps.runtime)
         entries = json.loads(state_path.read_text())["entries"].values()
         seen_while_running.append([entry["has_new_runs"] for entry in entries])
         return await real_ainvoke(*args, **kwargs)
@@ -9890,6 +9891,51 @@ async def test_a_response_registers_its_skill_review_conversation_before_it_runs
         await coordinator.generate_response(_plain_request(_target()))
     assert seen_while_running[:1] == [[False]]
     assert [entry["has_new_runs"] for entry in json.loads(state_path.read_text())["entries"].values()] == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_skill_review_registration_never_fails_the_reply(tmp_path: Path) -> None:
+    """Skill learning is background bookkeeping, so a broken queue file must not cost the user their answer."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=30,
+        max_response_chars=30,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.response_runner.queue_skill_review", side_effect=OSError("queue file unwritable")),
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=False),
+        ),
+    ):
+        await coordinator.generate_response(_plain_request(_target()))
+        await wait_for_background_tasks(owner=coordinator.deps.runtime)
+    bot.client.room_send.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_a_pending_skill_review_registration(tmp_path: Path) -> None:
+    """Registration runs as a runtime background task, which the bot's shutdown drains."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
+    registered: list[bool] = []
+
+    def slow_queue(*_args: object, completed: bool, **_kwargs: object) -> None:
+        time.sleep(0.3)
+        registered.append(completed)
+
+    with patch("mindroom.response_runner.queue_skill_review", slow_queue):
+        runner._start_skill_review(agent_name="general", session_id="session-1", execution_identity=None)
+        await wait_for_background_tasks(owner=runner.deps.runtime)
+    assert registered == [False]
 
 
 @pytest.mark.asyncio

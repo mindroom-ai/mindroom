@@ -33,9 +33,8 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, resolve_runtime_paths
 from mindroom.model_loading import get_model_instance
 from mindroom.provider_tool_policy import provider_tools_disabled
-from mindroom.redaction import REDACTION_FAILED
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.skill_learning import library, queue, transcript
+from mindroom.skill_learning import library, queue
 from mindroom.skill_learning import worker as worker_module
 from mindroom.skill_learning.reviewer import ReviewProgress, review_conversation
 from mindroom.skill_learning.transcript import count_model_replies, render_transcript
@@ -225,6 +224,7 @@ async def _cycle(config: Config, paths: RuntimePaths, client: object | None = No
         ("deploy-checks", LEARNED + "Log in with sk-abcdefghij0123456789.\n", "credential-like"),
         ("deploy-checks", LEARNED + "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n", "credential-like"),
         ("deploy-checks", LEARNED + "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n", "credential-like"),
+        ("deploy-checks", LEARNED + "```yaml\npassword: |\n  Zq8vN3pL7wX2kR9mT4yB6c\n```\n", "credential-like"),
         ("deploy-checks", LEARNED + "Clone https://alice:hunter2@git.example.test/repo.\n", "credential-like"),
         ("mindroom-docs", LEARNED.replace("deploy-checks", "mindroom-docs"), "already exists"),
     ],
@@ -1478,26 +1478,6 @@ async def test_an_approved_continuation_counts_when_its_request_opened_the_conve
     assert model.requests
 
 
-def test_clipping_keeps_secrets_split_by_the_cut_redacted() -> None:
-    """A secret next to either cut is still redacted, even when its recognizable prefix falls on the other side."""
-    heading = "TOOL RESULT (shell):\n"
-
-    def render(content: str) -> str:
-        return render_transcript([Message(role="tool", content=content, tool_name="shell")], budget_chars=80_000)
-
-    filler = "\n".join(["x" * 99] * 1_000)
-    probe = render(filler)
-    head_len = probe.index("\n[... ") - len(heading)
-    tail_len = len(probe) - probe.index(" ...]\n") - len(" ...]\n")
-    secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
-    for prefix in ("GITHUB_TOKEN=", "Authorization: Bearer ", ""):
-        for offset in range(-45, 45, 3):
-            near_head = "x" * max(0, head_len + offset - len(prefix) - 1) + " " + prefix + secret + "\n" + filler
-            near_tail = filler + "\n" + prefix + secret + " " + "x" * max(0, tail_len - offset)
-            for content in (near_head, near_tail):
-                assert secret[6:24] not in render(content), (prefix, offset)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["archival", "bookkeeping"])
 async def test_a_stop_during_archival_or_bookkeeping_still_records_the_learners_changes(
@@ -1556,38 +1536,6 @@ async def test_a_stop_during_archival_or_bookkeeping_still_records_the_learners_
     assert not (root / "old-habit").exists()
 
 
-def test_evidence_is_redacted_whole_before_any_cut() -> None:
-    """Secrets longer than any margin, secrets whose prefix sits on the previous line, and digest cuts stay hidden."""
-    jwt = "eyJ" + "a" * 980
-    long_secret = "z" * 50_000 + "\nAuthorization: Bearer " + jwt + "\n" + "x" * 50_000
-    clipped = render_transcript([Message(role="tool", content=long_secret, tool_name="shell")], budget_chars=80_000)
-    assert "a" * 40 not in clipped
-
-    token = "Zq8vN3pL7wX2kR9mT4yB6cD1fG5hJ0aa"  # noqa: S105 - synthetic, recognizable only through its prefix
-    for slack in range(0, 45, 4):
-        # The prefix line ends one 60,000-character redaction chunk and the token starts the next.
-        pad = "y" * (60_000 - len("Authorization: Bearer") - 1 - slack)
-        text = f"{pad}\nAuthorization: Bearer\n{token}\ndone"
-        rendered = render_transcript([Message(role="tool", content=text, tool_name="shell")], budget_chars=10_000_000)
-        assert token not in rendered, slack
-
-    older = [Message(role="user", content="x " * 139 + "postgresql://app:S3cr3tPassw0rd@db:5432/app and more")]
-    recent = [Message(role="user", content="recent")] * 24
-    assert "S3cr3" not in render_transcript([*older, *recent], budget_chars=100_000)
-    named = Message(
-        role="assistant",
-        content="",
-        tool_calls=[{"function": {"name": "sk-ABCDEF1234567890abcdef1234", "arguments": "{}"}}],
-    )
-    assert "ABCDEF1234567890" not in render_transcript([named, *recent], budget_chars=100_000)
-
-    unredactable = render_transcript(
-        [Message(role="tool", content="k" * 70_000, tool_name="shell")],
-        budget_chars=80_000,
-    )
-    assert "kkkk" not in unredactable
-
-
 @pytest.mark.asyncio
 async def test_a_skills_root_that_cannot_be_fingerprinted_still_settles_the_review(tmp_path: Path) -> None:
     """Worker code can replace the skills root after a review wrote, and the review must still settle as done."""
@@ -1613,21 +1561,3 @@ async def test_a_skills_root_that_cannot_be_fingerprinted_still_settles_the_revi
         await _cycle(config, paths)
     (entry,) = _entries(paths).values()
     assert (entry["failures"], entry["has_new_runs"], _marker_index(entry)) == (0, False, 0)
-
-
-def test_chunked_redaction_keeps_every_line_and_fails_closed_only_where_needed() -> None:
-    """Multi-chunk text comes back line for line; a key ending its line blanks only the line that may hold its value."""
-    plain = "\n".join(f"line {index} " + "x" * 90 for index in range(2_000))
-    assert transcript._redacted(plain) == plain
-    manifest = "\n".join(
-        ["y" * 80] * 1_000 + ["env:", "  - name: DB_PASSWORD", "    valueFrom:", "      secretKeyRef:"],
-    )
-    manifest += "\n        name: db\n        key: password\n" + "\n".join(["z" * 80] * 1_000)
-    redacted = transcript._redacted(manifest).split("\n")
-    assert len(redacted) == manifest.count("\n") + 1
-    assert redacted.count(REDACTION_FAILED) <= 2
-    assert redacted[-1] == "z" * 80
-    token = "Zq8vN3pL7wX2kR9mT4yB6cD1fG5hJ0aa"  # noqa: S105 - synthetic, recognizable only through its prefix
-    for gap in ("\ntoken\n", " " * 300 + "\n", "\n" * 5):
-        pad = "q" * (60_000 - len("Authorization: Bearer") - 1 - len(gap))
-        assert token not in transcript._redacted(f"{pad}\nAuthorization: Bearer{gap}{token}\ndone"), repr(gap[:8])

@@ -64,6 +64,8 @@ _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
 # Values that only stand in for a secret: shell or template references, ellipses, and masking runs.
 _PLACEHOLDER_PATTERN = re.compile(r"^[$<{%\[]|\.\.\.|x{4,}|\*{3,}", re.IGNORECASE)
 _ASSIGNED_VALUE_PATTERN = re.compile(r"[\"']?([^\s\"',;&)\]}]+)")
+# A YAML block scalar indicator, whose value is the more-indented lines below its key.
+_BLOCK_SCALAR_PATTERN = re.compile(r"[|>][+-]?[0-9]?")
 # Assigned code rather than a literal: a call, a subscript, or a dotted attribute reference.
 _CODE_REFERENCE_PATTERN = re.compile(r".*[(\[].*|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
 # An unterminated block still redacts through the end of the text, so a split key never leaks its body.
@@ -563,6 +565,11 @@ def contains_credential(value: str) -> bool:
         key = match.group("key")
         assigned = _ASSIGNED_VALUE_PATTERN.match(value, match.end())
         secret_named = _is_sensitive_key(key) or key.lower().endswith(("_token", "_key"))
+        if secret_named and (assigned is None or _BLOCK_SCALAR_PATTERN.fullmatch(assigned.group(1))):
+            # A YAML block or a value that starts on the next line lives in the more-indented lines below the key.
+            if any(_looks_like_secret(word) for word in _indented_block_words(value, match.start(), match.end())):
+                return True
+            continue
         if (
             secret_named
             and assigned is not None
@@ -571,6 +578,18 @@ def contains_credential(value: str) -> bool:
         ):
             return True
     return False
+
+
+def _indented_block_words(value: str, key_start: int, value_start: int) -> list[str]:
+    """Return the words on the lines after a key that are indented deeper than the key."""
+    before_key = value[value.rfind("\n", 0, key_start) + 1 : key_start]
+    indent = len(before_key) - len(before_key.lstrip())
+    words: list[str] = []
+    for line in value[value_start:].split("\n")[1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= indent:
+            break
+        words.extend(line.split())
+    return words
 
 
 def _looks_like_secret(value: str) -> bool:
