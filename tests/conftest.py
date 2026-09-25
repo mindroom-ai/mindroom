@@ -827,8 +827,8 @@ def _postgres_container_name(run_id: str, prefix: str) -> str:
 
 
 # The controller creates the pipe and every worker mounts it, so they must agree
-# on its directory. Captured at import, before the root conftest points each
-# worker's temp root into that worker's own pytest base directory.
+# on its directory. Captured at import, before pytest-shm points each process's
+# temp root into that process's own pytest base directory at session start.
 _OWNER_PIPE_ROOT = Path(tempfile.gettempdir())
 
 
