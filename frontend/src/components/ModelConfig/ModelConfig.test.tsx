@@ -659,6 +659,55 @@ describe("ModelConfig", () => {
     },
   );
 
+  it("deletes a saved key exactly once when a row switches to a keyless provider and is renamed", async () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...mockStore,
+      config: {
+        ...mockStore.config,
+        models: {
+          ...mockStore.config.models,
+          switching: { provider: "openrouter", id: "some-model" },
+        },
+      },
+    } as never);
+    keyStatusByService["model:switching"] = {
+      has_key: true,
+      source: "ui",
+      masked_key: "sk-ui...4321",
+      api_key: "sk-dashboard-real",
+    };
+
+    render(<ModelConfig />);
+
+    const initialRow = screen.getByText("switching").closest("tr");
+    if (!initialRow) throw new Error("row not found");
+    await waitFor(() => {
+      expect(within(initialRow).getByText("Custom key")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("switching"));
+    const row = screen.getByDisplayValue("switching").closest("tr");
+    if (!row) throw new Error("row not found");
+    fireEvent.click(within(row).getAllByRole("combobox")[0]);
+    fireEvent.click(screen.getByRole("option", { name: /Vertex AI Claude/ }));
+    fireEvent.change(within(row).getByDisplayValue("switching"), {
+      target: { value: "renamed" },
+    });
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "renamed"],
+        expect.objectContaining({ provider: "vertexai_claude" }),
+      );
+    });
+    const deletes = fetchMock.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method === "DELETE",
+    );
+    expect(deletes).toEqual([
+      ["/api/credentials/model:switching", { method: "DELETE" }],
+    ]);
+  });
+
   it.each(["codex", "kimi", "bedrock_claude", "vertexai_claude", "synthetic"])(
     "shows no key status for %s, which drops config and saved API keys",
     async (provider) => {
