@@ -142,6 +142,7 @@ uv tool install 'mindroom[desktop]'
 
 macOS supports native semantic state through AXUIElement and requires Accessibility permission for state and control.
 macOS screenshots require macOS 14 or newer and Screen Recording permission.
+When `mindroom desktop run` starts from a terminal, macOS attributes both permissions to that terminal app and applies a new grant only after the app is quit and reopened, even if it already appears enabled.
 ScreenCaptureKit captures the exact selected window, with its process and bounds checked before capture.
 Windows and Linux currently expose screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
 Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.

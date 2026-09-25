@@ -393,6 +393,29 @@ def test_desktop_setup_compares_saved_session_with_default_homeserver(
     assert not pair.called
 
 
+@pytest.mark.parametrize("inside_tmux", [False, True])
+def test_missing_macos_permission_says_to_restart_the_terminal_app(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    inside_tmux: bool,
+) -> None:
+    """A granted but not yet applied permission is the common case, so the restart comes first."""
+    monkeypatch.setattr("mindroom.desktop.provider.request_macos_desktop_permissions", lambda: ("Accessibility",))
+    if inside_tmux:
+        monkeypatch.setenv("TMUX", "/private/tmp/tmux-501/default,1,0")
+    else:
+        monkeypatch.delenv("TMUX", raising=False)
+
+    with pytest.raises(DesktopProviderError) as raised:
+        desktop_cli._request_required_desktop_permissions()
+
+    message = str(raised.value)
+    assert message.startswith("macOS has not applied Accessibility permission")
+    assert "already listed and enabled" in message
+    assert "Cmd-Q" in message
+    assert ("tmux kill-server" in message) is inside_tmux
+
+
 def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Long-running sync receives the same proxy headers as one-time login."""
     runtime_paths = SimpleNamespace(storage_root=tmp_path)

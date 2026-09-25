@@ -102,10 +102,13 @@ def _request_required_desktop_permissions() -> None:
     permission_names = " and ".join(missing_permissions)
     permission_label = "permission" if len(missing_permissions) == 1 else "permissions"
     msg = (
-        f"macOS requested {permission_names} {permission_label}. Grant the requested access to the terminal app "
-        "running this command in System Settings > Privacy & Security, fully quit and reopen that app, then run "
-        "`mindroom desktop run` again."
+        f"macOS has not applied {permission_names} {permission_label} to the terminal app running this command. "
+        "macOS applies a grant only after that app restarts, even if it is already listed and enabled in "
+        "System Settings > Privacy & Security. Enable it there if needed, quit the terminal app completely "
+        "(Cmd-Q; closing its windows is not enough), reopen it, then run `mindroom desktop run` again."
     )
+    if os.environ.get("TMUX"):
+        msg += " Inside tmux, macOS checks the tmux server instead: run `tmux kill-server` or start the bridge outside tmux."
     raise DesktopProviderError(msg)
 
 
