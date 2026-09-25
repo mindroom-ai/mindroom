@@ -414,7 +414,10 @@ def desktop_setup(
     from mindroom.desktop.session import desktop_session_path  # noqa: PLC0415
 
     runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
-    if not desktop_session_path(runtime_paths).exists():
+    session_path = desktop_session_path(runtime_paths)
+    if session_path.exists():
+        _require_saved_session_matches(session_path, user_id=user_id, homeserver=homeserver)
+    else:
         desktop_login(
             user_id=user_id,
             homeserver=homeserver,
@@ -437,6 +440,27 @@ def desktop_setup(
         config_path=config_path,
         storage_path=storage_path,
     )
+
+
+def _require_saved_session_matches(session_path: Path, *, user_id: str | None, homeserver: str | None) -> None:
+    """Refuse to pair a saved session that belongs to another homeserver or user."""
+    from mindroom.desktop.session import DesktopSessionError, load_desktop_session  # noqa: PLC0415
+
+    try:
+        session = load_desktop_session(session_path)
+    except DesktopSessionError as exc:
+        _error_console.print(f"[red]Desktop setup failed:[/red] {exc}")
+        raise typer.Exit(1) from None
+    homeserver_differs = homeserver is not None and homeserver.rstrip("/") != session.homeserver.rstrip("/")
+    user_differs = user_id is not None and user_id != session.user_id
+    if homeserver_differs or user_differs:
+        _error_console.print(
+            f"[red]Desktop setup failed:[/red] The saved session at {session_path} belongs to "
+            f"{session.user_id} on {session.homeserver}, not {user_id or session.user_id} on "
+            f"{homeserver or session.homeserver}. Pass --storage-path for a separate setup, or run "
+            "'mindroom desktop login --replace' to replace the saved session.",
+        )
+        raise typer.Exit(1)
 
 
 async def _pair_desktop(
