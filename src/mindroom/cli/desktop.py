@@ -19,20 +19,12 @@ from rich.console import Console
 
 from mindroom.desktop.command_journal import DesktopCommandJournalError, check_controller_binding
 from mindroom.desktop.login_method import DesktopLoginMethod
-from mindroom.desktop.native_config import (
-    NativeBrowserConfig,
-    NativeCaptureConfig,
-    NativeConfigError,
-    NativeDesktopConfig,
-    load_native_config,
-    native_config_path,
-    save_native_config,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mindroom.constants import RuntimePaths
+    from mindroom.desktop.native_config import NativeDesktopConfig
     from mindroom.desktop.session import DesktopMatrixSession
 
 _console = Console()
@@ -443,6 +435,17 @@ def desktop_setup(
 ) -> None:
     """Pair and save the connection shared with the macOS app."""
     from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
+
+    # Native configuration uses Unix file locks; CLI help must remain portable.
+    from mindroom.desktop.native_config import (  # noqa: PLC0415
+        NativeBrowserConfig,
+        NativeCaptureConfig,
+        NativeConfigError,
+        NativeDesktopConfig,
+        load_native_config,
+        native_config_path,
+        save_native_config,
+    )
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
         desktop_session_path,
@@ -753,6 +756,15 @@ def _resolve_run_config(
     browser_timeout_seconds: int | None,
 ) -> NativeDesktopConfig:
     """Resolve one run without combining a new controller with saved authority."""
+    # Native configuration uses Unix file locks; CLI help must remain portable.
+    from mindroom.desktop.native_config import (  # noqa: PLC0415
+        NativeBrowserConfig,
+        NativeCaptureConfig,
+        NativeConfigError,
+        NativeDesktopConfig,
+        load_native_config,
+        native_config_path,
+    )
     from mindroom.matrix.olm_to_device import PinnedMatrixDevice  # noqa: PLC0415
 
     try:

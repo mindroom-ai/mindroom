@@ -253,6 +253,26 @@ def test_participation_state_has_no_framework_dependencies() -> None:
     )
 
 
+def test_cli_help_does_not_require_unix_file_locking() -> None:
+    """Desktop's platform-specific implementation must not break general CLI help on Windows."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.modules['fcntl'] = None; "
+            "from typer.testing import CliRunner; from mindroom.cli.main import app; "
+            "result = CliRunner().invoke(app, ['--help']); print(result.output); "
+            "raise SystemExit(result.exit_code)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert "Usage:" in result.stdout
+
+
 def test_primary_runtime_defers_heavy_optional_dependencies() -> None:
     """The orchestrator import must leave provider, storage, and ML/data engines unloaded."""
     _assert_probe_clean("mindroom.orchestrator", _HEAVY_OPTIONAL_RUNTIME_ROOTS)
