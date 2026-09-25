@@ -63,6 +63,8 @@ _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
 # Values that only stand in for a secret: shell or template references, ellipses, and masking runs.
 _PLACEHOLDER_PATTERN = re.compile(r"^[$<{%\[]|\.\.\.|x{4,}|\*{3,}", re.IGNORECASE)
 _ASSIGNED_VALUE_PATTERN = re.compile(r"[\"']?([^\s\"',;&)\]}]+)")
+# Assigned code rather than a literal: a call, a subscript, or a dotted attribute reference.
+_CODE_REFERENCE_PATTERN = re.compile(r".*[(\[].*|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
 # An unterminated block still redacts through the end of the text, so a split key never leaks its body.
 _PRIVATE_KEY_PATTERN = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
@@ -552,14 +554,28 @@ def contains_credential(value: str) -> bool:
     if any(_url_holds_secret(match.group("url")) for match in _URL_PATTERN.finditer(value)):
         return True
     for match in _ASSIGNMENT_PREFIX_PATTERN.finditer(value):
+        key = match.group("key")
         assigned = _ASSIGNED_VALUE_PATTERN.match(value, match.end())
-        if _is_sensitive_key(match.group("key")) and assigned is not None and _looks_like_secret(assigned.group(1)):
+        secret_named = _is_sensitive_key(key) or key.lower().endswith(("_token", "_key"))
+        if (
+            secret_named
+            and assigned is not None
+            and _looks_like_secret(assigned.group(1))
+            and not _CODE_REFERENCE_PATTERN.fullmatch(assigned.group(1))
+        ):
             return True
     return False
 
 
 def _looks_like_secret(value: str) -> bool:
-    return len(value) >= 16 and len(set(value)) >= 8 and not _PLACEHOLDER_PATTERN.search(value)
+    """Long mixed letters and digits that no placeholder marker stands in for."""
+    return (
+        len(value) >= 16
+        and len(set(value)) >= 8
+        and any(character.isdigit() for character in value)
+        and any(character.isalpha() for character in value)
+        and not _PLACEHOLDER_PATTERN.search(value)
+    )
 
 
 def _url_holds_secret(url: str) -> bool:
