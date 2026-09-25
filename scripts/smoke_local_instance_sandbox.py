@@ -63,16 +63,21 @@ def compose_command(project_name: str, env_file: Path, override_file: Path, *arg
     return ["docker", "compose", "--env-file", str(env_file), *files, "-p", project_name, *args]
 
 
-def exec_python(compose: list[str], service: str, code: str, *args: str) -> str:
+def exec_python(compose: list[str], service: str, code: str, *args: str, check: bool = True) -> str:
     """Run a Python snippet inside one smoke service and return its output."""
     command = [*compose, "exec", "-T", service, PYTHON, "-c", code, *args]
-    return run_command(command, check=False, capture_output=True).stdout.strip()
+    return run_command(command, check=check, capture_output=True).stdout.strip()
 
 
 def tcp_reachability(compose: list[str], service: str, targets: list[str]) -> dict[str, bool]:
     """Return which host:port targets accept TCP connections from inside one service."""
     lines = exec_python(compose, service, TCP_PROBE, *targets).splitlines()
-    return {target: state == "open" for target, state in (line.rsplit(" ", 1) for line in lines)}
+    reachability = {target: state == "open" for target, state in (line.rsplit(" ", 1) for line in lines)}
+    # A probe that reports on other targets must not pass an all-open or all-closed check vacuously.
+    if set(reachability) != set(targets):
+        msg = f"[error] {service} probe reported {lines} for {targets}"
+        raise RuntimeError(msg)
+    return reachability
 
 
 def runtime_network_ip(container_name: str, network_name: str) -> str:
@@ -87,7 +92,7 @@ def runtime_network_ip(container_name: str, network_name: str) -> str:
 def wait_for_relay(compose: list[str]) -> None:
     """Poll the runner health endpoint through the relay until it answers."""
     for _ in range(60):
-        if exec_python(compose, "mindroom", HTTP_PROBE, "http://sandbox-relay:8766/healthz") == "200":
+        if exec_python(compose, "mindroom", HTTP_PROBE, "http://sandbox-relay:8766/healthz", check=False) == "200":
             log("[smoke] sandbox runner answers through the relay")
             return
         time.sleep(2)

@@ -335,6 +335,18 @@ def _require_instance_env_file(name: str) -> Path:
     raise typer.Exit(1)
 
 
+def _env_file_value(raw_value: str) -> str:
+    """Parse one env-file value like Compose: quotes delimit it, and ` #` starts an unquoted comment."""
+    value = raw_value.strip()
+    if value[:1] in {"'", '"'} and (end := value.find(value[0], 1)) != -1:
+        return value[1:end]
+    if value.startswith("#"):
+        # Compose reads `KEY= # note` as "# note"; treat such a placeholder as unset rather than as a secret.
+        return ""
+    comment = value.find(" #")
+    return (value if comment == -1 else value[:comment]).rstrip()
+
+
 def _read_env_values(env_file: Path) -> dict[str, str]:
     """Read KEY=VALUE assignments from an instance env file; later assignments win, as in Compose."""
     values: dict[str, str] = {}
@@ -344,7 +356,7 @@ def _read_env_values(env_file: Path) -> dict[str, str]:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            values[key.strip().removeprefix("export ").strip()] = value.strip().strip("'\"")
+            values[key.strip().removeprefix("export ").strip()] = _env_file_value(value)
     return values
 
 

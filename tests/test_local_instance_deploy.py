@@ -1343,7 +1343,10 @@ def test_rendered_compose_isolates_sandbox_runner(
     services = model["services"]
     assert set(services["sandbox-runner"]["networks"]) == {"sandbox-network"}
     assert set(services["sandbox-relay"]["networks"]) == {"mindroom-network", "sandbox-network"}
-    assert services["sandbox-relay"]["command"][-2:] == ["sandbox-runner", "8766"]
+    assert services["sandbox-relay"]["command"] == [
+        *["tcpsvd", "-c", "256", "-C", "128", "0.0.0.0", "8766"],  # noqa: S104
+        *["nc", "sandbox-runner", "8766"],
+    ]
     assert services["sandbox-relay"]["sysctls"] == {"net.ipv4.ip_forward": "0"}
     for name, service in services.items():
         if name not in _SANDBOX_SERVICES:
@@ -1414,6 +1417,66 @@ def test_ensure_env_secrets_fills_only_empty_values(tmp_path: Path) -> None:
     assert values["POSTGRES_PASSWORD"] == "existing"  # noqa: S105
     assert deploy._ensure_env_secrets(env_file, names) == []
     assert env_file.read_text() == written
+
+
+_ENV_VALUE_CASES = {
+    "EMPTY": ("", ""),
+    "PLAIN": ("abc", "abc"),
+    "SPACED": ("  spaced  ", "spaced"),
+    "COMMENT": ("abc # note", "abc"),
+    "COMMENT_AFTER_SPACES": ("abc  #  note", "abc"),
+    "HASH_INSIDE": ("abc#def", "abc#def"),
+    "DOUBLE_QUOTED": ('"abc # kept"', "abc # kept"),
+    "SINGLE_QUOTED": ("'abc # kept'", "abc # kept"),
+    "QUOTED_THEN_COMMENT": ("'abc' # note", "abc"),
+    "QUOTED_EMPTY_THEN_COMMENT": ('"" # note', ""),
+}
+
+
+def test_read_env_values_matches_compose_interpolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """deploy.py must see the same value Compose interpolates, so it never skips a secret Compose leaves empty."""
+    _require_docker_compose()
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent-mindroom-test.sock")
+    for name in _ENV_VALUE_CASES:
+        monkeypatch.delenv(name, raising=False)
+    env_file = tmp_path / "values.env"
+    env_file.write_text("".join(f"{name}={raw}\n" for name, (raw, _expected) in _ENV_VALUE_CASES.items()))
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "probe": {
+                        "image": "busybox",
+                        "environment": {name: f"[${{{name}:-}}]" for name in _ENV_VALUE_CASES},
+                    },
+                },
+            },
+        ),
+    )
+
+    result = _REAL_SUBPROCESS_RUN(
+        ["docker", "compose", "--env-file", str(env_file), "-f", str(compose_file), "-p", "probe", "config"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    rendered = yaml.safe_load(result.stdout)["services"]["probe"]["environment"]
+    parsed = deploy._read_env_values(env_file)
+    for name, (_raw, expected) in _ENV_VALUE_CASES.items():
+        assert rendered[name] == f"[{expected}]", name
+        assert parsed[name] == expected, name
+
+
+def test_env_placeholder_comment_counts_as_missing_secret(tmp_path: Path) -> None:
+    """A `KEY= # note` placeholder is replaced, because Compose would otherwise use the comment as the secret."""
+    env_file = tmp_path / "alpha.env"
+    env_file.write_text("MINDROOM_API_KEY= # set a dashboard key\n")
+
+    assert deploy._ensure_env_secrets(env_file, ("MINDROOM_API_KEY",)) == ["MINDROOM_API_KEY"]
+    assert len(deploy._read_env_values(env_file)["MINDROOM_API_KEY"]) == 64
 
 
 @pytest.mark.parametrize("command", ["start", "restart", "restart_all"])

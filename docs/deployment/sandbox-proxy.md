@@ -96,7 +96,7 @@ services:
       - ALL
     sysctls:
       net.ipv4.ip_forward: 0
-    command: ["tcpsvd", "-c", "256", "0.0.0.0", "8766", "nc", "sandbox-runner", "8766"]
+    command: ["tcpsvd", "-c", "256", "-C", "128", "0.0.0.0", "8766", "nc", "sandbox-runner", "8766"]
     networks:
       - mindroom-network
       - sandbox-network
@@ -111,7 +111,8 @@ networks:
 
 Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
 Do not attach the runner to a network shared with MindRoom, its homeserver, or databases, because tool code could then call the MindRoom API or read those services directly.
-Keep IP forwarding disabled in the relay, because tool code can otherwise send packets for the MindRoom network through it.
+Cap connections per address in the relay (`-C`), because tool code can connect to the relay too and could otherwise use up every slot MindRoom needs.
+Disabling IP forwarding in the relay is defense in depth: a non-root runner cannot send raw packets, but a runner started as root could route them through the relay into the MindRoom network.
 Set `MINDROOM_API_KEY` as well, because the runner keeps outbound access and can still reach MindRoom through ports published on the host or its public URL.
 
 > [!IMPORTANT]

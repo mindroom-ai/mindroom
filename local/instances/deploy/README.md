@@ -100,8 +100,8 @@ This will start:
 Before starting the sandbox runner, Compose initializes its scratch volume ownership using `UID` and `GID` (both default to `1000`).
 
 The sandbox runner joins only its own `sandbox-network`, so tool code cannot open connections to MindRoom, PostgreSQL, Redis, Authelia, or the homeserver over Docker networking.
-The `sandbox-relay` container joins both networks, forwards only the runner port, and does not route other traffic.
-The runner keeps outbound internet access for package installs and web requests, so like any other client it can reach the instance's published host ports and public routes.
+The `sandbox-relay` container joins both networks, forwards only the runner port, caps connections per address, and does not route other traffic.
+The runner keeps outbound internet access for package installs and web requests, so like any other client it can reach public routes and every port that any instance or other host service publishes on the host's interfaces.
 `MINDROOM_API_KEY` protects the MindRoom API on those paths, and PostgreSQL and Redis publish no host ports.
 
 ### 4. Access Your Instance
@@ -363,7 +363,8 @@ No manual steps are required.
 Compose then creates `sandbox-network` and the relay, recreates the runner on the new network, and reuses the existing `mindroom-network`, so attached bridges stay connected.
 Synapse instances keep their existing PostgreSQL password and unauthenticated Redis, which the runner can no longer reach.
 To enable Redis authentication on such an instance anyway, set one new value as `REDIS_PASSWORD` in the env file and as `redis.password` in `{DATA_DIR}/synapse/homeserver.yaml`, then restart it.
-When you run Docker Compose directly with an older env file, run `./deploy.py start <name>` once or add `MINDROOM_SANDBOX_PROXY_TOKEN` yourself, because the runner otherwise rejects every tool call.
+When you run Docker Compose directly with an older env file, run `./deploy.py start <name>` once or add random values for both `MINDROOM_API_KEY` and `MINDROOM_SANDBOX_PROXY_TOKEN` yourself.
+Without the token the runner rejects every tool call, and without the API key tool code can call the MindRoom API through its published host port.
 
 ## Examples
 
