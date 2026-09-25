@@ -167,7 +167,7 @@ async def test_final_approval_links_the_delivered_attempt(
 
 @pytest.mark.asyncio
 async def test_each_approved_continuation_refreshes_its_skill_review_conversation(tmp_path: Path) -> None:
-    """Chained approvals of one response keep its conversation fresh, so the finished run still counts."""
+    """Every approved continuation registers its conversation again, which keeps it fresh across chained approvals."""
     runner = await _runner_with_source(tmp_path)
     runner.deps.runtime.config.agents["general"].skill_learning.enabled = True
     await _seed_ready_continuation(runner)

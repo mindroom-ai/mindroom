@@ -9933,7 +9933,9 @@ async def test_shutdown_waits_for_a_pending_skill_review_registration(tmp_path: 
         registered.append(completed)
 
     with patch("mindroom.response_runner.queue_skill_review", slow_queue):
-        runner._start_skill_review(agent_name="general", session_id="session-1", execution_identity=None)
+        runner._register_skill_review(
+            runner._skill_review(agent_name="general", session_id="session-1", execution_identity=None),
+        )
         await wait_for_background_tasks(owner=runner.deps.runtime)
     assert registered == [False]
 
