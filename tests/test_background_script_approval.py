@@ -379,7 +379,9 @@ async def test_cancelled_background_call_is_denied_retired_and_pruned_with_run(t
             _origin(),
             reason="Background script ownership was cancelled.",
         )
-        decision = await asyncio.wait_for(decision_task, timeout=1.0)
+        # The waiter rereads the durable decision once a second, so it can take a
+        # whole poll interval to see the settlement.
+        decision = await asyncio.wait_for(decision_task, timeout=5.0)
 
         assert settled is True
         assert decision.status == "denied"
