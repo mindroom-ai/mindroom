@@ -3,8 +3,13 @@
 Entries are keyed by agent, private worker scope, and session, never by requester, so a shared thread is reviewed
 once however many people talk in it. Progress is read from the session itself: the model replies in runs after
 ``reviewed_through``, the position of the newest run a review already covered. A position is the run's creation
-time and its run index; Agno never renumbers run indexes, and a new run can only reuse the index of a deleted
-newest run with a later creation time, so compaction or redaction deleting runs cannot hide new ones.
+second and its run index. Agno never renumbers run indexes, and a new run that reuses the index of a deleted
+newest run is created in a later second unless the deleted run was created, answered, reviewed, and deleted within
+that same second, so compaction or redaction deleting runs does not hide new ones.
+
+An entry is due while ``has_new_runs`` is set. Only a count that finds nothing to review, a settled review, or an
+abandoned retry clears it, and only when no response arrived since the claim, so a deferred, interrupted, or
+failing review is picked up again.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from contextlib import AbstractContextManager
 
     from mindroom.config.main import Config
@@ -35,6 +41,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 RunPosition = tuple[int, int]
+NO_RUN: RunPosition = (-1, -1)
 _STATE_FILENAME = "skill_learning_state.json"
 _MAX_ENTRIES = 5000
 _MAX_DUE_ENTRIES = 32
@@ -151,10 +158,11 @@ def _entry_is_current(config: Config, entry: QueueEntry, now: float) -> bool:
         return False
 
 
-def claim_due_reviews(config: Config, runtime_paths: RuntimePaths, *, now: float) -> list[tuple[str, QueueEntry]]:
-    """Drop retired entries and return conversations with new runs to count or a review to retry.
+def drop_retired_reviews(config: Config, runtime_paths: RuntimePaths, *, now: float) -> list[tuple[str, QueueEntry]]:
+    """Drop entries of disabled agents, stale conversations, and changed scopes, and return the others.
 
-    Scope resolution happens outside the lock that completed responses also take.
+    The orchestrator also calls this while no agent learns, so re-enabling learning never reviews the time it was
+    off. Scope resolution happens outside the lock that completed responses also take.
     """
     with _locked(runtime_paths):
         state = _read(runtime_paths)
@@ -171,11 +179,13 @@ def claim_due_reviews(config: Config, runtime_paths: RuntimePaths, *, now: float
                 if state.entries.get(key) == snapshot:
                     del state.entries[key]
             _write(runtime_paths, state)
-    due = [
-        (key, entry)
-        for key, entry in current
-        if entry.next_attempt_at <= now and (entry.has_new_runs or entry.failures)
-    ]
+    return current
+
+
+def claim_due_reviews(config: Config, runtime_paths: RuntimePaths, *, now: float) -> list[tuple[str, QueueEntry]]:
+    """Drop retired entries and return conversations with new runs to count or a review to retry."""
+    current = drop_retired_reviews(config, runtime_paths, now=now)
+    due = [(key, entry) for key, entry in current if entry.has_new_runs and entry.next_attempt_at <= now]
     return due[:_MAX_DUE_ENTRIES]
 
 
@@ -184,59 +194,69 @@ def record_count(
     key: str,
     *,
     claimed: QueueEntry,
+    replies: Sequence[tuple[RunPosition, int]],
     start: RunPosition,
-    newest: RunPosition,
+    interval: int,
     skills_root: str,
     fingerprint: str,
-) -> RunPosition:
-    """Mark the conversation counted and return the run position its count starts after.
+) -> int:
+    """Place the conversation's marker and return the model replies after it.
 
-    ``start`` is the position just before the response that created the entry and ``newest`` the newest one.
-    Hermes resets its counter when the agent saves a skill itself; here counting restarts after ``newest`` when
-    anyone other than the learner changed the workspace skills since this conversation last looked. The
-    comparison uses the stored state, which reviews of other conversations move forward when the learner itself
-    changes skills.
+    ``replies`` holds each visible run's position and model replies, oldest first, and ``start`` is the position
+    just before the response that created the entry. Hermes resets its counter when the agent saves a skill
+    itself; here counting restarts after the newest run when anyone other than the learner changed the workspace
+    skills since this conversation last looked. The comparison uses the stored state, which reviews of other
+    conversations move forward when the learner itself changes skills.
     """
+    newest = replies[-1][0] if replies else NO_RUN
     with _locked(runtime_paths):
         state = _read(runtime_paths)
         entry = state.entries.get(key)
         if entry is None:
-            return newest
+            return 0
         if entry.seen_fingerprint not in {None, fingerprint}:
             reviewed_through = newest
         else:
             reviewed_through = start if entry.reviewed_through is None else entry.reviewed_through
+        pending = sum(count for position, count in replies if position > reviewed_through)
         update: dict[str, object] = {
             "first_run_id": None,
             "reviewed_through": reviewed_through,
             "skills_root": skills_root,
             "seen_fingerprint": fingerprint,
         }
-        if entry.last_seen_at == claimed.last_seen_at:
-            # A response that completed after the claim keeps its mark for the next cycle to count.
-            update["has_new_runs"] = False
+        if pending < interval:
+            update |= _idle(entry, claimed)
         state.entries[key] = entry.model_copy(update=update)
         _write(runtime_paths, state)
-    return reviewed_through
+    return pending
+
+
+def _idle(entry: QueueEntry, claimed: QueueEntry) -> dict[str, object]:
+    """Clear the entry's due state, unless a response completed after the claim and still needs counting."""
+    if entry.last_seen_at != claimed.last_seen_at:
+        return {"failures": 0, "next_attempt_at": 0.0}
+    return {"has_new_runs": False, "failures": 0, "next_attempt_at": 0.0}
 
 
 def settle_review(
     runtime_paths: RuntimePaths,
     key: str,
     *,
+    claimed: QueueEntry,
     outcome: Literal["reviewed", "failed", "interrupted"],
     now: float,
     through: RunPosition | None = None,
     learner_change: tuple[str, str] | None = None,
 ) -> None:
-    """Close one review attempt.
+    """Close one review or count attempt.
 
-    A review moves the marker to ``through``, the newest run it saw; a failure keeps the marker for a backed-off
-    retry until it is abandoned; an interruption by shutdown keeps everything for the next start. A failure that
-    happened before counting passes no ``through``, and abandoning it keeps the marker. ``learner_change`` is the
-    ``(before, after)``
-    skills fingerprint around the learner's own writes: every conversation that saw ``before`` in the same
-    workspace moves to ``after``, so those writes never read as someone else's edits.
+    A review moves the marker to ``through``, the newest run it saw. A failure keeps the marker and the due state
+    for a backed-off retry, and the third one is abandoned like a review; a failure before counting passes no
+    ``through`` and keeps the marker. An interruption by shutdown keeps everything for the next start.
+    ``learner_change`` is the ``(before, after)`` skills fingerprint around the learner's own writes: every
+    conversation that saw ``before`` in the same workspace moves to ``after``, so those writes never read as
+    someone else's edits.
     """
     with _locked(runtime_paths):
         state = _read(runtime_paths)
@@ -250,7 +270,7 @@ def settle_review(
                     state.entries[other_key] = other.model_copy(update={"seen_fingerprint": after})
             entry = state.entries[key]
         failures = entry.failures + 1
-        done: dict[str, object] = {"failures": 0, "next_attempt_at": 0.0}
+        done = _idle(entry, claimed)
         if through is not None:
             done["reviewed_through"] = through
         if outcome == "reviewed":

@@ -62,11 +62,11 @@ MindRoom's architecture consists of several key components working together.
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
 | `background_loop.py` | Wakeable loops and cross-thread wake signals shared by durable per-session background workers |
-| `skill_learning/queue.py` | Durable per-conversation review counters: run-ID accounting, scope keys, retries, and retention |
+| `skill_learning/queue.py` | Durable per-conversation review markers: run positions, due state, scope keys, retries, and retention |
 | `skill_learning/worker.py` | Background worker that counts completed runs, triggers reviews at the interval, and posts change notices |
 | `skill_learning/reviewer.py` | One bounded skill review: Hermes-derived prompt, skill-only tools, read-before-write, and input budget |
 | `skill_learning/transcript.py` | Conversation evidence for a review: older-turn digest plus the newest messages verbatim |
-| `skill_learning/library.py` | Confined learner-owned skill writes, ownership marker, history snapshots, archival, and change fingerprints |
+| `skill_learning/library.py` | Confined learner-owned skill writes, ownership provenance, history snapshots, archival, and change fingerprints |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |

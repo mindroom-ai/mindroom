@@ -2091,6 +2091,7 @@ class ResponseRunner:
                 continuation.execution_identity,
                 error_prefix="Approval continuation execution_identity",
             ),
+            attempt_run_ids=(),
         )
 
     def _skill_review(
@@ -2099,8 +2100,13 @@ class ResponseRunner:
         agent_name: str,
         session_id: str,
         execution_identity: ToolExecutionIdentity | None,
+        attempt_run_ids: Sequence[str],
     ) -> Callable[[str], Awaitable[None]]:
-        """Build the handoff that marks a conversation for counting toward a background skill review."""
+        """Build the handoff that marks a conversation for counting toward a background skill review.
+
+        Dynamic-tool continuations and empty-run retries persist each attempt as its own run, so a conversation's
+        first count starts at the response's first attempt, or at its final run when it had a single attempt.
+        """
 
         async def queue(response_run_id: str) -> None:
             await asyncio.to_thread(
@@ -2110,7 +2116,7 @@ class ResponseRunner:
                 agent_name=agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,
-                run_id=response_run_id,
+                run_id=attempt_run_ids[0] if attempt_run_ids else response_run_id,
             )
 
         return queue
@@ -5512,6 +5518,7 @@ class ResponseRunner:
                 agent_name=self.deps.agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,
+                attempt_run_ids=attempt_run_ids,
             )
         )
 

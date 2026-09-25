@@ -362,7 +362,7 @@ def _archive_inactive(root_fd: int, *, archive_after_days: int, now: datetime) -
 
 
 def skills_fingerprint(skills_root: Path) -> str:
-    """Hash visible skill files so edits by anyone but the learner reset the review counter."""
+    """Hash visible skill files so edits by anyone but the learner restart review counting."""
     digest = hashlib.sha256()
     if not skills_root.is_dir():
         return digest.hexdigest()

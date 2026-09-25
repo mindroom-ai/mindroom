@@ -389,6 +389,16 @@ def test_long_tool_output_keeps_its_start_and_end() -> None:
     assert transcript.count("characters omitted") == 1
 
 
+def test_clipping_never_leaves_a_private_key_body_behind() -> None:
+    """A key whose BEGIN line falls in the omitted middle keeps no body or END line in the kept tail."""
+    key = "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIKEYBODY\n" * 3_000 + "-----END RSA PRIVATE KEY-----"
+    output = "x" * 30_000 + key + "\ndone"
+    transcript = render_transcript([Message(role="tool", content=output, tool_name="shell")], budget_chars=40_000)
+    assert "MIIKEYBODY" not in transcript
+    assert "END RSA PRIVATE KEY" not in transcript
+    assert transcript.endswith("done")
+
+
 def test_model_replies_count_only_model_visible_runs() -> None:
     """Each assistant message is one model request; history copies and runs hidden from history do not count."""
     errored = _tool_turn("r4")
@@ -420,49 +430,89 @@ def test_queue_keys_conversations_by_scope_not_requester(tmp_path: Path) -> None
     assert sorted(entry["first_run_id"] for entry in _entries(private_paths).values()) == ["r1", "r2"]
 
 
-def _count(paths: RuntimePaths, key: str, claimed: queue.QueueEntry, *, newest: int, fingerprint: str = "a") -> int:
-    """Record a count whose runs were all created in one second, and return the index it starts after."""
-    _created_at, index = queue.record_count(
+def _count(
+    paths: RuntimePaths,
+    key: str,
+    claimed: queue.QueueEntry,
+    *runs: tuple[int, int],
+    fingerprint: str = "a",
+) -> int:
+    """Record a count of runs given as ``(run_index, replies)`` created in one second; return pending replies."""
+    return queue.record_count(
         paths,
         key,
         claimed=claimed,
+        replies=[((0, index), replies) for index, replies in runs],
         start=(-1, -1),
-        newest=(0, newest),
+        interval=2,
         skills_root="root",
         fingerprint=fingerprint,
     )
-    return index
 
 
 def _marker_index(entry: Mapping[str, Any]) -> int:
     return entry["reviewed_through"][1]
 
 
-def test_queue_marks_new_runs_and_backs_off_failures(tmp_path: Path) -> None:
-    """A count keeps a response that arrived meanwhile; failures back off, and the third is abandoned."""
+def _due(config: Config, paths: RuntimePaths, now: float = 1.0) -> list[str]:
+    return [key for key, _entry in queue.claim_due_reviews(config, paths, now=now)]
+
+
+def test_conversations_stay_due_until_nothing_is_left_to_review(tmp_path: Path) -> None:
+    """A count below the interval clears the due state unless a response arrived; one at the interval keeps it."""
     config, paths = _learner(tmp_path)
     _queue(config, paths, "r1")
     ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
     _queue(config, paths, "r2")
-    assert _count(paths, key, entry, newest=0) == -1
-    assert _entries(paths)[key]["has_new_runs"]
+    assert _count(paths, key, entry, (0, 1)) == 1
+    assert _due(config, paths) == [key]
     ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
-    assert _count(paths, key, entry, newest=1) == -1
-    assert queue.claim_due_reviews(config, paths, now=1.0) == []
+    assert _count(paths, key, entry, (0, 1)) == 1
+    assert _due(config, paths) == []
 
+    _queue(config, paths, "r3")
+    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
+    assert _count(paths, key, entry, (0, 1), (1, 1)) == 2
+    assert _due(config, paths) == [key], "a deferred or interrupted review is claimed again"
+    queue.settle_review(paths, key, claimed=entry, outcome="interrupted", now=1.0, through=(0, 1))
+    assert _due(config, paths) == [key]
+    queue.settle_review(paths, key, claimed=entry, outcome="reviewed", now=1.0, through=(0, 1))
+    assert (_marker_index(_entries(paths)[key]), _due(config, paths)) == (1, [])
+
+
+def test_failed_reviews_back_off_and_the_third_is_abandoned(tmp_path: Path) -> None:
+    """Failures keep the conversation due behind a growing delay; a recount with nothing due clears them."""
+    config, paths = _learner(tmp_path)
+    _queue(config, paths, "r1")
+    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
+    assert _count(paths, key, entry, (0, 2)) == 2
     for attempt in (1, 2):
-        queue.settle_review(paths, key, outcome="failed", now=100.0, through=(0, 1))
+        queue.settle_review(paths, key, claimed=entry, outcome="failed", now=100.0, through=(0, 0))
         state = _entries(paths)[key]
         assert (state["failures"], _marker_index(state)) == (attempt, -1)
         assert state["next_attempt_at"] == 100.0 + 60 * 2 ** (attempt - 1)
-        assert queue.claim_due_reviews(config, paths, now=101.0) == []
-        assert [due_key for due_key, _entry in queue.claim_due_reviews(config, paths, now=10_000.0)] == [key]
-    queue.settle_review(paths, key, outcome="interrupted", now=100.0, through=(0, 1))
-    assert _entries(paths)[key]["failures"] == 2
-    queue.settle_review(paths, key, outcome="failed", now=100.0, through=(0, 1))
+        assert _due(config, paths, now=101.0) == []
+        assert _due(config, paths, now=10_000.0) == [key]
+    queue.settle_review(paths, key, claimed=entry, outcome="failed", now=100.0, through=(0, 0))
     state = _entries(paths)[key]
-    assert (state["failures"], _marker_index(state)) == (0, 1)
-    assert queue.claim_due_reviews(config, paths, now=10_000.0) == []
+    assert (state["failures"], _marker_index(state)) == (0, 0)
+    assert _due(config, paths, now=10_000.0) == []
+
+    _queue(config, paths, "r2")
+    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
+    queue.settle_review(paths, key, claimed=entry, outcome="failed", now=100.0)
+    assert _count(paths, key, entry, (0, 2), fingerprint="changed") == 0
+    assert (_entries(paths)[key]["failures"], _due(config, paths, now=10_000.0)) == (0, [])
+
+
+def test_failing_counts_are_abandoned_instead_of_retried_forever(tmp_path: Path) -> None:
+    """A conversation that cannot be counted stops being claimed after three failures."""
+    config, paths = _learner(tmp_path)
+    _queue(config, paths, "r1")
+    for _attempt in range(3):
+        ((key, entry),) = queue.claim_due_reviews(config, paths, now=10_000.0 * (_attempt + 1))
+        queue.settle_review(paths, key, claimed=entry, outcome="failed", now=10_000.0 * (_attempt + 1))
+    assert _due(config, paths, now=1_000_000.0) == []
 
 
 def test_learner_changes_move_every_conversation_forward(tmp_path: Path) -> None:
@@ -472,10 +522,18 @@ def test_learner_changes_move_every_conversation_forward(tmp_path: Path) -> None
     _queue(config, paths, "o1")
     claimed = dict(queue.claim_due_reviews(config, paths, now=1.0))
     for key in ("mind:session", "mind:other"):
-        _count(paths, key, claimed[key], newest=0)
-    queue.settle_review(paths, "mind:session", outcome="reviewed", now=1.0, through=(0, 0), learner_change=("a", "b"))
-    assert _count(paths, "mind:other", claimed["mind:other"], newest=3, fingerprint="b") == -1
-    assert _count(paths, "mind:other", claimed["mind:other"], newest=3, fingerprint="c") == 3
+        _count(paths, key, claimed[key], (0, 1))
+    queue.settle_review(
+        paths,
+        "mind:session",
+        claimed=claimed["mind:session"],
+        outcome="reviewed",
+        now=1.0,
+        through=(0, 0),
+        learner_change=("a", "b"),
+    )
+    assert _count(paths, "mind:other", claimed["mind:other"], (0, 1), (3, 1), fingerprint="b") == 2
+    assert _count(paths, "mind:other", claimed["mind:other"], (0, 1), (3, 1), fingerprint="c") == 0
 
 
 def test_queue_drops_entries_of_disabled_agents(tmp_path: Path) -> None:
@@ -794,7 +852,7 @@ async def test_worker_reviews_only_at_the_interval_and_posts_a_notice(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_foreign_skill_edits_reset_the_counter(tmp_path: Path) -> None:
+async def test_foreign_skill_edits_restart_counting(tmp_path: Path) -> None:
     """Like Hermes resetting after the agent saves a skill itself, outside skill edits restart the count."""
     config, paths = _learner(tmp_path, review_interval=4)
     _seed(config, paths, _tool_turn("r1"))
@@ -974,8 +1032,8 @@ async def test_learner_edits_in_one_cycle_do_not_reset_later_conversations(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_stop_interrupts_a_running_review_and_keeps_its_counter(tmp_path: Path) -> None:
-    """Shutdown does not wait for a slow review; the durable counter brings it back after restart."""
+async def test_stop_interrupts_a_running_review_and_the_next_start_runs_it(tmp_path: Path) -> None:
+    """Shutdown does not wait for a slow review; the durable queue runs it again after restart."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     model = _model()
@@ -988,7 +1046,12 @@ async def test_stop_interrupts_a_running_review_and_keeps_its_counter(tmp_path: 
         worker.stop()
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5)
     (entry,) = _entries(paths).values()
-    assert (_marker_index(entry), entry["failures"]) == (-1, 0)
+    assert (_marker_index(entry), entry["failures"], entry["has_new_runs"]) == (-1, 0, True)
+    model.release.set()
+    with patch("mindroom.model_loading.get_model_instance", return_value=model):
+        await _cycle(config, paths)
+    assert len(model.requests) == 2
+    assert _marker_index(next(iter(_entries(paths).values()))) == 0
 
 
 def test_archival_skips_unreadable_user_skills(tmp_path: Path) -> None:
@@ -1165,7 +1228,7 @@ def test_pruning_keeps_an_entry_that_received_a_run_meanwhile(tmp_path: Path) ->
     config, paths = _learner(tmp_path)
     _queue(config, paths, "r1")
     ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
-    _count(paths, key, entry, newest=0)
+    _count(paths, key, entry, (0, 1))
     state = json.loads((paths.storage_root / "skill_learning_state.json").read_text())
     state["entries"]["mind:session"]["last_seen_at"] = 0.0
     (paths.storage_root / "skill_learning_state.json").write_text(json.dumps(state))

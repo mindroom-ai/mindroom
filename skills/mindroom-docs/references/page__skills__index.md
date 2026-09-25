@@ -178,8 +178,9 @@ All fields, defaults, and bounds are listed in the [agent configuration referenc
 
 After each successful standalone-agent response to a person in Matrix, including an approved continuation, the background worker counts the model replies stored in that conversation since its last review, counting each tool-calling step and the final answer.
 A review runs once that count reaches `review_interval`, and counting then starts after the newest run the review saw.
-The count is read from the stored runs rather than kept as a separate tally, so it cannot drift from the conversation, and runs that compaction or redaction deletes can neither hide nor repeat later runs.
-Counting starts with the response that first reaches the worker after learning is enabled, so older history is never reviewed.
+The count is read from the stored runs rather than kept as a separate tally, so it cannot drift from the conversation, and runs that compaction or redaction deletes do not hide later runs.
+An approved continuation that finishes after a later turn of the same thread was already reviewed is not counted, although its messages still appear in later reviews.
+Counting starts with the first response after learning is enabled, including every attempt of that response, and conversations are forgotten while no agent learns, so the time learning was off is never reviewed.
 Automated responses from schedules, hooks, and external triggers never start a count, just as Hermes skips reviews for cron jobs, so a thread with only automated runs is never reviewed; in a thread people also use, automated replies are part of the conversation that is counted and reviewed.
 Team responses are excluded.
 When anyone other than the learner changes the workspace skills, for example an agent writing a skill with its file tools, counting starts again after the newest run because that lesson is already saved.
@@ -187,7 +188,7 @@ Conversations are counted per agent and private instance, not per requester, so 
 Minimal-mode turns count like standard turns.
 The queue in `skill_learning_state.json` in the storage root holds each conversation's review marker, retry state, and scope metadata, never message content.
 Reviews run one at a time across processes that share the storage root.
-A failed review, including a provider error, is retried with a growing delay and abandoned after three failures.
+A failed review, including a provider error, is retried with a growing delay and abandoned after three failures, and a later count that finds nothing to review clears the failures.
 A review that already changed skills before failing or timing out counts as done, like Hermes' best-effort review, so it never repeats its edits.
 Shutdown interrupts a running review, which runs again after the next start.
 

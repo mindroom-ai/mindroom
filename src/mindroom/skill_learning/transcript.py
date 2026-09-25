@@ -13,7 +13,7 @@ import re
 from typing import TYPE_CHECKING
 
 from mindroom.history_run_visibility import is_model_history_visible_run
-from mindroom.redaction import redact_sensitive_text
+from mindroom.redaction import REDACTED, redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 _CONVERSATION_ROLES = frozenset({"user", "assistant", "tool"})
 _CLOSING_TAG = re.compile(r"</\s*conversation\s*>", re.IGNORECASE)
+_PRIVATE_KEY_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
 _TAIL_MESSAGES = 24
 _DIGEST_USER_CHARS = 300
 _DIGEST_ASSISTANT_CHARS = 200
@@ -136,4 +137,10 @@ def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     half = limit // 2
-    return f"{text[:half]}\n[... {len(text) - 2 * half} characters omitted ...]\n{text[-half:]}"
+    tail = text[-half:]
+    # Redaction recognizes a private key by its BEGIN line; one that starts in the omitted middle leaves its body
+    # and END line in the tail, so that fragment goes here.
+    end = _PRIVATE_KEY_END.search(tail)
+    if end is not None and "-----BEGIN " not in tail[: end.start()]:
+        tail = REDACTED + tail[end.end() :]
+    return f"{text[:half]}\n[... {len(text) - 2 * half} characters omitted ...]\n{tail}"

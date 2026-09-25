@@ -22,6 +22,7 @@ from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.skill_learning.library import archive_unused_skills, skills_fingerprint
 from mindroom.skill_learning.queue import (
+    NO_RUN,
     SKILL_LEARNING_WAKE,
     QueueEntry,
     RunPosition,
@@ -49,9 +50,6 @@ _POLL_SECONDS = 30
 _MAX_REVIEWS_PER_CYCLE = 4
 
 
-_NO_RUN: RunPosition = (-1, -1)
-
-
 def _conversation_runs(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -76,7 +74,7 @@ def _conversation_runs(
 
 @dataclass
 class SkillLearningWorker:
-    """Serialize reviews across processes sharing one storage root; queued runs survive restarts."""
+    """Serialize reviews across processes sharing one storage root; queued conversations survive restarts."""
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
@@ -128,6 +126,7 @@ class SkillLearningWorker:
                         settle_review,
                         self.runtime_paths,
                         key,
+                        claimed=entry,
                         outcome="failed",
                         now=time.time(),
                     )
@@ -145,25 +144,24 @@ class SkillLearningWorker:
         skills_root = agent_workspace_skills_root(self.runtime_paths, entry.agent, workspace_root=workspace_root)
         runs = await asyncio.to_thread(_conversation_runs, config, self.runtime_paths, entry)
         fingerprint = await asyncio.to_thread(skills_fingerprint, skills_root)
-        positions = [_NO_RUN, *(position for position, _run in runs)]
-        newest = positions[-1]
+        positions = [NO_RUN, *(position for position, _run in runs)]
         # The count starts just before the response that created the entry; without it, at the newest run.
         start = next(
             (positions[number] for number, (_position, run) in enumerate(runs) if run.run_id == entry.first_run_id),
-            newest,
+            positions[-1],
         )
-        reviewed_through = await asyncio.to_thread(
+        replies = await asyncio.to_thread(
             record_count,
             self.runtime_paths,
             key,
             claimed=entry,
+            replies=[(position, count_model_replies([run])) for position, run in runs],
             start=start,
-            newest=newest,
+            interval=config.agents[entry.agent].skill_learning.review_interval,
             skills_root=str(skills_root),
             fingerprint=fingerprint,
         )
-        replies = count_model_replies(run for position, run in runs if position > reviewed_through)
-        return replies, newest, skills_root
+        return replies, positions[-1], skills_root
 
     async def _review(
         self,
@@ -211,10 +209,10 @@ class SkillLearningWorker:
                     timeout=settings.timeout_seconds,
                 )
         except asyncio.CancelledError:
-            # Shutdown keeps the counter for a retry but still records the learner's partial writes as its own;
+            # Shutdown keeps the conversation due for a retry but still records the learner's partial writes;
             # a bookkeeping error here must not replace the cancellation.
             try:
-                self._settle(key, skills_root, before, outcome="interrupted", through=through)
+                self._settle(key, entry, skills_root, before, outcome="interrupted", through=through)
             except Exception:
                 logger.exception("Could not record an interrupted skill review", agent=entry.agent)
             raise
@@ -227,7 +225,7 @@ class SkillLearningWorker:
             # Like Hermes' best-effort review, one that already changed skills is done; rerunning the same
             # conversation would repeat its edits and notices.
             outcome = "reviewed"
-        await asyncio.to_thread(self._settle, key, skills_root, before, outcome=outcome, through=through)
+        await asyncio.to_thread(self._settle, key, entry, skills_root, before, outcome=outcome, through=through)
         changes = progress.changes
         logger.info(
             "Skill review finished",
@@ -242,6 +240,7 @@ class SkillLearningWorker:
     def _settle(
         self,
         key: str,
+        claimed: QueueEntry,
         skills_root: Path,
         before: str,
         *,
@@ -252,6 +251,7 @@ class SkillLearningWorker:
         settle_review(
             self.runtime_paths,
             key,
+            claimed=claimed,
             outcome=outcome,
             now=time.time(),
             through=through,
