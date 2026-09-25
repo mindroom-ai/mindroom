@@ -3638,14 +3638,29 @@ def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_
     assert saved_file.read_text(encoding="utf-8") == "hello"
 
 
-def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
+def test_sandbox_runner_user_scope_base_dir_reaches_only_user_scope_agent_roots(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """User-scoped workers intentionally allow base_dir anywhere under the shared agents tree."""
+    """A user worker addresses its user-scope agents' roots, never agents on other scopes."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml_io.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "agents": {
+                    "coder": {"display_name": "Coder", "worker_scope": "user"},
+                    "ops": {"display_name": "Ops", "worker_scope": "shared"},
+                },
+                "router": {"model": "default"},
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
@@ -3653,8 +3668,8 @@ def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
         (venv_dir / "bin" / "python").symlink_to(Path(sys.executable))
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create):
-        response = runner_client.post(
+    def save_note(agent_name: str) -> object:
+        return runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
             json={
@@ -3663,13 +3678,20 @@ def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
                 "args": ["hello", "note.txt"],
                 "kwargs": {},
                 "worker_key": "v1:tenant-123:user:@alice:example.org",
-                "tool_init_overrides": {"base_dir": "agents/other/workspace"},
+                "tool_init_overrides": {"base_dir": f"agents/{agent_name}/workspace"},
             },
         )
 
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-    assert (storage_root / "agents" / "other" / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create):
+        allowed = save_note("coder")
+        rejected = save_note("ops")
+
+    assert allowed.status_code == 200
+    assert allowed.json()["ok"] is True
+    assert (storage_root / "agents" / "coder" / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
+    assert rejected.status_code == 400
+    assert "allowed state roots" in rejected.json()["detail"]
+    assert not (storage_root / "agents" / "ops").exists()
 
 
 def test_sandbox_runner_rejects_unknown_worker_key_base_dir(

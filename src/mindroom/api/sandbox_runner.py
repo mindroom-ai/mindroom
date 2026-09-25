@@ -1727,6 +1727,7 @@ async def view_file_in_worker(
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
                 private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
+                user_scope_agent_names=config.get_user_scope_shared_agent_names(),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
@@ -1947,6 +1948,7 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
                 private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
+                user_scope_agent_names=config.get_user_scope_shared_agent_names(),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
