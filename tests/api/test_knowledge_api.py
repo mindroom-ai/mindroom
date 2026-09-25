@@ -136,7 +136,7 @@ def _test_client(tmp_path: Path) -> TestClient:
     runtime_paths = _runtime_paths(tmp_path)
     main.initialize_api_app(main.app, runtime_paths)
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
-    return TestClient(main.app)
+    return TestClient(main.app, base_url="http://localhost")
 
 
 class _RecordingRefreshScheduler:
