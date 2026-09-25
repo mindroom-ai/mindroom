@@ -23,9 +23,11 @@ import sys
 import threading
 import time
 import uuid
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
@@ -8787,6 +8789,40 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
     faked worker has no connection to take away.
     """
 
+    async def test_finished_statement_is_released_before_its_completion_is_reported(self) -> None:
+        """A worker thread that has not yet dropped its work item keeps nothing the statement used.
+
+        The pool holds each work item until its thread gets back to it, and a
+        thread starved of the GIL can take a while. A recovery walk that holds
+        one page per install used to find the previous page still alive behind
+        that item, a third page where the walk promises two.
+        """
+
+        class _Payload:
+            pass
+
+        class _RetainingExecutor(ThreadPoolExecutor):
+            """Keep every work item, as a thread that has not dropped its own yet does."""
+
+            def __init__(self) -> None:
+                super().__init__(max_workers=1)
+                self.retained: list[tuple[object, ...]] = []
+
+            def submit(self, fn, /, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+                self.retained.append((fn, args, kwargs))
+                return super().submit(fn, *args, **kwargs)
+
+        executor = _RetainingExecutor()
+        offload = ThreadOffload(_executor=executor)
+        payload = _Payload()
+        released = weakref.ref(payload)
+        await offload.run(partial(id, payload))
+        del payload
+        offload.shutdown()
+
+        assert executor.retained
+        assert released() is None, "the finished statement's data outlived it behind the pool's work item"
+
     async def test_cancellation_retrieves_a_completed_worker_failure(self) -> None:
         """The caller keeps cancellation while the worker's failure remains observable."""
         work: asyncio.Future[None] = asyncio.get_running_loop().create_future()
@@ -9195,6 +9231,47 @@ class TestClosingAnswersEveryWriteItWillNotRun:
         assert all(isinstance(refusal, RuntimeError) for refusal in refusals), (
             "a write the closed store never ran reported something other than a refusal"
         )
+
+    @pytest.mark.parametrize("writer_started", [True, False], ids=["idle-writer", "unstarted-writer"])
+    async def test_no_write_is_left_waiting_when_the_writer_is_cancelled_without_close(
+        self,
+        tmp_path: Path,
+        writer_started: bool,
+    ) -> None:
+        """A writer cancelled outside ``close()`` refuses the write still in its queue.
+
+        ``close()`` is not the only thing that cancels the writer task: a loop
+        shutting down, as ``asyncio.run`` and pytest-asyncio do, cancels every
+        task at once. Cancelled after a write is queued but before the writer
+        takes it, the task used to end with the write still queued, and
+        ``settled`` held its caller forever -- the loop's own shutdown then
+        never finished. A writer that never ran its first step never enters its
+        coroutine at all, so the refusal cannot live there.
+        """
+        backend = SqliteBackend.open(tmp_path / "cancelled-writer.db")
+        ran = threading.Event()
+
+        def operation(_transaction: Transaction) -> str:
+            ran.set()
+            return "landed"
+
+        if writer_started:
+            await backend.write(lambda _transaction: None)
+        writing = asyncio.create_task(backend.write(operation))
+        # The write enqueues, and the writer has not resumed (or started) yet.
+        await asyncio.sleep(0)
+        writer = backend._writer_task
+        assert writer is not None
+        writer.cancel()
+        answered, abandoned = await asyncio.wait({writing}, timeout=_SETTLEMENT_WAIT_SECONDS)
+        refusals = [task.exception() for task in answered]
+        await _release_writes_the_store_abandoned(backend, abandoned)
+        await backend.close()
+
+        assert not abandoned, "a write stayed queued behind a writer that had been cancelled"
+        assert not ran.is_set()
+        assert len(refusals) == 1
+        assert isinstance(refusals[0], RuntimeError)
 
 
 class TestTheJournalIsAtLeastAsDurableAsWhatCertifiesIt:
