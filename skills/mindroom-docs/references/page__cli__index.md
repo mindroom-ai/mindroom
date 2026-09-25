@@ -233,9 +233,8 @@ See the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) guide
 │ app     Run the native app's private structured helper over inherited standard I/O.    │
 │ login   Log in once, create an Olm device, and save its access token privately.        │
 │ pair    Claim one requester-agent pairing through authenticated Matrix E2EE.           │
-│ setup   Log in when needed, then claim one requester-agent pairing.                    │
-│ run     Run the outbound-only Matrix sync loop and execute locally authorized          │
-│         commands.                                                                      │
+│ setup   Pair and save the connection shared with the macOS app.                        │
+│ run     Observe using saved app/terminal setup; flags override this run only.          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -265,43 +264,37 @@ Use `--allow-app` to save app choices here, or choose them later in **Computer a
 
  Pair and save the connection shared with the macOS app.
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ *  --code                              TEXT  Short-lived code returned by    │
-│                                              !desktop setup.                 │
-│                                              [required]                      │
-│ *  --controller-user-id                TEXT  Pinned cloud controller Matrix  │
-│                                              user.                           │
-│                                              [required]                      │
-│ *  --controller-device-id              TEXT  Pinned cloud controller device. │
-│                                              [required]                      │
-│ *  --controller-ed25519                TEXT  Pinned controller fingerprint.  │
-│                                              [required]                      │
-│    --allow-agent                       TEXT  Agent name from the setup       │
-│                                              message; prompts if omitted.    │
-│                                              Repeat as needed.               │
-│    --allow-app                         TEXT  Save allowed app IDs, or choose │
-│                                              apps later in the macOS app.    │
-│    --user-id                           TEXT  Expected Matrix user ID;        │
-│                                              required for password login and │
-│                                              optional for SSO.               │
-│    --homeserver                        TEXT  Matrix homeserver URL; defaults │
-│                                              to the configured MindRoom      │
-│                                              homeserver.                     │
-│    --cloudflare-access                       Authenticate Matrix requests    │
-│                                              interactively with the local    │
-│                                              cloudflared CLI.                │
-│                                              [env var:                       │
-│                                              MINDROOM_DESKTOP_CLOUDFLARE_AC… │
-│    --matrix-http-headers-file          PATH  Owner-only JSON file of HTTP    │
-│                                              headers added to every Matrix   │
-│                                              request.                        │
-│                                              [env var:                       │
-│                                              MINDROOM_DESKTOP_MATRIX_HTTP_H… │
-│    --config                    -c      PATH  MindRoom config path used for   │
-│                                              runtime env.                    │
-│    --storage-path              -s      PATH  Desktop bridge state directory. │
-│    --help                      -h            Show this message and exit.     │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ *  --code                              TEXT  Short-lived code returned by !desktop     │
+│                                              setup.                                    │
+│                                              [required]                                │
+│ *  --controller-user-id                TEXT  Pinned cloud controller Matrix user.      │
+│                                              [required]                                │
+│ *  --controller-device-id              TEXT  Pinned cloud controller device.           │
+│                                              [required]                                │
+│ *  --controller-ed25519                TEXT  Pinned controller fingerprint. [required] │
+│    --allow-agent                       TEXT  Agent name from the setup message;        │
+│                                              prompts if omitted. Repeat as needed.     │
+│    --allow-app                         TEXT  Save allowed app IDs, or choose apps      │
+│                                              later in the macOS app.                   │
+│    --user-id                           TEXT  Expected Matrix user ID; required for     │
+│                                              password login and optional for SSO.      │
+│    --homeserver                        TEXT  Matrix homeserver URL; defaults to the    │
+│                                              configured MindRoom homeserver.           │
+│    --cloudflare-access                       Authenticate Matrix requests              │
+│                                              interactively with the local cloudflared  │
+│                                              CLI.                                      │
+│                                              [env var:                                 │
+│                                              MINDROOM_DESKTOP_CLOUDFLARE_ACCESS]       │
+│    --matrix-http-headers-file          PATH  Owner-only JSON file of HTTP headers      │
+│                                              added to every Matrix request.            │
+│                                              [env var:                                 │
+│                                              MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FIL… │
+│    --config                    -c      PATH  MindRoom config path used for runtime     │
+│                                              env.                                      │
+│    --storage-path              -s      PATH  Desktop bridge state directory.           │
+│    --help                      -h            Show this message and exit.               │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
