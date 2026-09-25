@@ -425,6 +425,94 @@ describe("ModelConfig", () => {
     });
   });
 
+  it.each([
+    ["api_key", { api_key: "sk-config-real" }],
+    ["extra_kwargs.api_key", { extra_kwargs: { api_key: "sk-config-real" } }],
+  ])(
+    "shows and copies a model key from config.yaml (%s) instead of the provider key",
+    async (_field, keyFields) => {
+      vi.mocked(useConfigStore).mockReturnValue({
+        ...mockStore,
+        config: {
+          ...mockStore.config,
+          models: {
+            ...mockStore.config.models,
+            proxied: {
+              provider: "openrouter",
+              id: "z-ai/glm-5.3",
+              ...keyFields,
+            },
+          },
+        },
+      } as never);
+      keyStatusByService["openrouter"] = {
+        has_key: true,
+        source: "env",
+        masked_key: "sk-en...5678",
+        api_key: "sk-openrouter-env-real",
+      };
+
+      render(<ModelConfig />);
+
+      const row = screen.getByText("proxied").closest("tr");
+      if (!row) throw new Error("row not found");
+      await waitFor(() => {
+        expect(within(row).getByText("Config key")).toBeTruthy();
+      });
+      expect(within(row).getByText("Source: config.yaml")).toBeTruthy();
+      expect(within(row).queryByText("Provider key")).toBeNull();
+
+      fireEvent.click(within(row).getByTitle("Copy API key"));
+
+      await waitFor(() => {
+        expect(writeTextMock).toHaveBeenCalledWith("sk-config-real");
+      });
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        "/api/credentials/openrouter/api-key?key_name=api_key&include_value=true",
+      );
+
+      fireEvent.click(screen.getByText("proxied"));
+
+      expect(
+        screen.getByText(
+          "No custom key provided. This model will use its key from config.yaml.",
+        ),
+      ).toBeTruthy();
+    },
+  );
+
+  it("prefers a saved model key over a key from config.yaml", async () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...mockStore,
+      config: {
+        ...mockStore.config,
+        models: {
+          ...mockStore.config.models,
+          proxied: {
+            provider: "openrouter",
+            id: "z-ai/glm-5.3",
+            api_key: "sk-config-real",
+          },
+        },
+      },
+    } as never);
+    keyStatusByService["model:proxied"] = {
+      has_key: true,
+      source: "ui",
+      masked_key: "sk-ui...4321",
+      api_key: "sk-dashboard-real",
+    };
+
+    render(<ModelConfig />);
+
+    const row = screen.getByText("proxied").closest("tr");
+    if (!row) throw new Error("row not found");
+    await waitFor(() => {
+      expect(within(row).getByText("Custom key")).toBeTruthy();
+    });
+    expect(within(row).queryByText("Config key")).toBeNull();
+  });
+
   it("adds a model using the top add row", async () => {
     render(<ModelConfig />);
 

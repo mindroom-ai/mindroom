@@ -254,9 +254,22 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
   return copied;
 }
 
+/** The model's own key from config.yaml (api_key or extra_kwargs.api_key); blank values count as unset. */
+function getConfiguredApiKey(
+  modelConfig: ModelConfigType | undefined,
+): string | null {
+  const configured = [modelConfig?.api_key, modelConfig?.extra_kwargs?.api_key]
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.trim())
+    .find(Boolean);
+  return configured ?? null;
+}
+
+/** Mirrors the runtime order: saved model key, then config.yaml key, then provider key. */
 function getKeyStatusDisplay(
   modelName: string,
   provider: string,
+  configuredApiKey: string | null,
   modelKeys: Record<string, KeyStatus>,
   providerKeys: Record<string, KeyStatus>,
 ): KeyDisplayInfo | null {
@@ -274,6 +287,16 @@ function getKeyStatusDisplay(
         ? `key:${modelKey.maskedKey}`
         : `model:${modelName}`,
       sourceLabel: sourceToLabel(modelKey.source, true),
+    };
+  }
+
+  if (configuredApiKey) {
+    return {
+      hasKey: true,
+      label: "Config key",
+      maskedKey: null,
+      keyId: `config:${modelName}`,
+      sourceLabel: "config.yaml",
     };
   }
 
@@ -521,11 +544,18 @@ export function ModelConfig() {
   };
 
   const copyApiKeyForRow = async (modelName: string, provider: string) => {
+    const configuredApiKey = getConfiguredApiKey(models[modelName]);
+    const usesConfiguredKey =
+      !modelKeys[modelName]?.hasKey && configuredApiKey !== null;
     const service = modelKeys[modelName]?.hasKey
       ? `model:${modelName}`
-      : providerToService(provider);
+      : usesConfiguredKey
+        ? "config.yaml"
+        : providerToService(provider);
 
-    const apiKey = await fetchApiKeyValue(service);
+    const apiKey = usesConfiguredKey
+      ? configuredApiKey
+      : await fetchApiKeyValue(service);
     if (!apiKey) {
       toast({
         title: "Error",
@@ -951,6 +981,7 @@ export function ModelConfig() {
       const keyDisplay = getKeyStatusDisplay(
         modelName,
         modelConfig.provider,
+        getConfiguredApiKey(modelConfig),
         modelKeys,
         providerKeys,
       );
@@ -1059,10 +1090,14 @@ export function ModelConfig() {
       !hasManualApiKey &&
       !hasReuseSource;
     const providerFallbackKey = providerKeys[draft.provider];
+    const configuredApiKey = currentModelName
+      ? getConfiguredApiKey(models[currentModelName])
+      : null;
     const currentStatus = currentModelName
       ? getKeyStatusDisplay(
           currentModelName,
           draft.provider,
+          configuredApiKey,
           modelKeys,
           providerKeys,
         )
@@ -1178,12 +1213,14 @@ export function ModelConfig() {
 
         {!hasManualApiKey && !hasReuseSource && (
           <p className="text-xs text-muted-foreground">
-            {providerFallbackKey?.hasKey
-              ? `No custom key provided. This model will use the provider key (${sourceToLabel(
-                  providerFallbackKey.source,
-                  true,
-                )}${providerFallbackKey.maskedKey ? ` ${providerFallbackKey.maskedKey}` : ""}).`
-              : "No custom key provided. This model will use the provider key (for example from .env) when available."}
+            {configuredApiKey
+              ? "No custom key provided. This model will use its key from config.yaml."
+              : providerFallbackKey?.hasKey
+                ? `No custom key provided. This model will use the provider key (${sourceToLabel(
+                    providerFallbackKey.source,
+                    true,
+                  )}${providerFallbackKey.maskedKey ? ` ${providerFallbackKey.maskedKey}` : ""}).`
+                : "No custom key provided. This model will use the provider key (for example from .env) when available."}
           </p>
         )}
       </div>
