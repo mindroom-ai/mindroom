@@ -44,7 +44,7 @@ Provider credentials come from supported environment variables, stored credentia
 MindRoom resolves a model's API key in this order: the key saved for that model in the dashboard's **Models** editor, then `api_key` or `extra_kwargs.api_key` from the model config, then the provider's shared key from the environment or credential store.
 Setting both `api_key` and `extra_kwargs.api_key` on one model is a validation error.
 MindRoom trims both fields, and a blank value counts as unset, so the provider's shared key still applies.
-`extra_kwargs.api_key` must be a string.
+`extra_kwargs.api_key` must be a string or `null`, which counts as unset; any other value is a validation error.
 `ollama` and `llama_cpp` models skip the shared provider key step.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and drop any configured key.
 The dashboard's **Models** editor shows whether a model uses its saved key, its config key, or the provider key, except for `ollama` models and the providers above that drop keys.

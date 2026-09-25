@@ -1001,7 +1001,7 @@ Check your environment for common issues before running `mindroom run`.
 Runs a series of checks in one pass:
 
 - **Config file** exists and is valid YAML with correct Pydantic schema
-- **Providers** — validates each provider's shared API key at the provider's default endpoint when a model relies on it and no custom endpoint applies, and lists models with their own keys without sending those keys (Anthropic, OpenAI, Ollama, Vertex AI Claude, etc.)
+- **Providers** — validates each shared API key (Anthropic, OpenAI, Google, OpenRouter, DeepSeek, Cerebras, Groq) at its provider's default endpoint when a model relies on it and no custom endpoint applies, lists models with their own keys without sending those keys, checks that Ollama is reachable, and sends Vertex AI Claude a one-token request built with the runtime's client settings
 - **Memory config** — checks memory LLM and embedder reachability (Ollama, OpenAI embeddings, sentence-transformers) and reports which key the memory LLM uses without sending it
 - **Matrix homeserver** — verifies the homeserver is reachable via `/_matrix/client/versions`
 - **Storage** — confirms the storage directory is writable
