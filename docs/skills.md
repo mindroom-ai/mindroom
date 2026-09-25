@@ -216,9 +216,9 @@ Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](configu
 `skill_manage` can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/`, `templates/`, `scripts/`, or `assets/`.
 Before changing an existing file, the reviewer must load its current version with `skill_view` in the same review, and a write against any other version is refused.
 A new skill needs a lowercase hyphenated name matching its directory, a description of at most 60 characters, and the `learned` marker shown below.
-Files that look like they contain a literal credential are refused with the offending line named, using checks adapted from Hermes Agent's skill guard: a PEM or PGP private key, a long known token (OpenAI, Anthropic, GitHub, GitLab, Slack, Stripe, Google, or an AWS access key ID) or bearer token, a password or secret query value in a URL, or a quoted long random value of an api-key, token, secret, or password setting such as `password: "..."`, `api_key="..."`, or `{"api_key": "..."}`.
+Files that look like they contain a literal credential are refused with the offending line named, using checks adapted from Hermes Agent's skill guard: a PEM or PGP private key, a long known token (OpenAI, Anthropic, GitHub, GitLab, Slack, Stripe, Google, or an AWS access key ID) or bearer token, a password or secret query value in a URL, or a quoted value of at least 20 characters, including a passphrase, of an api-key, token, secret, or password setting such as `password: "..."`, `api_key="..."`, or `{"api_key": "..."}`.
 This is a heuristic for common formats, not a guarantee: like Hermes' guard, it lets an unusual secret format or an unquoted value of an unknown format, such as `API_KEY=...` in an environment file, pass.
-Placeholders such as `OPENAI_API_KEY=<your key>`, `sk-...`, `$TOKEN`, and usernames in URLs like `ssh://git@github.com/...` are allowed.
+Placeholders such as `OPENAI_API_KEY=<your key>`, `sk-...`, `$TOKEN`, environment variable names like `api_key = "OPENAI_API_KEY"` or `postgres://app:DB_PASSWORD@localhost/app`, and usernames in URLs like `ssh://git@github.com/...` are allowed.
 Workspace skill scripts still cannot be executed through `get_skill_script`.
 
 ### Ownership
