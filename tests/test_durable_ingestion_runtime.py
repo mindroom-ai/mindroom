@@ -9,27 +9,31 @@ from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 from uuid import uuid4
 
 import nio
 import pytest
-from nio.durable import DurableSyncConfig, RecordKind, SyncRecord
+from nio.durable import DurableSyncConfig, RecordKind, SyncBatch, SyncRecord
 from nio.durable.transport import HttpError
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_room_lifecycle import BotRoomLifecycle
 from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.personal_rooms import PersonalRoomsConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import DeliveryStage, RoomMembershipPosition
 from mindroom.matrix._owned_session import MatrixCredentials, open_owned_matrix_session
 from mindroom.matrix.client_session import create_authenticated_client
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
+from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.personal_room_lifecycle import PersonalRoomTarget
 from tests.bot_helpers import make_matrix_client_mock
 from tests.test_bot_ready_hook import _agent_bot
-from tests.test_durable_ingestion_admission import ROOM
+from tests.test_durable_ingestion_admission import ROOM, Session
 from tests.test_event_journal_store import admit, interactive_edit, interactive_prompt, projection
 from tests.test_room_invites import _handle_invite, _live_router_invite_scenario, _pending_room_invites
 
@@ -39,6 +43,55 @@ if TYPE_CHECKING:
     from nio.durable import DurableSync
 
     from mindroom.event_journal.store import PrincipalStore
+
+
+@pytest.mark.asyncio
+async def test_personal_room_reconciliation_does_not_delay_sync_ack(tmp_path: Path) -> None:
+    """Slow personal-room maintenance must not hold the durable ingestion checkpoint."""
+    bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    bot.config.personal_rooms = PersonalRoomsConfig(agent="code", onboarding_rooms=[ROOM], backfill=True)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@alice:localhost", None, None)],
+        room_id=ROOM,
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def ensure(*_args: object, **_kwargs: object) -> None:
+        entered.set()
+        try:
+            await release.wait()
+        finally:
+            stopped.set()
+
+    service = Mock(spec=PersonalRoomService)
+    service.ensure.side_effect = ensure
+    bot._personal_room_lifecycle.lookup_target = lambda _name: PersonalRoomTarget(service, first_sync_complete=True)
+    batch = SyncBatch(uuid4(), 1, (), completes_sync=True)
+    principal = bot.journal_principal()
+    consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
+    await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=batch.stream_id)
+    session = Session(batch)
+    try:
+        async with asyncio.timeout(2):
+            await consume_one_ingestion_batch(
+                session,
+                principal,
+                account_id=bot.agent_user.user_id,
+                after_sync=bot._on_ingestion_frame_completion,
+            )
+            await entered.wait()
+        assert session.acked == [batch]
+        assert not release.is_set()
+        async with asyncio.timeout(2):
+            await bot.prepare_for_sync_shutdown()
+        assert stopped.is_set()
+        assert not release.is_set()
+    finally:
+        release.set()
+        await wait_for_background_tasks(timeout=2, owner=bot._runtime_view)
 
 
 @asynccontextmanager

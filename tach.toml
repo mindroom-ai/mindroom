@@ -1941,6 +1941,7 @@ visibility = ["mindroom.bot"]
 [[modules]]
 path = "mindroom.personal_room_lifecycle"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.constants",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.state",
