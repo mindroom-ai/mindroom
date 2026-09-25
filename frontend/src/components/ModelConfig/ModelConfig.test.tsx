@@ -610,7 +610,7 @@ describe("ModelConfig", () => {
   );
 
   it.each(["codex", "kimi", "bedrock_claude", "vertexai_claude", "synthetic"])(
-    "does not show a config.yaml key for %s, which drops API keys",
+    "shows no key status for %s, which drops config and saved API keys",
     async (provider) => {
       vi.mocked(useConfigStore).mockReturnValue({
         ...mockStore,
@@ -622,15 +622,32 @@ describe("ModelConfig", () => {
           },
         },
       } as never);
+      keyStatusByService["model:keyless"] = {
+        has_key: true,
+        source: "ui",
+        masked_key: "sk-ui...4321",
+        api_key: "sk-dashboard-real",
+      };
 
       render(<ModelConfig />);
 
       const row = screen.getByText("keyless").closest("tr");
       if (!row) throw new Error("row not found");
       await waitFor(() => {
-        expect(within(row).getByText("No API key")).toBeTruthy();
+        expect(fetchMock).toHaveBeenCalled();
       });
+      expect(within(row).getByText("N/A")).toBeTruthy();
+      expect(within(row).queryByText("Custom key")).toBeNull();
       expect(within(row).queryByText("Config key")).toBeNull();
+
+      fireEvent.click(screen.getByText("keyless"));
+
+      expect(
+        screen.getByText(
+          "No API key used; this provider authenticates another way",
+        ),
+      ).toBeTruthy();
+      expect(screen.queryByPlaceholderText("Paste new API key")).toBeNull();
     },
   );
 

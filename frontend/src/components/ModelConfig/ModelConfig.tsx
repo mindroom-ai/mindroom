@@ -298,7 +298,7 @@ function getKeyStatusDisplay(
   modelKeys: Record<string, KeyStatus>,
   providerKeys: Record<string, KeyStatus>,
 ): KeyDisplayInfo | null {
-  if (provider === "ollama") {
+  if (provider === "ollama" || PROVIDERS_WITHOUT_API_KEYS.has(provider)) {
     return null;
   }
 
@@ -1096,6 +1096,13 @@ export function ModelConfig() {
       return (
         <span className="text-xs text-muted-foreground">
           No key needed for Ollama
+        </span>
+      );
+    }
+    if (PROVIDERS_WITHOUT_API_KEYS.has(draft.provider)) {
+      return (
+        <span className="text-xs text-muted-foreground">
+          No API key used; this provider authenticates another way
         </span>
       );
     }
