@@ -213,11 +213,11 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
 | `background_loop.py` | Wakeable loops and cross-thread wake signals shared by durable per-session background workers |
-| `skill_learning/queue.py` | Durable per-conversation review markers: run positions, due state, scope keys, retries, and retention |
-| `skill_learning/worker.py` | Background worker that counts completed runs, triggers reviews at the interval, and posts change notices |
+| `skill_learning/queue.py` | Durable per-conversation reply counts: completed-run counting, scope keys, retries, and retention |
+| `skill_learning/worker.py` | Background worker that reviews conversations whose count reached the interval and posts change notices |
 | `skill_learning/reviewer.py` | One bounded skill review: Hermes-derived prompt, skill-only tools, read-before-write, and input budget |
 | `skill_learning/transcript.py` | Conversation evidence for a review: older-turn digest plus the newest messages verbatim |
-| `skill_learning/library.py` | Confined learner-owned skill writes, ownership provenance, history snapshots, archival, and change fingerprints |
+| `skill_learning/library.py` | Confined learner-owned skill writes, ownership provenance, history snapshots, and archival |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `credentials.py` | Unified credential management (CredentialsManager) |

@@ -176,25 +176,24 @@ All fields, defaults, and bounds are listed in the [agent configuration referenc
 
 ### When reviews run
 
-After each successful standalone-agent response to a person in Matrix, including an approved continuation, the background worker counts the model replies stored in that conversation since its last review, counting each tool-calling step and the final answer.
-A review runs once that count reaches `review_interval`, and counting then starts after the newest run the review saw.
-The count is read from the stored runs rather than kept as a separate tally, so it cannot drift from the conversation, and runs that compaction or redaction deletes do not hide later runs.
-Each response to a person registers its conversation when it starts, so an approved continuation counts even when its request opened the conversation.
-An approved continuation that finishes after a later turn of the same thread was already reviewed is not counted, although its messages still appear in later reviews.
-Counting starts with the first response after learning is enabled, including every attempt of that response, and the queued conversations of an agent that stops learning are forgotten, so replies from before learning was enabled or while it was off never count toward a review.
+Like Hermes' `creation_nudge_interval`, each conversation keeps a count of model replies, one for each tool-calling step and one for the final answer.
+Each successful standalone-agent response to a person in Matrix adds the replies of its run when it completes.
+An approved continuation completes the run it continues, so it adds that whole run, including the replies from before the approval pause.
+A review runs once the count reaches `review_interval`, and it subtracts the replies it covered, so replies that arrive while it runs count toward the next review.
+Only completed responses count, so replies from before learning was enabled or while it was off never do, and the queued conversations of an agent that stops learning are forgotten on the next config change.
+Compaction and redaction never change a count, because replies are counted when their response completes.
 A review still reads the whole stored conversation as evidence, including turns from before learning was enabled, as a Hermes review sees the whole session.
-Automated responses from schedules, hooks, and external triggers, including ones the router hands to an agent, responses another agent asked for, and runs resumed after a restart never start a count, just as Hermes skips reviews for cron jobs, so a thread with only such runs is never reviewed; in a thread people also use, those replies are part of the conversation that is counted and reviewed.
+Automated responses from schedules, hooks, and external triggers, including ones the router hands to an agent, responses another agent asked for, and runs resumed after a restart never count, just as Hermes skips reviews for cron jobs; they still appear in the evidence when people also use the thread.
 Team responses are excluded.
-When anyone other than the learner changes the workspace skills, for example an agent writing a skill with its file tools, counting starts again after the newest run because that lesson is already saved.
-This includes a change during a conversation's first response, because its first registration records the skills as they were; a change made while a review of another conversation is writing skills in the same workspace is taken as that review's own.
+Hermes restarts its count when the agent saves a skill with its own `skill_manage` tool; MindRoom agents write skills with their file tools, which do not restart the count, so the next review sees the saved skill and is told to patch rather than duplicate it.
 Conversations are counted per agent and private instance, not per requester, so a thread shared by several people is reviewed once.
 Minimal-mode turns count like standard turns.
-The queue in `skill_learning_state.json` in the storage root holds each conversation's review marker, retry state, and scope metadata, never message content.
-A conversation with nothing left to review is forgotten 30 days plus the longest configured `tool_approval` timeout after a response or approved continuation last started or finished in it, so a response waiting for approval keeps its place.
+The queue in `skill_learning_state.json` in the storage root holds each conversation's count, retry state, and scope metadata, never message content, so counts survive restarts.
+A conversation still below the interval is forgotten after 30 days without a counted response.
 Reviews run one at a time across processes that share the storage root.
-A failed review, including a provider error, is retried with a growing delay and abandoned after three failures, and a later count that finds nothing to review clears the failures.
+A failed review, including a provider error, is retried with a growing delay and abandoned after three failures, which gives up the replies it would have covered.
 A review that already changed skills before failing or timing out counts as done, like Hermes' best-effort review, so it never repeats its edits.
-Shutdown interrupts a running review, which runs again after the next start unless it had already changed skills; writes it started land first and count as the learner's.
+Shutdown interrupts a running review, which runs again after the next start unless it had already changed skills; writes it started land first.
 
 ### What a review can do
 

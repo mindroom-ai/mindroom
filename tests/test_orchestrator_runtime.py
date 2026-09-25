@@ -20,6 +20,9 @@ import httpx
 import nio
 import pytest
 import uvicorn
+from agno.models.message import Message
+from agno.run.agent import RunOutput
+from agno.session import AgentSession
 from structlog.testing import capture_logs
 
 import mindroom.orchestrator as orchestrator_module
@@ -27,6 +30,7 @@ import mindroom.tool_system.plugin_imports as plugin_module
 import mindroom.workers.runtime as workers_runtime_module
 from mindroom.agent_cli.session import CliAuthenticationError, CliOperationOwner
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_storage import create_session_storage
 from mindroom.api import config_lifecycle as api_config_lifecycle
 from mindroom.api import main as api_main
 from mindroom.approval_manager import (
@@ -99,6 +103,7 @@ from tests.conftest import (
     bind_mock_config_event_journal,
     make_matrix_client_mock,
     runtime_paths_for,
+    seed_session,
 )
 
 
@@ -5218,6 +5223,22 @@ async def test_dashboard_departure_uses_live_membership_owner(tmp_path: Path) ->
     assert gate.in_flight_response_count == 0
 
 
+def _count_a_skill_learning_reply(config: Config, paths: RuntimePaths, agent_name: str) -> None:
+    """Persist one run with a model reply for ``agent_name`` and count it toward skill learning."""
+    run = RunOutput(
+        run_id=f"{agent_name}-run",
+        agent_id=agent_name,
+        session_id="s",
+        messages=[Message(role="assistant", content="hi")],
+    )
+    storage = create_session_storage(agent_name, config, paths, execution_identity=None)
+    try:
+        seed_session(storage, AgentSession(session_id="s", agent_id=agent_name, runs=[run]))
+    finally:
+        storage.close()
+    queue_skill_review(config, paths, agent_name=agent_name, session_id="s", execution_identity=None, run_id=run.run_id)
+
+
 @pytest.mark.asyncio
 async def test_config_changes_forget_conversations_of_agents_that_stopped_learning(tmp_path: Path) -> None:
     """While other agents keep learning, an agent that stops learning loses its queued conversations at once."""
@@ -5228,15 +5249,7 @@ async def test_config_changes_forget_conversations_of_agents_that_stopped_learni
         agent.skill_learning.enabled = True
     orchestrator.config = config
     for name in config.agents:
-        queue_skill_review(
-            config,
-            paths,
-            agent_name=name,
-            session_id="s",
-            execution_identity=None,
-            started_at=0,
-            completed=True,
-        )
+        _count_a_skill_learning_reply(config, paths, name)
     config.agents["helper"].skill_learning.enabled = False
     await orchestrator._sync_background_workers()
     try:
@@ -5262,15 +5275,7 @@ async def test_background_workers_follow_config_across_reloads(tmp_path: Path) -
     first = orchestrator._skill_learning._task
     await orchestrator._sync_background_workers()
     assert orchestrator._skill_learning._task is first
-    queue_skill_review(
-        config,
-        paths,
-        agent_name="general",
-        session_id="s",
-        execution_identity=None,
-        started_at=0,
-        completed=True,
-    )
+    _count_a_skill_learning_reply(config, paths, "general")
     config.agents["general"].skill_learning.enabled = False
     await orchestrator._sync_background_workers()
     assert first is not None

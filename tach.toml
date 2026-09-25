@@ -898,6 +898,7 @@ visibility = [
     "mindroom.turn_store",
     "mindroom.delegation.execution",
     "mindroom.delegation.recovery",
+    "mindroom.skill_learning.queue",
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.worker",
 ]
@@ -7392,14 +7393,14 @@ depends_on = [
     "mindroom.redaction",
     "mindroom.tool_system.workspace_skills",
 ]
-visibility = ["mindroom.skill_learning.queue", "mindroom.skill_learning.reviewer", "mindroom.skill_learning.worker"]
+visibility = ["mindroom.skill_learning.reviewer", "mindroom.skill_learning.worker"]
 
 [[modules]]
 path = "mindroom.skill_learning.transcript"
 depends_on = ["mindroom.redaction",
     "mindroom.history_run_visibility",
 ]
-visibility = ["mindroom.skill_learning.reviewer", "mindroom.skill_learning.worker"]
+visibility = ["mindroom.skill_learning.queue", "mindroom.skill_learning.reviewer", "mindroom.skill_learning.worker"]
 
 [[modules]]
 path = "mindroom.skill_learning.reviewer"
@@ -7418,11 +7419,11 @@ visibility = ["mindroom.skill_learning.worker"]
 [[modules]]
 path = "mindroom.skill_learning.queue"
 depends_on = [
+    "mindroom.agent_storage",
     "mindroom.file_locks",
     "mindroom.logging_config",
     "mindroom.runtime_resolution",
-    "mindroom.skill_learning.library",
-    "mindroom.tool_system.skills",
+    "mindroom.skill_learning.transcript",
     "mindroom.tool_system.worker_routing",
     "mindroom.atomic_file",
     "mindroom.path_confinement",
@@ -7436,14 +7437,15 @@ depends_on = [
     "mindroom.agent_storage",
     "mindroom.constants",
     "mindroom.file_locks",
-    "mindroom.history_run_visibility",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.message_builder",
+    "mindroom.runtime_resolution",
     "mindroom.skill_learning.library",
     "mindroom.skill_learning.queue",
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.transcript",
+    "mindroom.tool_system.skills",
     "mindroom.background_loop",
 ]
 visibility = ["mindroom.orchestrator"]

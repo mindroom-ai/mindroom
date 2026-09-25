@@ -28,7 +28,6 @@ from openai import AsyncOpenAI
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, resolve_runtime_paths
@@ -200,18 +199,16 @@ def _queue(
     session_id: str = "session",
     *,
     identity: ToolExecutionIdentity | None = None,
-    started_at: int = 0,
-    completed: bool = True,
+    run_id: str = "r1",
 ) -> None:
-    """Record a finished response to a person; ``started_at`` defaults to counting every seeded run."""
+    """Count one seeded run as a completed response to a person."""
     queue.queue_skill_review(
         config,
         paths,
         agent_name="mind",
         session_id=session_id,
         execution_identity=identity,
-        started_at=started_at,
-        completed=completed,
+        run_id=run_id,
     )
 
 
@@ -383,20 +380,6 @@ def test_archive_moves_only_inactive_learned_skills(tmp_path: Path) -> None:
     assert library.archive_unused_skills(root, archive_after_days=0, now=now + timedelta(days=90)) == []
 
 
-def test_fingerprint_ignores_learner_housekeeping(tmp_path: Path) -> None:
-    """Usage telemetry, history, and archive never look like someone else editing skills."""
-    root = tmp_path / "skills"
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
-    before = library.skills_fingerprint(root)
-    with open_skills_root(root) as root_fd:
-        update_skill_usage(root_fd, "deploy-checks", lambda usage: usage.model_copy(update={"use_count": 3}))
-    (root / ".history").mkdir()
-    (root / ".archive").mkdir()
-    assert library.skills_fingerprint(root) == before
-    (root / "deploy-checks/SKILL.md").write_text(LEARNED + "Edited by hand.\n")
-    assert library.skills_fingerprint(root) != before
-
-
 def test_transcript_digests_older_turns_and_keeps_recent_evidence_verbatim() -> None:
     """Hermes' digest keeps the newest messages whole, never opens on a tool result, and marks omissions."""
     older = [Message(role="user", content=f"old request {index} " + "x" * 400) for index in range(30)]
@@ -465,166 +448,85 @@ def test_model_replies_count_only_model_visible_runs() -> None:
 def test_queue_keys_conversations_by_scope_not_requester(tmp_path: Path) -> None:
     """A shared thread is reviewed once however many people talk in it; private instances stay separate."""
     config, paths = _learner(tmp_path)
-    _queue(config, paths, identity=ALICE)
-    _queue(config, paths, identity=BOB)
+    _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
+    _queue(config, paths, identity=ALICE, run_id="r1")
+    _queue(config, paths, identity=BOB, run_id="r2")
     (entry,) = _entries(paths).values()
-    assert (entry["reviewed_through"], entry["has_new_runs"]) == ([0, -1], True)
+    assert entry["replies"] == 4
     assert entry["identity"]["requester_id"] == "@bob:example.test"
 
     private_config, private_paths = _learner(tmp_path / "private", private=True)
-    _queue(private_config, private_paths, identity=ALICE)
-    _queue(private_config, private_paths, identity=BOB)
+    for identity in (ALICE, BOB):
+        _seed(private_config, private_paths, _tool_turn("r1"), identity=identity)
+        _queue(private_config, private_paths, identity=identity)
     assert len(_entries(private_paths)) == 2
-
-
-def _count(
-    paths: RuntimePaths,
-    key: str,
-    claimed: queue.QueueEntry,
-    *runs: tuple[int, int],
-    fingerprint: str | None = None,
-) -> int:
-    """Record a count of runs given as ``(run_index, replies)`` created in one second; return pending replies.
-
-    Without ``fingerprint``, the skills are as they were when the conversation registered.
-    """
-    return queue.record_count(
-        paths,
-        key,
-        claimed=claimed,
-        replies=[((0, index), replies) for index, replies in runs],
-        interval=2,
-        skills_root="root",
-        fingerprint=fingerprint or claimed.seen_fingerprint,
-    )
-
-
-def _marker_index(entry: Mapping[str, Any]) -> int:
-    return entry["reviewed_through"][1]
 
 
 def _due(config: Config, paths: RuntimePaths, now: float = 1.0) -> list[str]:
     return [key for key, _entry in queue.claim_due_reviews(config, paths, now=now)]
 
 
-def test_conversations_stay_due_until_nothing_is_left_to_review(tmp_path: Path) -> None:
-    """A count below the interval clears the due state unless a response arrived; one at the interval keeps it."""
-    config, paths = _learner(tmp_path)
-    _queue(config, paths)
-    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
-    _queue(config, paths)
-    assert _count(paths, key, entry, (0, 1)) == 1
-    assert _due(config, paths) == [key]
-    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
-    assert _count(paths, key, entry, (0, 1)) == 1
+def test_completed_runs_add_up_and_a_review_subtracts_what_it_covered(tmp_path: Path) -> None:
+    """Like Hermes' counter, replies add up to the interval, and replies arriving during a review count next time."""
+    config, paths = _learner(tmp_path, review_interval=4)
+    _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"), _tool_turn("r3"))
+    _queue(config, paths, run_id="r1")
     assert _due(config, paths) == []
+    _queue(config, paths, run_id="r2")
+    ((key, claimed),) = queue.claim_due_reviews(config, paths, now=1.0)
+    _queue(config, paths, run_id="r3")
+    queue.settle_review(paths, key, claimed=claimed, outcome="interrupted", now=1.0)
+    assert (_entries(paths)[key]["replies"], _due(config, paths)) == (6, [key])
+    queue.settle_review(paths, key, claimed=claimed, outcome="reviewed", now=1.0)
+    assert (_entries(paths)[key]["replies"], _due(config, paths)) == (2, [])
 
-    _queue(config, paths)
-    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
-    assert _count(paths, key, entry, (0, 1), (1, 1)) == 2
-    assert _due(config, paths) == [key], "a deferred or interrupted review is claimed again"
-    queue.settle_review(paths, key, claimed=entry, outcome="interrupted", now=1.0, through=(0, 1))
-    assert _due(config, paths) == [key]
-    queue.settle_review(paths, key, claimed=entry, outcome="reviewed", now=1.0, through=(0, 1))
-    assert (_marker_index(_entries(paths)[key]), _due(config, paths)) == (1, [])
+
+def test_runs_without_model_replies_add_nothing(tmp_path: Path) -> None:
+    """A run missing from storage or hidden from model history never creates or advances a count."""
+    config, paths = _learner(tmp_path)
+    errored = _tool_turn("r1")
+    errored.status = RunStatus.error
+    _seed(config, paths, errored)
+    _queue(config, paths, run_id="missing")
+    _queue(config, paths, run_id="r1")
+    assert not (paths.storage_root / "skill_learning_state.json").exists()
 
 
 def test_failed_reviews_back_off_and_the_third_is_abandoned(tmp_path: Path) -> None:
-    """Failures keep the conversation due behind a growing delay; a recount with nothing due clears them."""
+    """Failures keep the count behind a growing delay; the third gives those replies up like a review."""
     config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
     _queue(config, paths)
     ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
-    assert _count(paths, key, entry, (0, 2)) == 2
     for attempt in (1, 2):
-        queue.settle_review(paths, key, claimed=entry, outcome="failed", now=100.0, through=(0, 0))
+        queue.settle_review(paths, key, claimed=entry, outcome="failed", now=100.0)
         state = _entries(paths)[key]
-        assert (state["failures"], _marker_index(state)) == (attempt, -1)
+        assert (state["failures"], state["replies"]) == (attempt, 2)
         assert state["next_attempt_at"] == 100.0 + 60 * 2 ** (attempt - 1)
         assert _due(config, paths, now=101.0) == []
         assert _due(config, paths, now=10_000.0) == [key]
-    queue.settle_review(paths, key, claimed=entry, outcome="failed", now=100.0, through=(0, 0))
+    queue.settle_review(paths, key, claimed=entry, outcome="failed", now=100.0)
     state = _entries(paths)[key]
-    assert (state["failures"], _marker_index(state)) == (0, 0)
+    assert (state["failures"], state["replies"]) == (0, 0)
     assert _due(config, paths, now=10_000.0) == []
 
-    _queue(config, paths)
-    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
-    queue.settle_review(paths, key, claimed=entry, outcome="failed", now=100.0)
-    assert _count(paths, key, entry, (0, 2), fingerprint="changed") == 0
-    assert (_entries(paths)[key]["failures"], _due(config, paths, now=10_000.0)) == (0, [])
 
-
-def test_failing_counts_are_abandoned_instead_of_retried_forever(tmp_path: Path) -> None:
-    """A conversation that cannot be counted stops being claimed after three failures."""
-    config, paths = _learner(tmp_path)
-    _queue(config, paths)
-    for _attempt in range(3):
-        ((key, entry),) = queue.claim_due_reviews(config, paths, now=10_000.0 * (_attempt + 1))
-        queue.settle_review(paths, key, claimed=entry, outcome="failed", now=10_000.0 * (_attempt + 1))
-    assert _due(config, paths, now=1_000_000.0) == []
-
-
-def test_learner_changes_move_every_conversation_forward(tmp_path: Path) -> None:
-    """A learner write moves all conversations that saw the old skills, while a foreign edit resets the marker."""
-    config, paths = _learner(tmp_path)
-    _queue(config, paths)
-    _queue(config, paths, "other")
-    claimed = dict(queue.claim_due_reviews(config, paths, now=1.0))
-    for key in ("mind:session", "mind:other"):
-        _count(paths, key, claimed[key], (0, 1))
-    queue.settle_review(
-        paths,
-        "mind:session",
-        claimed=claimed["mind:session"],
-        outcome="reviewed",
-        now=1.0,
-        through=(0, 0),
-        learner_change=queue.LearnerChange(claimed["mind:session"].seen_fingerprint, "b", started_at=time.time()),
-    )
-    assert _count(paths, "mind:other", claimed["mind:other"], (0, 1), (3, 1), fingerprint="b") == 2
-    assert _count(paths, "mind:other", claimed["mind:other"], (0, 1), (3, 1), fingerprint="c") == 0
-
-
-def test_conversations_that_look_while_a_review_writes_keep_counting(tmp_path: Path) -> None:
-    """A conversation registering between a review's writes saw only some of them, and they are still the learner's."""
-    config, paths = _learner(tmp_path)
-    root = _skills_root(config, paths)
-    _queue(config, paths)
-    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
-    started_at = time.time()
-    before = library.skills_fingerprint(root)
-    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset())
-    _queue(config, paths, "other")
-    library.create_skill(
-        root,
-        "older-lesson",
-        LEARNED.replace("deploy-checks", "older-lesson"),
-        reserved_names=frozenset(),
-    )
-    after = library.skills_fingerprint(root)
-    change = queue.LearnerChange(before, after, started_at)
-    queue.settle_review(paths, key, claimed=entry, outcome="reviewed", now=1.0, through=(0, 0), learner_change=change)
-    other = dict(queue.claim_due_reviews(config, paths, now=1.0))["mind:other"]
-    assert _count(paths, "mind:other", other, (0, 2), fingerprint=after) == 2
-
-
-def test_a_starting_response_keeps_its_conversation_without_taking_it_over(tmp_path: Path) -> None:
-    """A response paused for approval keeps a long-idle conversation, and only completed ones choose its scope."""
-    config, paths = _learner(tmp_path)
-    day = 86400.0
+def test_idle_conversations_short_of_a_review_are_forgotten(tmp_path: Path) -> None:
+    """After 30 idle days a count below the interval is dropped, while a due one still waits for its review."""
+    config, paths = _learner(tmp_path, review_interval=4)
+    _seed(config, paths, _tool_turn("r1"))
+    _seed(config, paths, _tool_turn("d1"), _tool_turn("d2"), session_id="due")
     with patch("mindroom.skill_learning.queue.time.time", return_value=0.0):
-        _queue(config, paths, identity=ALICE)
-    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
-    assert _count(paths, key, entry) == 0
-    with patch("mindroom.skill_learning.queue.time.time", return_value=40 * day):
-        _queue(config, paths, identity=BOB, completed=False)
-    ((_key, kept),) = queue.drop_retired_reviews(config, paths, now=45 * day)
-    assert (kept.execution_identity(), kept.has_new_runs) == (ALICE, False)
+        _queue(config, paths)
+        _queue(config, paths, "due", run_id="d1")
+        _queue(config, paths, "due", run_id="d2")
+    assert [key for key, _entry in queue.drop_retired_reviews(config, paths, now=31 * 86400.0)] == ["mind:due"]
 
 
 def test_queue_drops_entries_of_disabled_agents(tmp_path: Path) -> None:
-    """Disabling learning retires queued conversations and stops recording new runs."""
+    """Disabling learning retires queued conversations and stops counting new runs."""
     config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
     _queue(config, paths)
     config.agents["mind"].skill_learning.enabled = False
     assert queue.claim_due_reviews(config, paths, now=1.0) == []
@@ -991,7 +893,7 @@ async def test_parallel_tool_calls_spend_the_input_budget_once_per_request(tmp_p
 
 @pytest.mark.asyncio
 async def test_worker_reviews_only_at_the_interval_and_posts_a_notice(tmp_path: Path) -> None:
-    """Model replies since the marker accumulate across turns; the review and its m.notice arrive at the interval."""
+    """Model replies of completed responses add up across turns; the review and its m.notice arrive at the interval."""
     config, paths = _learner(tmp_path, review_interval=4)
     _seed(config, paths, _tool_turn("r1"))
     model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
@@ -1004,52 +906,18 @@ async def test_worker_reviews_only_at_the_interval_and_posts_a_notice(tmp_path: 
         _queue(config, paths, identity=ALICE)
         await _cycle(config, paths, client)
         assert model.requests == []
-        assert _marker_index(next(iter(_entries(paths).values()))) == -1
+        assert next(iter(_entries(paths).values()))["replies"] == 2
         _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
-        _queue(config, paths, identity=ALICE)
+        _queue(config, paths, identity=ALICE, run_id="r2")
         await _cycle(config, paths, client)
     assert model.requests
     assert (_skills_root(config, paths, ALICE) / "deploy-checks/SKILL.md").exists()
-    assert _marker_index(next(iter(_entries(paths).values()))) == 1
+    assert next(iter(_entries(paths).values()))["replies"] == 0
     sent_client, room_id, content = send.await_args.args
     assert (sent_client, room_id) == (client, "!room:example.test")
     assert content["msgtype"] == "m.notice"
     assert content["body"] == "💾 Skill review: created `deploy-checks`"
     assert content["m.relates_to"]["event_id"] == "$thread"
-
-
-@pytest.mark.asyncio
-async def test_foreign_skill_edits_restart_counting(tmp_path: Path) -> None:
-    """Like Hermes resetting after the agent saves a skill itself, outside skill edits restart the count."""
-    config, paths = _learner(tmp_path, review_interval=4)
-    _seed(config, paths, _tool_turn("r1"))
-    model = _model()
-    with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        _queue(config, paths)
-        await _cycle(config, paths)
-        _write_skill(_skills_root(config, paths), "handwritten", HANDWRITTEN)
-        _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
-        _queue(config, paths)
-        await _cycle(config, paths)
-    assert model.requests == []
-    assert _marker_index(next(iter(_entries(paths).values()))) == 1
-
-
-@pytest.mark.asyncio
-async def test_learner_edits_do_not_reset_other_conversations(tmp_path: Path) -> None:
-    """A review in one conversation moves every conversation that saw the same skills forward."""
-    config, paths = _learner(tmp_path, review_interval=2)
-    _seed(config, paths, _tool_turn("r1"))
-    _seed(config, paths, _run("o1", Message(role="assistant", content="hi")), session_id="other")
-    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
-    with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        _queue(config, paths, "other")
-        await _cycle(config, paths)
-        _queue(config, paths)
-        await _cycle(config, paths)
-    entries = _entries(paths)
-    assert entries["mind:other"]["seen_fingerprint"] == entries["mind:session"]["seen_fingerprint"]
-    assert _marker_index(entries["mind:other"]) == -1
 
 
 @pytest.mark.asyncio
@@ -1067,7 +935,7 @@ async def test_review_that_fails_after_changing_skills_is_not_repeated(tmp_path:
         _queue(config, paths, identity=ALICE)
         await _cycle(config, paths, object())
     (entry,) = _entries(paths).values()
-    assert (entry["failures"], _marker_index(entry), entry["has_new_runs"]) == (0, 0, False)
+    assert (entry["failures"], entry["replies"]) == (0, 0)
     content = send.await_args.args[2]
     assert content["body"] == "💾 Skill review: created `deploy-checks`"
     assert content[SKILL_REVIEW_NOTICE_CONTENT_KEY] == {"changes": {"deploy-checks": "created"}}
@@ -1157,45 +1025,8 @@ async def test_provider_errors_fail_the_review_and_back_off(tmp_path: Path) -> N
         _queue(config, paths)
         await _cycle(config, paths)
     (entry,) = _entries(paths).values()
-    assert (entry["failures"], _marker_index(entry)) == (1, -1)
+    assert (entry["failures"], entry["replies"]) == (1, 2)
     assert entry["next_attempt_at"] > 0
-
-
-@pytest.mark.asyncio
-async def test_every_attempt_of_one_response_counts(tmp_path: Path) -> None:
-    """Continuation attempts persist as separate runs, and all of them count toward the interval."""
-    config, paths = _learner(tmp_path, review_interval=4)
-    _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
-    model = _model()
-    with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        _queue(config, paths)
-        await _cycle(config, paths)
-    assert model.requests
-
-
-@pytest.mark.asyncio
-async def test_learner_edits_in_one_cycle_do_not_reset_later_conversations(tmp_path: Path) -> None:
-    """A review earlier in a cycle moves the stored state of conversations counted later in the same cycle."""
-    config, paths = _learner(tmp_path, review_interval=3)
-    _seed(config, paths, _run("o1", Message(role="assistant", content="one")), session_id="other")
-    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
-    with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        _queue(config, paths, "other")
-        await _cycle(config, paths)
-        _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
-        _seed(
-            config,
-            paths,
-            _run("o1", Message(role="assistant", content="one")),
-            _run("o2", Message(role="assistant", content="two")),
-            session_id="other",
-        )
-        _queue(config, paths)
-        _queue(config, paths, "other")
-        await _cycle(config, paths)
-    assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").exists()
-    assert _marker_index(_entries(paths)["mind:other"]) == -1
-    assert len(model.requests) == 2
 
 
 @pytest.mark.asyncio
@@ -1213,12 +1044,12 @@ async def test_stop_interrupts_a_running_review_and_the_next_start_runs_it(tmp_p
         worker.stop()
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5)
     (entry,) = _entries(paths).values()
-    assert (_marker_index(entry), entry["failures"], entry["has_new_runs"]) == (-1, 0, True)
+    assert (entry["replies"], entry["failures"]) == (2, 0)
     model.release.set()
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
         await _cycle(config, paths)
     assert len(model.requests) == 2
-    assert _marker_index(next(iter(_entries(paths).values()))) == 0
+    assert next(iter(_entries(paths).values()))["replies"] == 0
 
 
 def test_usage_timestamps_without_an_offset_read_as_utc(tmp_path: Path) -> None:
@@ -1256,20 +1087,6 @@ def test_one_malformed_usage_record_never_erases_the_others(tmp_path: Path) -> N
     learned = library.read_skill_file(root, "deploy-checks")
     assert learned is not None
     assert learned.learned
-
-
-def test_conversations_outlast_their_longest_approval_wait(tmp_path: Path) -> None:
-    """The idle limit grows by the longest approval timeout, so a response that paused late still has its place."""
-    config, paths = _learner(tmp_path)
-    day = 86400.0
-    with patch("mindroom.skill_learning.queue.time.time", return_value=0.0):
-        _queue(config, paths, completed=False)
-    assert [key for key, _entry in queue.drop_retired_reviews(config, paths, now=36 * day)] == ["mind:session"]
-    assert queue.drop_retired_reviews(config, paths, now=38 * day) == []
-    with patch("mindroom.skill_learning.queue.time.time", return_value=0.0):
-        _queue(config, paths, completed=False)
-    config.tool_approval.rules.append(ApprovalRuleConfig(match="deploy", action="require_approval", timeout_days=60))
-    assert [key for key, _entry in queue.drop_retired_reviews(config, paths, now=89 * day)] == ["mind:session"]
 
 
 def test_an_unreadable_usage_file_is_left_for_a_person_to_repair(tmp_path: Path) -> None:
@@ -1336,9 +1153,15 @@ async def test_adopted_skill_in_a_differently_named_directory_can_be_patched(tmp
 
 @pytest.mark.asyncio
 async def test_conversation_without_a_session_stops_being_due(tmp_path: Path) -> None:
-    """A conversation whose session is gone counts nothing and is not claimed again every cycle."""
+    """A conversation whose session was deleted after it counted is settled instead of claimed again every cycle."""
     config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
     _queue(config, paths)
+    storage = create_session_storage("mind", config, paths, execution_identity=None)
+    try:
+        storage.delete_session("session")
+    finally:
+        storage.close()
     model = _model()
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
         await _cycle(config, paths)
@@ -1348,29 +1171,30 @@ async def test_conversation_without_a_session_stops_being_due(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_one_failing_conversation_does_not_stop_the_cycle(tmp_path: Path) -> None:
-    """A conversation that cannot be counted backs off alone while the rest of the cycle proceeds."""
+    """A conversation whose workspace cannot be resolved backs off alone while the rest of the cycle proceeds."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
-    _queue(config, paths, "other")
+    _seed(config, paths, _tool_turn("o1"), session_id="other")
+    _queue(config, paths, "other", run_id="o1")
     _queue(config, paths)
-    original = worker_module._conversation_runs
+    original = worker_module._skills_root
 
-    def failing(config: Config, runtime_paths: RuntimePaths, entry: queue.QueueEntry) -> list[tuple[int, RunOutput]]:
+    def failing(config: Config, runtime_paths: RuntimePaths, entry: queue.QueueEntry) -> Path:
         if entry.session == "other":
-            msg = "storage unavailable"
+            msg = "workspace unavailable"
             raise OSError(msg)
         return original(config, runtime_paths, entry)
 
     model = _model()
     with (
         patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch.object(worker_module, "_conversation_runs", failing),
+        patch.object(worker_module, "_skills_root", failing),
     ):
         await _cycle(config, paths)
     entries = _entries(paths)
     assert entries["mind:other"]["failures"] == 1
     assert model.requests
-    assert _marker_index(entries["mind:session"]) == 0
+    assert entries["mind:session"]["replies"] == 0
 
 
 def test_transcript_cannot_close_the_evidence_block() -> None:
@@ -1448,16 +1272,17 @@ async def test_write_running_at_timeout_lands_before_settlement_and_is_announced
         _queue(config, paths, identity=ALICE)
         await _cycle(config, paths, object())
     entry = _entries(paths)["mind:session"]
-    assert (entry["failures"], _marker_index(entry)) == (0, 0)
-    assert entry["seen_fingerprint"] == library.skills_fingerprint(_skills_root(config, paths, ALICE))
+    assert (entry["failures"], entry["replies"]) == (0, 0)
     assert send.await_args.args[2]["body"] == "💾 Skill review: created `deploy-checks`"
 
 
 def test_a_malformed_scope_retires_only_its_own_conversation(tmp_path: Path) -> None:
     """One hand-edited entry must not stop startup, config reloads, or learning in every other conversation."""
     config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    _seed(config, paths, _tool_turn("o1"), session_id="other")
     _queue(config, paths, identity=ALICE)
-    _queue(config, paths, "other", identity=ALICE)
+    _queue(config, paths, "other", identity=ALICE, run_id="o1")
     state_path = paths.storage_root / "skill_learning_state.json"
     state = json.loads(state_path.read_text())
     state["entries"]["mind:other"]["identity"] = {"channel": "matrix"}
@@ -1467,24 +1292,23 @@ def test_a_malformed_scope_retires_only_its_own_conversation(tmp_path: Path) -> 
 
 
 def test_pruning_keeps_an_entry_that_received_a_run_meanwhile(tmp_path: Path) -> None:
-    """An entry judged stale is kept when a run arrives between the snapshot and the removal."""
-    config, paths = _learner(tmp_path)
+    """An entry judged stale is kept when a run is counted between the snapshot and the removal."""
+    config, paths = _learner(tmp_path, review_interval=4)
+    _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
     _queue(config, paths)
-    ((key, entry),) = queue.claim_due_reviews(config, paths, now=1.0)
-    _count(paths, key, entry, (0, 1))
     state = json.loads((paths.storage_root / "skill_learning_state.json").read_text())
     state["entries"]["mind:session"]["last_seen_at"] = 0.0
     (paths.storage_root / "skill_learning_state.json").write_text(json.dumps(state))
     judge = queue._entry_is_current
 
-    def judge_then_queue(config: Config, entry: queue.QueueEntry, now: float, stale_seconds: float) -> bool:
-        current = judge(config, entry, now, stale_seconds)
-        _queue(config, paths)
+    def judge_then_queue(config: Config, entry: queue.QueueEntry, now: float) -> bool:
+        current = judge(config, entry, now)
+        _queue(config, paths, run_id="r2")
         return current
 
     with patch.object(queue, "_entry_is_current", judge_then_queue):
         queue.claim_due_reviews(config, paths, now=datetime.now(UTC).timestamp())
-    assert _entries(paths)["mind:session"]["has_new_runs"]
+    assert _entries(paths)["mind:session"]["replies"] == 4
 
 
 @pytest.mark.asyncio
@@ -1497,7 +1321,7 @@ async def test_failed_shutdown_bookkeeping_does_not_swallow_the_cancellation(tmp
     worker = SkillLearningWorker(paths, lambda: config, client_provider=lambda _agent: None)
     with (
         patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch.object(SkillLearningWorker, "_settle", side_effect=OSError("disk full")),
+        patch.object(worker_module, "settle_review", side_effect=OSError("disk full")),
     ):
         _queue(config, paths)
         task = asyncio.create_task(worker.run())
@@ -1595,67 +1419,25 @@ def test_restored_or_reused_skill_names_start_over(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_first_count_starts_at_the_response_that_enabled_counting(tmp_path: Path) -> None:
-    """Replies from before learning was enabled never count toward a review, like Hermes' counter starting at zero."""
-    config, paths = _learner(tmp_path, review_interval=4)
-    now = int(time.time())
-    history = [_tool_turn("h1"), _tool_turn("h2")]
-    for run in history:
-        run.created_at = now - 600
-    _seed(config, paths, *history, _tool_turn("r1"))
-    model = _model()
-    with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        _queue(config, paths, started_at=now)
-        await _cycle(config, paths)
-        assert model.requests == []
-        _seed(config, paths, *history, _tool_turn("r1"), _tool_turn("r2"))
-        _queue(config, paths, started_at=now)
-        await _cycle(config, paths)
-    assert len(model.requests) == 1
-
-
-@pytest.mark.asyncio
-async def test_a_skill_saved_during_the_first_response_restarts_counting(tmp_path: Path) -> None:
-    """The first registration records the skills, so the agent saving one itself resets counting like Hermes."""
-    config, paths = _learner(tmp_path)
-    _queue(config, paths, completed=False)
-    _write_skill(_skills_root(config, paths), "handwritten", HANDWRITTEN)
-    _seed(config, paths, _tool_turn("r1"))
-    model = _model()
-    with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        _queue(config, paths)
-        await _cycle(config, paths)
-        assert model.requests == []
-        _seed(config, paths, _tool_turn("r1"), _tool_turn("r2"))
-        _queue(config, paths)
-        await _cycle(config, paths)
-    assert len(model.requests) == 1
-
-
-@pytest.mark.asyncio
-async def test_compaction_neither_hides_new_runs_nor_drops_its_summary(tmp_path: Path) -> None:
-    """Deleted runs cannot hide a new run that reuses an index, and the review sees the compaction summary."""
+async def test_compaction_never_lowers_the_count_and_the_review_sees_its_summary(tmp_path: Path) -> None:
+    """Replies stay counted when compaction deletes their runs, and the summary opens the review's evidence."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
+    _queue(config, paths)
+    storage = create_session_storage("mind", config, paths, execution_identity=None)
+    try:
+        storage.delete_runs(["r1"])
+        later = _tool_turn("r2", result="deployed to canary")
+        later.session_id = "session"
+        summary = SessionSummary(summary="The user wants release notes in the #deploys channel.")
+        seed_session(storage, AgentSession(session_id="session", agent_id="mind", summary=summary, runs=[later]))
+    finally:
+        storage.close()
     model = _model()
     with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        _queue(config, paths)
         await _cycle(config, paths)
-        assert len(model.requests) == 1
-        storage = create_session_storage("mind", config, paths, execution_identity=None)
-        try:
-            storage.delete_runs(["r1"])
-            later = _tool_turn("r2", result="deployed to canary")
-            later.created_at = int(time.time()) + 5
-            later.session_id = "session"
-            summary = SessionSummary(summary="The user wants release notes in the #deploys channel.")
-            seed_session(storage, AgentSession(session_id="session", agent_id="mind", summary=summary, runs=[later]))
-        finally:
-            storage.close()
-        _queue(config, paths)
-        await _cycle(config, paths)
-    assert len(model.requests) == 2
-    evidence = model.requests[1][-1]
+    assert len(model.requests) == 1
+    evidence = model.requests[0][-1]
     assert evidence.index("release notes in the #deploys channel") < evidence.index("deployed to canary")
     assert "tests passed" not in evidence
 
@@ -1676,10 +1458,9 @@ def test_transcript_keeps_the_compaction_summary_when_trimming() -> None:
 
 @pytest.mark.asyncio
 async def test_write_in_flight_at_shutdown_is_recorded_as_the_learners(tmp_path: Path) -> None:
-    """Stopping during a learner write waits for it, so no conversation reads the learner's edit as a foreign one."""
+    """Stopping during a learner write waits for it and settles the review, so its edits are never repeated."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
-    _seed(config, paths, _run("o1", Message(role="assistant", content="hi")), session_id="other")
     writing = threading.Event()
     real_create = library.create_skill
 
@@ -1694,33 +1475,13 @@ async def test_write_in_flight_at_shutdown_is_recorded_as_the_learners(tmp_path:
         patch("mindroom.model_loading.get_model_instance", return_value=model),
         patch("mindroom.skill_learning.reviewer.create_skill", slow_create),
     ):
-        _queue(config, paths, "other")
-        await _cycle(config, paths)
         _queue(config, paths)
         task = asyncio.create_task(worker.run())
         assert await asyncio.to_thread(writing.wait, 10)
         worker.stop()
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=10)
-    entries = _entries(paths)
-    assert entries["mind:other"]["seen_fingerprint"] == library.skills_fingerprint(_skills_root(config, paths))
-    assert (entries["mind:session"]["has_new_runs"], _marker_index(entries["mind:session"])) == (False, 0)
-
-
-@pytest.mark.asyncio
-async def test_an_approved_continuation_counts_when_its_request_opened_the_conversation(tmp_path: Path) -> None:
-    """A continued run keeps its first save time, so the paused request that began it fixes where counting starts."""
-    config, paths = _learner(tmp_path)
-    started = int(time.time()) - 600
-    paused = _tool_turn("r1")
-    paused.created_at = started + 1
-    _seed(config, paths, paused)
-    model = _model()
-    with patch("mindroom.model_loading.get_model_instance", return_value=model):
-        _queue(config, paths, started_at=started, completed=False)
-        assert queue.claim_due_reviews(config, paths, now=time.time()) == []
-        _queue(config, paths, started_at=int(time.time()))
-        await _cycle(config, paths)
-    assert model.requests
+    assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").exists()
+    assert _entries(paths)["mind:session"]["replies"] == 0
 
 
 @pytest.mark.asyncio
@@ -1733,7 +1494,6 @@ async def test_a_stop_during_archival_or_bookkeeping_still_records_the_learners_
     config, paths = _learner(tmp_path)
     config.agents["mind"].skill_learning.timeout_seconds = 1
     _seed(config, paths, _tool_turn("r1"))
-    _seed(config, paths, _run("o1", Message(role="assistant", content="hi")), session_id="other")
     root = _skills_root(config, paths)
     library.create_skill(root, "old-habit", LEARNED.replace("deploy-checks", "old-habit"), reserved_names=frozenset())
     with open_skills_root(root) as root_fd:
@@ -1770,42 +1530,14 @@ async def test_a_stop_during_archival_or_bookkeeping_still_records_the_learners_
         patch("mindroom.skill_learning.reviewer.create_skill", slow_create),
         patch.object(SkillLearningWorker, "_finish", finish),
     ):
-        _queue(config, paths, "other")
-        await _cycle(config, paths)
         _queue(config, paths)
         task = asyncio.create_task(worker.run())
         assert await asyncio.to_thread(reached.wait, 10)
         worker.stop()
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=10)
-    assert _entries(paths)["mind:other"]["seen_fingerprint"] == library.skills_fingerprint(root)
     assert not (root / "old-habit").exists()
-
-
-@pytest.mark.asyncio
-async def test_a_skills_root_that_cannot_be_fingerprinted_still_settles_the_review(tmp_path: Path) -> None:
-    """Worker code can replace the skills root after a review wrote, and the review must still settle as done."""
-    config, paths = _learner(tmp_path)
-    _seed(config, paths, _tool_turn("r1"))
-    model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
-    real_fingerprint = worker_module.skills_fingerprint
-    calls = 0
-
-    def fingerprint(root: Path) -> str:
-        nonlocal calls
-        calls += 1
-        if calls == 3:
-            msg = "skills root was replaced"
-            raise OSError(msg)
-        return real_fingerprint(root)
-
-    with (
-        patch("mindroom.model_loading.get_model_instance", return_value=model),
-        patch.object(worker_module, "skills_fingerprint", fingerprint),
-    ):
-        _queue(config, paths)
-        await _cycle(config, paths)
-    (entry,) = _entries(paths).values()
-    assert (entry["failures"], entry["has_new_runs"], _marker_index(entry)) == (0, False, 0)
+    # A review stopped before it wrote runs again after restart; one whose write landed is done.
+    assert _entries(paths)["mind:session"]["replies"] == (2 if phase == "archival" else 0)
 
 
 @pytest.mark.asyncio
