@@ -479,10 +479,10 @@ async def test_scan_rotates_requester_pokes_without_starvation(tmp_path: Path) -
 async def _poke_history_with_thread_churn(
     todo_root: Path,
     items: list[dict[str, object]],
-) -> list[tuple[datetime, str | None]]:
+) -> tuple[list[tuple[datetime, str | None]], list[str]]:
     current_time = [_NOW]
     sent_requesters: list[str | None] = []
-    deps, _queried_rooms, _sent = _deps(todo_root, clock=lambda: current_time[0], sent_requesters=sent_requesters)
+    deps, _queried_rooms, sent = _deps(todo_root, clock=lambda: current_time[0], sent_requesters=sent_requesters)
     policy = TodoPokePolicy(quiet_seconds=0, cooldown_seconds=300)
     remembered_pokes = {}
     seen_warning_keys: set[tuple[str, str]] = set()
@@ -500,7 +500,7 @@ async def _poke_history_with_thread_churn(
         )
         history.extend((current_time[0], requester) for requester in sent_requesters[before:])
         current_time[0] += timedelta(seconds=120)
-    return history
+    return history, [body for _room, body, _thread in sent]
 
 
 @pytest.mark.asyncio
@@ -511,8 +511,8 @@ async def test_scan_skips_refused_requesters_without_reducing_other_pokes(
     """Work from a human who lost access or a bot account is never poked, is logged once, and costs no poke slots."""
     warnings: list[str] = []
     monkeypatch.setattr(todo_poke_module.logger, "warning", lambda event, **_context: warnings.append(event))
-    baseline = await _poke_history_with_thread_churn(tmp_path / "baseline", [_item("legacy")])
-    history = await _poke_history_with_thread_churn(
+    baseline, _baseline_bodies = await _poke_history_with_thread_churn(tmp_path / "baseline", [_item("legacy")])
+    history, bodies = await _poke_history_with_thread_churn(
         tmp_path / "refused",
         [
             _item("legacy"),
@@ -523,6 +523,7 @@ async def test_scan_skips_refused_requesters_without_reducing_other_pokes(
 
     assert len(baseline) > 1
     assert history == baseline
+    assert not any("Former work" in body or "Bridged work" in body for body in bodies)
     assert warnings == ["todo_poke_requester_refused", "todo_poke_requester_refused"]
 
 

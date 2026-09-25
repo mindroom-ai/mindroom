@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,13 +12,21 @@ import nio
 import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
-from mindroom.custom_tools.todo_poke import TodoPokeDeliveryUnavailableError, TodoPokeRequesterKind
+from mindroom.custom_tools.todo_poke import (
+    TodoPokeDeliveryUnavailableError,
+    TodoPokeDeps,
+    TodoPokePolicy,
+    TodoPokeRequesterKind,
+    scan_todo_pokes,
+)
+from mindroom.custom_tools.todo_state import state_root as todo_state_root
 from mindroom.entity_resolution import MissingManagedEntityAccountError, mindroom_user_id
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks.sender import send_hook_message
@@ -224,6 +234,80 @@ def test_requester_kind_follows_current_config(tmp_path: Path) -> None:
         kind("@alice:localhost")
     with pytest.raises(TodoPokeDeliveryUnavailableError):
         _coordinator(runtime_paths, None, {})._requester_kind("@alice:localhost", "secret", "!room:localhost")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_scan_waits_for_pending_membership_without_pruning_human_record(tmp_path: Path) -> None:
+    """An unresolved membership grant is no refusal, so the human's dedup record survives until it resolves."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "shared": AgentConfig(
+                    display_name="Shared",
+                    rooms=["!room:localhost"],
+                    access=ResponderAccessConfig(current_room_members=True),
+                ),
+            },
+        ),
+        runtime_paths=test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    entity_ids(config, runtime_paths)
+    # A fresh index has not yet loaded the room's members, as after a restart or a membership invalidation.
+    coordinator = _coordinator(runtime_paths, config, {})
+    todo_root = todo_state_root(runtime_paths)
+    thread_path = todo_root / "threads" / "scope" / "todos.json"
+    thread_path.parent.mkdir(parents=True)
+    thread_path.write_text(
+        json.dumps(
+            {
+                "room_id": "!room:localhost",
+                "thread_id": "$thread",
+                "items": [
+                    {
+                        "id": "carol",
+                        "title": "Carol work",
+                        "status": "open",
+                        "priority": "medium",
+                        "depends_on": [],
+                        "assigned_agent": "shared",
+                        "requester_id": "@carol:localhost",
+                        "updated_at": "2026-07-18T11:50:00+00:00",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    poke_state_path = todo_root / "poke_state.json"
+    seeded_state = {
+        "scopes": {
+            '["shared","!room:localhost","$thread","@carol:localhost"]': {
+                "last_poked_at": 0.0,
+                "last_fingerprint": "exhausted",
+                "unchanged_repoke_count": 3,
+            },
+        },
+    }
+    poke_state_path.write_text(json.dumps(seeded_state), encoding="utf-8")
+    sender = AsyncMock(return_value="$event")
+    deps = TodoPokeDeps(
+        state_root=todo_root,
+        schedule_query=AsyncMock(return_value=frozenset()),
+        idle_check=lambda _agent_name: True,
+        sender=sender,
+        requester_kind=coordinator._requester_kind,
+        clock=lambda: datetime.now(UTC),
+    )
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 0
+
+    sender.assert_not_awaited()
+    assert json.loads(poke_state_path.read_text(encoding="utf-8")) == seeded_state
+    with pytest.raises(TodoPokeDeliveryUnavailableError) as raised:
+        coordinator._requester_kind("@carol:localhost", "shared", "!room:localhost")
+    assert isinstance(raised.value.__cause__, ReplyMembershipPendingError)
 
 
 @pytest.mark.asyncio

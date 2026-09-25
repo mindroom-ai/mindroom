@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from mindroom.authorization import is_sender_allowed_for_responder
+from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.custom_tools.todo_poke import (
     TodoPokeDeliveryUnavailableError,
@@ -166,20 +166,22 @@ class TodoPokeRuntimeCoordinator:
             return TodoPokeRequesterKind.INTERNAL
         # Ingress promotes only a human original sender to requester; any other sender would run with the assignee's authority.
         # Ingress also refuses a human the assignee may not reply to, so such work would only take poke slots.
-        if (
-            is_human_requester_id(requester_id, config, self.runtime_paths)
-            and agent_name in config.agents
-            and is_sender_allowed_for_responder(
+        if not is_human_requester_id(requester_id, config, self.runtime_paths) or agent_name not in config.agents:
+            return TodoPokeRequesterKind.REFUSED
+        try:
+            allowed = is_sender_allowed_for_responder(
                 requester_id,
                 agent_name,
                 room_id,
                 config,
                 self.runtime_paths,
                 self.agent_reply_memberships,
+                require_resolved_membership=True,
             )
-        ):
-            return TodoPokeRequesterKind.HUMAN
-        return TodoPokeRequesterKind.REFUSED
+        except ReplyMembershipPendingError as exc:
+            # Unresolved membership is no refusal, so skip the scan without pruning this requester's dedup state.
+            raise TodoPokeDeliveryUnavailableError from exc
+        return TodoPokeRequesterKind.HUMAN if allowed else TodoPokeRequesterKind.REFUSED
 
     async def _send_poke(
         self,
