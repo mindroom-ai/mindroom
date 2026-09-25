@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
     from agno.run.workflow import WorkflowRunOutput
-    from sqlalchemy import Engine, Table
+    from sqlalchemy import Engine, Row, Table
     from sqlalchemy.orm import Session
 
 _CONNECT_LISTENER_NAME = "_set_sqlite_pragmas"
@@ -43,6 +43,15 @@ def remove_default_pragmas(engine: Engine) -> None:
     event.remove(engine, "connect", listeners[0])
 
 
+def run_table(db: SqliteDb) -> Table:
+    """Return the runs table, creating it on first use."""
+    runs = db._get_table(table_type="runs", create_table_if_not_found=True)
+    if runs is None:
+        msg = "Run table unavailable"
+        raise RuntimeError(msg)
+    return runs
+
+
 # AGNO_COMPAT: Run insertion can reorder surviving stored runs.
 # Reason: Agno accepts an in-memory run position that can precede surviving stored
 # indexes after deletion. Its MAX+1 path is only used when the supplied index is None.
@@ -58,6 +67,36 @@ def remove_default_pragmas(engine: Engine) -> None:
 # Remove when: Agno accepts a caller-owned transaction or an in-transaction persistence hook;
 # retain the owner's independent usage retention and atomic snapshot update.
 # Coverage: tests/test_usage_storage.py::test_usage_write_failure_rolls_back_the_run.
+def insert_run_row(
+    transaction: Session,
+    runs: Table,
+    run: RunOutput | TeamRunOutput | WorkflowRunOutput | dict[str, Any],
+    *,
+    session_id: str,
+    user_id: str | None,
+) -> Row[Any]:
+    """Upsert one run row at the end of its session inside the caller's transaction."""
+    row = build_single_run_row(run, session_id=session_id, user_id=user_id, run_index=None)
+    row["run_index"] = (
+        select(func.coalesce(func.max(runs.c.run_index) + 1, 0))
+        .where(runs.c.session_id == session_id)
+        .scalar_subquery()
+    )
+    statement = insert(runs).values(**row)
+    return transaction.execute(
+        statement.on_conflict_do_update(
+            index_elements=["run_id"],
+            set_={
+                **{
+                    name: statement.excluded[name]
+                    for name in ("status", "run_data", "user_id", "parent_run_id", "updated_at")
+                },
+                "run_index": func.coalesce(runs.c.run_index, statement.excluded.run_index),
+            },
+        ).returning(runs.c.session_id, runs.c.run_id, runs.c.run_data, runs.c.created_at),
+    ).one()
+
+
 def upsert_run_at_end(
     db: SqliteDb,
     run: RunOutput | TeamRunOutput | WorkflowRunOutput | dict[str, Any],
@@ -67,30 +106,9 @@ def upsert_run_at_end(
     record_usage: bool = True,
 ) -> None:
     """Save the run and optional usage in one transaction, preserving Agno's row/index semantics."""
-    runs = db._get_table(table_type="runs", create_table_if_not_found=True)
-    if runs is None:
-        msg = "Run table unavailable"
-        raise RuntimeError(msg)
-    row = build_single_run_row(run, session_id=session_id, user_id=user_id, run_index=None)
+    runs = run_table(db)
     with db.Session() as transaction, transaction.begin():
-        row["run_index"] = (
-            select(func.coalesce(func.max(runs.c.run_index) + 1, 0))
-            .where(runs.c.session_id == session_id)
-            .scalar_subquery()
-        )
-        statement = insert(runs).values(**row)
-        stored = transaction.execute(
-            statement.on_conflict_do_update(
-                index_elements=["run_id"],
-                set_={
-                    **{
-                        name: statement.excluded[name]
-                        for name in ("status", "run_data", "user_id", "parent_run_id", "updated_at")
-                    },
-                    "run_index": func.coalesce(runs.c.run_index, statement.excluded.run_index),
-                },
-            ).returning(runs.c.session_id, runs.c.run_id, runs.c.run_data, runs.c.created_at),
-        ).one()
+        stored = insert_run_row(transaction, runs, run, session_id=session_id, user_id=user_id)
         if record_usage:
             payload = project_usage({**stored.run_data, "created_at": stored.created_at})
             connection = transaction.connection()

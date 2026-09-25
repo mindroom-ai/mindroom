@@ -37,12 +37,14 @@ from mindroom.session_storage_preflight import session_storage_preflight
 from mindroom.usage_storage import project_usage, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Collection, Iterable, Mapping
     from pathlib import Path
 
     from agno.agent import Agent
     from agno.run.workflow import WorkflowRunOutput
     from agno.session import Session
+    from sqlalchemy import Table
+    from sqlalchemy.orm import Session as OrmSession
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -62,6 +64,7 @@ __all__ = [
     "create_session_storage",
     "create_state_engine",
     "create_state_storage",
+    "delete_run_subtrees",
     "get_agent_runtime_state_dbs",
     "get_agent_session",
     "get_team_session",
@@ -421,22 +424,34 @@ class _ConversationSqliteDb(SqliteDb):
         """Delete a run subtree and its legacy representations atomically."""
         if not run_ids:
             return
-        wanted = {run_id for run_id in run_ids if run_id}
         with agno_compat_sqlite.run_deletion_transaction(self) as (sess, runs_table, sessions_table):
-            if runs_table is not None:
-                # Team member runs are rows whose parent_run_id is the team run; a
-                # deleted run takes its whole subtree along, as agno's own
-                # session-level delete cascades do.
-                frontier = list(wanted)
-                while frontier:
-                    children = sess.execute(
-                        select(runs_table.c.run_id).where(runs_table.c.parent_run_id.in_(frontier)),
-                    ).scalars()
-                    frontier = [child for child in children if child not in wanted]
-                    wanted.update(frontier)
-                sess.execute(runs_table.delete().where(runs_table.c.run_id.in_(wanted)))
-            if sessions_table is not None:
-                scrub_legacy_run_blobs(sess, sessions_table, wanted)
+            delete_run_subtrees(sess, runs_table, sessions_table, run_ids)
+
+
+def delete_run_subtrees(
+    transaction: OrmSession,
+    runs_table: Table | None,
+    sessions_table: Table | None,
+    run_ids: Collection[str],
+) -> None:
+    """Delete runs, their member-run descendants, and retained legacy copies in the caller's transaction."""
+    wanted = {run_id for run_id in run_ids if run_id}
+    if not wanted:
+        return
+    if runs_table is not None:
+        # Team member runs are rows whose parent_run_id is the team run; a
+        # deleted run takes its whole subtree along, as agno's own
+        # session-level delete cascades do.
+        frontier = list(wanted)
+        while frontier:
+            children = transaction.execute(
+                select(runs_table.c.run_id).where(runs_table.c.parent_run_id.in_(frontier)),
+            ).scalars()
+            frontier = [child for child in children if child not in wanted]
+            wanted.update(frontier)
+        transaction.execute(runs_table.delete().where(runs_table.c.run_id.in_(wanted)))
+    if sessions_table is not None:
+        scrub_legacy_run_blobs(transaction, sessions_table, wanted)
 
 
 def runs_without(
