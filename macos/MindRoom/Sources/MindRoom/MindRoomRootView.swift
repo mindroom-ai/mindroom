@@ -95,6 +95,7 @@ struct MindRoomRootView: View {
         .frame(width: 195)
         .frame(maxHeight: .infinity)
         .background(.regularMaterial)
+        .onAppear { focusedSection = navigation.section }
         .onChange(of: navigation.section) { _, section in
             if focusedSection != nil {
                 focusedSection = section
