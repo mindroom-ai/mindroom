@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import shutil
@@ -792,13 +793,13 @@ def test_instance_chart_static_runner_mounts_only_agent_state() -> None:
 
 
 def test_instance_chart_static_runner_generates_primary_api_key_without_other_auth() -> None:
-    """Without Supabase or trusted-upstream auth, the primary API gets a key the sidecar never receives."""
+    """Without Supabase auth, the primary API gets a key the sidecar never receives."""
     deployment_docs = _render_chart(Path("cluster/k8s/instance"))
     deployment = _resource(deployment_docs, "Deployment", "mindroom-demo")
     api_key_secret = _resource(deployment_docs, "Secret", "mindroom-primary-api-key-demo")
 
     assert api_key_secret["metadata"]["namespace"] == "mindroom-instances"
-    assert len(api_key_secret["stringData"]["MINDROOM_API_KEY"]) == 48
+    assert len(base64.b64decode(api_key_secret["data"]["MINDROOM_API_KEY"])) == 48
     assert _env_by_name(_container(deployment, "mindroom"))["MINDROOM_API_KEY"] == {
         "name": "MINDROOM_API_KEY",
         "valueFrom": {"secretKeyRef": {"name": "mindroom-primary-api-key-demo", "key": "MINDROOM_API_KEY"}},
@@ -810,13 +811,12 @@ def test_instance_chart_static_runner_generates_primary_api_key_without_other_au
     "settings",
     [
         ("supabaseUrl=https://supabase.example.test", "supabaseAnonKey=anon-key"),
-        ("trustedUpstreamAuth.enabled=true", "trustedUpstreamAuth.userIdHeader=X-User"),
         ("allowUnauthenticatedPrimary=true",),
         ("workerBackend=kubernetes", "storageAccessMode=ReadWriteMany"),
     ],
 )
 def test_instance_chart_skips_generated_api_key_when_not_needed(settings: tuple[str, ...]) -> None:
-    """Provisioned Supabase auth, trusted upstream, the opt-out, and dedicated workers render no generated key."""
+    """Provisioned Supabase auth, the opt-out, and dedicated workers render no generated key."""
     docs = _render_chart(Path("cluster/k8s/instance"), *settings)
     mindroom_container = _container(_resource(docs, "Deployment", "mindroom-demo"), "mindroom")
 
@@ -3106,9 +3106,11 @@ def test_runtime_chart_static_runner_withholds_key_and_mounts_only_agent_state(
     assert volumes["sandbox-workspace"] == {"name": "sandbox-workspace", "emptyDir": {}}
     assert _env_by_name(runner_container)["MINDROOM_STORAGE_PATH"]["value"] == "/app/agent_data"
     assert _init_container(deployment, "prepare-sandbox-runner-storage")["command"] == [
-        "sh",
-        "-ec",
-        'mkdir -p "/app/agent_data/sandbox-runner" "/app/agent_data/agents" "/app/agent_data/private_instances"\n',
+        "mkdir",
+        "-p",
+        "/app/agent_data/sandbox-runner",
+        "/app/agent_data/agents",
+        "/app/agent_data/private_instances",
     ]
 
 
@@ -3148,11 +3150,6 @@ def test_runtime_chart_static_runner_reads_file_config_subtree_read_only(
     config_mounts = [mount for mount in runner_container["volumeMounts"] if mount.get("readOnly")]
 
     assert config_mounts == ([expected_config_mount] if expected_config_mount is not None else [])
-    init_script = _init_container(_resource(docs, "Deployment", "mindroom-runtime"), "prepare-sandbox-runner-storage")[
-        "command"
-    ][2]
-    # Only a single-file subPath needs the file to exist before kubelet mounts it.
-    assert (f'if [ ! -f "{config_path}" ]; then' in init_script) is (config_path == "/app/agent_data/config.yaml")
     assert [mount for mount in runner_container["volumeMounts"] if mount["name"] == "storage"][:3] == [
         {"name": "storage", "mountPath": "/app/agent_data", "subPath": "sandbox-runner"},
         {"name": "storage", "mountPath": "/app/agent_data/agents", "subPath": "agents"},
@@ -3188,8 +3185,8 @@ def test_runtime_chart_static_runner_generates_primary_api_key() -> None:
     api_key_secret = _resource(docs, "Secret", "mindroom-runtime-api-key")
     runner_container = _container(deployment, "sandbox-runner")
 
-    assert list(api_key_secret["stringData"]) == ["MINDROOM_API_KEY"]
-    assert len(api_key_secret["stringData"]["MINDROOM_API_KEY"]) == 48
+    assert list(api_key_secret["data"]) == ["MINDROOM_API_KEY"]
+    assert len(base64.b64decode(api_key_secret["data"]["MINDROOM_API_KEY"])) == 48
     # The generated key comes first so an operator-supplied MINDROOM_API_KEY wins.
     assert _container(deployment, "mindroom")["envFrom"] == [
         {"secretRef": {"name": "mindroom-runtime-api-key"}},
@@ -3199,18 +3196,9 @@ def test_runtime_chart_static_runner_generates_primary_api_key() -> None:
     assert "MINDROOM_API_KEY" not in _env_by_name(runner_container)
 
 
-@pytest.mark.parametrize(
-    "settings",
-    [
-        ("env.extra[0].name=MINDROOM_API_KEY", "env.extra[0].valueFrom.secretKeyRef.name=operator-api-key"),
-        ("env.extra[0].name=SUPABASE_URL", "env.extra[0].value=https://supabase.example.test"),
-        ("env.extra[0].name=MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED", "env.extra[0].value=true"),
-        ("apiAuth.allowUnauthenticatedPrimary=true",),
-        ("workers.backend=kubernetes",),
-    ],
-)
+@pytest.mark.parametrize("settings", [("apiAuth.allowUnauthenticatedPrimary=true",), ("workers.backend=kubernetes",)])
 def test_runtime_chart_skips_generated_api_key_when_not_needed(settings: tuple[str, ...]) -> None:
-    """Configured primary auth, the explicit opt-out, and dedicated workers render no generated key."""
+    """The explicit opt-out and dedicated workers render no generated key."""
     docs = _render_chart(
         Path("cluster/k8s/runtime"),
         "workers.sandbox.proxyToken.value=test-token",
@@ -3222,10 +3210,6 @@ def test_runtime_chart_skips_generated_api_key_when_not_needed(settings: tuple[s
 
     assert not any(doc["kind"] == "Secret" and doc["metadata"]["name"] == "mindroom-runtime-api-key" for doc in docs)
     assert "envFrom" not in mindroom_container
-    if settings[0] == "env.extra[0].name=MINDROOM_API_KEY":
-        assert _env_by_name(mindroom_container)["MINDROOM_API_KEY"]["valueFrom"]["secretKeyRef"]["name"] == (
-            "operator-api-key"
-        )
 
 
 def test_runtime_chart_dedicated_workers_skip_static_runner_storage() -> None:

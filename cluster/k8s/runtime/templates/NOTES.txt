@@ -20,14 +20,7 @@ Supply the configuration file at {{ include "mindroom-runtime.configPath" . }}, 
 Provide either an existing config ConfigMap or a chart-managed config value.
 {{- end }}
 For externally managed PostgreSQL, set eventCache.databaseUrl.existingSecret.
-{{- if include "mindroom-runtime.generatesApiKey" . }}
-
-Primary API key:
-  The static_runner sidecar shares the pod network, so the primary API requires a chart-generated MINDROOM_API_KEY.
-  Read it with:
-    kubectl get secret --namespace {{ .Release.Namespace }} {{ include "mindroom-runtime.apiKeySecretName" . }} -o jsonpath='{.data.MINDROOM_API_KEY}' | base64 -d
-  A MINDROOM_API_KEY supplied through env.envFrom takes precedence over the generated key.
-{{- else if and (eq .Values.workers.backend "static_runner") .Values.apiAuth.allowUnauthenticatedPrimary }}
-
-WARNING: apiAuth.allowUnauthenticatedPrimary=true lets tool code in the static_runner sidecar call the primary API on localhost unless other API authentication is configured.
+{{- if and (eq .Values.workers.backend "static_runner") (not .Values.apiAuth.allowUnauthenticatedPrimary) }}
+The primary API requires the generated MINDROOM_API_KEY unless env.extra or env.envFrom sets one:
+  kubectl get secret --namespace {{ .Release.Namespace }} {{ include "mindroom-runtime.fullname" . }}-api-key -o jsonpath='{.data.MINDROOM_API_KEY}' | base64 -d
 {{- end }}

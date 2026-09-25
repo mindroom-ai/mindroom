@@ -164,7 +164,7 @@ spec:
             secretKeyRef:
               name: {{ $instanceSecretName }}
               key: credentials_encryption_key
-        {{- if include "mindroom.generatesApiKey" .Values }}
+        {{- if and (eq $workerBackend "static_runner") (not .Values.allowUnauthenticatedPrimary) (not (and .Values.supabaseUrl .Values.supabaseAnonKey)) }}
         # The sandbox-runner sidecar shares this pod's network, so the otherwise unauthenticated API requires a key.
         - name: MINDROOM_API_KEY
           valueFrom:
