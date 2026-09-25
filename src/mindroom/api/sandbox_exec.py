@@ -304,6 +304,7 @@ def worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")
     env["UV_CACHE_DIR"] = str(paths.cache_dir / "uv")
     env["PYTHONPYCACHEPREFIX"] = str(paths.cache_dir / "pycache")
+    env["TMPDIR"] = str(paths.tmp_dir)
     env["VIRTUAL_ENV"] = str(paths.venv_dir)
 
     env["PATH"] = constants.subprocess_path_with_prepends(

@@ -119,6 +119,7 @@ from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix_delivery import TurnHandoff
 from mindroom.message_target import MessageTarget
+from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.provider_media_fallback import reset_model_media_capability_cache
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
@@ -429,6 +430,7 @@ __all__ = [
     "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
+    "install_personal_room_shutdown_mock",
     "install_runtime_journal_support",
     "install_send_response_mock",
     "install_shutdown_drain_mocks",
@@ -2624,6 +2626,11 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
             )
             stack.enter_context(patch(f"{module_name}.{name}", new=replacement))
         yield
+
+
+def install_personal_room_shutdown_mock(bot: AgentBot) -> None:
+    """Install lifecycle cancellation for partial shutdown fixtures through one seam."""
+    bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
 
 
 def install_shutdown_drain_mocks(

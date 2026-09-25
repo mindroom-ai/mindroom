@@ -138,6 +138,7 @@ uv tool install 'mindroom[desktop]'
 
 macOS supports native semantic state through AXUIElement and requires Accessibility permission for state and control.
 macOS screenshots require macOS 14 or newer and Screen Recording permission.
+When `mindroom desktop run` starts from a terminal, macOS attributes both permissions to that terminal app and applies a new grant only after the app is quit and reopened, even if it already appears enabled; inside tmux, also restart the tmux server with `tmux kill-server`.
 ScreenCaptureKit captures the exact selected window, with its process and bounds checked before capture.
 Windows and Linux currently expose screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
 Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
@@ -287,6 +288,7 @@ Each user then runs `!desktop setup` in a private Matrix room containing only th
 The short-lived pairing code is a bearer secret, so MindRoom rejects `!desktop` when any other room member is present.
 The serving bot returns one full `mindroom desktop setup` command containing the configured homeserver, a short-lived code, and the exact pinned cloud controller identity.
 Run it once; it reuses an existing local Desktop Matrix session or completes login before claiming the pairing.
+If the saved session belongs to a different homeserver or Matrix user than the command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace` to replace the saved session.
 Then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
 The claim travels as an authenticated Olm-encrypted to-device event, and confirmation stores the local device identity only in that requester's agent-scoped credential store.

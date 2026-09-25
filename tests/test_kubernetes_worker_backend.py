@@ -975,8 +975,9 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     assert "MINDROOM_STORAGE_PATH" in env_names
     assert "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH" in env_names
     assert "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT" not in env_names
-    assert "VIRTUAL_ENV" in env_names
-    assert "PATH" in env_names
+    # The runner must resolve executables from the image, not the worker-writable venv.
+    assert "VIRTUAL_ENV" not in env_names
+    assert "PATH" not in env_names
     assert "MINDROOM_SHARED_CREDENTIALS_PATH" in env_names
     assert token_env == {
         "name": "MINDROOM_SANDBOX_PROXY_TOKEN",
@@ -1005,8 +1006,6 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_dedicated_root
     assert env_values["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == expected_dedicated_root
     assert env_values["HOME"] == expected_dedicated_root
-    assert env_values["VIRTUAL_ENV"] == f"{expected_dedicated_root}/venv"
-    assert env_values["PATH"].startswith(f"{expected_dedicated_root}/venv/bin:")
     assert env_values["MINDROOM_SHARED_CREDENTIALS_PATH"] == f"{expected_dedicated_root}/.shared_credentials"
     assert committed_runtime.storage_root == Path(expected_dedicated_root)
     assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY") == worker_key
@@ -1062,6 +1061,7 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     }
     assert container["securityContext"] == {
         "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
         "capabilities": {"drop": ["ALL"]},
     }
     assert container["resources"]["requests"] == {"memory": "256Mi", "cpu": "100m"}
@@ -1092,6 +1092,7 @@ def test_kubernetes_worker_localhost_seccomp_applies_only_to_main_container(tmp_
     assert pod_spec["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}
     assert pod_spec["containers"][0]["securityContext"] == {
         "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
         "capabilities": {"drop": ["ALL"]},
         "seccompProfile": profile,
     }
@@ -1114,6 +1115,7 @@ def test_kubernetes_worker_runtime_class_preserves_sandbox_security_context(tmp_
     assert pod_spec["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}
     assert pod_spec["containers"][0]["securityContext"] == {
         "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
         "capabilities": {"drop": ["ALL"]},
     }
 
@@ -1868,6 +1870,7 @@ def test_kubernetes_backend_mounts_config_storage_subtree_without_configmap(
     assert not any(mount["name"] == "worker-config" for mount in container["volumeMounts"])
     assert deployment["spec"]["template"]["spec"]["volumes"] == [
         {"name": "worker-storage", "persistentVolumeClaim": {"claimName": "mindroom-storage"}},
+        {"name": "worker-tmp", "emptyDir": {}},
     ]
     assert env_by_name["MINDROOM_CONFIG_PATH"]["value"] == worker_config_path
 
@@ -2234,8 +2237,8 @@ def test_kubernetes_backend_omits_backend_config_env_from_worker_env_and_manifes
     assert env_values["HOME"] == expected_worker_root
     assert env_values["MINDROOM_CONFIG_PATH"] != "/unsafe/config.yaml"
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_worker_root
-    assert env_values["PATH"] != "/unsafe/bin"
-    assert env_values["VIRTUAL_ENV"] == f"{expected_worker_root}/venv"
+    assert "PATH" not in env_values
+    assert "VIRTUAL_ENV" not in env_values
     assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY") == _TEST_SCOPED_WORKER_KEY_A
     assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT") == expected_worker_root
     assert committed_runtime.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") == (
@@ -2754,7 +2757,9 @@ router:
         "/app/worker/agents/code",
         expected_worker_root,
         f"{expected_worker_root}/.shared_credentials",
+        f"{expected_worker_root}/.runtime",
         "/app/config.yaml",
+        "/tmp",  # noqa: S108
     }
 
 
@@ -2880,7 +2885,7 @@ router:
     assert apps_api.deleted_names == [recreated["metadata"]["name"]]
     assert updated_hash != initial_hash
     volume_mounts = recreated["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
-    assert any(mount["subPath"] == "knowledge/shared-docs" for mount in volume_mounts)
+    assert any(mount.get("subPath") == "knowledge/shared-docs" for mount in volume_mounts)
 
 
 def test_kubernetes_backend_uses_custom_worker_prefix_for_storage_path() -> None:
@@ -2899,8 +2904,8 @@ def test_kubernetes_backend_uses_custom_worker_prefix_for_storage_path() -> None
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_worker_root
 
 
-def test_kubernetes_backend_mounts_shared_credential_mirror_read_only() -> None:
-    """Worker code must not be able to delete or relink the primary's credential mirror."""
+def test_kubernetes_backend_mounts_primary_written_directories_read_only() -> None:
+    """Worker code must not be able to rewrite or relink the credential mirror or the startup manifest."""
     backend, apps_api, _core_api = _backend()
     worker_key = "v1:tenant-123:shared:code"
 
@@ -2912,12 +2917,33 @@ def test_kubernetes_backend_mounts_shared_credential_mirror_read_only() -> None:
     expected_worker_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
 
     assert mounts_by_path[expected_worker_root].get("readOnly") is None
-    assert mounts_by_path[f"{expected_worker_root}/.shared_credentials"] == {
-        "name": mounts_by_path[expected_worker_root]["name"],
-        "mountPath": f"{expected_worker_root}/.shared_credentials",
-        "subPath": f"workers/{worker_dir_name(worker_key)}/.shared_credentials",
-        "readOnly": True,
-    }
+    for dirname in (".shared_credentials", ".runtime"):
+        assert mounts_by_path[f"{expected_worker_root}/{dirname}"] == {
+            "name": mounts_by_path[expected_worker_root]["name"],
+            "mountPath": f"{expected_worker_root}/{dirname}",
+            "subPath": f"workers/{worker_dir_name(worker_key)}/{dirname}",
+            "readOnly": True,
+        }
+
+
+def test_kubernetes_backend_refuses_symlinked_startup_manifest_directory(tmp_path: Path) -> None:
+    """A `.runtime` link planted by an older worker must never redirect the primary's manifest write."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    runtime_dir = worker_root_path(runtime_paths.storage_root, _TEST_SCOPED_WORKER_KEY_A) / ".runtime"
+    runtime_dir.parent.mkdir(parents=True)
+    runtime_dir.symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(WorkerBackendError, match="real directory"):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert list(victim.iterdir()) == []
+    assert apps_api.created_bodies == []
 
 
 def test_kubernetes_backend_prepares_mirror_before_applying_deployment(tmp_path: Path) -> None:

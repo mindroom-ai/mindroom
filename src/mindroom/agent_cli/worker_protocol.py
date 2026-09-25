@@ -9,7 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 
-CLI_PRIVATE_ROOT_PATH = "/app/.mindroom-agent-cli"
+# Worker containers mount the root filesystem read-only; /tmp is their private tmpfs.
+CLI_PRIVATE_ROOT_PATH = "/tmp/.mindroom-agent-cli"  # noqa: S108
 _ShellOperationName = Literal["run_shell_command", "check_shell_command", "kill_shell_command"]
 SHELL_OPERATION_NAMES: tuple[_ShellOperationName, ...] = get_args(_ShellOperationName)
 

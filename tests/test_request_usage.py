@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING
 import pytest
 from agno.db.sqlite import SqliteDb
 from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
+from agno.models.base import MessageData
 from agno.models.message import Message
+from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
@@ -22,6 +24,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.legacy_usage_storage import migrate_usage_database
 from mindroom.usage_stats import collect_admin_usage
+from tests.history_helpers import RecordingModel
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -244,6 +247,148 @@ def test_unreconciled_request_details_preserve_aggregates_and_mark_coverage(
     ]
     assert sum(row.totals.total_tokens for row in report.model_breakdown) == 250_014
     assert report.to_dict()["request_breakdown"] == []
+    assert report.request_coverage is not None
+    assert report.request_coverage.unavailable_sources == 1
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("retained_run", [False, True])
+def test_mixed_model_requests_keep_models_and_actual_dates(
+    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    *,
+    streaming: bool,
+    retained_run: bool,
+) -> None:
+    """Changing models must not omit request detail or move new usage to the run's original day."""
+    config, paths, storage = request_usage
+    run = _run()
+    assert run.messages is not None
+    assert run.metrics is not None
+    run.metrics.details = {
+        "model": [
+            ModelMetrics(id="first-model", provider="first-provider", **_FIRST),
+            ModelMetrics(id="second-model", provider="second-provider", **_SECOND),
+        ],
+    }
+    first_day = int(datetime(2023, 11, 15, tzinfo=UTC).timestamp())
+    second_day = int(datetime(2023, 11, 16, tzinfo=UTC).timestamp())
+    for message, model_id, provider, metrics, created_at in (
+        (run.messages[2], "first-model", "first-provider", _FIRST, first_day + 1),
+        (run.messages[5], "second-model", "second-provider", _SECOND, second_day + 1),
+    ):
+        model = RecordingModel(id=model_id, provider=provider)
+        message.created_at = created_at
+        message.metrics = MessageMetrics()
+        provider_data = {"secret": "private provider metadata"}
+        if streaming:
+            model._populate_assistant_message_from_stream_data(
+                message,
+                MessageData(response_metrics=MessageMetrics(**metrics), response_provider_data=provider_data),
+            )
+        else:
+            populated = model._populate_assistant_message(
+                message,
+                ModelResponse(response_usage=MessageMetrics(**metrics), provider_data=provider_data),
+            )
+            assert populated is message
+    storage.upsert_run(run, session_id="session")
+    if not retained_run:
+        with sqlite3.connect(storage.db_file) as connection:
+            connection.execute("DELETE FROM code_sessions_runs")
+
+    payload = collect_admin_usage(
+        config=config,
+        runtime_paths=paths,
+        include_requests=True,
+        include_daily=True,
+    ).to_dict()
+    requests = payload["request_breakdown"]
+    assert [(row["provider"], row["model"], row["created_at"], row["totals"]) for row in requests] == [
+        ("first-provider", "first-model", first_day + 1, _FIRST),
+        ("second-provider", "second-model", second_day + 1, _SECOND),
+    ]
+    days = payload["daily_breakdown"]
+    assert [(day["date"], day["run_count"], day["totals"]) for day in days] == [
+        ("2023-11-15", 1, _FIRST),
+        ("2023-11-16", 0, _SECOND),
+    ]
+    assert [(day["model_breakdown"][0]["provider"], day["model_breakdown"][0]["model"]) for day in days] == [
+        ("first-provider", "first-model"),
+        ("second-provider", "second-model"),
+    ]
+    assert payload["user_breakdown"][0]["daily_breakdown"] == days
+    assert payload["request_coverage"]["unavailable_sources"] == 0
+    with sqlite3.connect(storage.db_file) as connection:
+        stored = connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0]
+    assert "private" not in stored
+
+
+def test_daily_mixed_models_count_run_once_per_model(
+    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+) -> None:
+    """Repeated calls count one run overall and one run for each model used."""
+    config, paths, storage = request_usage
+    with sqlite3.connect(storage.db_file) as connection:
+        payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
+        payload["metrics"] = {
+            "input_tokens": 6,
+            "total_tokens": 6,
+            "details": {
+                "model": [
+                    {"id": "first-model", "provider": "test-provider", "input_tokens": 4, "total_tokens": 4},
+                    {"id": "second-model", "provider": "test-provider", "input_tokens": 2, "total_tokens": 2},
+                ],
+            },
+        }
+        payload["requests"] = [
+            {
+                "created_at": 1_700_000_000 + tokens,
+                "model": model,
+                "model_provider": "test-provider",
+                "metrics": {"input_tokens": tokens, "total_tokens": tokens},
+            }
+            for model, tokens in [("first-model", 1), ("second-model", 2), ("first-model", 3)]
+        ]
+        connection.execute("UPDATE code_sessions_usage SET usage_data = ?", (json.dumps(payload),))
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True)
+    day = report.to_dict()["daily_breakdown"][0]
+    assert day["run_count"] == 1
+    assert day["totals"]["total_tokens"] == 6
+    assert [(row["model"], row["run_count"], row["totals"]["total_tokens"]) for row in day["model_breakdown"]] == [
+        ("first-model", 1, 4),
+        ("second-model", 1, 2),
+    ]
+
+
+@pytest.mark.parametrize("invalid", ["swapped_models", "missing_provider", "malformed_model", "empty_model"])
+def test_request_attribution_must_reconcile_per_model(
+    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    invalid: str,
+) -> None:
+    """Correct overall totals cannot justify a wrong or incomplete per-request model."""
+    config, paths, storage = request_usage
+    with sqlite3.connect(storage.db_file) as connection:
+        payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
+        payload["metrics"]["details"]["model"] = [
+            {"id": "first-model", "provider": "test-provider", **_FIRST},
+            {"id": "second-model", "provider": "test-provider", **_SECOND},
+        ]
+        for request, model in zip(payload["requests"], ["first-model", "second-model"], strict=True):
+            request.update(model=model, model_provider="test-provider")
+        if invalid == "swapped_models":
+            payload["requests"][0]["model"] = "second-model"
+            payload["requests"][1]["model"] = "first-model"
+        elif invalid == "missing_provider":
+            del payload["requests"][0]["model_provider"]
+        elif invalid == "malformed_model":
+            payload["requests"][0]["model"] = {"private": "content"}
+        else:
+            payload["requests"][0]["model"] = ""
+        connection.execute("UPDATE code_sessions_usage SET usage_data = ?", (json.dumps(payload),))
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True, include_daily=True)
+    assert report.totals.total_tokens == 250_014
+    assert [(day.date, day.totals.total_tokens) for day in report.daily_breakdown] == [("2023-11-14", 250_014)]
+    assert report.request_breakdown == ()
     assert report.request_coverage is not None
     assert report.request_coverage.unavailable_sources == 1
 

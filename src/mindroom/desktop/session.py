@@ -19,6 +19,7 @@ from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.client_session import (
+    MindRoomAsyncClient,
     PermanentMatrixStartupError,
     create_matrix_http_client,
     login_flows,
@@ -381,7 +382,8 @@ async def _open_owned_session(
     store_path.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name != "nt":
         store_path.chmod(0o700)
-    client = nio.AsyncClient(
+    # MindRoomAsyncClient prepares dynamic Cloudflare Access headers before every request.
+    client = MindRoomAsyncClient(
         session.homeserver,
         session.user_id,
         device_id=session.device_id,

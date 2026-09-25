@@ -102,10 +102,16 @@ def _request_required_desktop_permissions() -> None:
     permission_names = " and ".join(missing_permissions)
     permission_label = "permission" if len(missing_permissions) == 1 else "permissions"
     msg = (
-        f"macOS requested {permission_names} {permission_label}. Grant the requested access to the terminal app "
-        "running this command in System Settings > Privacy & Security, fully quit and reopen that app, then run "
-        "`mindroom desktop run` again."
+        f"macOS has not applied {permission_names} {permission_label} to the terminal app running this command. "
+        "macOS applies a grant only after that app restarts, even if it is already listed and enabled in "
+        "System Settings > Privacy & Security. Enable it there if needed, quit the terminal app completely "
+        "(Cmd-Q; closing its windows is not enough), reopen it, then run `mindroom desktop run` again."
     )
+    if os.environ.get("TMUX"):
+        msg += (
+            " This command runs inside tmux, whose existing server does not pick up the new grant: after reopening "
+            "the terminal app, also run `tmux kill-server`, or start the bridge outside tmux."
+        )
     raise DesktopProviderError(msg)
 
 
@@ -411,10 +417,18 @@ def desktop_setup(
     ),
 ) -> None:
     """Log in when needed, then claim one requester-agent pairing."""
+    from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
     from mindroom.desktop.session import desktop_session_path  # noqa: PLC0415
 
     runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
-    if not desktop_session_path(runtime_paths).exists():
+    session_path = desktop_session_path(runtime_paths)
+    if session_path.exists():
+        _require_saved_session_matches(
+            session_path,
+            user_id=user_id,
+            homeserver=homeserver or runtime_matrix_homeserver(runtime_paths),
+        )
+    else:
         desktop_login(
             user_id=user_id,
             homeserver=homeserver,
@@ -437,6 +451,27 @@ def desktop_setup(
         config_path=config_path,
         storage_path=storage_path,
     )
+
+
+def _require_saved_session_matches(session_path: Path, *, user_id: str | None, homeserver: str) -> None:
+    """Refuse to pair a saved session that belongs to another homeserver or user."""
+    from mindroom.desktop.session import DesktopSessionError, load_desktop_session  # noqa: PLC0415
+
+    try:
+        session = load_desktop_session(session_path)
+    except DesktopSessionError as exc:
+        _error_console.print(f"[red]Desktop setup failed:[/red] {exc}")
+        raise typer.Exit(1) from None
+    homeserver_differs = homeserver.rstrip("/") != session.homeserver.rstrip("/")
+    user_differs = user_id is not None and user_id != session.user_id
+    if homeserver_differs or user_differs:
+        _error_console.print(
+            f"[red]Desktop setup failed:[/red] The saved session at {session_path} belongs to "
+            f"{session.user_id} on {session.homeserver}, not {user_id or session.user_id} on "
+            f"{homeserver}. Pass --storage-path for a separate setup, or run "
+            "'mindroom desktop login --replace' to replace the saved session.",
+        )
+        raise typer.Exit(1)
 
 
 async def _pair_desktop(
