@@ -97,6 +97,7 @@ from mindroom.tools.matrix_message import matrix_message_tools
 from mindroom.tools.matrix_room import matrix_room_tools
 from mindroom.tools.matrix_voice_message import matrix_voice_message_tools
 from mindroom.tools.mem0 import mem0_tools
+from mindroom.tools.microsoft_365 import microsoft_365_tools
 from mindroom.tools.modelslabs import modelslabs_tools
 from mindroom.tools.moviepy_video_tools import moviepy_video_tools
 from mindroom.tools.neo4j import neo4j_tools
@@ -232,6 +233,7 @@ __all__ = [
     "matrix_room_tools",
     "matrix_voice_message_tools",
     "mem0_tools",
+    "microsoft_365_tools",
     "modelslabs_tools",
     "moviepy_video_tools",
     "neo4j_tools",

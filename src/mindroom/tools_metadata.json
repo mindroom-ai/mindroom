@@ -8780,6 +8780,34 @@
     },
     {
       "agent_override_fields": null,
+      "auth_provider": "microsoft_365",
+      "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": true,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Connect OneDrive and SharePoint Excel workbooks and edit them in place after human approval",
+      "display_name": "Microsoft 365",
+      "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
+      "executes_code": false,
+      "file_access": "agent",
+      "function_names": [
+        "connect_office_document",
+        "save_office_document",
+        "read_office_document",
+        "edit_office_document"
+      ],
+      "helper_text": "Each user connects their own work or school Microsoft account. Store the Entra app registration's client ID and secret in the microsoft_365_oauth_client credential service, and set MICROSOFT_365_TENANT_ID for a single-tenant app.",
+      "icon": "FaMicrosoft",
+      "icon_color": "text-sky-600",
+      "name": "microsoft_365",
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
