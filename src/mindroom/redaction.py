@@ -63,19 +63,25 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
 _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
 # Values that only stand in for a secret: shell or template references, ellipses, and masking runs.
 _PLACEHOLDER_PATTERN = re.compile(r"^[$<{%\[]|\.\.\.|x{4,}|\*{3,}", re.IGNORECASE)
-_ASSIGNED_VALUE_PATTERN = re.compile(r"[\"']?([^\s\"',;&)\]}]+)")
-# A YAML block scalar indicator, whose value is the more-indented lines below its key.
-_BLOCK_SCALAR_PATTERN = re.compile(r"[|>][+-]?[0-9]?[+-]?")
-# A YAML mapping entry, which the assignment scan checks on its own.
-_MAPPING_ENTRY_PATTERN = re.compile(r"(?:-[^\S\r\n]+)?[\"']?[A-Za-z0-9_.-]+[\"']?[^\S\r\n]*:(?:\s|$)")
-# Words before a credential that are not the credential: YAML tags and anchors, and authorization schemes.
-_VALUE_PREFIX_WORDS = re.compile(r"[!&]\S*|(?:basic|bearer|bot|digest|token)", re.IGNORECASE)
-# Normalized key names and suffixes that mark a credential beyond the redaction key list.
-_CREDENTIAL_KEY_NAMES = frozenset({"pass", "passwd", "passphrase", "pat", "private_key", "private_token"})
-_CREDENTIAL_KEY_SUFFIXES = ("_token", "_key", "_secret", "_password", "_pass", "_passwd", "_passphrase")
-# Assigned code rather than a literal: a call, a subscript, or a dotted attribute reference.
-_CALL_OR_SUBSCRIPT_PATTERN = re.compile(r".*[(\[].*")
-_DOTTED_REFERENCE_PATTERN = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
+# Credentials written into skill content, adapted from Hermes Agent's skill guard (tools/skills_guard.py): quoted
+# values of api-key, token, secret, or password settings unless they name an environment variable, AWS access key
+# IDs, Anthropic and GitLab tokens, and unquoted values on env-file style lines.
+_SKILL_SECRET_PATTERNS = (
+    re.compile(
+        r"(?:api[_-]?key|token|secret|password)\s*[=:]\s*[\"']"
+        r"(?!(?-i:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)[\"'])(?P<secret>[A-Za-z0-9+/=_-]{20,})",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?P<secret>AKIA[0-9A-Z]{16})"),
+    re.compile(r"(?P<secret>sk-ant-[A-Za-z0-9_-]{90,})"),
+    re.compile(r"(?P<secret>glpat-[A-Za-z0-9_-]{20,})"),
+    re.compile(
+        r"^[^\S\n]*+(?:export[^\S\n]++)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*=(?P<secret>[^\s\"'$<{]\S{19,})$",
+        re.MULTILINE,
+    ),
+)
+# URL passwords that only name a local default rather than a secret.
+_DEFAULT_URL_PASSWORDS = frozenset({"changeme", "example", "pass", "password", "secret"})
 # An unterminated block still redacts through the end of the text, so a split key never leaks its body.
 _PRIVATE_KEY_PATTERN = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\Z)",
@@ -89,11 +95,6 @@ _TOKEN_LIKE_PATTERN = re.compile(
     r"|gh(?:p|o|u|s|r)_[A-Za-z0-9_]+"
     r"|github_pat_[A-Za-z0-9_]+"
     r"|AIza[0-9A-Za-z_-]+"
-    r"|hf_[A-Za-z0-9]+"
-    r"|glpat-[A-Za-z0-9_-]+"
-    r"|gsk_[A-Za-z0-9]+"
-    r"|AGE-SECRET-KEY-[A-Z0-9]+"
-    r"|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
     r"))(?![A-Za-z0-9])",
 )
 _TOKEN_LIKE_MARKERS = (
@@ -117,11 +118,6 @@ _TOKEN_LIKE_MARKERS = (
     "ghr_",
     "github_pat_",
     "AIza",
-    "hf_",
-    "glpat-",
-    "gsk_",
-    "AGE-SECRET-KEY-",
-    "eyJ",
 )
 _SECRET_KEYS: frozenset[str] = frozenset(
     {
@@ -565,9 +561,9 @@ def find_credential(value: str) -> int | None:
     """Return where text holds a likely literal credential rather than a placeholder or prose, or None.
 
     Unlike redaction, which also hides harmless values, this flags private keys, long known token formats, bearer
-    tokens, URL passwords or secret query values, and long values of secret-named settings, including a YAML value
-    on the more-indented lines below one, while exempting placeholders such as ``OPENAI_API_KEY=<your key>``,
-    ``sk-...``, or ``$TOKEN``, code references, and word-like identifiers. It is a heuristic for common formats.
+    tokens, URL passwords or secret query values, and the setting shapes of Hermes Agent's skill guard, while
+    exempting placeholders such as ``OPENAI_API_KEY=<your key>``, ``sk-...``, or ``$TOKEN``. It is a heuristic for
+    common formats, so an unusual secret format can pass.
     """
     if match := _PRIVATE_KEY_PATTERN.search(value):
         return match.start()
@@ -578,77 +574,11 @@ def find_credential(value: str) -> int | None:
     for match in _URL_PATTERN.finditer(value):
         if _url_holds_secret(match.group("url")):
             return match.start("url")
-    return _secret_assignment(value)
-
-
-def _is_credential_key(key: str) -> bool:
-    """Whether a setting's name, in any spelling, marks its value as a credential."""
-    normalized = _normalize_key_text(key)
-    return (
-        _is_sensitive_key(key) or normalized in _CREDENTIAL_KEY_NAMES or normalized.endswith(_CREDENTIAL_KEY_SUFFIXES)
-    )
-
-
-def _secret_assignment(value: str) -> int | None:
-    """Return where a secret-named setting holds a likely literal credential, or None."""
-    for match in _ASSIGNMENT_PREFIX_PATTERN.finditer(value):
-        if not _is_credential_key(match.group("key")):
-            continue
-        line_end = value.find("\n", match.end())
-        words = _value_words(value[match.end() : len(value) if line_end == -1 else line_end])
-        if not words or _BLOCK_SCALAR_PATTERN.fullmatch(words[0]):
-            # A YAML block or a value that starts on the next line lives in the more-indented lines below the key.
-            if (found := _indented_block_secret(value, match.start(), line_end)) is not None:
-                return found
-            continue
-        if _looks_like_secret(words[0]) and not _looks_like_code_or_identifier(words[0]):
-            return match.end()
+    for pattern in _SKILL_SECRET_PATTERNS:
+        for match in pattern.finditer(value):
+            if _looks_like_secret(match.group("secret")):
+                return match.start("secret")
     return None
-
-
-def _value_words(text: str) -> list[str]:
-    """Return an assignment's value words without surrounding quotes, YAML tags and anchors, or an auth scheme."""
-    words = [word.strip("\"'`,;") for word in text.split()]
-    while len(words) > 1 and _VALUE_PREFIX_WORDS.fullmatch(words[0]):
-        words.pop(0)
-    return [word for word in words if word]
-
-
-def _indented_block_secret(value: str, key_start: int, line_end: int) -> int | None:
-    """Return where a secret sits in the lines after a key that belong to its value, or None."""
-    before_key = value[value.rfind("\n", 0, key_start) + 1 : key_start]
-    indent = len(before_key) - len(before_key.lstrip())
-    position = line_end
-    while position != -1:
-        start = position + 1
-        position = value.find("\n", start)
-        line = value[start : len(value) if position == -1 else position]
-        stripped = line.lstrip()
-        if not stripped:
-            continue
-        line_indent = len(line) - len(stripped)
-        if line_indent < indent or (line_indent == indent and not stripped.startswith("- ")):
-            return None
-        if stripped.startswith("#") or _MAPPING_ENTRY_PATTERN.match(stripped):
-            # Comments are prose, and nested entries are checked by the assignment scan on their own.
-            continue
-        if any(
-            _looks_like_secret(word) and not _looks_like_code_or_identifier(word) for word in _value_words(stripped)
-        ):
-            return start + line_indent
-    return None
-
-
-def _looks_like_code_or_identifier(value: str) -> bool:
-    """Code, a URL, or a word-like identifier such as ``order-12345-retry-1`` rather than a random secret."""
-    if "://" in value or _CALL_OR_SUBSCRIPT_PATTERN.fullmatch(value):
-        return True
-    segments = [segment for segment in re.split(r"[-_./:]", value) if segment]
-    if _DOTTED_REFERENCE_PATTERN.fullmatch(value) and not any(_looks_like_secret(part) for part in segments):
-        return True
-    return len(segments) >= 3 and all(
-        segment.isalpha() or segment.isdigit() or len(segment) <= 3 for segment in segments
-    )
 
 
 def _looks_like_secret(value: str) -> bool:
@@ -668,7 +598,8 @@ def _url_holds_secret(url: str) -> bool:
         password = parsed.password
     except ValueError:
         return False
-    if password and not _PLACEHOLDER_PATTERN.search(password):
+    default = password is not None and (password == parsed.username or password.lower() in _DEFAULT_URL_PASSWORDS)
+    if password and not default and not _PLACEHOLDER_PATTERN.search(password):
         return True
     return any(
         _is_redacted_query_key(key) and _looks_like_secret(item)

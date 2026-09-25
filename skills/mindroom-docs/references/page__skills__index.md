@@ -211,8 +211,8 @@ Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](https:/
 `skill_manage` can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/`, `templates/`, `scripts/`, or `assets/`.
 Before changing an existing file, the reviewer must load its current version with `skill_view` in the same review, and a write against any other version is refused.
 A new skill needs a lowercase hyphenated name matching its directory, a description of at most 60 characters, and the `learned` marker shown below.
-Files that look like they contain a literal credential are refused with the offending line named: a PEM or PGP private key, a long known token (including JWTs and GitHub, GitLab, Hugging Face, Groq, Slack, Stripe, and OpenAI formats) or bearer token, a password or secret query value in a URL, or a long random value of a secret-named setting, including a YAML value on the more-indented lines below one.
-This is a heuristic for common formats, not a guarantee: word-like identifiers and code references are allowed, and an unusual secret format can pass.
+Files that look like they contain a literal credential are refused with the offending line named, using checks adapted from Hermes Agent's skill guard: a PEM or PGP private key, a long known token (OpenAI, Anthropic, GitHub, GitLab, Slack, Stripe, Google, or an AWS access key ID) or bearer token, a password or secret query value in a URL, a quoted long random value of an api-key, token, secret, or password setting, or such a value on an environment-file line such as `API_KEY=...`.
+This is a heuristic for common formats, not a guarantee: an unusual secret format or an unquoted value in other file shapes can pass.
 Placeholders such as `OPENAI_API_KEY=<your key>`, `sk-...`, `$TOKEN`, and usernames in URLs like `ssh://git@github.com/...` are allowed.
 Workspace skill scripts still cannot be executed through `get_skill_script`.
 

@@ -132,7 +132,7 @@ def _render_text(text: str, limit: int) -> str:
     """Remove private keys from the whole text, keep its start and end, and redact what remains.
 
     The evidence is a conversation the agent's model already processed, so redaction is best-effort; learned files
-    are what is checked strictly, when they are written.
+    are checked again for credentials when they are written.
     """
     return redact_sensitive_text(_clip(redact_private_keys(text), limit))
 
