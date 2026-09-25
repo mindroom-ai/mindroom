@@ -150,6 +150,7 @@ def _runtime_paths_with_synced_env(tmp_path: Path, env: dict[str, str]) -> Runti
         ({"api_key": "sk-configured"}, None, "sk-configured"),
         ({"api_key": " sk-configured "}, None, "sk-configured"),
         ({"extra_kwargs": {"api_key": "sk-configured"}}, None, "sk-configured"),
+        ({"extra_kwargs": {"api_key": " sk-configured "}}, None, "sk-configured"),
         ({"api_key": "sk-configured"}, "sk-stored-model", "sk-stored-model"),
         ({"api_key": "  "}, None, "sk-env"),
         ({"extra_kwargs": {"api_key": ""}}, None, "sk-env"),
@@ -160,6 +161,7 @@ def _runtime_paths_with_synced_env(tmp_path: Path, env: dict[str, str]) -> Runti
         "api-key",
         "api-key-trimmed",
         "extra-kwargs-api-key",
+        "extra-kwargs-api-key-trimmed",
         "stored-model-credential",
         "blank-api-key",
         "blank-extra-kwargs-api-key",
@@ -244,6 +246,13 @@ def test_keyless_providers_never_carry_a_configured_api_key(
     model = get_model_instance(config, runtime_paths, "target")
 
     assert "sk-configured" not in repr(vars(model))
+
+
+@pytest.mark.parametrize("api_key", [12345, ["sk-a"], {"key": "sk-a"}])
+def test_model_config_rejects_non_string_extra_kwargs_api_key(api_key: object) -> None:
+    """A non-string extra_kwargs.api_key would bypass key resolution, so config validation rejects it."""
+    with pytest.raises(ValidationError, match=r"extra_kwargs\.api_key must be a string"):
+        ModelConfig(provider="openai", id="gpt-6-astra", extra_kwargs={"api_key": api_key})
 
 
 def test_model_config_rejects_api_key_in_both_fields() -> None:

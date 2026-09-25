@@ -682,14 +682,18 @@ class ModelConfig(BaseModel):
 
     @field_validator("extra_kwargs")
     @classmethod
-    def _drop_blank_extra_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Treat a blank extra_kwargs.api_key as unset, matching the api_key field."""
+    def _normalize_extra_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Normalize extra_kwargs.api_key exactly like the api_key field: a trimmed string, blank meaning unset."""
         if value is None or "api_key" not in value:
             return value
         api_key = value["api_key"]
-        if api_key is None or (isinstance(api_key, str) and not api_key.strip()):
-            return {key: item for key, item in value.items() if key != "api_key"}
-        return value
+        if api_key is not None and not isinstance(api_key, str):
+            msg = "extra_kwargs.api_key must be a string"
+            raise ValueError(msg)
+        normalized = {key: item for key, item in value.items() if key != "api_key"}
+        if api_key is not None and api_key.strip():
+            normalized["api_key"] = api_key.strip()
+        return normalized
 
     @field_validator("icon")
     @classmethod

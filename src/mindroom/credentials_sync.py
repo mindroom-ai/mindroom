@@ -435,9 +435,25 @@ def get_model_api_key(model_name: str, model_config: ModelConfig, runtime_paths:
     stored_api_key = get_api_key_for_service(f"model:{model_name}", runtime_paths)
     if stored_api_key:
         return _ModelApiKey(stored_api_key, "dashboard")
+    # ModelConfig normalizes both fields to a trimmed string or absence.
     configured_api_key = model_config.api_key or (model_config.extra_kwargs or {}).get("api_key")
-    if isinstance(configured_api_key, str):
-        return _ModelApiKey(configured_api_key, "config")
+    return None if configured_api_key is None else _ModelApiKey(configured_api_key, "config")
+
+
+def get_memory_llm_api_key(
+    provider: str,
+    llm_settings: Mapping[str, Any],
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return the key the Mem0 LLM uses: an explicit ``memory.llm.config.api_key``, else the provider's shared key.
+
+    Blank explicit keys count as unset. Only ``openai`` and ``anthropic`` fall back to a shared key.
+    """
+    explicit_api_key = llm_settings.get("api_key")
+    if isinstance(explicit_api_key, str) and explicit_api_key.strip():
+        return explicit_api_key.strip()
+    if provider in {"openai", "anthropic"}:
+        return get_api_key_for_provider(provider, runtime_paths=runtime_paths)
     return None
 
 
