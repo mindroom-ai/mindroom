@@ -237,7 +237,7 @@ class TestDMPreservationDuringCleanup:
                 return_value=members,
             ),
             patch(
-                "mindroom.matrix.room_cleanup._get_all_known_bot_user_ids",
+                "mindroom.matrix.room_cleanup.persisted_bot_user_ids",
                 return_value={"@mindroom_orphaned:server", f"@mindroom_configured_agent:{current_domain}"},
             ),
         ):
@@ -280,7 +280,7 @@ class TestDMPreservationDuringCleanup:
                 return_value=members,
             ),
             patch(
-                "mindroom.matrix.room_cleanup._get_all_known_bot_user_ids",
+                "mindroom.matrix.room_cleanup.persisted_bot_user_ids",
                 return_value={"@mindroom_orphaned:server", f"@mindroom_configured_agent:{current_domain}"},
             ),
         ):
@@ -320,7 +320,7 @@ class TestDMPreservationDuringCleanup:
                 return_value=members,
             ),
             patch(
-                "mindroom.matrix.room_cleanup._get_all_known_bot_user_ids",
+                "mindroom.matrix.room_cleanup.persisted_bot_user_ids",
                 return_value={"@mindroom_self:server", "@mindroom_orphaned:server"},
             ),
         ):
@@ -475,7 +475,7 @@ class TestDMPreservationDuringCleanup:
                 return_value=["@user:server", "@mindroom_orphaned:server"],
             ),
             patch(
-                "mindroom.matrix.room_cleanup._get_all_known_bot_user_ids",
+                "mindroom.matrix.room_cleanup.persisted_bot_user_ids",
                 return_value={"@mindroom_orphaned:server", "@mindroom_agent:server"},
             ),
             patch("mindroom.matrix.room_cleanup.is_dm_room", side_effect=mock_is_dm_room),
@@ -569,7 +569,7 @@ class TestDMPreservationDuringCleanup:
                 return_value=[f"@mindroom_router:{current_domain}"],
             ),
             patch(
-                "mindroom.matrix.room_cleanup._get_all_known_bot_user_ids",
+                "mindroom.matrix.room_cleanup.persisted_bot_user_ids",
                 return_value={f"@mindroom_router:{current_domain}"},
             ),
             patch("mindroom.matrix.room_cleanup.is_dm_room", side_effect=mock_is_dm_room),

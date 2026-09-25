@@ -22,7 +22,7 @@ from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field, field_validator
 
 from mindroom import model_loading, scheduling_executor
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.conversation_reads import complete_thread_history
@@ -88,6 +88,32 @@ def _schedule_edit_lock(client: nio.AsyncClient, room_id: str, task_id: str) -> 
 
 class _ScheduledTaskStateReadError(RuntimeError):
     """A scheduled-task state read failed without proving the task absent."""
+
+
+def _runtime_authored_task_content(
+    room_id: str,
+    event: dict[str, typing.Any],
+    runtime_account_ids: frozenset[str],
+) -> dict[str, typing.Any] | None:
+    """Return a scheduled-task state event's content only when a MindRoom-managed bot account wrote it.
+
+    Any member with power to write room state can write this event type, and its workflow names
+    the requester each trigger runs as, so state from any other sender is ignored.
+    """
+    content = event.get("content")
+    sender = event.get("sender")
+    if not isinstance(content, dict) or not isinstance(sender, str):
+        return None
+    if sender in runtime_account_ids:
+        return content
+    logger.warning(
+        "scheduled_task_state_ignored_unmanaged_author",
+        room_id=room_id,
+        task_id=event.get("state_key"),
+        event_id=event.get("event_id"),
+        sender=sender,
+    )
+    return None
 
 
 class _AgentValidationResult(NamedTuple):
@@ -378,6 +404,8 @@ def _parse_scheduled_task_record(
             return None
     else:
         return None
+    if not workflow.created_by:
+        return None
 
     created_at = _parse_datetime(content.get("created_at"))
     revision = content.get("revision")
@@ -611,17 +639,19 @@ def _cleanup_task_if_current(task_id: str, running_tasks: dict[str, asyncio.Task
 def _parse_task_records_from_state(
     room_id: str,
     state_response: nio.RoomGetStateResponse,
+    runtime_paths: RuntimePaths,
     include_non_pending: bool = False,
 ) -> list[ScheduledTaskRecord]:
-    """Parse scheduled task records from a room state response."""
+    """Parse runtime-authored scheduled task records from a room state response."""
+    runtime_account_ids = persisted_bot_user_ids(runtime_paths)
     tasks: list[ScheduledTaskRecord] = []
     for event in state_response.events:
         if event.get("type") != _SCHEDULED_TASK_EVENT_TYPE:
             continue
 
         state_key = event.get("state_key")
-        content = event.get("content")
-        if not isinstance(state_key, str) or not isinstance(content, dict):
+        content = _runtime_authored_task_content(room_id, event, runtime_account_ids)
+        if not isinstance(state_key, str) or content is None:
             continue
 
         task = _parse_scheduled_task_record(room_id, state_key, content)
@@ -637,6 +667,7 @@ def _parse_task_records_from_state(
 async def get_scheduled_tasks_for_room(
     client: nio.AsyncClient,
     room_id: str,
+    runtime_paths: RuntimePaths,
     include_non_pending: bool = False,
 ) -> list[ScheduledTaskRecord]:
     """Fetch and parse scheduled tasks for a room."""
@@ -645,12 +676,13 @@ async def get_scheduled_tasks_for_room(
         logger.error("Failed to get room state", response=str(response), room_id=room_id)
         return []
 
-    return _parse_task_records_from_state(room_id, response, include_non_pending)
+    return _parse_task_records_from_state(room_id, response, runtime_paths, include_non_pending)
 
 
 async def get_pending_schedule_thread_ids_for_room(
     client: nio.AsyncClient,
     room_id: str,
+    runtime_paths: RuntimePaths,
 ) -> frozenset[str | None]:
     """Return existing-thread scopes suppressed by pending schedules in one room.
 
@@ -663,7 +695,7 @@ async def get_pending_schedule_thread_ids_for_room(
         msg = f"Failed to get scheduled task state for room {room_id}: {response}"
         # nio signals read failures through the response type; this is I/O, not input validation.
         raise RuntimeError(msg)  # noqa: TRY004
-    tasks = _parse_task_records_from_state(room_id, response, include_non_pending=False)
+    tasks = _parse_task_records_from_state(room_id, response, runtime_paths, include_non_pending=False)
     return frozenset(
         None if task.workflow.thread_id in {None, "main"} else task.workflow.thread_id
         for task in tasks
@@ -675,13 +707,16 @@ async def _read_scheduled_task_state(
     client: nio.AsyncClient,
     room_id: str,
     task_id: str,
+    runtime_paths: RuntimePaths,
 ) -> dict[str, typing.Any] | None:
-    """Fetch and validate one scheduled-task state payload."""
+    """Fetch one scheduled-task state payload, treating state not written by MindRoom as absent."""
     try:
-        response = await client.room_get_state_event(
-            room_id=room_id,
-            event_type=_SCHEDULED_TASK_EVENT_TYPE,
-            state_key=task_id,
+        # Nio's state-event read omits the sender; Synapse and Tuwunel return the full event for format=event.
+        response = await client._send(
+            nio.RoomGetStateEventResponse,
+            "GET",
+            nio.Api._build_path(["rooms", room_id, "state", _SCHEDULED_TASK_EVENT_TYPE, task_id], {"format": "event"}),
+            response_data=(_SCHEDULED_TASK_EVENT_TYPE, task_id, room_id),
         )
     except asyncio.CancelledError:
         raise
@@ -693,19 +728,23 @@ async def _read_scheduled_task_state(
     if not isinstance(response, nio.RoomGetStateEventResponse):
         msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}: {response}"
         raise _ScheduledTaskStateReadError(msg)
-    if not isinstance(response.content, dict):
-        msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state content"
-        raise TypeError(msg)
-    return response.content
+    event = response.content
+    if not isinstance(event.get("sender"), str) or not isinstance(event.get("content"), dict):
+        transport = response.transport_response
+        error = event.get("errcode") or (f"HTTP {transport.status}" if transport is not None else "no HTTP status")
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} was not returned as a full state event ({error})"
+        raise _ScheduledTaskStateReadError(msg)
+    return _runtime_authored_task_content(room_id, event, persisted_bot_user_ids(runtime_paths))
 
 
 async def get_scheduled_task(
     client: nio.AsyncClient,
     room_id: str,
     task_id: str,
+    runtime_paths: RuntimePaths,
 ) -> ScheduledTaskRecord | None:
-    """Fetch and parse a single scheduled task from Matrix state."""
-    content = await _read_scheduled_task_state(client, room_id, task_id)
+    """Fetch and parse a single runtime-authored scheduled task from Matrix state."""
+    content = await _read_scheduled_task_state(client, room_id, task_id, runtime_paths)
     if content is None:
         return None
     task = _parse_scheduled_task_record(room_id, task_id, content)
@@ -719,12 +758,18 @@ async def _get_pending_task_record(
     client: nio.AsyncClient,
     room_id: str | None,
     task_id: str,
+    runtime_paths: RuntimePaths,
 ) -> ScheduledTaskRecord | None:
     """Return the latest pending task state for a task id, if it still exists."""
     if not room_id:
         return None
 
-    task_record = await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
+    task_record = await get_scheduled_task(
+        client=client,
+        room_id=room_id,
+        task_id=task_id,
+        runtime_paths=runtime_paths,
+    )
     if not task_record or task_record.status != "pending":
         return None
     return task_record
@@ -738,8 +783,7 @@ async def _scheduled_task_creator_is_joined(
 ) -> bool:
     """Check live membership for the creator or a permitted human alias."""
     creator = task.workflow.created_by
-    if not creator:
-        return True
+    assert creator is not None
     requester_ids = equivalent_requester_ids(creator, config, runtime_paths)
     membership_unknown = False
     for requester_id in sorted(requester_ids, key=lambda user_id: (user_id != creator, user_id)):
@@ -779,7 +823,12 @@ async def _reconcile_runnable_task_retrying(  # noqa: C901
     departed_task: ScheduledTaskRecord | None = None
     while True:
         try:
-            task = await _get_pending_task_record(client=client, room_id=room_id, task_id=task_id)
+            task = await _get_pending_task_record(
+                client=client,
+                room_id=room_id,
+                task_id=task_id,
+                runtime_paths=runtime_paths,
+            )
             if task is None:
                 return None
             if departed_task != task:
@@ -800,7 +849,12 @@ async def _reconcile_runnable_task_retrying(  # noqa: C901
                 departed_task = task
 
             async with _schedule_edit_lock(client, room_id, task_id):
-                current_task = await _get_pending_task_record(client=client, room_id=room_id, task_id=task_id)
+                current_task = await _get_pending_task_record(
+                    client=client,
+                    room_id=room_id,
+                    task_id=task_id,
+                    runtime_paths=runtime_paths,
+                )
                 if current_task is None:
                     return None
                 if current_task != departed_task:
@@ -990,6 +1044,7 @@ async def save_edited_scheduled_task(
     task_id: str,
     workflow: ScheduledWorkflow,
     existing_task: ScheduledTaskRecord,
+    runtime_paths: RuntimePaths,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> ScheduledTaskRecord:
     """Persist edits to an existing task without touching runtime task runners."""
@@ -1001,7 +1056,7 @@ async def save_edited_scheduled_task(
         raise ValueError(_SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
 
     async with _schedule_edit_lock(client, room_id, task_id):
-        current_task = await get_scheduled_task(client, room_id, task_id)
+        current_task = await get_scheduled_task(client, room_id, task_id, runtime_paths)
         if current_task is None or current_task.status != "pending":
             msg = f"Task `{task_id}` cannot be edited because it is no longer pending."
             raise ValueError(msg)
@@ -1714,6 +1769,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 task_id=task_id,
                 workflow=workflow_result,
                 existing_task=existing_task,
+                runtime_paths=runtime_paths,
                 matrix_admin=runtime.matrix_admin,
             )
         else:
@@ -1749,7 +1805,12 @@ async def edit_scheduled_task(
     """Edit an existing scheduled task while preserving its saved delivery scope."""
     del thread_id
     client = runtime.client
-    existing_task = await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
+    existing_task = await get_scheduled_task(
+        client=client,
+        room_id=room_id,
+        task_id=task_id,
+        runtime_paths=runtime.runtime_paths,
+    )
     if not existing_task:
         return f"❌ Task `{task_id}` not found."
     if existing_task.status != "pending":
@@ -1781,6 +1842,7 @@ async def edit_scheduled_task(
 async def list_scheduled_tasks(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_id: str,
+    runtime_paths: RuntimePaths,
     thread_id: str | None = None,
     config: Config | None = None,
 ) -> str:
@@ -1791,7 +1853,7 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
         logger.error("Failed to get room state", response=str(state_response), room_id=room_id, thread_id=thread_id)
         return "Unable to retrieve scheduled tasks."
 
-    task_records = _parse_task_records_from_state(room_id, state_response, include_non_pending=False)
+    task_records = _parse_task_records_from_state(room_id, state_response, runtime_paths, include_non_pending=False)
 
     tasks: list[ScheduledTaskRecord] = []
     tasks_in_other_threads: list[ScheduledTaskRecord] = []
@@ -1866,11 +1928,12 @@ async def cancel_scheduled_task(
     client: nio.AsyncClient,
     room_id: str,
     task_id: str,
+    runtime_paths: RuntimePaths,
     cancel_in_memory: bool = True,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> str:
     """Cancel a scheduled task."""
-    existing_content = await _read_scheduled_task_state(client, room_id, task_id)
+    existing_content = await _read_scheduled_task_state(client, room_id, task_id, runtime_paths)
     if existing_content is None:
         return f"❌ Task `{task_id}` not found."
 
@@ -1895,6 +1958,7 @@ async def cancel_scheduled_task(
 async def cancel_all_scheduled_tasks(
     client: nio.AsyncClient,
     room_id: str,
+    runtime_paths: RuntimePaths,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> str:
     """Cancel all scheduled tasks in a room."""
@@ -1907,24 +1971,21 @@ async def cancel_all_scheduled_tasks(
 
     cancelled_count = 0
     failed_count = 0
+    runtime_account_ids = persisted_bot_user_ids(runtime_paths)
 
     for event in response.events:
         if event["type"] == _SCHEDULED_TASK_EVENT_TYPE:
-            content = event["content"]
-            if content.get("status") == "pending":
+            content = _runtime_authored_task_content(room_id, event, runtime_account_ids)
+            if content is not None and content.get("status") == "pending":
                 task_id = event["state_key"]
 
                 # Update to cancelled in Matrix state
                 try:
-                    existing_content = content if isinstance(content, dict) else None
                     await _put_scheduled_task_state_content(
                         client=client,
                         room_id=room_id,
                         task_id=task_id,
-                        content=_cancelled_task_content(
-                            task_id,
-                            existing_content,
-                        ),
+                        content=_cancelled_task_content(task_id, content),
                         matrix_admin=matrix_admin,
                     )
                     _cancel_running_task(task_id)
@@ -1965,7 +2026,7 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
 
     restored_count = 0
     matrix_admin = build_hook_matrix_admin(client, runtime_paths)
-    for task in _parse_task_records_from_state(room_id, response, include_non_pending=False):
+    for task in _parse_task_records_from_state(room_id, response, runtime_paths, include_non_pending=False):
         task_id = task.task_id
         workflow = task.workflow
 

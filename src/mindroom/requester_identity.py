@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-_INTERNAL_USER_ENTITY_NAME = "user"
+INTERNAL_USER_ENTITY_NAME = "user"
 
 
 def runtime_matrix_domain(runtime_paths: RuntimePaths) -> str:
@@ -28,7 +28,7 @@ def mindroom_user_id(config: Config, runtime_paths: RuntimePaths) -> str | None:
     if config.mindroom_user is None:
         return None
     return managed_account_user_id(
-        managed_account_key(_INTERNAL_USER_ENTITY_NAME),
+        managed_account_key(INTERNAL_USER_ENTITY_NAME),
         runtime_matrix_domain(runtime_paths),
         runtime_paths,
     )

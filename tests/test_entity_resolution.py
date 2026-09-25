@@ -16,6 +16,7 @@ from mindroom.entity_resolution import (
     configured_bot_user_ids_for_room,
     configured_call_agent_name_for_room,
     entity_identity_registry,
+    persisted_bot_user_ids,
 )
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -267,6 +268,25 @@ def test_entity_identity_registry_requires_prepared_entity_accounts(tmp_path: Pa
 
     with pytest.raises(MissingManagedEntityAccountError, match="router"):
         entity_identity_registry(config, runtime_paths)
+
+
+def test_persisted_bot_user_ids_keep_removed_entities_and_skip_internal_user(tmp_path: Path) -> None:
+    """Every persisted bot account counts, whether or not it is configured, but the internal user never does."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    state = MatrixState()
+    state.add_account(f"agent_{ROUTER_AGENT_NAME}", "mindroom_router", "pw", domain="server")
+    state.add_account("agent_retired", "mindroom_retired", "pw", domain="server")
+    state.add_account("agent_legacy", "mindroom_legacy", "pw")
+    state.add_account("agent_user", "mindroom_user", "pw", domain="server")
+    state.save(runtime_paths=runtime_paths)
+
+    assert persisted_bot_user_ids(runtime_paths) == frozenset(
+        {"@mindroom_router:server", "@mindroom_retired:server", "@mindroom_legacy:localhost"},
+    )
 
 
 def test_entity_identity_registry_rejects_duplicate_persisted_entity_ids(tmp_path: Path) -> None:
