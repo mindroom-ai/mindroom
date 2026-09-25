@@ -708,6 +708,53 @@ describe("ModelConfig", () => {
     ]);
   });
 
+  it("deletes an old saved key exactly once when a keyless model is renamed", async () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...mockStore,
+      config: {
+        ...mockStore.config,
+        models: {
+          ...mockStore.config.models,
+          keyless: { provider: "codex", id: "gpt-6-astra" },
+        },
+      },
+    } as never);
+    keyStatusByService["model:keyless"] = {
+      has_key: true,
+      source: "ui",
+      masked_key: "sk-ui...4321",
+      api_key: "sk-dashboard-real",
+    };
+
+    render(<ModelConfig />);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/credentials/model:keyless/api-key?key_name=api_key",
+      );
+    });
+    fireEvent.click(screen.getByText("keyless"));
+    const row = screen.getByDisplayValue("keyless").closest("tr");
+    if (!row) throw new Error("row not found");
+    fireEvent.change(within(row).getByDisplayValue("keyless"), {
+      target: { value: "renamed" },
+    });
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(mockStore.updateConfigValue).toHaveBeenCalledWith(
+        ["models", "renamed"],
+        expect.objectContaining({ provider: "codex" }),
+      );
+    });
+    const deletes = fetchMock.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method === "DELETE",
+    );
+    expect(deletes).toEqual([
+      ["/api/credentials/model:keyless", { method: "DELETE" }],
+    ]);
+  });
+
   it.each(["codex", "kimi", "bedrock_claude", "vertexai_claude", "synthetic"])(
     "shows no key status for %s, which drops config and saved API keys",
     async (provider) => {

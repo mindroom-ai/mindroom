@@ -812,7 +812,14 @@ export function ModelConfig() {
       keyOperationOk = await deleteModelApiKey(originalModelName);
     }
 
-    if (keyOperationOk && renamed && hadCustomKey && !rowDraft.clearCustomKey) {
+    // Keyless providers already deleted the saved key above.
+    if (
+      keyOperationOk &&
+      renamed &&
+      hadCustomKey &&
+      !rowDraft.clearCustomKey &&
+      !usesNoApiKey(rowDraft.provider)
+    ) {
       keyOperationOk = await deleteModelApiKey(originalModelName);
     }
 
