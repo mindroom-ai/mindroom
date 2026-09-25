@@ -47,10 +47,12 @@ For Azure OpenAI, `id` is the Azure deployment name, not the underlying base-mod
 Provider credentials come from supported environment variables, stored credentials, CLI authentication, or a model-specific key.
 MindRoom resolves a model's API key in this order: the key saved for that model in the dashboard's **Models** editor, then `api_key` or `extra_kwargs.api_key` from the model config, then the provider's shared key from the environment or credential store.
 Setting both `api_key` and `extra_kwargs.api_key` on one model is a validation error.
-MindRoom trims `api_key`, and a blank value in either field counts as unset, so the provider's shared key still applies.
+MindRoom trims both fields, and a blank value counts as unset, so the provider's shared key still applies.
+`extra_kwargs.api_key` must be a string.
 `ollama` and `llama_cpp` models skip the shared provider key step.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and drop any configured key.
-The dashboard's **Models** editor shows which of these keys each model uses, and `mindroom doctor` validates that key.
+The dashboard's **Models** editor shows whether a model uses its saved key, its config key, or the provider key, except for `ollama` models.
+`mindroom doctor` checks a provider's shared key only when some model uses it, and lists models that have their own key without sending that key anywhere.
 
 Presentation metadata is optional:
 
