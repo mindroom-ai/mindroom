@@ -60,6 +60,8 @@ Mantle currently needs its existing HTTP transport passed explicitly when copyin
 - A chunk moves its runs, member runs included, into the archive and records its summary generation in the same transaction that deletes their live rows; nothing compaction touches is lost.
 - The session summary is a cache of the latest generation's summary, written after that transaction; before each run, reconciliation refreshes it from the archive and deletes live runs that are already archived.
 - Seen ids are derived rather than stored: live runs supply their own, the archive supplies those of the runs the replayed summary covers, and session metadata keeps only ids no stored run carries, such as team consumption.
+- Archived runs keep the seen ids they counted while live apart from the wider set redaction matches, so compaction never changes which messages count as seen.
+- Metadata seen ids have no archive counterpart, so a stale whole-row session write can restore ids a redaction dropped; that only withholds those messages from unseen thread context.
 - Earlier committed chunks survive later failure or cancellation; compacted runs cannot silently reappear.
 - Redacting an event represented by an archived run removes that run and everything after it, returns the generation's earlier runs to replay, and replays the previous generation's summary.
 - Content-free legacy generations cannot be split: while one still replays its summary, an event it may contain (its captured seen ids or retained source ownership) clears it together with every later generation, their archived runs, and all live runs, as before the archive existed.

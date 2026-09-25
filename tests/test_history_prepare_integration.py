@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ from mindroom.history.prompt_tokens import (
 )
 from mindroom.history.session_context import open_scope_session_context
 from mindroom.history.storage import (
+    read_scope_seen_event_ids,
     update_scope_seen_event_ids,
 )
 from mindroom.history.summary_input import build_summary_input
@@ -740,6 +742,50 @@ async def test_native_agno_replays_recent_raw_history_without_persisting_replay(
     ]
     assert all(message.from_history is False for message in latest_run.messages or [])
     assert latest_run.additional_input in (None, [])
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_reads_seen_ids_off_the_event_loop(tmp_path: Path) -> None:
+    """Seen ids include an archive query, so both unseen-context passes read them in a worker thread."""
+    config, runtime_paths = _make_config(tmp_path, num_history_runs=1)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
+    live_agent = _agent(model=RecordingModel(id="recording-model", provider="fake"), db=storage, num_history_runs=1)
+    loop_thread = threading.get_ident()
+    reading_threads: list[int] = []
+
+    def recording_read(*args: object) -> set[str]:
+        reading_threads.append(threading.get_ident())
+        return read_scope_seen_event_ids(*args)  # type: ignore[arg-type]
+
+    with open_scope_session_context(
+        agent=live_agent,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    ) as scope_context:
+        assert scope_context is not None
+        with (
+            patch("mindroom.ai.create_agent", return_value=live_agent),
+            patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+            patch("mindroom.execution_preparation.read_scope_seen_event_ids", new=recording_read),
+        ):
+            await _prepare_agent_and_prompt(
+                make_turn_context("test_agent", reply_to_event_id="event-2"),
+                prompt="Current prompt",
+                runtime_paths=runtime_paths,
+                config=config,
+                scope_context=scope_context,
+                thread_history=[
+                    make_visible_message(event_id="event-1", sender="alice", body="Earlier message"),
+                    make_visible_message(event_id="event-2", sender="alice", body="Current message body"),
+                ],
+            )
+
+    assert len(reading_threads) == 2
+    assert loop_thread not in reading_threads
 
 
 @pytest.mark.asyncio

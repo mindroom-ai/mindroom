@@ -122,6 +122,26 @@ def _legacy_session(run_ids: list[str], summary: str, seen_event_ids: list[str])
     return session
 
 
+def test_a_compacted_run_counts_as_seen_what_it_counted_while_live(storage: SqliteDb) -> None:
+    """Compaction changes where seen ids come from, not which ids a run marks seen; redaction still matches all."""
+    run = _run("r1")
+    assert run.metadata is not None
+    run.metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] = ["$coalesced"]
+    session = seed_session(storage, AgentSession(session_id="session", agent_id="code", runs=[run, _run("r2")]))
+    seen_while_live = _seen(storage, _stored(storage))
+    _compact(storage, session, ["r1"], "summary of r1")
+
+    assert _seen(storage, _stored(storage)) == seen_while_live == {"$r1", "$r2"}
+    assert remove_redacted_event_from_compaction(
+        storage,
+        session,
+        _SCOPE,
+        event_id="$coalesced",
+        removed_live_run=False,
+    )
+    assert _summary(_stored(storage)) is None
+
+
 def test_compaction_derives_seen_ids_without_storing_them(storage: SqliteDb) -> None:
     """Compacted runs count as seen through the archive, so session metadata keeps no copy to repair."""
     session = _seed(storage, ["r1", "r2"])
@@ -150,7 +170,7 @@ def test_redaction_restores_the_runs_compacted_before_the_redacted_one(storage: 
 
 
 def test_redacting_the_first_compacted_run_clears_the_summary_for_good(storage: SqliteDb) -> None:
-    """A rollback past every generation keeps a stale summary write from being adopted as legacy history."""
+    """A rollback past every generation keeps a stale summary write from replaying again."""
     session = _seed(storage, ["r1", "r2"])
     _compact(storage, session, ["r1"], "summary with the redacted content")
 

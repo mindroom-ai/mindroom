@@ -860,6 +860,7 @@ async def test_native_route_names_the_summary_reconciliation_repaired(tmp_path: 
         summary_model="summary-model",
         runs=[],
         event_ids={},
+        seen_event_ids={},
     )
     agent = _agent(model=model, db=db)
     resolved = resolve_agent_preparation_inputs(

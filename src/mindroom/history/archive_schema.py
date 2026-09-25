@@ -25,11 +25,12 @@ def archive_schema_sql(session_table: str) -> tuple[str, ...]:
         "legacy INTEGER NOT NULL DEFAULT 0, legacy_event_ids TEXT, created_at INTEGER NOT NULL)",
         f"CREATE INDEX IF NOT EXISTS {quote_identifier(session_table + '_compactions_scope')} "
         f"ON {compactions} (session_id, scope_key)",
-        # ``event_ids`` precedes the large ``run_data`` so event scans skip its overflow pages.
+        # ``event_ids`` (what redaction matches) and ``seen_event_ids`` (what the run counts as
+        # seen) precede the large ``run_data`` so event scans skip its overflow pages.
         f"CREATE TABLE IF NOT EXISTS {compacted_runs} (id INTEGER PRIMARY KEY, "
         f"compaction_id INTEGER NOT NULL REFERENCES {compactions}(id) ON DELETE CASCADE, "
         "session_id TEXT NOT NULL, run_id TEXT NOT NULL, run_type TEXT, event_ids TEXT NOT NULL, "
-        "run_data TEXT, UNIQUE(session_id, run_id))",
+        "seen_event_ids TEXT NOT NULL DEFAULT '[]', run_data TEXT, UNIQUE(session_id, run_id))",
         f"CREATE INDEX IF NOT EXISTS {quote_identifier(session_table + '_compacted_runs_generation')} "
         f"ON {compacted_runs} (compaction_id)",
     )

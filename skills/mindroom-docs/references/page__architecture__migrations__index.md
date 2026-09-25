@@ -151,7 +151,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S11 | Removed/superseded | [`thread_export/storage.py`][thread-export] refuses populated markerless roots and marks only empty roots. |
 | S12 | Tiny retained default | [`report_publishing/store.py`][report-store] treats missing `artifact_kind` as `html_file`. |
 | S13 | Tiny retained default | [`scheduling.py`][scheduling] treats missing `history_limit` as the current `None` default. |
-| S14 | Isolated | [`history/storage.py`][history-storage] reads current v2 compaction state and ignores v1; [`history/legacy_compaction_state.py`][legacy-compaction-state] recognizes state written before compacted runs were archived. |
+| S14 | Isolated | [`history/storage.py`][history-storage] reads current v2 compaction state and ignores v1; [`history/legacy_compaction_state.py`][legacy-compaction-state] migrates state written before compacted runs were archived once, when the conversation database opens. |
 | S15 | Current behavior | [`knowledge/candidate_checkpoint.py`][candidate-checkpoint] rebuilds unknown versions and retains current torn-tail recovery. |
 | S16 | Current behavior | [`external_triggers/store.py`][trigger-store] and [`external_triggers/replay_store.py`][replay-store] own current validation and replay deduplication; the only retained historical default supplies an empty `threads` map when that section is absent. |
 | S17 | Current behavior | [Receipts][scheduled-records], [todos][todo-state], [attachments][attachments], and workflows combine sparse fields with current identity and integrity checks. |

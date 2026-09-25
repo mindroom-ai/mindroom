@@ -74,6 +74,7 @@ def _archive(storage: SqliteDb, session: AgentSession, run_ids: list[str], summa
         summary_model="summary-model",
         runs=runs,
         event_ids={run_id: {f"${run_id}"} for run_id in run_ids},
+        seen_event_ids={run_id: {f"${run_id}"} for run_id in run_ids},
     )
 
 
@@ -106,6 +107,7 @@ def test_compacted_event_ids_are_scoped(storage: SqliteDb) -> None:
         summary_model="summary-model",
         runs=[run for run in session.runs or [] if run.run_id == "r2"],
         event_ids={"r2": {"$other"}},
+        seen_event_ids={"r2": {"$other"}},
     )
 
     assert archive.compacted_event_ids(storage, session_id="session", scope_key=_SCOPE) == {"$r1"}

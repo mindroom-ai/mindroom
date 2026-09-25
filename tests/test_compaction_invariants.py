@@ -242,6 +242,7 @@ def _archive_directly(storage: object, session: AgentSession, run_ids: list[str]
         summary_model="summary-model",
         runs=[run for run in session.runs or [] if run.run_id in run_ids],
         event_ids={},
+        seen_event_ids={},
     )
 
 
@@ -343,6 +344,7 @@ def test_an_interrupted_chunk_counts_its_events_as_seen_when_its_summary_text_di
         summary_model="summary-model",
         runs=[run for run in session.runs or [] if run.run_id == "run-1"],
         event_ids={"run-1": {"$run-1"}},
+        seen_event_ids={"run-1": {"$run-1"}},
     )
     reloaded = get_agent_session(storage, "session-1")
     assert reloaded is not None
@@ -410,13 +412,13 @@ def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(tmp_pat
 
 
 def test_scope_state_writes_keep_other_scopes_verbatim() -> None:
-    """Writing one scope must not rewrite state another scope has not adopted yet."""
+    """Writing one scope must not rewrite state stored for another scope, including keys it does not model."""
     other_scope = HistoryScope(kind="team", scope_id="other")
     session = _session([])
     session.metadata = {
         MINDROOM_COMPACTION_METADATA_KEY: {
             "version": 2,
-            "states": {other_scope.key: {"compacted_run_ids": ["old"], "last_compacted_at": "2026-01-01T00:00:00Z"}},
+            "states": {other_scope.key: {"force_compact_before_next_run": True, "unmodeled": "kept"}},
         },
     }
 
@@ -424,7 +426,7 @@ def test_scope_state_writes_keep_other_scopes_verbatim() -> None:
 
     metadata = session.metadata or {}
     assert metadata[MINDROOM_COMPACTION_METADATA_KEY]["states"] == {
-        other_scope.key: {"compacted_run_ids": ["old"], "last_compacted_at": "2026-01-01T00:00:00Z"},
+        other_scope.key: {"force_compact_before_next_run": True, "unmodeled": "kept"},
         _SCOPE.key: {"force_compact_before_next_run": True},
     }
 

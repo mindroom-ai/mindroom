@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import TYPE_CHECKING
 
@@ -159,29 +160,11 @@ def test_opening_storage_ignores_malformed_legacy_metadata(tmp_path: Path) -> No
         assert archive.latest_generation(storage, session_id="session", scope_key=_SCOPE.key) is None
     finally:
         storage.close()
-
-
-def test_opening_storage_attributes_a_summary_to_the_scope_that_recorded_seen_ids(tmp_path: Path) -> None:
-    """Without compaction state, the scope that consumed the summarized messages owns the summary."""
-    storage = _migrated(
-        tmp_path,
-        AgentSession(
-            session_id="session",
-            agent_id="renamed",
-            summary=SessionSummary(summary="legacy summary"),
-            metadata=_seen_metadata(_SCOPE.key, ["$legacy"]),
-        ),
-    )
+    connection = sqlite3.connect(tmp_path / "sessions" / "code.db")
     try:
-        assert compaction_generations(storage, _SCOPE.key, "session") == [
-            StoredGeneration(summary="legacy summary", summary_model=None, legacy=True),
-        ]
-        assert archive.legacy_event_ids(storage, session_id="session", scope_key=_SCOPE.key) == {"$legacy"}
-        stored = get_agent_session(storage, "session")
-        assert stored is not None
-        assert stored.metadata == {}
+        assert connection.execute("SELECT metadata FROM code_sessions").fetchone() == ("not json",)
     finally:
-        storage.close()
+        connection.close()
 
 
 def test_opening_storage_keeps_seen_ids_of_a_scope_without_a_summary(tmp_path: Path) -> None:
@@ -203,5 +186,65 @@ def test_opening_storage_keeps_seen_ids_of_a_scope_without_a_summary(tmp_path: P
         stored = get_agent_session(storage, "session")
         assert stored is not None
         assert stored.metadata == seen
+    finally:
+        storage.close()
+
+
+def test_opening_storage_reads_double_encoded_legacy_metadata(tmp_path: Path) -> None:
+    """Metadata an older Agno stored as a JSON string of JSON is adopted like plain JSON."""
+    seeding = _open(tmp_path)
+    seed_session(
+        seeding,
+        AgentSession(session_id="session", agent_id="code", summary=SessionSummary(summary="legacy summary")),
+    )
+    seeding.close()
+    metadata = {
+        **_compaction_metadata(_SCOPE.key, {"compacted_run_ids": ["gone"]}),
+        **_seen_metadata(_SCOPE.key, ["$legacy"]),
+    }
+    connection = sqlite3.connect(tmp_path / "sessions" / "code.db")
+    try:
+        connection.execute(
+            "UPDATE code_sessions SET metadata = ? WHERE session_id = 'session'",
+            (json.dumps(json.dumps(metadata)),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    storage = _open(tmp_path)
+    try:
+        assert compaction_generations(storage, _SCOPE.key, "session") == [
+            StoredGeneration(summary="legacy summary", summary_model=None, legacy=True),
+        ]
+        assert archive.legacy_event_ids(storage, session_id="session", scope_key=_SCOPE.key) == {"$legacy"}
+        assert archive.archived_run_ids(storage, session_id="session", run_ids=["gone"]) == {"gone"}
+        stored = get_agent_session(storage, "session")
+        assert stored is not None
+        assert stored.metadata == {}
+    finally:
+        storage.close()
+
+
+def test_opening_storage_adopts_a_team_row_with_tombstones(tmp_path: Path) -> None:
+    """A team scope's tombstones and summary are adopted under the team scope."""
+    team_scope = HistoryScope(kind="team", scope_id="squad")
+    storage = _migrated(
+        tmp_path,
+        TeamSession(
+            session_id="session",
+            team_id="squad",
+            summary=SessionSummary(summary="team summary"),
+            metadata=_compaction_metadata(team_scope.key, {"compacted_run_ids": ["gone"]}),
+        ),
+    )
+    try:
+        assert compaction_generations(storage, team_scope.key, "session") == [
+            StoredGeneration(summary="team summary", summary_model=None, legacy=True),
+        ]
+        assert archive.archived_run_ids(storage, session_id="session", run_ids=["gone"]) == {"gone"}
+        stored = get_team_session(storage, "session")
+        assert stored is not None
+        assert stored.metadata == {}
     finally:
         storage.close()

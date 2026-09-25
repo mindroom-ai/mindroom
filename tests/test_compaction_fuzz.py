@@ -188,6 +188,7 @@ class _Runner:
             summary_model="fuzz-model",
             runs=runs,
             event_ids={run.run_id: {_event(run.run_id)} for run in runs if run.run_id},
+            seen_event_ids={run.run_id: {_event(run.run_id)} for run in runs if run.run_id},
         )
 
     def _snapshot(self, _action: Action) -> None:

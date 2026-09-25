@@ -67,10 +67,13 @@ def archive_runs(
     summary_model: str,
     runs: Sequence[RunOutput | TeamRunOutput],
     event_ids: Mapping[str, Collection[str]],
+    seen_event_ids: Mapping[str, Collection[str]],
 ) -> None:
     """Record one generation and move ``runs`` from the live table into the archive atomically.
 
     ``runs`` is the complete removed subtree in stored order, member runs included.
+    ``event_ids`` names every event redaction matches a run by; ``seen_event_ids`` the
+    events it counts as seen while the summary covers it.
     A run that is already archived keeps its original generation: that earliest
     summary is the one that first folded it, so redaction must roll back to it.
     """
@@ -88,8 +91,8 @@ def archive_runs(
         if archived:
             connection.exec_driver_sql(
                 f"INSERT INTO {compacted_runs} "  # noqa: S608
-                "(compaction_id, session_id, run_id, run_type, event_ids, run_data) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id, run_id) DO NOTHING",
+                "(compaction_id, session_id, run_id, run_type, event_ids, seen_event_ids, run_data) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(session_id, run_id) DO NOTHING",
                 [
                     (
                         compaction_id,
@@ -97,6 +100,7 @@ def archive_runs(
                         run_id,
                         get_run_type(run),
                         json.dumps(sorted(event_ids.get(run_id, ()))),
+                        json.dumps(sorted(seen_event_ids.get(run_id, ()))),
                         json.dumps(run.to_dict()),
                     )
                     for run_id, run in archived
@@ -111,9 +115,9 @@ def archive_runs(
 # ``history/legacy_compaction_state.py`` for provenance and the one-time migration).
 # Last legacy release: v2026.9.313; replacement: the next release archives compacted runs.
 # Handling: The migration records a ``legacy`` generation holding that summary, the seen ids it
-# may contain, and ``run_data``-free tombstone rows. ``has_legacy_summary``, ``legacy_event_ids``,
-# ``clear_to_legacy``, and ``retire_summaries`` let redaction retire it as a whole, because it
-# cannot be split by run.
+# may contain, and ``run_data``-free tombstone rows. ``compacted_event_ids`` counts those seen ids
+# while the summary replays; ``has_legacy_summary``, ``legacy_event_ids``, ``clear_to_legacy``, and
+# ``retire_summaries`` let redaction retire it as a whole, because it cannot be split by run.
 # Coverage: tests/test_legacy_compaction_state.py and tests/test_compaction_redaction.py.
 def has_legacy_summary(storage: BaseDb, *, session_id: str, scope_key: str) -> bool:
     """Return whether the scope still replays a summary written before the archive existed."""
@@ -234,7 +238,7 @@ def compacted_event_ids(storage: BaseDb, *, session_id: str, scope_key: str) -> 
     with db.db_engine.begin() as connection:
         _ensure_tables(connection, db)
         rows = connection.exec_driver_sql(
-            f"SELECT value FROM {compacted_runs} AS archived, json_each(archived.event_ids) "  # noqa: S608
+            f"SELECT value FROM {compacted_runs} AS archived, json_each(archived.seen_event_ids) "  # noqa: S608
             f"JOIN {compactions} AS generation ON generation.id = archived.compaction_id "
             "WHERE generation.session_id = ? AND generation.scope_key = ? AND generation.id > COALESCE("
             f"(SELECT MAX(id) FROM {compactions} WHERE session_id = ? AND scope_key = ? AND summary IS NULL), 0) "

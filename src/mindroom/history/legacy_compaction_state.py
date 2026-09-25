@@ -80,9 +80,7 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, session_table: str) -
         }
         seen_states = _scope_states(metadata, MINDROOM_MATRIX_HISTORY_METADATA_KEY)
         summary = _summary_text(_decoded_mapping(raw_summary))
-        summary_scope = (
-            _summary_scope_key(scopes or seen_states, session_type, agent_id, team_id) if summary is not None else None
-        )
+        summary_scope = _owner_scope_key(session_type, agent_id, team_id) if summary is not None else None
         if summary_scope is not None:
             scopes.setdefault(summary_scope, ())
         for scope_key, tombstones in scopes.items():
@@ -120,27 +118,13 @@ def _legacy_tombstones(raw_state: dict[str, Any]) -> tuple[str, ...] | None:
     return tuple(dict.fromkeys(run_id for run_id in raw_run_ids if isinstance(run_id, str) and run_id))
 
 
-def _summary_scope_key(
-    candidate_scope_keys: Collection[object],
-    session_type: object,
-    agent_id: object,
-    team_id: object,
-) -> str | None:
-    """Return the scope a replayed summary belongs to.
-
-    Candidates are the compacted scopes, or else the scopes that recorded seen ids; with
-    no single candidate, the scope owning the session row decides.
-    """
-    candidates = sorted(key for key in candidate_scope_keys if isinstance(key, str) and key)
-    if len(candidates) == 1:
-        return candidates[0]
+def _owner_scope_key(session_type: object, agent_id: object, team_id: object) -> str | None:
+    """Return the key of the scope that owns a session row, which also owns its replayed summary."""
     if session_type == "team" and isinstance(team_id, str) and team_id:
-        owner = HistoryScope(kind="team", scope_id=team_id).key
-    elif isinstance(agent_id, str) and agent_id:
-        owner = HistoryScope(kind="agent", scope_id=agent_id).key
-    else:
-        return candidates[0] if candidates else None
-    return owner if not candidates or owner in candidates else candidates[0]
+        return HistoryScope(kind="team", scope_id=team_id).key
+    if isinstance(agent_id, str) and agent_id:
+        return HistoryScope(kind="agent", scope_id=agent_id).key
+    return None
 
 
 def _without_adopted_state(

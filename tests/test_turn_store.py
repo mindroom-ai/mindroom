@@ -1729,7 +1729,7 @@ async def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(
     scope = HistoryScope(kind="agent", scope_id="agent")
     owner_session = AgentSession(
         session_id=target.session_id,
-        agent_id="owner",
+        agent_id="agent",
         runs=[],
         summary=SessionSummary(summary="contains REDACTED_SECRET"),
     )

@@ -13,7 +13,9 @@ compaction-state locations of a stored Agno session:
 - the pending force-compaction scope keys list inside Agno ``session_state``
 
 Nothing else the archive already knows is stored: the event ids compacted history
-represents are derived from the archive when seen ids are read.
+represents are derived from the archive when seen ids are read. Metadata seen ids
+have no archive counterpart, so a stale whole-row write can restore ids a redaction
+dropped; that only withholds those messages from unseen thread context.
 
 It enforces the durable-state half of the compaction invariants
 (see ``tests/test_compaction_invariants.py`` and ``tests/test_compaction_fuzz.py``):
@@ -566,6 +568,11 @@ def archive_compaction_chunk(
         summary_model=summary_model,
         runs=archived_runs,
         event_ids={run.run_id: _run_event_ids(run) for run in archived_runs if run.run_id},
+        seen_event_ids={
+            run.run_id: _run_seen_event_ids(run)
+            for run in archived_runs
+            if run.run_id and is_model_history_visible_run(run)
+        },
     )
     target_session = _latest_persisted_session(storage, session)
     target_session.summary = summary
