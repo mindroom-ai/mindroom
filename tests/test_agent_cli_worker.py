@@ -32,7 +32,11 @@ from mindroom.constants import (
     resolve_primary_runtime_paths,
 )
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    _private_instance_state_root_path,
+    resolve_worker_key,
+)
 from mindroom.workers import runtime as worker_runtime
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
@@ -733,14 +737,23 @@ async def test_cancelled_shell_revokes_before_transport_shutdown(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("private", [True, False])
 async def test_cli_shell_preserves_workspace_home_hook_path_and_output_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    private: bool,
 ) -> None:
+    """Only a private agent's workspace hook runs in a requester's CLI turn."""
     app, workspace = _app(tmp_path, monkeypatch)
+    launch = _launch(workspace)
+    if private:
+        state_root = _private_instance_state_root_path(tmp_path / "storage", worker_key=BASE, agent_name="code")
+        workspace = state_root / "workspace"
+        workspace.mkdir(parents=True)
+        launch["private_agent_names"] = ["code"]
     (workspace / ".mindroom").mkdir()
     (workspace / ".mindroom/worker-env.sh").write_text("export CLI_TEST_HOOK=from-hook\nexport HOME=/forged-home\n")
-    launch = _launch(workspace)
     launch["shell"] = _shell(str(workspace)).model_copy(update={"shell_path_prepend": "/custom/bin"}).model_dump()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -763,7 +776,8 @@ async def test_cli_shell_preserves_workspace_home_hook_path_and_output_files(
         )
         assert response.status_code == 200, response.text
         saved = (workspace / "output.txt").read_text()
-        assert f"\n{workspace}\nfrom-hook\n/custom/bin:" in saved
+        hook_value = "from-hook" if private else ""
+        assert f"\n{workspace}\n{hook_value}\n/custom/bin:" in saved
         assert "/forged-home" not in saved
 
 

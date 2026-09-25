@@ -17,7 +17,9 @@ from mindroom.path_confinement import resolve_path_within_root
 from mindroom.private_storage_paths import resolve_private_scope_path
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
+    private_instance_scope_root_path,
     requires_explicit_private_agent_visibility,
+    resolved_worker_key_scope,
     visible_state_roots_for_worker_key,
     worker_dir_name,
 )
@@ -39,6 +41,7 @@ logger = get_logger(__name__)
 
 _MAX_LEASE_TTL_SECONDS = 3600
 DEFAULT_LEASE_TTL_SECONDS = 60
+_LOGGED_SHARED_HOOK_WORKSPACES: set[Path] = set()
 
 
 @dataclass
@@ -348,6 +351,35 @@ def resolve_prepared_worker_request(
         private_agent_names=private_agent_names,
         runner_token=runner_token,
     )
+
+
+def workspace_env_hook_allowed(
+    workspace: Path,
+    *,
+    worker_key: str | None,
+    state_worker_key: str | None,
+    prepared: PreparedWorkerRequest | None,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether one runtime may source `<workspace>/.mindroom/worker-env.sh`.
+
+    `user` and `user_agent` runtimes act with one requester's credentials, while every
+    requester's runtime for a non-private agent can write that agent's workspace, so they
+    only source hooks from the requester's private-instance namespace or their own workspace.
+    """
+    if worker_key is None or resolved_worker_key_scope(worker_key) not in {"user", "user_agent"}:
+        return True
+    resolved_workspace = workspace.expanduser().resolve()
+    storage_root = sandbox_exec.runner_storage_root(runtime_paths)
+    owned_roots = [private_instance_scope_root_path(storage_root, state_worker_key or worker_key)]
+    if prepared is not None:
+        owned_roots.append(prepared.paths.workspace.resolve())
+    if any(resolved_workspace.is_relative_to(root) for root in owned_roots):
+        return True
+    if resolved_workspace not in _LOGGED_SHARED_HOOK_WORKSPACES:
+        _LOGGED_SHARED_HOOK_WORKSPACES.add(resolved_workspace)
+        logger.info("workspace_env_hook_ignored_in_shared_workspace", workspace=str(resolved_workspace))
+    return False
 
 
 def record_worker_failure(

@@ -425,6 +425,13 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
             request_workspace=workspace,
             prepared=prepared,
             execution_env=execution_environment,
+            apply_workspace_env_hook=sandbox_worker_prep.workspace_env_hook_allowed(
+                workspace,
+                worker_key=payload.worker_key,
+                state_worker_key=payload.state_scope_worker_key,
+                prepared=prepared,
+                runtime_paths=app_runtime_paths(request.app),
+            ),
         )
     except sandbox_exec.WorkspaceEnvHookError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -438,7 +445,7 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
     result = await run_command_via_supervisor(
         socket_path,
         namespace=_script_namespace(payload.worker_key, payload.run_id),
-        argv=[python_executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        argv=[python_executable, "-P", "-s", "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
         env=environment,
         cwd=str(workspace),
         tail=200,

@@ -21,6 +21,7 @@ import pytest
 from agno.tools import Toolkit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 import mindroom.api.sandbox_env_assembly as sandbox_env_assembly_module
 import mindroom.api.sandbox_exec as sandbox_exec_module
@@ -6113,6 +6114,301 @@ def test_workspace_env_hook_user_agent_routed_request_uses_prepared_private_base
     )
 
     assert workspace == private_workspace
+
+
+def _requester_identity(requester_id: str, agent_name: str) -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=agent_name,
+        requester_id=requester_id,
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+        tenant_id="tenant-123",
+    )
+
+
+def _prepared_local_worker(
+    worker_key: str,
+    worker_root: Path,
+    *,
+    base_dir: Path,
+) -> sandbox_worker_prep_module.PreparedWorkerRequest:
+    return sandbox_worker_prep_module.PreparedWorkerRequest(
+        handle=WorkerHandle(
+            worker_id=worker_dir_name(worker_key),
+            worker_key=worker_key,
+            endpoint="/api/sandbox-runner/execute",
+            auth_token=SANDBOX_TOKEN,
+            status="ready",
+            backend_name="local",
+            last_used_at=0.0,
+            created_at=0.0,
+        ),
+        paths=local_workers_module.local_worker_state_paths_for_root(worker_root),
+        runtime_overrides={"base_dir": base_dir},
+    )
+
+
+@pytest.mark.parametrize(
+    ("worker_scope", "hook_runs"),
+    [("shared", True), ("user", False), ("user_agent", False)],
+)
+def test_requester_bound_worker_ignores_hook_in_shared_agent_workspace(
+    tmp_path: Path,
+    worker_scope: str,
+    *,
+    hook_runs: bool,
+) -> None:
+    """Another requester's hook in a shared agent workspace must not run with this requester's credentials."""
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=storage_root,
+        process_env={},
+    )
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+            "agents": {
+                "general": {
+                    "display_name": "General",
+                    "memory_backend": "file",
+                    "worker_scope": worker_scope,
+                },
+            },
+            "router": {"model": "default"},
+        },
+        runtime_paths,
+    )
+    shared_workspace = agent_workspace_root_path(storage_root, "general")
+    shared_workspace.mkdir(parents=True)
+    # Planted by another requester through its own runtime's writable agent mount.
+    _write_workspace_env_hook(
+        shared_workspace,
+        'touch "$PWD/planted-hook-ran"\nexport PLANTED_BY_OTHER_REQUESTER=1\n',
+    )
+    victim = _requester_identity("@victim:example.org", "general")
+    worker_key = resolve_worker_key(worker_scope, victim, agent_name="general")
+    assert worker_key is not None
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        worker_key=worker_key,
+        worker_scope=worker_scope,
+        routing_agent_name="general",
+        execution_identity=asdict(victim),
+        private_agent_names=[] if worker_scope == "user_agent" else None,
+        tool_init_overrides={"base_dir": "agents/general/workspace"},
+        execution_env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+    )
+
+    prepared_request = sandbox_runner_module._prepare_execute_request(
+        request,
+        runtime_paths,
+        _prepared_local_worker(worker_key, tmp_path / "victim-worker", base_dir=shared_workspace.resolve()),
+        config=config,
+    )
+
+    assert (shared_workspace / "planted-hook-ran").exists() is hook_runs
+    assert ("PLANTED_BY_OTHER_REQUESTER" in prepared_request.execution_env) is hook_runs
+    assert prepared_request.execution_env["HOME"] == str(shared_workspace.resolve())
+
+
+def test_requester_bound_worker_sources_hook_in_private_agent_workspace(tmp_path: Path) -> None:
+    """A private agent's workspace belongs to its requester, so its hook still runs."""
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=storage_root,
+        process_env={},
+    )
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+            "agents": {"mind": {"display_name": "Mind", "private": {"per": "user_agent"}}},
+            "router": {"model": "default"},
+        },
+        runtime_paths,
+    )
+    alice = _requester_identity("@alice:example.org", "mind")
+    worker_key = resolve_worker_key("user_agent", alice, agent_name="mind")
+    assert worker_key is not None
+    private_workspace = private_instance_scope_root_path(storage_root, worker_key) / "mind" / "workspace"
+    private_workspace.mkdir(parents=True)
+    _write_workspace_env_hook(private_workspace, "export PRIVATE_HOOK_VALUE=from-owner\n")
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        worker_key=worker_key,
+        worker_scope="user_agent",
+        routing_agent_name="mind",
+        execution_identity=asdict(alice),
+        private_agent_names=["mind"],
+        execution_env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+    )
+
+    prepared_request = sandbox_runner_module._prepare_execute_request(
+        request,
+        runtime_paths,
+        _prepared_local_worker(worker_key, tmp_path / "alice-worker", base_dir=private_workspace.resolve()),
+        config=config,
+    )
+
+    assert prepared_request.execution_env["PRIVATE_HOOK_VALUE"] == "from-owner"
+
+
+def test_workspace_env_hook_ownership_for_requester_bound_runtimes(tmp_path: Path) -> None:
+    """Requester-bound runtimes only source hooks from state no other requester can write."""
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=storage_root,
+        process_env={},
+    )
+    user_key = resolve_worker_key("user", _requester_identity("@alice:example.org", "general"))
+    user_agent_key = resolve_worker_key(
+        "user_agent",
+        _requester_identity("@alice:example.org", "general"),
+        agent_name="general",
+    )
+    bob_user_key = resolve_worker_key("user", _requester_identity("@bob:example.org", "general"))
+    assert user_key is not None
+    assert user_agent_key is not None
+    assert bob_user_key is not None
+    shared_workspace = agent_workspace_root_path(storage_root, "general")
+    own_private_workspace = private_instance_scope_root_path(storage_root, user_key) / "mind" / "workspace"
+    other_private_workspace = private_instance_scope_root_path(storage_root, bob_user_key) / "mind" / "workspace"
+    for path in (shared_workspace, own_private_workspace, other_private_workspace):
+        path.mkdir(parents=True)
+    linked_workspace = private_instance_scope_root_path(storage_root, user_key) / "linked"
+    linked_workspace.symlink_to(shared_workspace)
+    linked_private_root = private_instance_scope_root_path(storage_root, user_agent_key)
+    linked_private_root.symlink_to(shared_workspace.parent)
+    prepared = _prepared_local_worker(user_key, tmp_path / "alice-worker", base_dir=shared_workspace)
+    prepared.paths.workspace.mkdir(parents=True)
+
+    def allowed(
+        workspace: Path,
+        worker_key: str | None = user_key,
+        *,
+        state_worker_key: str | None = None,
+        prepared_worker: sandbox_worker_prep_module.PreparedWorkerRequest | None = None,
+    ) -> bool:
+        return sandbox_worker_prep_module.workspace_env_hook_allowed(
+            workspace,
+            worker_key=worker_key,
+            state_worker_key=state_worker_key,
+            prepared=prepared_worker,
+            runtime_paths=runtime_paths,
+        )
+
+    assert allowed(own_private_workspace)
+    assert allowed(prepared.paths.workspace, prepared_worker=prepared)
+    assert allowed(own_private_workspace, user_agent_key, state_worker_key=user_key)
+    for unscoped_key in ("v1:tenant-123:shared:general", "v1:tenant-123:unscoped:general", None):
+        assert allowed(shared_workspace, unscoped_key)
+    assert not allowed(shared_workspace, prepared_worker=prepared)
+    assert not allowed(shared_workspace, user_agent_key)
+    assert not allowed(shared_workspace, user_agent_key, state_worker_key="v1:tenant-123:shared:general")
+    assert not allowed(linked_private_root / "workspace", user_agent_key)
+    assert not allowed(linked_workspace)
+    assert not allowed(other_private_workspace)
+    assert not allowed(own_private_workspace, bob_user_key)
+
+
+def test_shared_workspace_hook_refusal_is_logged_once_per_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operators see why a shared workspace hook stopped running, without one line per call."""
+    monkeypatch.setattr(sandbox_worker_prep_module, "_LOGGED_SHARED_HOOK_WORKSPACES", set())
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=storage_root,
+        process_env={},
+    )
+    general = agent_workspace_root_path(storage_root, "general")
+    other = agent_workspace_root_path(storage_root, "other")
+    for workspace in (general, other):
+        workspace.mkdir(parents=True)
+
+    with capture_logs() as logs:
+        for workspace in (general, general, other):
+            assert not sandbox_worker_prep_module.workspace_env_hook_allowed(
+                workspace,
+                worker_key="v1:tenant-123:user:@alice:example.org",
+                state_worker_key=None,
+                prepared=None,
+                runtime_paths=runtime_paths,
+            )
+
+    assert [(log["event"], log["workspace"]) for log in logs] == [
+        ("workspace_env_hook_ignored_in_shared_workspace", str(general.resolve())),
+        ("workspace_env_hook_ignored_in_shared_workspace", str(other.resolve())),
+    ]
+
+
+def test_python_subprocess_child_ignores_code_planted_in_workspace(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A workspace package or user-site `.pth` file must not run inside the protocol child."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    (workspace / "mindroom").mkdir(parents=True)
+    # Would replace MindRoom itself if the child's cwd led sys.path.
+    (workspace / "mindroom" / "__init__.py").write_text(
+        "from pathlib import Path\nPath.cwd().joinpath('planted-package-ran').touch()\n",
+        encoding="utf-8",
+    )
+    user_site = subprocess.run(
+        [sys.executable, "-c", "import site; print(site.getusersitepackages())"],
+        env={**os.environ, "HOME": str(workspace.resolve())},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    Path(user_site).mkdir(parents=True)
+    # `.pth` import lines run at interpreter startup whenever the user site is enabled.
+    (Path(user_site) / "planted.pth").write_text(
+        "import pathlib; pathlib.Path.cwd().joinpath('planted-pth-ran').touch()\n",
+        encoding="utf-8",
+    )
+    (workspace / "helper.py").write_text('VALUE = "helper-value"\n', encoding="utf-8")
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    def _venv_with_real_python(venv_dir: Path) -> None:
+        bin_dir = venv_dir / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / "python").symlink_to(Path(sys.executable))
+
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_venv_with_real_python):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "python",
+                "function_name": "run_python_code",
+                "args": ["import helper\nresult = helper.VALUE", "result"],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:shared:general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, payload
+    assert payload["result"] == "helper-value"
+    assert not (workspace / "planted-package-ran").exists()
+    assert not (workspace / "planted-pth-ran").exists()
 
 
 def test_request_preparation_failure_response_marks_request_errors_as_tool_failures() -> None:

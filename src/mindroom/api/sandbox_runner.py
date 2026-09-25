@@ -12,7 +12,7 @@ import secrets
 import subprocess
 import sys
 from collections.abc import Mapping
-from contextlib import redirect_stderr, redirect_stdout, suppress
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -1011,6 +1011,14 @@ def _prepare_execute_request(
     execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
     config = config or _runtime_config_or_empty(runtime_paths)
     request_workspace = _resolve_request_workspace(request, prepared, runtime_paths=runtime_paths, config=config)
+    if request_workspace is not None and not sandbox_worker_prep.workspace_env_hook_allowed(
+        request_workspace,
+        worker_key=request.worker_key,
+        state_worker_key=None,
+        prepared=prepared,
+        runtime_paths=runtime_paths,
+    ):
+        apply_workspace_env_hook = False
     try:
         env_result = sandbox_env_assembly.build_request_execution_env(
             request_workspace=request_workspace,
@@ -1475,6 +1483,9 @@ def _run_subprocess_worker_payload(payload: str) -> tuple[int, str, str]:
     # interfere with the protocol marker in the returned response text.
     captured_out = io.StringIO()
     captured_err = io.StringIO()
+    if request.tool_name == "python":
+        # Children start with `-P`; python-tool code may still import workspace modules, after installed ones.
+        sys.path.append(str(Path.cwd()))
     with redirect_stdout(captured_out), redirect_stderr(captured_err):
         response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config))
 
@@ -1508,11 +1519,6 @@ def _run_forkserver_template() -> int:
     _ = mcp_registry, tool_system_plugins
     import mindroom.tools  # noqa: F401, PLC0415
 
-    # `python -m` prepended the runner's cwd to sys.path at template startup;
-    # fork children prepend their own request cwd instead, matching what a
-    # spawn-per-call child started in that cwd would see.
-    with suppress(ValueError):
-        sys.path.remove(str(Path.cwd()))
     return sandbox_forkserver.serve_template(socket_path, _run_subprocess_worker_payload)
 
 
