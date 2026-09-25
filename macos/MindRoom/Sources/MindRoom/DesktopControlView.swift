@@ -199,6 +199,7 @@ struct DesktopControlView: View {
                 if store.savedSessionMatchesSetup {
                     Label("Signed in as \(store.status.pairing.userID ?? "")", systemImage: "checkmark.circle")
                         .foregroundStyle(.secondary)
+                    DisclosureGroup("Sign-in options") { signInFields }
                 } else {
                     signInFields
                 }
@@ -255,7 +256,9 @@ struct DesktopControlView: View {
             if store.status.pairing.sessionState == .missing {
                 Button("Sign In with Browser") { store.login() }
             } else {
-                Text("The saved login cannot be used for this setup. Sign in with the account shown above.").foregroundStyle(.orange)
+                if !store.savedSessionMatchesSetup {
+                    Text("The saved login cannot be used for this setup. Sign in with the account shown above.").foregroundStyle(.orange)
+                }
                 Button("Replace Saved Login…") { replaceUsingPassword = false; isReplaceSessionConfirmationPresented = true }
             }
             DisclosureGroup("Use a password instead") {
